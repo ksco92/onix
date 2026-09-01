@@ -1,0 +1,166 @@
+//! Leaf-level (non-container) comparison: scalar/numeric equality and the
+//! `values_changed`/`type_changes` finding builders that `super::dispatch`'s
+//! [`super::diff_at`] dispatches to whenever a pair is not two dicts or two
+//! arrays.
+
+use serde_json::{Number, Value};
+
+use crate::error::Error;
+use crate::path::PathSegment;
+use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
+
+use super::check_value_depth;
+
+/// The Python type name `DeepDiff` would report for a given `serde_json`
+/// value.
+///
+/// Numbers are split into `"int"` and `"float"` based on how `serde_json`
+/// parsed them: a JSON literal with no decimal point or exponent (e.g. `1`)
+/// is an int; one with either (e.g. `1.0`) is a float. This mirrors
+/// `DeepDiff`'s default behavior of treating `1` and `1.0` as different types.
+pub(crate) fn python_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(n) if n.is_f64() => "float",
+        Value::Number(_) => "int",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+/// Builds a single-entry `type_changes` report at `path`, `depth` levels
+/// deep.
+///
+/// Checks both `a` and `b` with [`check_value_depth`] before cloning either
+/// one into the report — either side could be the deeply nested one (e.g. a
+/// list vs number type mismatch where the list is attacker-controlled and
+/// deep) — so a value whose own nesting, combined with `depth`, exceeds the
+/// shared `max_depth` budget is rejected cleanly instead of overflowing the
+/// stack on `.clone()`.
+pub(crate) fn type_change_report(
+    path: &[PathSegment],
+    a: &Value,
+    b: &Value,
+    depth: usize,
+    max_depth: usize,
+) -> Result<Report, Error> {
+    check_value_depth(path, a, depth, max_depth)?;
+    check_value_depth(path, b, depth, max_depth)?;
+
+    let mut report = Report::new();
+    report.insert_type_change(
+        path.to_vec(),
+        TypeChangeEntry {
+            old_type: python_type_name(a).to_string(),
+            new_type: python_type_name(b).to_string(),
+            old_value: a.clone(),
+            new_value: b.clone(),
+            new_path: None,
+        },
+    );
+    Ok(report)
+}
+/// Builds either an empty report (`equal`) or a single-entry
+/// `values_changed` report at `path`, `depth` levels deep.
+///
+/// Same [`check_value_depth`] guard as [`type_change_report`], run only when
+/// `!equal` (the only case that clones anything). Every current caller only
+/// ever passes scalars here (bool/string/number, all inherently depth `0`),
+/// so this can never actually trip today — the check is still here so the
+/// guarantee holds structurally rather than by relying on today's call
+/// graph never changing.
+pub(crate) fn scalar_diff(
+    path: &[PathSegment],
+    equal: bool,
+    a: &Value,
+    b: &Value,
+    depth: usize,
+    max_depth: usize,
+) -> Result<Report, Error> {
+    if equal {
+        return Ok(Report::new());
+    }
+    check_value_depth(path, a, depth, max_depth)?;
+    check_value_depth(path, b, depth, max_depth)?;
+
+    let mut report = Report::new();
+    report.insert_values_changed(
+        path.to_vec(),
+        ValuesChangedEntry {
+            old_value: a.clone(),
+            new_value: b.clone(),
+            new_path: None,
+        },
+    );
+    Ok(report)
+}
+/// Diffs two same-JSON-variant numbers, first checking whether one is an int
+/// and the other a float (a `type_changes` finding, regardless of numeric
+/// value), then comparing numerically within the same type via
+/// [`numbers_equal`].
+pub(crate) fn numeric_diff(
+    path: &[PathSegment],
+    old: &Number,
+    new: &Number,
+    a: &Value,
+    b: &Value,
+    depth: usize,
+    max_depth: usize,
+) -> Result<Report, Error> {
+    if old.is_f64() != new.is_f64() {
+        return type_change_report(path, a, b, depth, max_depth);
+    }
+    scalar_diff(path, numbers_equal(old, new), a, b, depth, max_depth)
+}
+/// The single definition of numeric equality shared by [`numeric_diff`] and
+/// [`values_equal`], so there is exactly one place these rules live.
+///
+/// An int and a float are never equal (mirroring `DeepDiff` always reporting
+/// that pairing as a `type_changes`, never a numeric comparison). Within the
+/// same kind: floats compare by exact IEEE-754 `==` (see [`floats_equal`]);
+/// ints compare by value across `i64`/`u64` representations (see
+/// [`number_as_i128`]), so `9_000_000_000_000_000_000u64` and its `i64`
+/// counterpart compare equal even though `serde_json` stored them
+/// differently.
+pub(crate) fn numbers_equal(old: &Number, new: &Number) -> bool {
+    if old.is_f64() != new.is_f64() {
+        return false;
+    }
+
+    if old.is_f64() {
+        let old_f = old
+            .as_f64()
+            .expect("Number::is_f64 guarantees as_f64 succeeds");
+        let new_f = new
+            .as_f64()
+            .expect("Number::is_f64 guarantees as_f64 succeeds");
+        floats_equal(old_f, new_f)
+    } else {
+        let old_int =
+            number_as_i128(old).expect("non-float Number always has an i64 or u64 representation");
+        let new_int =
+            number_as_i128(new).expect("non-float Number always has an i64 or u64 representation");
+        old_int == new_int
+    }
+}
+/// Compares two floats for exact equality.
+///
+/// This mirrors Python's `==` semantics for floats (including
+/// `0.0 == -0.0`), with no implicit epsilon; NaN/Infinity are out of scope
+/// for this JSON value model, so exact IEEE-754 equality is the correct
+/// (and only) rule here.
+fn floats_equal(a: f64, b: f64) -> bool {
+    #[allow(clippy::float_cmp)]
+    {
+        a == b
+    }
+}
+/// Converts a non-float [`Number`] to `i128`, so ints stored as `u64` and
+/// `i64` compare equal by value regardless of which representation
+/// `serde_json` chose.
+pub(crate) fn number_as_i128(n: &Number) -> Option<i128> {
+    n.as_i64()
+        .map(i128::from)
+        .or_else(|| n.as_u64().map(i128::from))
+}

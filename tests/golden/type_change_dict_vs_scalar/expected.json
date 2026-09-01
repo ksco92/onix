@@ -1,0 +1,12 @@
+{
+  "type_changes": {
+    "root['a']": {
+      "new_type": "int",
+      "new_value": 5,
+      "old_type": "dict",
+      "old_value": {
+        "x": 1
+      }
+    }
+  }
+}

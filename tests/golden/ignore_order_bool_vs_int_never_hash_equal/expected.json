@@ -1,0 +1,10 @@
+{
+  "type_changes": {
+    "root[0]": {
+      "new_type": "int",
+      "new_value": 1,
+      "old_type": "bool",
+      "old_value": true
+    }
+  }
+}

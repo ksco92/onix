@@ -1,0 +1,18 @@
+{
+  "iterable_item_removed": {
+    "root[0]": 3,
+    "root[3]": 3.8,
+    "root[4]": 3.8,
+    "root[5]": 1,
+    "root[6]": 0.0
+  },
+  "type_changes": {
+    "root[2]": {
+      "new_path": "root[1]",
+      "new_type": "NoneType",
+      "new_value": null,
+      "old_type": "bool",
+      "old_value": false
+    }
+  }
+}

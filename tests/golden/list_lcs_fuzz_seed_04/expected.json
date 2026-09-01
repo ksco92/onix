@@ -1,0 +1,20 @@
+{
+  "iterable_item_added": {
+    "root[2]": "b",
+    "root[3]": 3.8
+  },
+  "type_changes": {
+    "root[0]": {
+      "new_type": "str",
+      "new_value": "b",
+      "old_type": "float",
+      "old_value": 0.0
+    },
+    "root[1]": {
+      "new_type": "str",
+      "new_value": "a",
+      "old_type": "int",
+      "old_value": 1
+    }
+  }
+}

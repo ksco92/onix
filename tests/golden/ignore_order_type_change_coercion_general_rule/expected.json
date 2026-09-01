@@ -1,0 +1,20 @@
+{
+  "iterable_item_added": {
+    "root[0][0]": 1,
+    "root[0][3]": {
+      "c": true
+    }
+  },
+  "type_changes": {
+    "root[0][0]": {
+      "new_path": "root[0][2]",
+      "new_type": "bool",
+      "new_value": true,
+      "old_type": "list",
+      "old_value": [
+        "",
+        ""
+      ]
+    }
+  }
+}

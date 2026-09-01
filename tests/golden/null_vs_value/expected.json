@@ -1,0 +1,10 @@
+{
+  "type_changes": {
+    "root['a']": {
+      "new_type": "int",
+      "new_value": 1,
+      "old_type": "NoneType",
+      "old_value": null
+    }
+  }
+}

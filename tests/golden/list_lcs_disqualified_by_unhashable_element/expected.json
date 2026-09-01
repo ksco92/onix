@@ -1,0 +1,12 @@
+{
+  "values_changed": {
+    "root[0]": {
+      "new_value": 2,
+      "old_value": 1
+    },
+    "root[2]": {
+      "new_value": 1,
+      "old_value": 2
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "iterable_item_added": {
+    "root[1]": 4
+  },
+  "iterable_item_removed": {
+    "root[2]": 2
+  },
+  "values_changed": {
+    "root[0]": {
+      "new_value": 3,
+      "old_value": 1
+    }
+  }
+}

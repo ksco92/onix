@@ -1,0 +1,12 @@
+{
+  "values_changed": {
+    "root[204]": {
+      "new_value": "distinct_b",
+      "old_value": "x"
+    },
+    "root[5]": {
+      "new_value": "x",
+      "old_value": "distinct_a"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+/target
+perf/fixtures/
+perf/bench_raw/
+__pycache__/
+*.profraw
+.idea/
+/mutants.out*
+*.proptest-regressions

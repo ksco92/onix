@@ -1,0 +1,8 @@
+{
+  "iterable_item_added": {
+    "root[0]": true
+  },
+  "iterable_item_removed": {
+    "root[2]": false
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "iterable_item_added": {
+    "root[0]": "世界"
+  },
+  "values_changed": {
+    "root[1]": {
+      "new_path": "root[2]",
+      "new_value": "new",
+      "old_value": "世界"
+    }
+  }
+}

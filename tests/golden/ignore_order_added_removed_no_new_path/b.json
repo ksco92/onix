@@ -1,0 +1,12 @@
+[
+  "anchorA",
+  "anchorB",
+  "anchorC",
+  {
+    "extra": 9,
+    "id": 1,
+    "meta": {
+      "x": 1
+    }
+  }
+]

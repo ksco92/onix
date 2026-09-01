@@ -1,0 +1,53 @@
+{
+  "iterable_item_removed": {
+    "root[8]": 2.0
+  },
+  "type_changes": {
+    "root[1]": {
+      "new_type": "NoneType",
+      "new_value": null,
+      "old_type": "bool",
+      "old_value": true
+    },
+    "root[2]": {
+      "new_type": "float",
+      "new_value": 0.0,
+      "old_type": "str",
+      "old_value": "b"
+    },
+    "root[3]": {
+      "new_type": "str",
+      "new_value": "b",
+      "old_type": "bool",
+      "old_value": false
+    },
+    "root[5]": {
+      "new_type": "bool",
+      "new_value": false,
+      "old_type": "int",
+      "old_value": 2
+    },
+    "root[6]": {
+      "new_type": "str",
+      "new_value": "a",
+      "old_type": "float",
+      "old_value": 2.0
+    },
+    "root[7]": {
+      "new_type": "float",
+      "new_value": 1.0,
+      "old_type": "int",
+      "old_value": 0
+    }
+  },
+  "values_changed": {
+    "root[0]": {
+      "new_value": 1.0,
+      "old_value": 0.0
+    },
+    "root[4]": {
+      "new_value": 1.0,
+      "old_value": 0.0
+    }
+  }
+}

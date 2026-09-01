@@ -1,0 +1,28 @@
+{
+  "type_changes": {
+    "root[0]": {
+      "new_type": "bool",
+      "new_value": true,
+      "old_type": "float",
+      "old_value": 0.0
+    },
+    "root[1]": {
+      "new_type": "int",
+      "new_value": -3,
+      "old_type": "float",
+      "old_value": 1.0
+    },
+    "root[2]": {
+      "new_type": "float",
+      "new_value": 1.0,
+      "old_type": "str",
+      "old_value": "b"
+    },
+    "root[3]": {
+      "new_type": "bool",
+      "new_value": true,
+      "old_type": "float",
+      "old_value": 3.8
+    }
+  }
+}

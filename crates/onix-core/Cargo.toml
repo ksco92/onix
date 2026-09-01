@@ -1,0 +1,15 @@
+[package]
+name = "onix-core"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Core structural-diff engine with DeepDiff-compatible reports"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+proptest = "1"

@@ -1,0 +1,15 @@
+{
+  "iterable_item_added": {
+    "root[0]": 3,
+    "root[1]": 2.0
+  },
+  "type_changes": {
+    "root[1]": {
+      "new_path": "root[3]",
+      "new_type": "int",
+      "new_value": 0,
+      "old_type": "NoneType",
+      "old_value": null
+    }
+  }
+}

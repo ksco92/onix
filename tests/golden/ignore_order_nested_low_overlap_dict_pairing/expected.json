@@ -1,0 +1,21 @@
+{
+  "iterable_item_added": {
+    "root[1]": 0.0
+  },
+  "values_changed": {
+    "root[1]": {
+      "new_path": "root[2]",
+      "new_value": 2,
+      "old_value": 1
+    },
+    "root[2][0]": {
+      "new_path": "root[3][0]",
+      "new_value": {},
+      "old_value": {
+        "aa": 1,
+        "bb": 2,
+        "cc": 3
+      }
+    }
+  }
+}

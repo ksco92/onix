@@ -1,0 +1,20 @@
+{
+  "iterable_item_added": {
+    "root[4]": null,
+    "root[5]": false
+  },
+  "iterable_item_removed": {
+    "root[0]": 1.0,
+    "root[2]": -3,
+    "root[9]": "b"
+  },
+  "type_changes": {
+    "root[6]": {
+      "new_path": "root[2]",
+      "new_type": "float",
+      "new_value": 2.0,
+      "old_type": "int",
+      "old_value": 3
+    }
+  }
+}

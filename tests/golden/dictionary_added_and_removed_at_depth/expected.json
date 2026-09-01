@@ -1,0 +1,8 @@
+{
+  "dictionary_item_added": {
+    "root['a']['z']": 3
+  },
+  "dictionary_item_removed": {
+    "root['a']['y']": 2
+  }
+}

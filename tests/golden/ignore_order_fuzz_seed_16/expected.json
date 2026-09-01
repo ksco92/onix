@@ -1,0 +1,31 @@
+{
+  "iterable_item_added": {
+    "root[2]": "a",
+    "root[3]": true
+  },
+  "iterable_item_removed": {
+    "root[9]": null
+  },
+  "type_changes": {
+    "root[0]": {
+      "new_type": "float",
+      "new_value": 2.0,
+      "old_type": "int",
+      "old_value": 2
+    },
+    "root[3]": {
+      "new_path": "root[6]",
+      "new_type": "float",
+      "new_value": 0.0,
+      "old_type": "int",
+      "old_value": 0
+    },
+    "root[7]": {
+      "new_path": "root[1]",
+      "new_type": "int",
+      "new_value": 3,
+      "old_type": "float",
+      "old_value": 3.8
+    }
+  }
+}
