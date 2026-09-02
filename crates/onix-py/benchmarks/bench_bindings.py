@@ -52,9 +52,11 @@ import resource
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
 
 from deepdiff import DeepDiff as RealDeepDiff
@@ -204,11 +206,17 @@ def build_api_payloads_case() -> tuple[JsonValue, JsonValue]:
 # setup (done before the callable), matching how a caller holding JSON text
 # starts; parsing is inside the callable because a real caller pays it (onix
 # does it inside `diff_json`; the Python side does it with `json.loads`).
+# The `_file` case models the diff-two-files-on-disk workflow: the two JSON
+# files are written from the seed as fixture setup, then both tools pay an
+# identical `read_text()` inside the callable before parsing -- so the timed
+# difference is purely materializing Python object trees (`json.loads`) versus
+# parsing straight into onix's compact value (`diff_json`).
 CASE_LABELS: Final[dict[str, str]] = {
     "ignore_order": "`ignore_order`, 10k shuffled ints, ~5% mutated (live objects)",
     "api_payloads": "Heterogeneous API-payload records, n=20,000 (live objects)",
     "ignore_order_json": "Same `ignore_order` shape, via `diff_json` (JSON-string path)",
     "api_payloads_json": "Same API-payload shape, via `diff_json` (JSON-string path)",
+    "api_payloads_file": "Same API-payload shape, both tools reading two JSON files from disk",
 }
 LIVE_CASES: Final[list[str]] = list(CASE_LABELS)
 # The onix-only conversion-overhead proxy: a diff of two structurally equal
@@ -237,6 +245,25 @@ def _diff_callable(tool: str, case: str) -> Callable[[], object]:
     if case == PROXY_CASE:
         equal_copy = copy.deepcopy(a)
         return lambda: OnixDeepDiff(a, equal_copy)
+
+    if case.endswith("_file"):
+        tmpdir = tempfile.mkdtemp(prefix="onix-bench-")
+        a_path = Path(tmpdir) / "a.json"
+        b_path = Path(tmpdir) / "b.json"
+        a_path.write_text(json.dumps(a), encoding="utf-8")
+        b_path.write_text(json.dumps(b), encoding="utf-8")
+        if tool == "deepdiff":
+            return lambda: RealDeepDiff(
+                json.loads(a_path.read_text(encoding="utf-8")),
+                json.loads(b_path.read_text(encoding="utf-8")),
+                ignore_order=ignore_order,
+                verbose_level=2,
+            ).to_json()
+        return lambda: diff_json(
+            a_path.read_text(encoding="utf-8"),
+            b_path.read_text(encoding="utf-8"),
+            ignore_order=ignore_order,
+        )
 
     if case.endswith("_json"):
         a_text = json.dumps(a)
