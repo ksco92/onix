@@ -85,8 +85,10 @@ fn arb_list_and_permutation() -> impl Strategy<Value = (Vec<Value>, Vec<usize>)>
 }
 
 fn ignore_order_diff_ok(a: &Value, b: &Value) -> Value {
-    let mut opts = DiffOptions::default();
-    opts.ignore_order = true;
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
     diff_with_options(a, b, &opts)
         .expect("generated values are far under DEFAULT_MAX_DEPTH")
         .to_json_value()

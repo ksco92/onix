@@ -8,7 +8,7 @@ use crate::error::Error;
 use crate::path::PathSegment;
 use crate::report::{Report, ValuesChangedEntry};
 
-use super::{DiffOptions, check_value_depth, diff_at, scoped};
+use super::{DiffOptions, check_map_depth, check_value_depth, diff_at, scoped};
 
 /// Diffs two dicts (JSON objects) at `path`, `depth` levels deep.
 ///
@@ -32,6 +32,19 @@ use super::{DiffOptions, check_value_depth, diff_at, scoped};
 /// Simpler and covered by real test paths beats a cleverness that produces
 /// dead code.
 ///
+/// **`threshold_to_diff_deeper` collapse.** Before walking keys at all,
+/// this mirrors `DeepDiff`'s own `_diff_dict` (diff.py): whenever the key
+/// overlap (intersection / union) between `a` and `b` is below `DeepDiff`'s
+/// default `threshold_to_diff_deeper` (`0.33`), the whole pair collapses
+/// into a single wholesale `values_changed` (old/new value the entire
+/// dict) instead of recursing key by key — see
+/// [`crate::ignore_order::is_below_threshold_to_diff_deeper`]'s doc for the
+/// exact ratio (`union_len > 1 && intersect/union < 0.33`, confirmed
+/// against real `deepdiff==9.1.0` including the exact-`0.33`-boundary case,
+/// which does *not* collapse). This applies unconditionally, at every
+/// nesting level (root included), matching `DeepDiff`'s own behavior
+/// whether or not `ignore_order` is set.
+///
 /// [`Report::merge`] documents why the per-key `report.merge(...)` calls
 /// below never collide on a *structural* path (each key here is visited
 /// once, so no traversal ever revisits the same node) — `Report` is keyed
@@ -54,21 +67,17 @@ pub(crate) fn object_diff(
     depth: usize,
     opts: &DiffOptions,
 ) -> Result<Report, Error> {
-    // Trial-diff-only collapse (see `DiffOptions::collapse_low_overlap_dicts`'s
-    // doc for why this exists and why it never fires for a real, user-facing
-    // diff): below `DeepDiff`'s own `threshold_to_diff_deeper`, its distance
-    // computation treats this whole pair as a single wholesale
-    // `values_changed` rather than recursing key by key — mirrored here,
-    // for a trial only, by
-    // `crate::ignore_order::is_below_threshold_to_diff_deeper` (the exact
-    // ratio `crate::ignore_order::count_object_diff_leaves` already uses).
-    if opts.collapse_low_overlap_dicts
-        && crate::ignore_order::is_below_threshold_to_diff_deeper(a, b)
-    {
+    // `threshold_to_diff_deeper` collapse — see this function's own doc.
+    // The depth check runs against the borrowed maps, BEFORE either is
+    // cloned into a finding: cloning first and checking after would hand
+    // an attacker-controlled, arbitrarily deep `a`/`b` straight to
+    // `serde_json::Value`'s natively recursive `Clone` with no bound in
+    // place yet — see `check_map_depth`'s own doc.
+    if crate::ignore_order::is_below_threshold_to_diff_deeper(a, b) {
+        check_map_depth(path, a, depth, opts.max_depth)?;
+        check_map_depth(path, b, depth, opts.max_depth)?;
         let old_value = Value::Object(a.clone());
         let new_value = Value::Object(b.clone());
-        check_value_depth(path, &old_value, depth, opts.max_depth)?;
-        check_value_depth(path, &new_value, depth, opts.max_depth)?;
         let mut report = Report::new();
         report.insert_values_changed(
             path.clone(),

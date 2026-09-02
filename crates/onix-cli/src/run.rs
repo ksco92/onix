@@ -105,9 +105,10 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
     };
 
     let max_depth = parsed.max_depth.unwrap_or_else(resolve_default_max_depth);
-    let mut opts = DiffOptions::default();
-    opts.max_depth = max_depth;
-    opts.ignore_order = parsed.ignore_order;
+    let opts = DiffOptions {
+        max_depth,
+        ignore_order: parsed.ignore_order,
+    };
 
     let diff_start = Instant::now();
     let result = onix_core::diff_with_options(&a_value, &b_value, &opts);

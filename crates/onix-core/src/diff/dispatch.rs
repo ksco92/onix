@@ -6,7 +6,7 @@
 //! See the parent `diff` module's doc for the full recursion-depth hardening
 //! story (the "M3-pre" section) this file implements.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::error::Error;
 use crate::path::{PathSegment, render_path};
@@ -191,6 +191,50 @@ pub(crate) fn check_value_depth(
     max_depth: usize,
 ) -> Result<(), Error> {
     if deeper_than(value, max_depth.saturating_sub(depth)) {
+        return Err(Error::MaxDepthExceeded {
+            path: render_path(path),
+            max_depth,
+        });
+    }
+    Ok(())
+}
+/// Like [`deeper_than`], but walks a dict's fields directly instead of
+/// requiring an owned `Value::Object` wrapping them.
+///
+/// Delegates to [`deeper_than`] per field rather than duplicating its
+/// stack-walk: each field sits at depth `1` relative to `map` itself, so a
+/// field's own subtree trips `limit` exactly when that field's value
+/// (counted from its own depth `0`) trips `limit - 1` — matching what
+/// wrapping `map` in a `Value::Object` and calling [`deeper_than`] on that
+/// would compute. `limit == 0` is the one case that can't subtract `1`
+/// (`usize` has no negative range) and doesn't need to: at `limit == 0`
+/// *any* field at all already sits one level too deep, regardless of what
+/// it contains, so the answer is simply whether `map` is non-empty.
+/// `Iterator::any` short-circuits on the first offending field, matching
+/// [`deeper_than`]'s own early-return, and introduces no native recursion
+/// of its own — each delegated [`deeper_than`] call is independently
+/// iterative, so this composes without compounding stack usage.
+pub(crate) fn map_deeper_than(map: &Map<String, Value>, limit: usize) -> bool {
+    if limit == 0 {
+        !map.is_empty()
+    } else {
+        map.values().any(|value| deeper_than(value, limit - 1))
+    }
+}
+/// [`check_value_depth`]'s twin for a dict that hasn't been cloned into a
+/// `Value` yet: checks `map`'s own nesting directly ([`map_deeper_than`])
+/// so a caller that is *deciding whether to clone* an untrusted dict — like
+/// [`object_diff`]'s `threshold_to_diff_deeper` collapse, which would
+/// otherwise clone the whole dict into a finding before any depth check
+/// could reject it — can check first and only pay for the clone once this
+/// passes.
+pub(crate) fn check_map_depth(
+    path: &[PathSegment],
+    map: &Map<String, Value>,
+    depth: usize,
+    max_depth: usize,
+) -> Result<(), Error> {
+    if map_deeper_than(map, max_depth.saturating_sub(depth)) {
         return Err(Error::MaxDepthExceeded {
             path: render_path(path),
             max_depth,

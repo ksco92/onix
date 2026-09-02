@@ -1,4 +1,4 @@
-use super::dispatch::deeper_than;
+use super::dispatch::{deeper_than, map_deeper_than};
 use super::scalar::number_as_i128;
 use super::{
     DEFAULT_MAX_DEPTH, diff, diff_with_max_depth, python_type_name, scalar_diff, values_equal,
@@ -295,19 +295,26 @@ fn empty_dict_vs_empty_dict_is_empty() {
 
 #[test]
 fn empty_dict_vs_nonempty_dict_is_all_added() {
-    let report = diff(&json!({}), &json!({"a": 1, "b": 2})).unwrap();
+    // A single added key keeps the key-overlap union at exactly 1, below
+    // the `threshold_to_diff_deeper` guard's `union_len > 1` floor, so
+    // this stays on the granular add path rather than collapsing into a
+    // wholesale `values_changed` (see the `threshold_collapse_*` tests
+    // for the >= 2-key case, which does collapse, matching real
+    // `DeepDiff` exactly).
+    let report = diff(&json!({}), &json!({"a": 1})).unwrap();
     assert_eq!(
         report.to_json_value(),
-        json!({"dictionary_item_added": {"root['a']": 1, "root['b']": 2}})
+        json!({"dictionary_item_added": {"root['a']": 1}})
     );
 }
 
 #[test]
 fn nonempty_dict_vs_empty_dict_is_all_removed() {
-    let report = diff(&json!({"a": 1, "b": 2}), &json!({})).unwrap();
+    // Mirror of `empty_dict_vs_nonempty_dict_is_all_added` above.
+    let report = diff(&json!({"a": 1}), &json!({})).unwrap();
     assert_eq!(
         report.to_json_value(),
-        json!({"dictionary_item_removed": {"root['a']": 1, "root['b']": 2}})
+        json!({"dictionary_item_removed": {"root['a']": 1}})
     );
 }
 
@@ -634,6 +641,54 @@ fn deeper_than_false_for_empty_containers() {
 }
 
 #[test]
+fn map_deeper_than_true_for_a_map_one_level_past_limit() {
+    // Mirrors `deeper_than_true_for_value_one_level_past_limit`: a map
+    // whose one field wraps a leaf 3 levels deep has combined nesting 4
+    // (1 for the field itself + 3), one past a limit of 3.
+    let mut map = Map::new();
+    map.insert("x".to_string(), nested_dict(3, json!(1)));
+    assert!(map_deeper_than(&map, 3));
+}
+
+#[test]
+fn map_deeper_than_false_for_a_map_exactly_at_limit() {
+    // Kills both `>` -> `==` and `>` -> `>=` mutants in `map_deeper_than`:
+    // nesting is exactly 3 (1 + 2), which must NOT count as deeper than a
+    // limit of 3 (the check is strictly `>`).
+    let mut map = Map::new();
+    map.insert("x".to_string(), nested_dict(2, json!(1)));
+    assert!(!map_deeper_than(&map, 3));
+}
+
+#[test]
+fn map_deeper_than_true_for_any_nonempty_map_at_limit_zero() {
+    // Kills the `!map.is_empty()` -> `map.is_empty()` mutant: at
+    // `limit == 0`, a single scalar field already sits one level too
+    // deep, regardless of its own content.
+    let mut map = Map::new();
+    map.insert("x".to_string(), json!(1));
+    assert!(map_deeper_than(&map, 0));
+}
+
+#[test]
+fn map_deeper_than_false_for_an_empty_map_at_limit_zero() {
+    assert!(!map_deeper_than(&Map::new(), 0));
+}
+
+#[test]
+fn map_deeper_than_recurses_with_incrementing_not_constant_depth() {
+    // Kills the `depth + 1` -> `depth * 1` mutant in `map_deeper_than`'s
+    // `Value::Object` recursion arm: without the increment, the leaf at
+    // depth 2 would be (wrongly) checked at depth 1, never exceeding a
+    // limit of 1.
+    let mut inner = Map::new();
+    inner.insert("y".to_string(), json!(1));
+    let mut map = Map::new();
+    map.insert("x".to_string(), Value::Object(inner));
+    assert!(map_deeper_than(&map, 1));
+}
+
+#[test]
 fn deeper_than_handles_a_deeply_nested_value_without_crashing() {
     // Security-gate regression: `deeper_than` itself must be immune to
     // the very depth it is measuring — RECURSION_OVERFLOW_DEPTH (see its
@@ -681,6 +736,31 @@ fn removed_value_deeper_than_max_depth_errors_cleanly_instead_of_cloning_it() {
         Error::MaxDepthExceeded {
             path: "root['x']".to_string(),
             max_depth: 10,
+        }
+    );
+}
+
+#[test]
+fn threshold_collapse_rejects_a_deep_side_cleanly_instead_of_cloning_it_first() {
+    // Zero key overlap so this hits the threshold_to_diff_deeper collapse
+    // branch (not the granular add/remove path); "deep" pushes `a`'s own
+    // nesting to 11 (1 for the key itself + the array's own depth 10),
+    // past a max_depth of 5. If the collapse cloned `a`/`b` into the
+    // report before checking depth, this would either wrongly succeed
+    // (the depth check running against the wrong value) or (on a
+    // sufficiently deep input) crash outright rather than returning a
+    // clean error.
+    let mut a = Map::new();
+    a.insert("a".to_string(), json!(1));
+    a.insert("deep".to_string(), nested_array(10, json!(1)));
+
+    let err = diff_with_max_depth(&Value::Object(a), &json!({"x": 1, "y": 2}), 5).unwrap_err();
+
+    assert_eq!(
+        err,
+        Error::MaxDepthExceeded {
+            path: "root".to_string(),
+            max_depth: 5,
         }
     );
 }
@@ -1058,6 +1138,49 @@ fn compounding_depth_regression_max_depth_20_000_traversal_plus_deep_added_value
             }
         );
     });
+}
+
+#[test]
+fn threshold_collapse_rejects_a_deep_side_on_a_constrained_stack_instead_of_crashing() {
+    // Security-gate regression for the `threshold_to_diff_deeper` collapse
+    // (M2 fix): the collapse clones the whole `a`/`b` dict into a finding,
+    // so cloning before checking depth would hand an attacker-controlled,
+    // `RECURSION_OVERFLOW_DEPTH`-deep value straight to `serde_json::Value`'s
+    // natively recursive `Clone` with no bound in place yet. Run on a
+    // DELIBERATELY CONSTRAINED 8 MiB stack (not `run_on_a_large_stack`):
+    // empirically, reverting `object_diff`'s check-before-clone ordering
+    // reproduces a real SIGABRT at exactly this depth/stack combination,
+    // while `map_deeper_than`'s iterative (heap-stack, not native-stack)
+    // check clears it cleanly at the same size — a much larger stack (256
+    // MiB, tried while developing this test) masks the bug entirely, since
+    // `serde_json::Value::clone`'s per-frame cost is small enough that even
+    // the buggy ordering survives on a generous stack; 8 MiB is the
+    // smallest size found where the two orderings genuinely diverge.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut a = Map::new();
+            a.insert("p".to_string(), json!(1));
+            a.insert("q".to_string(), json!(2));
+            let mut b = Map::new();
+            b.insert("r".to_string(), json!(3));
+            b.insert(
+                "deep".to_string(),
+                nested_array(RECURSION_OVERFLOW_DEPTH, json!(1)),
+            );
+
+            let err = diff_with_max_depth(&Value::Object(a), &Value::Object(b), 1).unwrap_err();
+            assert_eq!(
+                err,
+                Error::MaxDepthExceeded {
+                    path: "root".to_string(),
+                    max_depth: 1,
+                }
+            );
+        })
+        .expect("failed to spawn constrained-stack test thread")
+        .join()
+        .expect("constrained-stack test thread panicked (crashed or asserted wrong)");
 }
 
 #[test]

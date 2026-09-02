@@ -374,40 +374,25 @@ fn coerce_to_python_str(value: &Value) -> Option<String> {
 /// decisions — see that function's own doc for a worked case where skipping
 /// this flips which candidate gets paired.
 ///
-/// This is a genuine, real, **PRE-EXISTING gap in `crate::diff::object_diff`
-/// itself** for a *real, user-facing* diff (the actual reported dict-vs-dict
-/// diff, used identically whether or not `ignore_order` is set — confirmed
-/// empirically on the plain ordered path too), and this slice does *not*
-/// fix that: implementing `threshold_to_diff_deeper` in the real reported
-/// output is a behavior change to already-shipped M2 functionality, out of
-/// scope for an `ignore_order` slice, and is tracked separately as its own
-/// reviewed follow-up rather than silently patched here.
-///
-/// It **is** additionally implemented, Report-producing, in
-/// `crate::diff::object_diff` itself, but *only* behind
-/// [`crate::DiffOptions::collapse_low_overlap_dicts`]'s trial-diff-only
-/// gate — never for a real diff. That second call site exists to close a
-/// route this count-only mirror alone cannot: [`count_array_diff_leaves`]'s
-/// own trial sub-diff calls the *real* `array_diff`/`object_diff` engine
-/// (not this module's count-only mirrors) to measure a nested array pair's
-/// distance, and when that trial's pairing accepts a dict-vs-dict pair
-/// nested inside it, the *actual Report entry it builds* — not just a
-/// count this function computes independently — must already reflect the
-/// collapse, or [`Report::distance_leaf_length`] inherits an inflated,
+/// `crate::diff::object_diff` (the real, user-facing dict-vs-dict diff)
+/// applies this exact same collapse unconditionally, whether or not
+/// `ignore_order` is set. Both call sites share the exact same ratio check,
+/// [`is_below_threshold_to_diff_deeper`], so there is exactly one place the
+/// `threshold_to_diff_deeper` arithmetic lives — this closes a route
+/// [`count_array_diff_leaves`]'s own trial sub-diff has into a nested
+/// dict-vs-dict pair through the real `array_diff`/`object_diff` engine:
+/// when that trial's pairing accepts a dict-vs-dict pair nested inside it,
+/// the *actual Report entry it builds* now already reflects the collapse,
+/// so [`Report::distance_leaf_length`] never inherits an inflated,
 /// uncollapsed leaf count from it (found by differential fuzzing: a
-/// nested-array-of-dicts candidate pair whose true distance is 0.1364 was
-/// measured at 0.3182 — crossing [`CUTOFF_DISTANCE_FOR_PAIRS`] and
-/// producing a completely different pairing decision). Both call sites
-/// share the exact same ratio check, [`is_below_threshold_to_diff_deeper`],
-/// so there is exactly one place the `threshold_to_diff_deeper` arithmetic
-/// lives.
+/// nested-array-of-dicts candidate pair whose true distance is 0.1364 used
+/// to be measured at 0.3182 — crossing [`CUTOFF_DISTANCE_FOR_PAIRS`] and
+/// producing a completely different pairing decision).
 pub(crate) const THRESHOLD_TO_DIFF_DEEPER: f64 = 0.33;
 
 /// The shared `threshold_to_diff_deeper` ratio check backing both
 /// [`count_object_diff_leaves`] (the count-only distance mirror) and
-/// `crate::diff::object_diff`'s trial-only collapse branch (the
-/// Report-producing twin, gated by
-/// [`crate::DiffOptions::collapse_low_overlap_dicts`]) — see
+/// `crate::diff::object_diff`'s own unconditional collapse — see
 /// [`THRESHOLD_TO_DIFF_DEEPER`]'s own doc for why both exist.
 pub(crate) fn is_below_threshold_to_diff_deeper(
     a: &serde_json::Map<String, Value>,
@@ -432,9 +417,12 @@ pub(crate) fn is_below_threshold_to_diff_deeper(
 /// confirmed via a real `DELTA_VIEW` probe to apply inside its distance
 /// computation too), in which case the whole thing collapses to
 /// [`item_length_of_map`] of `b`, matching a single wholesale
-/// `values_changed` rather than recursing. See [`THRESHOLD_TO_DIFF_DEEPER`]'s
-/// doc for the full story of where this is and is not also implemented as
-/// a real `Report`-producing collapse.
+/// `values_changed` rather than recursing — the exact same collapse
+/// `crate::diff::object_diff` applies unconditionally to its own real
+/// `Report` output (see [`THRESHOLD_TO_DIFF_DEEPER`]'s doc); this function
+/// stays a separate, `Report`-free mirror purely to avoid the allocation
+/// cost of a full `Report` for a distance measurement (see
+/// [`count_diff_leaves`]'s own doc).
 pub(crate) fn count_object_diff_leaves(
     a: &serde_json::Map<String, Value>,
     b: &serde_json::Map<String, Value>,
@@ -468,7 +456,13 @@ pub(crate) fn count_object_diff_leaves(
 /// `depth` here is the array's *own* depth (matching
 /// [`crate::diff::array_diff`]'s own convention), and the trial gets a
 /// bound of the *remaining* `max_depth` budget — see [`rough_distance`]'s
-/// doc for why a reduced (not fresh) budget is required for safety.
+/// doc for why a reduced (not fresh) budget is required for safety. Any
+/// dict-vs-dict pair this trial recurses into (directly, or arbitrarily
+/// deep through a nested `ignore_order_array_diff` re-entry building one of
+/// its own accepted pairs) is measured by the real
+/// `crate::diff::object_diff`, which applies `threshold_to_diff_deeper`
+/// unconditionally — see [`THRESHOLD_TO_DIFF_DEEPER`]'s doc — so no
+/// special-casing is needed here.
 pub(crate) fn count_array_diff_leaves(
     a: &[Value],
     b: &[Value],
@@ -478,15 +472,6 @@ pub(crate) fn count_array_diff_leaves(
     let probe_opts = DiffOptions {
         max_depth: opts.max_depth.saturating_sub(depth),
         ignore_order: opts.ignore_order,
-        // This whole call is a measurement-only trial (see this function's
-        // own doc) — never a real, user-facing diff — so any dict-vs-dict
-        // pair it recurses into (directly, or arbitrarily deep through a
-        // nested `ignore_order_array_diff` re-entry building one of its own
-        // accepted pairs) must be measured with the same
-        // `threshold_to_diff_deeper` awareness this module's own
-        // `count_object_diff_leaves` already applies — see
-        // `crate::DiffOptions::collapse_low_overlap_dicts`'s doc.
-        collapse_low_overlap_dicts: true,
     };
     let mut probe_path = Vec::new();
     let Ok(mut sub_report) = crate::diff::array_diff(&mut probe_path, a, b, 0, &probe_opts) else {
