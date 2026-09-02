@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use serde_json::Value;
 
 use crate::convert::{to_value, value_to_pyobject};
-use crate::guard::{diff_to_value, drop_value_safely, resolve_options, serialize_value};
+use crate::guard::{diff_to_value, drop_value_safely, is_deep, resolve_options, serialize_value};
 
 /// A drop-in subset of `deepdiff.DeepDiff`.
 ///
@@ -50,6 +50,11 @@ use crate::guard::{diff_to_value, drop_value_safely, resolve_options, serialize_
 #[pyclass(module = "deepdiff_rs")]
 pub(crate) struct DeepDiff {
     report_value: Value,
+    /// Whether `report_value` is nested past the inline-depth threshold, and
+    /// so must be serialized and dropped on the sized worker thread rather
+    /// than the calling thread. Computed once in `new`, so `to_json` and
+    /// `Drop` do not each re-walk the report. See `crate::guard::is_deep`.
+    report_is_deep: bool,
 }
 
 #[pymethods]
@@ -75,7 +80,8 @@ impl DeepDiff {
         let b = match to_value(t2, opts.max_depth) {
             Ok(b) => b,
             Err(error) => {
-                drop_value_safely(a);
+                let a_is_deep = is_deep(&a);
+                drop_value_safely(a, a_is_deep);
                 return Err(error);
             }
         };
@@ -83,8 +89,12 @@ impl DeepDiff {
         // shallow, else on the stack-sized worker (GIL released), which also
         // drops `a`, `b`, and the intermediate report on its large stack.
         let report_value = diff_to_value(py, a, b, opts)?;
+        let report_is_deep = is_deep(&report_value);
 
-        Ok(Self { report_value })
+        Ok(Self {
+            report_value,
+            report_is_deep,
+        })
     }
 
     /// Byte-compatible with real `DeepDiff(...).to_json()` at
@@ -95,7 +105,7 @@ impl DeepDiff {
     /// sized worker thread; a shallow one (the overwhelmingly common case)
     /// serializes inline. See `crate::guard::serialize_value`.
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
-        serialize_value(py, &self.report_value)
+        serialize_value(py, &self.report_value, self.report_is_deep)
     }
 
     /// The parsed form of [`Self::to_json`] — a native Python `dict`.
@@ -123,7 +133,10 @@ impl Drop for DeepDiff {
         // report nested past the inline threshold would overflow the calling
         // thread's stack if dropped here. `drop_value_safely` drops a deep
         // report on the sized worker thread and a shallow one inline.
-        drop_value_safely(std::mem::replace(&mut self.report_value, Value::Null));
+        drop_value_safely(
+            std::mem::replace(&mut self.report_value, Value::Null),
+            self.report_is_deep,
+        );
     }
 }
 

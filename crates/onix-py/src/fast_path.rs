@@ -8,7 +8,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::guard::{diff_to_value, drop_value_safely, resolve_options, serialize_value};
+use crate::guard::{diff_to_value, drop_value_safely, is_deep, resolve_options, serialize_value};
 
 /// Diffs two JSON documents and returns a `DeepDiff`-compatible JSON report
 /// string (`verbose_level=2` shape) — see [`crate::deepdiff::DeepDiff`] for
@@ -32,21 +32,32 @@ pub(crate) fn diff_json(
 ) -> PyResult<String> {
     let opts = resolve_options(max_depth, ignore_order)?;
     // `serde_json::from_str` caps its own recursion at ~128 levels, so a
-    // parsed value is never nested past that — comfortably under
-    // `MAX_DEPTH_CEILING`. That parser cap is defense in depth, not the safety
-    // guarantee: `diff_to_value`/`serialize_value` route anything past the
-    // inline depth threshold onto the sized worker thread regardless, so this
-    // path stays safe even if a future parser change lifted that cap.
+    // parsed value is never nested past that, which keeps parsing itself off
+    // the native-stack-overflow path. Independently of that cap, every
+    // deep-value operation below (the diff, the report's serialization and
+    // drop, and the drop of `a_value` on a `b` parse error) is routed onto the
+    // sized worker whenever the value is past the inline depth threshold, so
+    // those stay safe on their own.
     let a_value = parse_json(a, "a")?;
-    let b_value = parse_json(b, "b")?;
+    let b_value = match parse_json(b, "b") {
+        Ok(value) => value,
+        Err(error) => {
+            // `a` already parsed to a value that could (if the parser cap ever
+            // changed) be deep; don't drop it inline on this error return.
+            let a_is_deep = is_deep(&a_value);
+            drop_value_safely(a_value, a_is_deep);
+            return Err(error);
+        }
+    };
     // Runs the diff inline or on the sized worker depending on input depth,
     // dropping the parsed inputs wherever it ran.
     let report_value = diff_to_value(py, a_value, b_value, opts)?;
+    let report_is_deep = is_deep(&report_value);
     // Serialize (on the worker if the report is deep), then drop the report
     // through the same safe path — its recursive `Drop` must not run inline on
     // a small caller stack.
-    let json = serialize_value(py, &report_value);
-    drop_value_safely(report_value);
+    let json = serialize_value(py, &report_value, report_is_deep);
+    drop_value_safely(report_value, report_is_deep);
     json
 }
 

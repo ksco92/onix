@@ -81,13 +81,15 @@ const WORKER_STACK_BYTES: usize = MAX_DEPTH_CEILING * PER_LEVEL_STACK_BYTES * ST
 /// The calling thread's stack is out of this crate's control. Python's main
 /// thread stack is large, but worker threads created with
 /// `threading.stack_size()` — as web servers and async executors routinely
-/// do — can be as small as 512 KiB. The measurement in
-/// `crates/onix-core/examples/stack_frame_cost.rs` shows the diff recursion
-/// overflowing a 512 KiB stack at roughly 149 levels in a debug build (its
-/// worst case), so this threshold is set well below that (a ~4.6x margin) to
-/// stay safe even for such a minimal caller stack. Real inputs are almost
-/// always far shallower than this, so the inline path handles the
-/// overwhelming majority of diffs with no thread-spawn overhead.
+/// do — can be as small as 512 KiB. `crates/onix-core/examples/stack_frame_cost.rs`
+/// measures the diff recursion's worst case (nested lists, debug build) at
+/// roughly 3.5 KiB per level, so a 512 KiB stack is *estimated* to overflow
+/// somewhere around level ~150 (fixed thread-bootstrap overhead makes the true
+/// figure a little lower). This threshold, 32, sits well below that estimate,
+/// leaving room for that overhead and for the report's own serialize/drop
+/// recursion. Real inputs are almost always far shallower than this, so the
+/// inline path handles the overwhelming majority of diffs with no thread-spawn
+/// overhead.
 const MAX_INLINE_DEPTH: usize = 32;
 
 /// Resolves the two Python-supplied diff parameters into a [`DiffOptions`],
@@ -148,15 +150,17 @@ pub(crate) fn diff_to_value(
 }
 
 /// Serializes `value` to a JSON string, on the sized worker thread when
-/// `value` is deep enough that `serde_json`'s natively recursive
-/// serialization could overflow the calling thread, inline otherwise.
+/// `deep` (the caller's [`is_deep`] verdict for `value`) is set, because
+/// `serde_json`'s natively recursive serialization could then overflow the
+/// calling thread; inline otherwise. The caller passes the verdict in so it
+/// is computed once per value rather than re-walked here.
 ///
 /// # Errors
 ///
 /// `ValueError` if serialization fails (which, for a `Value`, does not happen
 /// in practice) or the worker thread cannot be run.
-pub(crate) fn serialize_value(py: Python<'_>, value: &Value) -> PyResult<String> {
-    let serialized = if is_deep(value) {
+pub(crate) fn serialize_value(py: Python<'_>, value: &Value, deep: bool) -> PyResult<String> {
+    let serialized = if deep {
         run_on_worker(py, || serde_json::to_string(value))?
     } else {
         serde_json::to_string(value)
@@ -164,15 +168,17 @@ pub(crate) fn serialize_value(py: Python<'_>, value: &Value) -> PyResult<String>
     serialized.map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
-/// Drops `value` safely regardless of nesting: on the sized worker thread if
-/// it is deep enough that `serde_json::Value`'s natively recursive `Drop`
-/// could overflow the calling thread's stack, inline otherwise. Callers with
-/// no `Python` token (e.g. [`crate::deepdiff::DeepDiff`]'s `Drop`, and the
-/// bindings' error paths) use this to hand a possibly-deep value off for
-/// destruction; it spawns a plain owned thread (the value is moved into it)
-/// rather than releasing the GIL.
-pub(crate) fn drop_value_safely(value: Value) {
-    if !is_deep(&value) {
+/// Drops `value` safely regardless of nesting: on the sized worker thread
+/// when `deep` (the caller's [`is_deep`] verdict for `value`) is set, because
+/// `serde_json::Value`'s natively recursive `Drop` could then overflow the
+/// calling thread's stack; inline otherwise. Callers with no `Python` token
+/// (e.g. [`crate::deepdiff::DeepDiff`]'s `Drop`, and the bindings' error
+/// paths) use this to hand a possibly-deep value off for destruction; it
+/// spawns a plain owned thread (the value is moved into it) rather than
+/// releasing the GIL. The caller passes the verdict in so it is computed once
+/// per value rather than re-walked here.
+pub(crate) fn drop_value_safely(value: Value, deep: bool) {
+    if !deep {
         // Shallow: dropping here cannot overflow, and skips all thread
         // overhead — the overwhelmingly common case.
         return;

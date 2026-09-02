@@ -254,7 +254,9 @@ fn advance_frame<'py>(
 fn drop_values_safely<I: IntoIterator<Item = Value>>(values: I) {
     let salvage: Vec<Value> = values.into_iter().collect();
     if !salvage.is_empty() {
-        crate::guard::drop_value_safely(Value::Array(salvage));
+        let wrapped = Value::Array(salvage);
+        let deep = crate::guard::is_deep(&wrapped);
+        crate::guard::drop_value_safely(wrapped, deep);
     }
 }
 
@@ -353,18 +355,14 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<Val
         // conversion. Dropping those frames inline here would run
         // `serde_json::Value`'s recursive `Drop` on the calling thread and
         // could overflow it, so route every parked value through the
-        // sized-worker drop path instead.
-        let leftover = finished
-            .into_iter()
-            .chain(stack.into_iter().flat_map(|frame| {
-                let built: Vec<Value> = match frame {
-                    Frame::List { built, .. } => built,
-                    Frame::Dict { built, .. } => {
-                        built.into_iter().map(|(_key, value)| value).collect()
-                    }
-                };
-                built
-            }));
+        // sized-worker drop path instead. (`finished` is always `None` at any
+        // error break — it is taken before every one — so only `stack` holds
+        // salvageable values.)
+        debug_assert!(finished.is_none());
+        let leftover = stack.into_iter().flat_map(|frame| match frame {
+            Frame::List { built, .. } => built,
+            Frame::Dict { built, .. } => built.into_iter().map(|(_key, value)| value).collect(),
+        });
         drop_values_safely(leftover);
     }
 
