@@ -59,15 +59,19 @@ machete:
 # Mutation testing: coverage's honest sibling. Slow by design — run per
 # milestone (M4+), not on every check. Install: cargo install cargo-mutants
 #
-# --workspace: both onix-core and onix-cli now carry real logic and their
-# own tests (onix-cli gained its `diff` subcommand at M5a, with the
-# coverage exclusion removed from `make coverage` above), so both are
-# mutation-tested. Every finding (caught, missed, or unviable) is triaged:
-# a missed mutant either gets a new regression test that kills it, or, if
-# justified, a recorded explanation of why it's equivalent/non-actionable.
+# Scoped to onix-core and onix-cli, the same two crates make coverage holds
+# to the 95% bar. onix-py is excluded for the same structural reason it is
+# excluded from coverage: it is a cdylib whose logic is only exercised by
+# calling the compiled wheel from Python, which the Rust test harness cannot
+# do, so every onix-py mutant would survive vacuously. This scope matches the
+# reproduce command recorded in perf/MUTANTS.md, so the committed table is
+# reproducible from `make mutants` exactly. Every finding (caught, missed, or
+# unviable) is triaged: a missed mutant either gets a new regression test that
+# kills it, or, if justified, a recorded explanation of why it's
+# equivalent/non-actionable.
 mutants:
 	@command -v cargo-mutants >/dev/null 2>&1 || { echo "cargo-mutants not installed: cargo install cargo-mutants --locked"; exit 1; }
-	cargo mutants --workspace
+	cargo mutants --package onix-core --package onix-cli
 
 # M6: regenerates perf/RESULTS.md from a real run against pinned deepdiff.
 # Slow (tens of minutes on the full fixture matrix, including two

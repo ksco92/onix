@@ -8,9 +8,11 @@ fixture is constructed.
 """
 
 import json
+import statistics
 import subprocess
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -24,14 +26,7 @@ DEFAULT_MAX_DEPTH = 512
 
 def _run_isolated(body: str) -> subprocess.CompletedProcess[str]:
     """
-    Run `body` in a fresh Python subprocess and return the completed process.
-
-    Used for the cases whose *whole point* is that they no longer crash the
-    interpreter: before the sized-worker fix they aborted the process with a
-    native SIGSEGV, which in-process would take pytest itself down (an
-    unhelpful "dead test run" rather than a failed test). Isolating them means
-    a regression surfaces as a non-zero return code on this one subprocess --
-    an ordinary failed assertion -- not a dead suite.
+    Run `body` in an isolated subprocess so a SIGSEGV-class regression is a failed assertion, not a dead test run.
 
     :param body: Python source to run; it should assert its own expectations
         and exit 0 on success.
@@ -230,6 +225,99 @@ def test_diff_json_max_depth_above_ceiling_raises_value_error() -> None:
     """diff_json enforces the same ceiling as the DeepDiff class."""
     with pytest.raises(ValueError, match=str(MAX_DEPTH_CEILING)):
         diff_json("[1]", "[2]", max_depth=MAX_DEPTH_CEILING + 1)
+
+
+# Error-path safety: when one argument converts to a deep legal Value but the
+# other (or a later sibling within one argument) then fails to convert, the
+# early return must not drop the deep Value inline on the calling thread.
+
+
+def test_cross_arg_error_drops_deep_first_arg_without_crashing() -> None:
+    """Deep legal t1 + t2 with an unsupported type raises TypeError, never crashes."""
+    result = _run_isolated(
+        f"""
+        def deep(d):
+            v = 1
+            for _ in range(d):
+                v = {{"a": v, "b": 2}}
+            return v
+        t1 = deep({MAX_DEPTH_CEILING} - 1)
+        try:
+            DeepDiff(t1, {{"x": (1, 2)}}, max_depth={MAX_DEPTH_CEILING})
+        except TypeError:
+            print("OK")
+        else:
+            raise AssertionError("expected TypeError")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_intra_arg_error_after_deep_sibling_does_not_crash() -> None:
+    """A dict with a deep legal sibling then an unsupported sibling raises cleanly."""
+    result = _run_isolated(
+        f"""
+        def deep(d):
+            v = 1
+            for _ in range(d):
+                v = {{"a": v, "b": 2}}
+            return v
+        t1 = {{"deep": deep({MAX_DEPTH_CEILING} - 1), "bad": (1, 2)}}
+        try:
+            DeepDiff(t1, {{}}, max_depth={MAX_DEPTH_CEILING})
+        except TypeError:
+            print("OK")
+        else:
+            raise AssertionError("expected TypeError")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_cross_arg_error_from_small_stack_thread_does_not_crash() -> None:
+    """The deep-t1 + bad-t2 error path is safe even from a 512 KiB-stack Python thread."""
+    result = _run_isolated(
+        f"""
+        import threading
+        threading.stack_size(512 * 1024)
+        def deep(d):
+            v = 1
+            for _ in range(d):
+                v = {{"a": v, "b": 2}}
+            return v
+        outcome = []
+        def work():
+            try:
+                DeepDiff(deep({MAX_DEPTH_CEILING} - 1), {{"x": (1, 2)}}, max_depth={MAX_DEPTH_CEILING})
+            except TypeError:
+                outcome.append("ok")
+        t = threading.Thread(target=work)
+        t.start()
+        t.join()
+        assert outcome == ["ok"], outcome
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_shallow_diff_per_call_overhead_is_bounded() -> None:
+    """A trivial diff must not pay per-call thread-spawn overhead (shallow inline path)."""
+    a = {"a": 1, "b": 2}
+    b = {"a": 1, "b": 3}
+    DeepDiff(a, b)  # warmup
+    samples = []
+    for _ in range(2000):
+        start = time.perf_counter()
+        DeepDiff(a, b)
+        samples.append(time.perf_counter() - start)
+    median_us = statistics.median(samples) * 1e6
+    # Generous bound (baseline is ~1-2 us); the round-2 unconditional worker
+    # spawn was ~55 us, so this fails loudly if that regresses.
+    assert median_us < 25.0, f"median {median_us:.2f} us exceeds 25 us"
 
 
 # diff_json's own depth guard (no Python-object conversion involved -- JSON

@@ -3,7 +3,7 @@
 **Rust rewrite of Python DeepDiff's core: byte-compatible deep diffing of JSON, 64-5757x faster, ignore_order included.**
 
 See [DeepDiff](https://github.com/seperman/deepdiff) for the Python original
-onix matches report-for-report.
+that onix matches report-for-report.
 
 **Status (September 2026):** pre-alpha proof of concept, unpublished; ordered
 + `ignore_order` diffing complete and benchmarked (see
@@ -226,17 +226,11 @@ entirely in Rust.
   at conversion time. Default `max_depth` is `onix_core::DEFAULT_MAX_DEPTH`
   (512).
 - **`max_depth` has a hard ceiling**, exposed as `deepdiff_rs.MAX_DEPTH_CEILING`
-  (currently 20,000). The diff engine is recursive, so a caller-raised
-  `max_depth` is what makes a deep-enough input recurse far enough to
-  overflow the native stack. Requesting a `max_depth` above the ceiling is
-  refused up front with a plain `ValueError` naming the ceiling (not a
-  `MaxDepthError`), because such a depth cannot be diffed without that risk.
-  For any `max_depth` at or below the ceiling the diff runs on a worker
-  thread whose stack is sized so that no in-range input can overflow it, so
-  the outcome is always either a correct result or a catchable exception,
-  never a process crash. The default (512) is far below the ceiling and is
-  unaffected; real-world JSON is essentially never nested even into the
-  hundreds.
+  (currently 20,000). A `max_depth` above it is refused up front with a plain
+  `ValueError` naming the ceiling (not a `MaxDepthError`); at or below it, the
+  outcome is always a correct result or a catchable exception, never a process
+  crash. The default (512) is unaffected. The rationale for the specific
+  ceiling is on `MAX_DEPTH_CEILING` in `crates/onix-py/src/guard.rs`.
 
 ### Bindings benchmark
 
@@ -249,12 +243,12 @@ same machine (macOS 26.5.1, Apple M5 Max) as `perf/RESULTS.md`'s M7 run:
 
 | Shape | deepdiff | deepdiff_rs | Speedup |
 | --- | --- | --- | --- |
-| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 3256.98ms | 67.10ms | **48.54x** |
-| Heterogeneous API-payload records, n=20,000 (live objects) | 4410.58ms | 127.38ms | **34.62x** |
-| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 3191.80ms | 66.90ms | **47.71x** |
-| Same API-payload shape, via `diff_json` (JSON-string path) | 6034.73ms | 66.24ms | **91.11x** |
+| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 3159.56ms | 67.53ms | **46.79x** |
+| Heterogeneous API-payload records, n=20,000 (live objects) | 4300.32ms | 126.43ms | **34.01x** |
+| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 3215.37ms | 67.92ms | **47.34x** |
+| Same API-payload shape, via `diff_json` (JSON-string path) | 6135.61ms | 69.71ms | **88.01x** |
 
-**Honest reading:** the live-object API-payload row (**~35x**) builds `b`
+**Honest reading:** the live-object API-payload row (**~34x**) builds `b`
 as a `copy.deepcopy` of `a`, never a shallow `list(a)`. A shallow copy
 would leave ~95% of records identity-shared between the two inputs, which
 real `DeepDiff` fast-paths via its own `t1 is t2` identity check, flattering
@@ -269,11 +263,11 @@ records into `onix_core`'s value model one object at a time is genuine,
 measurable overhead. A proxy that isolates it, `DeepDiff(a,
 copy.deepcopy(a))` (which pays the full conversion plus onix's cheap
 whole-tree equality check, but none of the per-node diff bookkeeping the
-mutated case also pays), accounts for roughly **77%** of the mutated case's
+mutated case also pays), accounts for roughly **80%** of the mutated case's
 own total time on this shape, and `bench_bindings.py` now computes and
 prints that percentage as part of its output. The JSON-string-only
 `diff_json` path skips the conversion entirely and recovers a much larger
-multiple (**~91x**) on the same data. Use `diff_json` when you already have
+multiple (**~88x**) on the same data. Use `diff_json` when you already have
 (or can produce) JSON text; reach for the drop-in `DeepDiff` class when you
 genuinely need to diff live Python objects, and accept the conversion cost
 as part of that convenience. Reproduce with:
@@ -285,6 +279,18 @@ uv run --group test maturin develop --release   # release, not debug -- a debug
                                                  # build understates onix by 10x+
 uv run --group test python benchmarks/bench_bindings.py
 ```
+
+**Per-call overhead and where the diff runs.** A diff whose two inputs are
+both nested no deeper than a small fixed threshold runs inline on the calling
+thread, so a trivial diff costs only a microsecond or two. A diff of more
+deeply nested inputs runs instead on a worker thread with a large, explicitly
+sized stack (with the GIL released), which is what keeps the recursive engine
+from overflowing the native stack on adversarially deep input; that worker
+path adds a fixed thread-handoff cost of a few tens of microseconds per call.
+The shapes in the table above are dominated by per-node work (thousands to
+tens of thousands of elements), so this fixed cost is a rounding error there,
+but it is real for a high-frequency stream of individually deep diffs. See
+`crates/onix-py/src/guard.rs` for the threshold and its stack-safety basis.
 
 ### Testing
 
@@ -381,8 +387,9 @@ against real `deepdiff` directly (not just the fixed golden corpus).
 ### Mutation testing
 
 `make mutants` runs [`cargo-mutants`](https://mutants.rs/) against
-`onix-core` (scoped the same way, and for the same reason, as the coverage
-exclusion above — see the `Makefile`'s `mutants` target). It's the
+`onix-core` and `onix-cli` — the two crates coverage holds to the 95% bar,
+excluding `onix-py` for the same structural reason (see the `Makefile`'s
+`mutants` target). It's the
 coverage gate's honest sibling: 100% line coverage only proves every line
 *ran*, not that a test would notice if that line's logic were wrong.
 Mutation testing rewrites the code in small, deliberately-wrong ways (delete
@@ -403,30 +410,22 @@ that doesn't even compile, e.g. because a type has no meaningful
 test that kills it, or, if justified, an explanation (kept alongside the
 code it concerns, as source comments) of why it's equivalent/non-actionable.
 
-**Standing result**, from a single `--workspace`-scoped run whose full
-per-file breakdown, tool version, and reproduce command are committed
-alongside the numbers in
-[perf/MUTANTS.md](https://github.com/ksco92/onix/blob/main/perf/MUTANTS.md):
-
-| Crate | Tested | Caught | Missed | Timeout | Unviable |
-| --- | --- | --- | --- | --- | --- |
-| `onix-core` | 425 | 412 | 6 | 6 | 1 |
-| `onix-cli` | 18 | 17 | 0 | 0 | 1 |
-| **Total** | **443** | **429** | **6** | **6** | **2** |
-
-All 6 missed and all 6 timeouts fall in `onix-core/src/lcs.rs`
-(`get_matching_blocks` and `find_longest_match`); each is equivalent or
-non-actionable, with the argument kept in the surrounding source comments.
-The 2 unviable mutants substitute a `Default` the type does not usefully
-provide, so they do not compile and no test can exercise them.
-
-A "timeout" is `cargo-mutants`' own non-passing category for a mutant that
-forces an infinite loop rather than a wrong-but-terminating result — not
-something a test suite could plausibly race against faster than the tool's
-own per-mutant timeout already does, so no action is taken on those either.
+**Standing result.** `make mutants` enumerates a deterministic **443**
+mutants (18 in `onix-cli`, 425 in `onix-core`). The reproducible, load-
+independent outcome: **every non-caught mutant lies in
+`onix-core/src/lcs.rs`'s `find_longest_match`/`get_matching_blocks`** (proven
+equivalent or non-actionable in the surrounding source comments), or is a
+`Default`-substitution mutant that does not compile; **`onix-cli` is fully
+caught**, and nothing else in `onix-core` survives. A representative
+quiet-machine run tested 443 and caught 424, with the remaining 19 confined
+to that `lcs.rs` set. The exact caught/missed/timeout split is not pinned
+here because `cargo-mutants` classifies those `lcs.rs` mutants as
+missed-versus-timeout by wall-clock time, so the split shifts with machine
+speed and load while the set stays fixed — the full explanation, tool
+version, and reproduce command are in
+[perf/MUTANTS.md](https://github.com/ksco92/onix/blob/main/perf/MUTANTS.md).
 Future work that touches this logic should re-run `make mutants`, refresh
-`perf/MUTANTS.md`, and keep this table current rather than letting missed
-mutants go unexamined.
+`perf/MUTANTS.md`, and confirm no mutant escapes that `lcs.rs` set.
 
 ## Benchmarks
 
