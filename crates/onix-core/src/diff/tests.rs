@@ -661,6 +661,21 @@ fn map_deeper_than_false_for_a_map_exactly_at_limit() {
 }
 
 #[test]
+fn map_deeper_than_true_for_any_nonempty_map_at_limit_zero() {
+    // Kills the `!map.is_empty()` -> `map.is_empty()` mutant: at
+    // `limit == 0`, a single scalar field already sits one level too
+    // deep, regardless of its own content.
+    let mut map = Map::new();
+    map.insert("x".to_string(), json!(1));
+    assert!(map_deeper_than(&map, 0));
+}
+
+#[test]
+fn map_deeper_than_false_for_an_empty_map_at_limit_zero() {
+    assert!(!map_deeper_than(&Map::new(), 0));
+}
+
+#[test]
 fn map_deeper_than_recurses_with_incrementing_not_constant_depth() {
     // Kills the `depth + 1` -> `depth * 1` mutant in `map_deeper_than`'s
     // `Value::Object` recursion arm: without the increment, the leaf at

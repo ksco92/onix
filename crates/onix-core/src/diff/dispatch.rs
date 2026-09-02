@@ -199,25 +199,27 @@ pub(crate) fn check_value_depth(
     Ok(())
 }
 /// Like [`deeper_than`], but walks a dict's fields directly instead of
-/// requiring an owned `Value::Object` wrapping them — every field starts at
-/// depth `1`, exactly matching what wrapping `map` in a `Value::Object` and
-/// calling [`deeper_than`] on that would compute (an empty map is nesting
-/// `0` either way, since there are no fields to push).
+/// requiring an owned `Value::Object` wrapping them.
+///
+/// Delegates to [`deeper_than`] per field rather than duplicating its
+/// stack-walk: each field sits at depth `1` relative to `map` itself, so a
+/// field's own subtree trips `limit` exactly when that field's value
+/// (counted from its own depth `0`) trips `limit - 1` — matching what
+/// wrapping `map` in a `Value::Object` and calling [`deeper_than`] on that
+/// would compute. `limit == 0` is the one case that can't subtract `1`
+/// (`usize` has no negative range) and doesn't need to: at `limit == 0`
+/// *any* field at all already sits one level too deep, regardless of what
+/// it contains, so the answer is simply whether `map` is non-empty.
+/// `Iterator::any` short-circuits on the first offending field, matching
+/// [`deeper_than`]'s own early-return, and introduces no native recursion
+/// of its own — each delegated [`deeper_than`] call is independently
+/// iterative, so this composes without compounding stack usage.
 pub(crate) fn map_deeper_than(map: &Map<String, Value>, limit: usize) -> bool {
-    let mut stack: Vec<(&Value, usize)> = map.values().map(|value| (value, 1)).collect();
-
-    while let Some((v, depth)) = stack.pop() {
-        if depth > limit {
-            return true;
-        }
-        match v {
-            Value::Array(items) => stack.extend(items.iter().map(|item| (item, depth + 1))),
-            Value::Object(map) => stack.extend(map.values().map(|item| (item, depth + 1))),
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-        }
+    if limit == 0 {
+        !map.is_empty()
+    } else {
+        map.values().any(|value| deeper_than(value, limit - 1))
     }
-
-    false
 }
 /// [`check_value_depth`]'s twin for a dict that hasn't been cloned into a
 /// `Value` yet: checks `map`'s own nesting directly ([`map_deeper_than`])
