@@ -31,26 +31,21 @@ pub(crate) fn diff_json(
     max_depth: Option<usize>,
 ) -> PyResult<String> {
     let opts = resolve_options(max_depth, ignore_order)?;
-    // `serde_json::from_str` caps its own recursion at ~128 levels, so a
-    // parsed value is never nested past that, which keeps parsing itself off
-    // the native-stack-overflow path. Independently of that cap, every
-    // deep-value operation below (the diff, the report's serialization and
-    // drop, and the drop of `a_value` on a `b` parse error) is routed onto the
-    // sized worker whenever the value is past the inline depth threshold, so
-    // those stay safe on their own.
+    // `serde_json`'s parser caps its own recursion at ~128 levels (it drives
+    // the compact value's streaming `Deserialize`), so a parsed input is never
+    // nested past that, which keeps parsing itself off the native-stack-
+    // overflow path. The diff and the report's serde serialization/drop are
+    // independently routed onto the sized worker whenever they are past the
+    // inline depth threshold.
+    // Both inputs stream-parse straight into the compact `onix_core::Value`
+    // (its `Deserialize`, driven by `serde_json`'s parser) — no intermediate
+    // `serde_json::Value` tree. If `b` fails to parse after `a` succeeded, the
+    // `?` drops `a`'s (compact) value here; its iterative `Drop` is stack-safe
+    // on the calling thread at any depth, so no sized-worker hand-off is
+    // needed for it.
     let a_value = parse_json(a, "a")?;
-    let b_value = match parse_json(b, "b") {
-        Ok(value) => value,
-        Err(error) => {
-            // `a` already parsed to a value that could (if the parser cap ever
-            // changed) be deep; don't drop it inline on this error return.
-            let a_is_deep = is_deep(&a_value);
-            drop_value_safely(a_value, a_is_deep);
-            return Err(error);
-        }
-    };
-    // Runs the diff inline or on the sized worker depending on input depth,
-    // dropping the parsed inputs wherever it ran.
+    let b_value = parse_json(b, "b")?;
+    // Runs the diff inline or on the sized worker depending on input depth.
     let report_value = diff_to_value(py, a_value, b_value, opts)?;
     let report_is_deep = is_deep(&report_value);
     // Serialize (on the worker if the report is deep), then drop the report
@@ -61,8 +56,8 @@ pub(crate) fn diff_json(
     json
 }
 
-fn parse_json(text: &str, argument_name: &str) -> PyResult<serde_json::Value> {
-    serde_json::from_str(text).map_err(|error| {
+fn parse_json(text: &str, argument_name: &str) -> PyResult<onix_core::Value> {
+    serde_json::from_str::<onix_core::Value>(text).map_err(|error| {
         PyValueError::new_err(format!(
             "failed to parse argument {argument_name:?} as JSON: {error}"
         ))

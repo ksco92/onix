@@ -122,10 +122,9 @@ single deterministic line is easiest to diff byte-for-byte.
   quirks" section: an intentionally-unchased path-rendering edge case and
   a narrow list-LCS numeric-precision limit.
 - `--timing` prints exactly one line of JSON to **stderr**:
-  `{"parse_ns": N, "diff_ns": N}` (measuring the `serde_json` parse of the
-  two inputs, and the diff call, respectively — `diff_ns` currently also
-  includes the boundary conversion of the parsed inputs into the engine's
-  compact value model) — the same
+  `{"parse_ns": N, "diff_ns": N}` (measuring the parse of the two inputs
+  straight into the engine's compact value model, and the diff call,
+  respectively) — the same
   "diff-only self-instrumentation" the benchmark harness under `perf/`
   uses to isolate diff time from process startup and JSON parsing. Without
   `--timing`, stderr stays empty on a successful run.

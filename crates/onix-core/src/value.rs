@@ -504,6 +504,7 @@ impl ExactSizeIterator for Entries<'_> {}
 /// construction, and the finished [`Value`] holds the shared handles while
 /// the lookup table is dropped. See the [module documentation](self) for the
 /// key-interning footprint rationale.
+#[derive(Debug, Default)]
 struct Interner {
     seen: HashSet<Arc<str>>,
 }
@@ -511,9 +512,7 @@ struct Interner {
 impl Interner {
     /// Creates an empty interner.
     fn new() -> Self {
-        Self {
-            seen: HashSet::new(),
-        }
+        Self::default()
     }
 
     /// Returns a shared `Arc<str>` for `key`, allocating one only the first
@@ -525,6 +524,57 @@ impl Interner {
         let shared: Arc<str> = Arc::from(key);
         self.seen.insert(Arc::clone(&shared));
         shared
+    }
+}
+
+/// Builds compact [`Value`]s while interning object keys across one
+/// construction session.
+///
+/// A caller assembling a large tree from an external source — the Python
+/// bindings walking a live object graph, say — threads one `Builder` through
+/// the whole walk and routes every object through [`Builder::object`], so a
+/// key repeated across many objects costs a single `Arc<str>` allocation
+/// shared by reference count. This is the same interning [`From`] and
+/// [`Deserialize`] perform internally, exposed for callers that build a
+/// [`Value`] some other way (e.g. from Python objects rather than JSON).
+///
+/// # Examples
+///
+/// ```
+/// use onix_core::Value;
+/// use onix_core::value::Builder;
+///
+/// let mut builder = Builder::new();
+/// let value = builder.object(vec![
+///     ("b".to_owned(), Value::Bool(true)),
+///     ("a".to_owned(), Value::Null),
+/// ]);
+/// // Rendered back out, keys are in canonical (sorted) order.
+/// assert_eq!(value.to_serde_json().to_string(), r#"{"a":null,"b":true}"#);
+/// ```
+#[derive(Debug, Default)]
+pub struct Builder {
+    interner: Interner,
+}
+
+impl Builder {
+    /// Creates an empty builder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builds an object [`Value`] from `entries`, interning each key against
+    /// this builder's session and sorting into the canonical ascending
+    /// key-string order. A duplicate key keeps the last value, matching
+    /// [`From`] and [`Deserialize`].
+    #[must_use]
+    pub fn object(&mut self, entries: Vec<(String, Value)>) -> Value {
+        let pairs = entries
+            .into_iter()
+            .map(|(key, value)| (self.interner.intern(&key), value))
+            .collect();
+        Value::Object(Object::from_pairs(pairs))
     }
 }
 

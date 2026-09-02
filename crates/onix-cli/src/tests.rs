@@ -120,7 +120,10 @@ fn read_json_file_parses_valid_json() {
     let path = write_temp_file("valid.json", r#"{"a": 1}"#);
     assert_eq!(
         read_json_file(path.to_str().unwrap()),
-        Ok((r#"{"a": 1}"#.to_string(), serde_json::json!({"a": 1})))
+        Ok((
+            r#"{"a": 1}"#.to_string(),
+            onix_core::Value::from(serde_json::json!({"a": 1})),
+        ))
     );
 }
 

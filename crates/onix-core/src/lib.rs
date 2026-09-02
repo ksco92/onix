@@ -59,7 +59,7 @@ pub(crate) mod test_support;
 pub use diff::{DEFAULT_MAX_DEPTH, DiffOptions, diff, diff_with_max_depth, diff_with_options};
 pub use error::Error;
 pub use report::Report;
-pub use value::{Number, Value};
+pub use value::{Builder, Number, Value};
 
 /// Returns `true` if `value` is nested strictly deeper than `limit` levels,
 /// treating `value` itself as the root (depth `0`): a scalar
