@@ -56,10 +56,10 @@
 //! This practical depth limit is a property of the recursive engine; an
 //! iterative work-stack rewrite would remove it entirely.
 //!
-//! The engine operates directly on `serde_json::Value` with no value-model
-//! trait/enum abstraction — a deliberate deferral: introducing one would be
-//! speculative until a second input format (e.g. Python bindings operating
-//! on native Python objects) actually exists to justify it.
+//! The engine operates directly on `serde_json::Value` today. A compact
+//! value model (`onix_core::Value`) now exists alongside it, and migrating
+//! the engine onto it follows as a deliberate next step — sequenced after
+//! the model and its conversions landed, rather than bundled with them.
 //!
 //! # List diffing: scalar-list LCS matching
 //!

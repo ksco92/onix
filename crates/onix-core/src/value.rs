@@ -79,12 +79,11 @@ pub enum Value {
     Object(Object),
 }
 
-/// Iterative structural equality (see the private `structural_eq`). Comparing two
-/// deeply nested values uses `O(1)` native stack rather than the native
-/// recursion a derived `PartialEq` would, matching this type's `Drop`, so
-/// equality on attacker-shaped input cannot overflow the stack. The result
-/// is exactly what a derived `PartialEq` produces (verified by a differential
-/// property test before the derive was replaced).
+/// Delegates to the iterative `structural_eq`. The result is exactly what a
+/// derived `PartialEq` produces, verified by a differential property test
+/// against the derive before it was replaced. See the [module
+/// documentation](self)'s "Stack safety" section for why equality is
+/// iterative.
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         structural_eq(self, other)
@@ -192,13 +191,13 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
     }
 }
 
-/// Iterative structural equality shared by `Value`'s `PartialEq`. Compares
-/// two values with an explicit heap work-stack instead of native recursion,
-/// so a deep comparison uses `O(1)` native stack. Semantics are exactly
-/// those of a derived `PartialEq`: same-variant structural equality, with
+/// Iterative structural equality backing `Value`'s [`PartialEq`]. Semantics
+/// match a derived `PartialEq`: same-variant structural equality, with
 /// `Number`'s variant sensitivity intact (`PosInt(1)` is not equal to
 /// `Float(1.0)`); objects compare over their sorted entries (equal key sets
-/// and per-key values), arrays over equal length and per-index values.
+/// and per-key values), arrays over equal length and per-index values. See
+/// the [module documentation](self)'s "Stack safety" section for why it is
+/// iterative rather than recursive.
 fn structural_eq(a: &Value, b: &Value) -> bool {
     let mut stack: Vec<(&Value, &Value)> = vec![(a, b)];
     while let Some((a, b)) = stack.pop() {
