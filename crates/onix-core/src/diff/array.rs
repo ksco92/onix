@@ -6,7 +6,7 @@
 use crate::value::Value;
 
 use crate::error::Error;
-use crate::ignore_order;
+use crate::ignore_order::{self, DistanceMemo};
 use crate::lcs;
 use crate::path::PathSegment;
 use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
@@ -56,14 +56,15 @@ pub(crate) fn array_diff(
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
+    memo: &DistanceMemo,
 ) -> Result<Report, Error> {
     if opts.ignore_order {
-        return ignore_order::ignore_order_array_diff(path, a, b, depth, opts);
+        return ignore_order::ignore_order_array_diff(path, a, b, depth, opts, memo);
     }
     if lcs::all_basic_scalars(a) && lcs::all_basic_scalars(b) {
-        lcs_or_positional_array_diff(path, a, b, depth, opts)
+        lcs_or_positional_array_diff(path, a, b, depth, opts, memo)
     } else {
-        positional_array_diff(path, a, b, depth, opts)
+        positional_array_diff(path, a, b, depth, opts, memo)
     }
 }
 /// The scalar-only-list candidate computation [`array_diff`] dispatches to
@@ -76,6 +77,7 @@ fn lcs_or_positional_array_diff(
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
+    memo: &DistanceMemo,
 ) -> Result<Report, Error> {
     let lcs_report = lcs_array_diff(path, a, b, depth, opts.max_depth)?;
     // The `> 1` here is a verified-equivalent boundary: replacing it with
@@ -94,7 +96,7 @@ fn lcs_or_positional_array_diff(
     // Confirmed by ~1.7M scalar-list pairs (zero difference between the two
     // thresholds) and by DeepDiff 9.1.0 parity at the boundary shapes.
     if lcs_report.finding_count() > 1 {
-        let positional_report = positional_array_diff(path, a, b, depth, opts)?;
+        let positional_report = positional_array_diff(path, a, b, depth, opts, memo)?;
         if lcs_report.finding_count() >= positional_report.finding_count() {
             return Ok(positional_report);
         }
@@ -321,6 +323,7 @@ fn positional_array_diff(
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
+    memo: &DistanceMemo,
 ) -> Result<Report, Error> {
     let mut report = Report::new();
     let min_len = a.len().min(b.len());
@@ -331,7 +334,7 @@ fn positional_array_diff(
     // depth.
     for i in 0..min_len {
         let sub_report = scoped(path, PathSegment::Index(i), |path| {
-            diff_at(path, &a[i], &b[i], depth + 1, opts)
+            diff_at(path, &a[i], &b[i], depth + 1, opts, memo)
         })?;
         report.merge(sub_report);
     }

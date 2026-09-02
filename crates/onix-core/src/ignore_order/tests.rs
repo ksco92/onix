@@ -29,7 +29,7 @@ fn count_diff_leaves(
     depth: usize,
     opts: &DiffOptions,
 ) -> usize {
-    super::distance::count_diff_leaves(&cv(a), &cv(b), depth, opts)
+    super::distance::count_diff_leaves(&cv(a), &cv(b), depth, opts, &super::DistanceMemo::new())
 }
 fn count_object_diff_leaves(
     a: &serde_json::Map<String, serde_json::Value>,
@@ -37,7 +37,13 @@ fn count_object_diff_leaves(
     depth: usize,
     opts: &DiffOptions,
 ) -> usize {
-    super::distance::count_object_diff_leaves(&cobj(a), &cobj(b), depth, opts)
+    super::distance::count_object_diff_leaves(
+        &cobj(a),
+        &cobj(b),
+        depth,
+        opts,
+        &super::DistanceMemo::new(),
+    )
 }
 fn count_array_diff_leaves(
     a: &[serde_json::Value],
@@ -45,7 +51,13 @@ fn count_array_diff_leaves(
     depth: usize,
     opts: &DiffOptions,
 ) -> usize {
-    super::distance::count_array_diff_leaves(&cvec(a), &cvec(b), depth, opts)
+    super::distance::count_array_diff_leaves(
+        &cvec(a),
+        &cvec(b),
+        depth,
+        opts,
+        &super::DistanceMemo::new(),
+    )
 }
 fn item_key(value: &serde_json::Value) -> super::hash::ItemKey {
     super::hash::item_key(&cv(value))
@@ -1109,6 +1121,7 @@ fn rough_distance_structural_formula_is_diff_length_over_summed_rough_lengths() 
         CUTOFF_DISTANCE_FOR_PAIRS,
         0,
         &opts,
+        &super::DistanceMemo::new(),
     );
     assert!((d - 1.0 / 7.0).abs() < 1e-12, "expected 1/7, got {d}");
 }
@@ -1142,6 +1155,7 @@ fn rough_distance_depth_boundary_is_exact() {
         CUTOFF_DISTANCE_FOR_PAIRS,
         0,
         &opts,
+        &super::DistanceMemo::new(),
     );
     assert_eq!(d, 0.0);
 }
@@ -1196,4 +1210,100 @@ fn item_key_ord_is_consistent_with_eq() {
     let a = item_key(&json!(1));
     let b = item_key(&json!(1));
     assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
+}
+
+// --- distance-memoization decision equivalence --------------------------
+
+use proptest::prelude::*;
+
+/// Generates a nested JSON value biased toward the shapes `ignore_order`
+/// pairing exercises: lists (some nested), dicts, and scalars, up to a
+/// modest depth.
+fn arb_nested() -> impl Strategy<Value = serde_json::Value> {
+    let leaf = prop_oneof![
+        Just(serde_json::Value::Null),
+        any::<bool>().prop_map(serde_json::Value::Bool),
+        any::<i32>().prop_map(|i| json!(i)),
+        "[a-z]{0,3}".prop_map(serde_json::Value::String),
+    ];
+    leaf.prop_recursive(6, 48, 4, |inner| {
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+            prop::collection::hash_map("[a-c]", inner, 0..3)
+                .prop_map(|map| serde_json::Value::Object(map.into_iter().collect())),
+        ]
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(600))]
+
+    /// The distance memo must change no decision: an `ignore_order` diff run
+    /// with the memo enabled produces a byte-identical report to one run with
+    /// it disabled, over generated nested shapes. This is the empirical
+    /// counterpart to the purity argument in `super::memo`'s module doc.
+    #[test]
+    fn memoized_and_unmemoized_reports_are_byte_identical(
+        a in arb_nested(),
+        b in arb_nested(),
+    ) {
+        let a = crate::value::Value::from(a);
+        let b = crate::value::Value::from(b);
+        let opts = DiffOptions {
+            ignore_order: true,
+            max_depth: 1_000,
+        };
+        let with = crate::diff::diff_with_options_memo(&a, &b, &opts, &super::DistanceMemo::new());
+        let without =
+            crate::diff::diff_with_options_memo(&a, &b, &opts, &super::DistanceMemo::disabled());
+        prop_assert_eq!(
+            with.map(|report| report.to_json_value().to_string()),
+            without.map(|report| report.to_json_value().to_string()),
+        );
+    }
+}
+
+#[test]
+fn deep_nested_ignore_order_completes_quickly_with_memoization() {
+    use std::time::Instant;
+
+    // A single-element nested list of depth `d` is `d` nodes — tiny, legal
+    // input. Unmemoized, `ignore_order` pairing re-diffs each level twice
+    // (once to score the pair's distance, once to record it), compounding to
+    // `~2x` cost per level: this used to take ~1-2s at depth 20 and hang for
+    // tens of seconds by depth 25. The distance memo collapses it to linear.
+    let opts = DiffOptions {
+        ignore_order: true,
+        max_depth: 100_000,
+    };
+    let build = |depth: usize, leaf: i64| {
+        let mut value = json!(leaf);
+        for _ in 0..depth {
+            value = json!([value]);
+        }
+        crate::value::Value::from(value)
+    };
+
+    let (a, b) = (build(20, 1), build(20, 2));
+    let started = Instant::now();
+    let report = crate::diff::diff_with_options(&a, &b, &opts).expect("depth 20 diffs");
+    let depth_20 = started.elapsed();
+    assert!(
+        !report.is_empty(),
+        "depth-20 unequal input must report a change"
+    );
+    assert!(
+        depth_20.as_millis() < 500,
+        "depth-20 nested ignore_order took {depth_20:?}, over the 500ms bound"
+    );
+
+    // Depth 25 previously hung (>30s); it must now complete at all.
+    let (a, b) = (build(25, 1), build(25, 2));
+    let started = Instant::now();
+    let _ = crate::diff::diff_with_options(&a, &b, &opts).expect("depth 25 diffs");
+    let depth_25 = started.elapsed();
+    assert!(
+        depth_25.as_secs() < 5,
+        "depth-25 nested ignore_order took {depth_25:?}, over the 5s bound"
+    );
 }

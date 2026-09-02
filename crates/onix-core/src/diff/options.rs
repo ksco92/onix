@@ -107,11 +107,33 @@ pub fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
 /// assert!(report.is_empty());
 /// ```
 pub fn diff_with_options(a: &Value, b: &Value, opts: &DiffOptions) -> Result<Report, Error> {
+    // The distance memo is created here, per diff invocation, and dropped
+    // when this returns — no cross-call state. It only ever caches
+    // `ignore_order` container-pair distances (see `crate::ignore_order`'s
+    // `memo` module); for an ordered diff it is threaded but never consulted.
+    diff_with_options_memo(a, b, opts, &crate::ignore_order::DistanceMemo::new())
+}
+
+/// The shared body of [`diff_with_options`], taking an explicit
+/// [`crate::ignore_order::DistanceMemo`] so the decision-equivalence
+/// differential test can run the exact same code path with the cache
+/// disabled. Production always calls it via [`diff_with_options`] with a live
+/// memo.
+///
+/// # Errors
+///
+/// Same as [`diff_with_options`].
+pub(crate) fn diff_with_options_memo(
+    a: &Value,
+    b: &Value,
+    opts: &DiffOptions,
+    memo: &crate::ignore_order::DistanceMemo,
+) -> Result<Report, Error> {
     if values_equal(a, b) {
         return Ok(Report::new());
     }
     let mut path = Vec::new();
-    diff_at(&mut path, a, b, 0, opts).map(|mut report| {
+    diff_at(&mut path, a, b, 0, opts, memo).map(|mut report| {
         report.merge_mutual_add_removes();
         report
     })

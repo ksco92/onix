@@ -241,11 +241,13 @@ entirely in Rust.
   pays for this option. `DeepDiff`'s `max_passes`/`max_diffs` bounds on that
   work are not implemented here, so a caller feeding untrusted input should
   bound the input size itself rather than rely on an internal cutoff. The
-  cost also grows steeply with the **nesting depth** of unpaired containers:
-  ranking candidate pairs computes a recursive pairwise structural distance,
-  so a caller should bound both the size *and* the nesting of untrusted
-  `ignore_order` inputs (a distance-memoization optimization is tracked
-  follow-up work, not in this release). Note
+  **nesting depth** of unpaired containers, by contrast, no longer compounds
+  this: ranking a candidate pair whose sides are containers is a recursive
+  pairwise structural distance, and a per-diff memo now computes each distinct
+  container-pair distance once, so that cost is polynomial in the input rather
+  than exponential in its depth (a tiny, deeply nested list no longer hangs).
+  The width bound stands, though — bound the *size* of untrusted
+  `ignore_order` input. Note
   too that, unlike upstream `DeepDiff` (which Python's randomized string
   hashing protects), onix's `ignore_order` hashes input-derived keys with a
   fixed-seed hash, so crafted inputs can additionally degrade hashing
