@@ -216,10 +216,10 @@ fn advance_frame<'py>(
         } => {
             built.insert(current_key, value);
 
-            Ok(match next_dict_entry(&mut remaining, path)? {
-                Some((key, next_value)) => {
+            match next_dict_entry(&mut remaining, path) {
+                Ok(Some((key, next_value))) => {
                     path.push(PathSegment::Key(key.clone()));
-                    Advance::NeedsChild {
+                    Ok(Advance::NeedsChild {
                         // The child's depth is the path length once its key
                         // segment is pushed above.
                         pending: (next_value, path.len()),
@@ -228,11 +228,33 @@ fn advance_frame<'py>(
                             built,
                             current_key: key,
                         },
-                    }
+                    })
                 }
-                None => Advance::Done(Value::Object(built)),
-            })
+                Ok(None) => Ok(Advance::Done(Value::Object(built))),
+                Err(error) => {
+                    // A bad dict key aborts conversion here. `built` may
+                    // already hold deep completed entries (including the child
+                    // just inserted); route them through the sized-worker drop
+                    // path so their natively recursive `Drop` cannot overflow
+                    // the calling thread.
+                    drop_values_safely(built.into_iter().map(|(_key, value)| value));
+                    Err(error)
+                }
+            }
         }
+    }
+}
+
+/// Drops every [`Value`] in `values` through
+/// [`crate::guard::drop_value_safely`] (wrapping them in one array so a
+/// single depth check and, if needed, a single sized-worker hand-off covers
+/// them all). Used only on the conversion error paths, where a deep subtree
+/// may already have been built before a later sibling failed to convert and
+/// would otherwise be dropped inline on the calling thread.
+fn drop_values_safely<I: IntoIterator<Item = Value>>(values: I) {
+    let salvage: Vec<Value> = values.into_iter().collect();
+    if !salvage.is_empty() {
+        crate::guard::drop_value_safely(Value::Array(salvage));
     }
 }
 
@@ -251,13 +273,17 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<Val
     let mut pending: Option<(Bound<'_, PyAny>, usize)> = Some((obj.clone(), 0));
     let mut finished: Option<Value> = None;
 
-    loop {
+    let outcome: PyResult<Value> = loop {
         if let Some((current, depth)) = pending.take() {
             if depth > max_depth {
-                return Err(max_depth_error(max_depth, &path));
+                break Err(max_depth_error(max_depth, &path));
             }
 
-            match classify(&current, &path)? {
+            let step = match classify(&current, &path) {
+                Ok(step) => step,
+                Err(error) => break Err(error),
+            };
+            match step {
                 Step::Done(value) => finished = Some(value),
                 Step::List { iter, first } => {
                     let child_depth = depth + 1;
@@ -299,23 +325,50 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<Val
         );
 
         match stack.pop() {
-            None => return Ok(value),
+            None => break Ok(value),
             Some(frame) => {
                 path.pop();
 
-                match advance_frame(frame, value, &mut path)? {
-                    Advance::NeedsChild {
+                match advance_frame(frame, value, &mut path) {
+                    Ok(Advance::NeedsChild {
                         pending: next_pending,
                         frame,
-                    } => {
+                    }) => {
                         stack.push(frame);
                         pending = Some(next_pending);
                     }
-                    Advance::Done(v) => finished = Some(v),
+                    Ok(Advance::Done(v)) => finished = Some(v),
+                    // `advance_frame` has already salvaged the failing frame's
+                    // own built entries; salvage the rest of the work-stack
+                    // below before returning.
+                    Err(error) => break Err(error),
                 }
             }
         }
+    };
+
+    if outcome.is_err() {
+        // A deep sibling may have been fully built into a parked frame before
+        // a later sibling (or a bad dict key, or the depth bound) aborted the
+        // conversion. Dropping those frames inline here would run
+        // `serde_json::Value`'s recursive `Drop` on the calling thread and
+        // could overflow it, so route every parked value through the
+        // sized-worker drop path instead.
+        let leftover = finished
+            .into_iter()
+            .chain(stack.into_iter().flat_map(|frame| {
+                let built: Vec<Value> = match frame {
+                    Frame::List { built, .. } => built,
+                    Frame::Dict { built, .. } => {
+                        built.into_iter().map(|(_key, value)| value).collect()
+                    }
+                };
+                built
+            }));
+        drop_values_safely(leftover);
     }
+
+    outcome
 }
 
 /// Pulls the next `(key, value)` pair out of a dict iterator, validating

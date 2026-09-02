@@ -3,14 +3,11 @@
 //! the result as `.to_json()`/`.to_dict()` — see this module's `DeepDiff`
 //! doc for the full, documented MVP surface.
 
-use onix_core::{DEFAULT_MAX_DEPTH, DiffOptions};
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde_json::Value;
 
 use crate::convert::{to_value, value_to_pyobject};
-use crate::errors::map_diff_error;
-use crate::guard::{check_max_depth_ceiling, drop_report, report_needs_worker, run_on_worker};
+use crate::guard::{diff_to_value, drop_value_safely, resolve_options, serialize_value};
 
 /// A drop-in subset of `deepdiff.DeepDiff`.
 ///
@@ -53,11 +50,6 @@ use crate::guard::{check_max_depth_ceiling, drop_report, report_needs_worker, ru
 #[pyclass(module = "deepdiff_rs")]
 pub(crate) struct DeepDiff {
     report_value: Value,
-    /// Whether `report_value` is nested deeply enough that serializing or
-    /// dropping it must happen on the sized worker thread rather than the
-    /// calling thread — computed once here so `to_json`/`Drop` need not
-    /// re-walk the report. See `crate::guard::report_needs_worker`.
-    needs_worker: bool,
 }
 
 #[pymethods]
@@ -71,31 +63,28 @@ impl DeepDiff {
         ignore_order: bool,
         max_depth: Option<usize>,
     ) -> PyResult<Self> {
-        let max_depth = max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
-        check_max_depth_ceiling(max_depth)?;
+        let opts = resolve_options(max_depth, ignore_order)?;
         // Conversion is iterative (no native recursion — see `crate::convert`)
         // and needs the GIL to read the live Python objects, so it stays on
         // the calling thread.
-        let a = to_value(t1, max_depth)?;
-        let b = to_value(t2, max_depth)?;
-        let opts = DiffOptions {
-            max_depth,
-            ignore_order,
+        let a = to_value(t1, opts.max_depth)?;
+        // If converting `t2` fails after `a` is already a (possibly deep)
+        // legal `Value`, the early return must not drop `a` inline: its
+        // recursive `Drop` could overflow this calling thread. Route it
+        // through the sized-worker drop path first.
+        let b = match to_value(t2, opts.max_depth) {
+            Ok(b) => b,
+            Err(error) => {
+                drop_value_safely(a);
+                return Err(error);
+            }
         };
-        // The diff is natively recursive, so it runs on the stack-sized
-        // worker (GIL released); `a`, `b`, and the intermediate `Report`
-        // are all owned by the closure and dropped there, on that large
-        // stack, never on the calling thread.
-        let report_value = run_on_worker(py, move || {
-            onix_core::diff_with_options(&a, &b, &opts).map(|report| report.to_json_value())
-        })?
-        .map_err(|error| map_diff_error(&error))?;
-        let needs_worker = report_needs_worker(&report_value);
+        // The diff is natively recursive: it runs inline when both inputs are
+        // shallow, else on the stack-sized worker (GIL released), which also
+        // drops `a`, `b`, and the intermediate report on its large stack.
+        let report_value = diff_to_value(py, a, b, opts)?;
 
-        Ok(Self {
-            report_value,
-            needs_worker,
-        })
+        Ok(Self { report_value })
     }
 
     /// Byte-compatible with real `DeepDiff(...).to_json()` at
@@ -104,14 +93,9 @@ impl DeepDiff {
     /// `serde_json`'s serialization of a `Value` is itself natively
     /// recursive, so a report deep enough to matter is serialized on the
     /// sized worker thread; a shallow one (the overwhelmingly common case)
-    /// serializes inline.
+    /// serializes inline. See `crate::guard::serialize_value`.
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
-        let serialized = if self.needs_worker {
-            run_on_worker(py, || serde_json::to_string(&self.report_value))?
-        } else {
-            serde_json::to_string(&self.report_value)
-        };
-        serialized.map_err(|error| PyValueError::new_err(error.to_string()))
+        serialize_value(py, &self.report_value)
     }
 
     /// The parsed form of [`Self::to_json`] — a native Python `dict`.
@@ -136,14 +120,10 @@ impl DeepDiff {
 impl Drop for DeepDiff {
     fn drop(&mut self) {
         // `serde_json::Value`'s derived `Drop` is natively recursive, so a
-        // report nested near the ceiling would overflow the calling
-        // thread's stack if dropped here. Hand it to `drop_report`, which
-        // drops a deep report on the sized worker thread and a shallow one
-        // inline. `needs_worker` is already known, so shallow reports pay no
-        // walk here.
-        if self.needs_worker {
-            drop_report(std::mem::replace(&mut self.report_value, Value::Null));
-        }
+        // report nested past the inline threshold would overflow the calling
+        // thread's stack if dropped here. `drop_value_safely` drops a deep
+        // report on the sized worker thread and a shallow one inline.
+        drop_value_safely(std::mem::replace(&mut self.report_value, Value::Null));
     }
 }
 
