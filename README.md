@@ -207,7 +207,7 @@ entirely in Rust.
 - **Supported types:** `None`, `bool`, `int`, `float`, `str`, `dict` (`str`
   keys only), `list` — the rest of `deepdiff.DeepDiff`'s option surface
   (`exclude_paths`, `significant_digits`, custom operators, `verbose_level
-  != 2`, delta/patch, …) is out of scope for this milestone.
+  != 2`, delta/patch, …) is not yet implemented.
 - **Integers** must fit in `i64` or `u64`; arbitrary-precision Python `int`s
   (beyond that range) raise `ValueError` — real `DeepDiff` supports them
   natively.
@@ -238,7 +238,12 @@ entirely in Rust.
   remaining candidate against every other, the same core cost real `DeepDiff`
   pays for this option. `DeepDiff`'s `max_passes`/`max_diffs` bounds on that
   work are not implemented here, so a caller feeding untrusted input should
-  bound the input size itself rather than rely on an internal cutoff.
+  bound the input size itself rather than rely on an internal cutoff. Note
+  too that, unlike upstream `DeepDiff` (which Python's randomized string
+  hashing protects), onix's `ignore_order` hashes input-derived keys with a
+  fixed-seed hash, so crafted inputs can additionally degrade hashing
+  performance — see `crates/onix-core/src/ignore_order/fxhash.rs` for the
+  accepted trade-off.
 
 ### Bindings benchmark
 
@@ -323,7 +328,7 @@ maturin build --release
 
 Builds a single abi3 wheel (`deepdiff_rs-<version>-cp39-abi3-<platform>.whl`,
 Python ≥3.9, one wheel per platform rather than per-CPython-minor-version).
-Publishing to PyPI is out of scope for this milestone (needs the
+Publishing to PyPI is not yet set up (needs the
 maintainer's PyPI credentials or trusted-publishing setup) — the exact
 command, once ready, is:
 
@@ -380,7 +385,7 @@ the same test runs both the ordered and `ignore_order=True` corpora. This is
 the correctness bar for the whole compatibility claim — see
 [`tests/golden/README.md`](https://github.com/ksco92/onix/blob/main/tests/golden/README.md) for the pinned
 `deepdiff`/Python versions, the case list, and the regeneration command
-(`uv run scripts/gen_goldens.py`). `scripts/m7_differential_fuzz.py` is a
+(`uv run scripts/gen_goldens.py`). `scripts/differential_fuzz.py` is a
 separate, non-`make-check` development-time tool that fuzzes `--ignore-order`
 against real `deepdiff` directly (not just the fixed golden corpus).
 
@@ -397,7 +402,7 @@ a match arm, flip an operator, swap a comparison) and checks whether the
 test suite actually fails — a survivor is a real gap in what's tested.
 
 It's slow by design (it rebuilds and re-tests once per mutant), so it runs
-per milestone rather than on every `make check`:
+periodically rather than on every `make check`:
 
 ```sh
 cargo install cargo-mutants --locked

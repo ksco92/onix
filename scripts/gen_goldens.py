@@ -2,7 +2,7 @@
 # requires-python = "==3.13.*"
 # dependencies = ["deepdiff==9.1.0"]
 # ///
-"""Generate onix's M5b golden corpus from real DeepDiff output.
+"""Generate onix's golden corpus from real DeepDiff output.
 
 For each hand-designed case in ``CASES`` this writes three files under
 ``tests/golden/<case_name>/``:
@@ -41,7 +41,7 @@ GOLDEN_ROOT = Path(__file__).resolve().parent.parent / "tests" / "golden"
 
 # Each case is a small, hand-designed (t1, t2) pair. Keep cases SMALL and
 # focused on one behavior each — this is the correctness corpus, not a
-# performance fixture (see perf/ for those, arriving at M6).
+# performance fixture (see perf/ for those).
 CASES: dict[str, tuple[JsonValue, JsonValue]] = {
     # Scalars: values_changed vs type_changes, and DeepDiff's numeric
     # semantics (int/float/bool are distinct Python types; ints compare by
@@ -148,17 +148,15 @@ CASES: dict[str, tuple[JsonValue, JsonValue]] = {
         {"p'\"][\"q'": 1, "p'": {"q'": 10}},
         {"p'\"][\"q'": 2, "p'": {"q'": 20}},
     ),
-    # M6 list-compat fix: DeepDiff's default (non-ignore_order) list
-    # comparison runs an LCS/difflib-style match instead of plain
-    # index-aligned comparison whenever every element of *both* lists is a
-    # JSON scalar (its own "basic hashable" check) — see
-    # crates/onix-core/src/diff/mod.rs's "List diffing" module doc for the full
-    # spec these cases pin down.
+    # DeepDiff's default (non-ignore_order) list comparison runs an
+    # LCS/difflib-style match instead of plain index-aligned comparison
+    # whenever every element of *both* lists is a JSON scalar (its own
+    # "basic hashable" check) — see crates/onix-core/src/diff/mod.rs's
+    # "List diffing" module doc for the full spec these cases pin down.
     #
-    # The exact repro that surfaced the M6 finding: real DeepDiff matches
-    # this as an insert of True at the front plus a delete of the trailing
-    # False, not the three-way values_changed a naive index-aligned scan
-    # would report.
+    # Real DeepDiff matches this pair as an insert of True at the front plus
+    # a delete of the trailing False, not the three-way values_changed a
+    # naive index-aligned scan would report.
     "list_lcs_repro_bool_reorder": ([False, True, False], [True, False, True]),
     # A same-length list where the LCS match and the plain index-aligned
     # scan agree (no reordering) — pins down the common case still working.
@@ -217,13 +215,12 @@ CASES: dict[str, tuple[JsonValue, JsonValue]] = {
         ["x"] * 5 + ["distinct_a"] + ["x"] * 204,
         ["x"] * 204 + ["distinct_b"] + ["x"] * 5,
     ),
-    # M6c reviewer finding: DeepDiff's global, whole-tree
+    # DeepDiff's global, whole-tree
     # mutual_add_removes_to_become_value_changes() post-pass (model.py) —
     # runs once, after the entire diff, and merges any iterable_item_added
     # and iterable_item_removed pair that renders to the exact same path
     # string into one values_changed, purely because the path strings
-    # coincide (no relation between the two values otherwise). Minimal
-    # repro from the reviewer.
+    # coincide (no relation between the two values otherwise).
     "list_lcs_mutual_add_remove_merge": (
         [False, False, None, 2, 3.8, None],
         [None, False, -3, None, None, 3, 2, None],
@@ -231,12 +228,12 @@ CASES: dict[str, tuple[JsonValue, JsonValue]] = {
 }
 
 
-# Seeded-random scalar-list cases (M6c): bakes the reviewer's differential-fuzz
-# insight into the permanent golden suite. Fixed seed, deterministic, small
-# alphabet (biased toward collisions/repeats so the LCS match, the
-# index-aligned tie-break, AND the mutual_add_removes_to_become_value_changes
-# merge all get exercised across the batch) — regenerating must reproduce
-# these byte-for-byte, same as every other case here.
+# Seeded-random scalar-list cases: a permanent, deterministic batch. Fixed
+# seed, small alphabet (biased toward collisions/repeats so the LCS match,
+# the index-aligned tie-break, AND the
+# mutual_add_removes_to_become_value_changes merge all get exercised across
+# the batch) — regenerating must reproduce these byte-for-byte, same as
+# every other case here.
 _FUZZ_SEED = 0xF0F0_C0DE
 _FUZZ_CASE_COUNT = 20
 _FUZZ_ALPHABET: Final[list[JsonValue]] = [
@@ -263,7 +260,7 @@ def _generate_fuzz_cases() -> dict[str, tuple[JsonValue, JsonValue]]:
     return cases
 
 
-# M7 (ignore_order=True) hand-designed cases — see
+# Hand-designed ignore_order=True cases — see
 # crates/onix-core/src/ignore_order/mod.rs's module doc for the full,
 # source-cited spec these pin down. Each entry carries an
 # explicit {"ignore_order": True} kwargs dict (the third tuple element),
@@ -344,10 +341,10 @@ IGNORE_ORDER_CASES: dict[str, tuple[JsonValue, JsonValue, dict[str, bool]]] = {
         {"b": 1, "s1": 1, "s2": 2, "s3": 3},
         {"ignore_order": True},
     ),
-    # Type-change distance formula, general coercion rule (found during
-    # review of the M7 change): DeepDiff's DELTA_VIEW omits a type_changes
-    # entry's new_value whenever applying the new side's own type to the
-    # old value reproduces it exactly (new_type(old_value) == new_value) —
+    # Type-change distance formula, general coercion rule: DeepDiff's
+    # DELTA_VIEW omits a type_changes entry's new_value whenever applying
+    # the new side's own type to the old value reproduces it exactly
+    # (new_type(old_value) == new_value) —
     # a general Python-coercion rule, not a `new_value == True`-only
     # special case. This pair's outer structural pairing distance depends
     # on that rule (float(0) == 0.0 pairs a nested type_changes with
@@ -389,7 +386,7 @@ IGNORE_ORDER_CASES: dict[str, tuple[JsonValue, JsonValue, dict[str, bool]]] = {
     ),
 }
 
-# Seeded-random ignore_order fuzz cases: the M6 ignore_order_10k fixture
+# Seeded-random ignore_order fuzz cases: the ignore_order_10k fixture
 # shape (perf/generate_fixtures.py::build_ignore_order_list) at small n — a
 # shuffled copy of `a` with a slice of values overwritten from a disjoint
 # range, so mutated values can never accidentally collide with untouched

@@ -10,6 +10,11 @@
 //! global flag consulted independently every time a list is encountered, at
 //! any depth (dicts are never affected; only list-typed values, recursively).
 //!
+//! Because `DeepDiff`'s own `max_passes`/`max_diffs` caps on this work are
+//! unimplemented (out of scope above), [`compute_pairs`]'s greedy matching is
+//! an unbounded `O(N²)` in the number of unpaired elements at each list level,
+//! so a caller diffing untrusted input must bound that input's size itself.
+//!
 //! # The algorithm, end to end
 //!
 //! For one list level (`a` = `t1`/old, `b` = `t2`/new):
@@ -100,7 +105,7 @@
 //!    than overwriting it — see that method's doc.
 //!
 //! Differential fuzzing against real `deepdiff==9.1.0`
-//! (`scripts/m7_differential_fuzz.py`) surfaces no unexplained divergences;
+//! (`scripts/differential_fuzz.py`) surfaces no unexplained divergences;
 //! the one accepted, documented exception is the `threshold_to_diff_deeper`
 //! class described on `crate::ignore_order::count_object_diff_leaves`'s own
 //! doc.

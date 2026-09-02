@@ -25,28 +25,22 @@ RAW_DIR: Final[Path] = ROOT / "perf" / "bench_raw"
 FIXTURES_DIR: Final[Path] = ROOT / "perf" / "fixtures"
 RESULTS_PATH: Final[Path] = ROOT / "perf" / "RESULTS.md"
 
-# A short, human-facing description of what each fixture stresses, for the
-# fixture-matrix table. Every fixture in the manifest is a real two-tool
-# comparison (see fixture_names(),
-# below) — ignore_order_10k included, since M7 gave onix `--ignore-order`.
+# Human-facing description per fixture, for the matrix table below.
 FIXTURE_DESCRIPTIONS: Final[dict[str, str]] = {
     "flat_dict_10k": "1-level dict, 10k keys — dict key-set ops",
     "flat_dict_100k": "1-level dict, 100k keys — dict at moderate scale",
     "flat_dict_1m": "1-level dict, 1M keys — dict at scale, memory",
-    "flat_list_100k": "1-level list, 100k scalar items — LCS-matched scalar list diffing (M6b)",
+    "flat_list_100k": "1-level list, 100k scalar items — LCS-matched scalar list diffing",
     "nested_uniform_d6_b10": "tree, depth 6, branch 10 (~1M leaves) — recursion overhead",
     "api_payloads": 'heterogeneous record list — the "real world" headline number',
     "identical_1m": "flat_dict_1m vs itself — the no-diff fast path",
     "deep_narrow_d120": "single-chain nesting, depth 120 — both tools' depth ceiling",
     "startup_trivial": "{} vs {} — isolates interpreter/binary startup + import cost",
-    "ignore_order_10k": "list, shuffled + 5% mutated, diffed with `--ignore-order` — M7's headline comparison",
+    "ignore_order_10k": "list, shuffled + 5% mutated, diffed with `--ignore-order` — the ignore_order headline comparison",
 }
 
-# AWS EC2 r7i.large (memory-optimized, 2 vCPU, 16 GiB), on-demand,
-# us-east-1: $0.132/hour. Source: instances.vantage.sh/aws/ec2/r7i.large
-# (aggregates the AWS Price List API), accessed 2026-08-31. This is the
-# instance the "$ per 1M diffs" derived column assumes; re-derive if this
-# price has moved by the time you read this.
+# AWS EC2 r7i.large on-demand, us-east-1, assumed by the "$ per 1M diffs"
+# derived column; see `INSTANCE_PRICE_DATE` for when this was priced.
 INSTANCE_LABEL: Final[str] = "AWS EC2 r7i.large (2 vCPU, 16 GiB, us-east-1, on-demand)"
 INSTANCE_PRICE_PER_HOUR_USD: Final[float] = 0.132
 INSTANCE_PRICE_DATE: Final[str] = "2026-08-31"
@@ -126,7 +120,7 @@ def fixture_names(manifest: list[JsonValue]) -> list[str]:
     Every fixture name, in manifest order — derived from the manifest
     itself (not a second hardcoded list) so this and `run_bench.sh`'s own
     fixture list can never drift out of sync. Every fixture in the matrix
-    is a real two-tool comparison since M7 (`ignore_order_10k` included).
+    is a real two-tool comparison, `ignore_order_10k` included.
 
     :param manifest: The parsed manifest's `fixtures` list.
     :return: Every fixture name.
@@ -190,11 +184,7 @@ def fmt_ratio(ratio: float) -> str:
 
 def fmt_seconds_with_spread(median_s: float, min_s: float, max_s: float) -> str:
     """
-    Format a median duration alongside its observed min-max spread across
-    repeated runs — the methodology fix this milestone's review round
-    required: a single unreplicated sample is never reported as a headline
-    number (this harness's own rule: report medians and σ, never single
-    runs).
+    Format a duration with its min-max spread.
 
     :param median_s: Median duration, in seconds.
     :param min_s: Fastest observed duration, in seconds.
@@ -243,9 +233,8 @@ class DiffOnlySamples:
     Self-instrumented diff-only timing samples for one tool on one fixture,
     from N repeated runs (tier-appropriate warmup/run counts — see
     `run_bench.sh`'s `tier_for`). Median is the headline number; min/max is
-    the reported spread (this harness's own rule: report medians and σ,
-    never single runs — a single unreplicated sample was this milestone's
-    review-round methodology finding).
+    the reported spread. This harness always reports medians and a spread
+    across repeated runs, never a single unreplicated sample.
     """
 
     def __init__(self: Self, samples_ns: list[float]) -> None:
@@ -433,7 +422,7 @@ def render_fixture_matrix(report: Report) -> str:
         "changed, ~2% added, ~2% removed between each fixture's `a`/`b` pair, "
         "except `identical_1m` (byte-identical copy), `startup_trivial` "
         "(`{}` vs `{}`), and `ignore_order_10k` (pure shuffle + ~5% "
-        "value-changed, no add/remove — see M7's `ignore_order.rs`).",
+        "value-changed, no add/remove — see `ignore_order.rs`).",
         "",
         "| Fixture | What it stresses | Input size (a+b) |",
         "|---|---|---|",
@@ -497,7 +486,7 @@ found byte-identical.** `run_bench.sh` aborts the entire run — no
 diverge — a perf number on divergent output is void.
 
 All {len(report.rows)} fixtures in the matrix matched on this run —
-`ignore_order_10k` included: since M7, it's a real `onix --ignore-order`
+`ignore_order_10k` included: it's a real `onix --ignore-order`
 vs. `DeepDiff(..., ignore_order=True)` comparison, not a deepdiff-only
 baseline, and it clears the exact same precheck as every other fixture.
 It's also an all-numeric flat list, so it never reaches the disclosed,
@@ -505,23 +494,17 @@ pre-existing `threshold_to_diff_deeper` dict-vs-dict divergence already
 tracked by `crates/onix-core/tests/golden.rs`'s `KNOWN_DIVERGENT_CASES`
 — no special-casing was needed here.
 
-**One real divergence was found at the fixture-design level while building
-this harness during M6** (not in `onix-core`): `api_payloads`' original
-design put raw booleans in `metadata.flags` and raw strings in `tags`.
-Real DeepDiff 9.1.0, even on the default *ordered* path
-(`ignore_order=False`), applies an LCS-style "cheapest edit" match for
-lists of *hashable* scalars — diverging from onix's then-simpler
-index-aligned list algorithm whenever two same-length, low-cardinality
-hashable lists happen to share values at different offsets, which the
-fixture's record-level add/remove mutation made likely. The fixture-level
-fix (wrap every such scalar in a single-key dict, forcing both tools onto
-the shared positional fallback) is still in place, but **the underlying
-gap it worked around was closed by M6b** (`crates/onix-core/src/lcs.rs`):
-onix's ordered-path list diffing now dispatches to the same LCS/`difflib`
-matching DeepDiff uses for scalar-only lists, so the wrapping may no
-longer be strictly required — kept anyway as a zero-risk safety net rather
-than re-verified and unwound here (see `perf/generate_fixtures.py`'s
-`_mutate_record` doc).
+`api_payloads` wraps each scalar in its `tags` and `metadata.flags` lists
+in a single-key dict. An earlier concern was a divergence on the default
+*ordered* path: real DeepDiff 9.1.0 applies an LCS-style "cheapest edit"
+match for lists of *hashable* scalars, which onix's then-simpler
+index-aligned list algorithm did not mirror, so two same-length
+low-cardinality scalar lists sharing values at different offsets could
+diverge. That gap is closed — `crates/onix-core/src/lcs.rs` now dispatches
+scalar-only lists to the same LCS/`difflib` matching DeepDiff uses — and
+differential testing confirms both tools agree without the wrapping. It is
+retained only so the generated fixture byte-matches the shape these
+published measurements used.
 """
 
 
@@ -613,7 +596,7 @@ def render_cpu_and_allocation_table(report: Report) -> str:
         "proxy documented in the Energy section below. `tracemalloc peak` is "
         "deepdiff's traced-allocation peak during the diff call only; onix's "
         "equivalent (a counting global allocator behind a bench-only "
-        "feature) is a **documented TODO**, not implemented this milestone "
+        "feature) is a **documented TODO**, not implemented "
         "(marked nice-to-have, not required) — see the Deferred work "
         "note at the end of this file.",
         "",
@@ -666,7 +649,7 @@ smaller gap.
 def render_ignore_order_design_notes(report: Report) -> str:
     """
     :param report: The loaded benchmark report.
-    :return: Design-rationale notes for `ignore_order_10k`, M7's headline
+    :return: Design-rationale notes for `ignore_order_10k`, the ignore_order headline
         comparison — the live measured numbers already appear in the
         Headline/wall-clock/CPU tables above via the normal per-fixture
         row; this section explains *why* the number looks the way it
@@ -674,7 +657,7 @@ def render_ignore_order_design_notes(report: Report) -> str:
     """
     row = report.row("ignore_order_10k")
 
-    return f"""## Design notes: `ignore_order_10k` (M7's headline comparison)
+    return f"""## Design notes: `ignore_order_10k` (the ignore_order headline comparison)
 
 `ignore_order_10k` is diffed by both tools with `--ignore-order`
 (`DeepDiff(..., ignore_order=True)` / `onix diff --ignore-order`) — a real
@@ -682,7 +665,7 @@ two-tool comparison like every other fixture (see the Headline table
 above for its row: {fmt_ratio(row.diff_only_speedup)} diff-only, this run).
 This was DeepDiff's own documented headline slowness (its `O(changed²)`
 candidate-pairing built from real Python objects) and the motivating
-reason for `onix-core`'s M7 milestone. Three design choices explain the size of the
+reason for `onix-core`'s ignore_order support. Three design choices explain the size of the
 gap:
 
 - **The numeric fast path never builds a `Report`.** For a flat list of
@@ -699,10 +682,11 @@ gap:
   hash-map lookups against already-computed keys.
 - **A from-scratch, dependency-free `FxHasher`** (this crate's own quality
   bar has no new-dependency budget) replaces the standard library's
-  default `SipHash` for this module's internal `HashMap`/`HashSet`s:
-  `SipHash`'s DoS-resistance is a real per-call cost that buys nothing
-  here (these maps never key on attacker-chosen strings the way `SipHash`
-  defends against — see `ignore_order.rs`'s own doc).
+  default `SipHash` for this module's `HashMap`/`HashSet`s. `SipHash`'s
+  DoS-resistance is a real per-call cost: switching the input-keyed maps to
+  it slowed this shape's diff by a measurable margin, so `FxHash` is kept
+  and the residual hash-flooding exposure on attacker-controlled keys is
+  documented as an accepted trade-off — see `ignore_order.rs`'s own doc.
 
 The cost is dominated by `O(change_n²)` (the candidate-pairing loop), not
 `O(n²)` — matching real `DeepDiff`'s own documented cost anatomy (see
@@ -847,7 +831,7 @@ def render_go_no_go(report: Report) -> str:
         "bound**, not the product validation — onix here diffs data "
         "already parsed into `serde_json::Value`, with no FFI or "
         "Python-object conversion cost on its ledger. The decision-relevant "
-        "validation is post-M7/M8 (real `ignore_order` through Python "
+        "validation is the product surface (real diffing through the Python "
         "bindings on live Python objects), where per-node FFI or up-front "
         "conversion costs will land on onix's side of the ledger. A clean "
         "GO here justifies *continuing* toward that validation, not a "
@@ -892,12 +876,12 @@ ceiling of each rather than forcing an arbitrary large target like 20k.
 
 
 def render_deferred_work_note() -> str:
-    """:return: The closing note on what M6 deliberately deferred, incl. the full scope-cut disclosure."""
+    """:return: The closing note on what this benchmark deliberately deferred, incl. the full scope-cut disclosure."""
 
     return """## Deferred work (documented, not silently dropped)
 
-**Fixture matrix scaled down from the original full table** (this milestone
-was explicitly asked to build "a scalable, representative subset", not the
+**Fixture matrix scaled down from the original full table** (this benchmark
+was explicitly scoped to build "a scalable, representative subset", not the
 full matrix — but here is every cut, not just the headline one):
 
 - **`flat_list_5m`** (the originally envisioned 5-million-item list,
@@ -919,12 +903,12 @@ full matrix — but here is every cut, not just the headline one):
 Also deferred, unrelated to matrix scale:
 
 - **Rust-side counting allocator** (marked nice-to-have, not required):
-  not implemented this milestone. onix's allocation profile is inferred
+  not implemented here. onix's allocation profile is inferred
   only indirectly, via peak RSS and the (already dramatic) CPU-time gap.
-  Left for a follow-up milestone if the allocation-churn detail is ever
+  Left for follow-up if the allocation-churn detail is ever
   decision-relevant.
-- **Criterion micro-benches**: not implemented this
-  milestone — `run_bench.sh`'s cross-language sweep was the priority; a
+- **Criterion micro-benches**: not implemented here —
+  `run_bench.sh`'s cross-language sweep was the priority; a
   per-fixture-shape Criterion suite inside `onix-core` is a natural
   follow-up once the cross-language number exists to compare against.
 - **Energy sampling**: see the Energy section above — CPU-seconds is the

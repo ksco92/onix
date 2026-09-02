@@ -1,6 +1,6 @@
-"""The M8 bindings benchmark: real DeepDiff vs deepdiff_rs on live Python objects.
+"""The bindings benchmark: real DeepDiff vs deepdiff_rs on live Python objects.
 
-This is the headline number M8 exists to produce: `perf/RESULTS.md` (M6)
+This is the headline number this benchmark exists to produce: `perf/RESULTS.md`
 compares onix-core against pure Python on already-parsed JSON, a
 structurally flattering upper bound. This script instead times the actual
 product surface a Python caller uses — live Python objects in, going
@@ -54,12 +54,9 @@ type JsonValue = dict[str, "JsonValue"] | list["JsonValue"] | str | int | float 
 ##############################################
 # Configuration
 
-# Matches perf/generate_fixtures.py's BASE_SEED + IGNORE_ORDER_LIST_SIZE/
-# API_PAYLOAD_RECORD_COUNT conventions (a fixed, recorded seed; disjoint
-# value ranges for genuine, guaranteed mutations) without importing that
-# module directly — this script is a standalone, project-venv script (it
-# needs the locally-built deepdiff_rs, which perf/'s PEP-723 scripts never
-# do), not part of that separate harness.
+# A fixed, recorded seed with disjoint value ranges for genuine, guaranteed
+# mutations, matching perf/generate_fixtures.py's ignore_order/api_payloads
+# conventions so the two harnesses' fixture shapes stay comparable.
 SEED: Final[int] = 20260901
 IGNORE_ORDER_SIZE: Final[int] = 10_000
 RECORD_COUNT: Final[int] = 20_000
@@ -97,9 +94,16 @@ def build_ignore_order_case() -> tuple[JsonValue, JsonValue]:
 
 def _make_record(index: int, rng: random.Random) -> dict[str, JsonValue]:
     """
-    Build one heterogeneous "API payload" record — the same realistic mix
-    of scalars, a nested object, and nested lists as
-    `perf/generate_fixtures.py`'s `_make_record`.
+    Build one heterogeneous "API payload" record: a realistic mix of
+    scalars, a nested object, and nested lists.
+
+    This is an intentionally self-contained, narrower copy of
+    `perf/generate_fixtures.py`'s `_make_record` — it drops that fixture's
+    `uuid`/`created_at`/`history` fields and its `metadata.flags` list. The
+    two are kept as independent copies rather than shared through a common
+    module so this benchmark stays a single standalone script with no
+    cross-tree import; the shapes only need to be representative, not
+    byte-identical, and this narrower field set is deliberate.
 
     :param index: The record's position (used for its `id`).
     :param rng: Seeded random source.
@@ -250,21 +254,18 @@ def bench_api_payloads(a: JsonValue, b: JsonValue) -> float:
 
 def bench_conversion_proxy(a: JsonValue, mutated_onix_seconds: float) -> None:
     """
-    Print deepdiff_rs's conversion-overhead proxy on the api_payloads shape.
+    Print deepdiff_rs's conversion-overhead proxy: time `OnixDeepDiff(a,
+    deepcopy(a))` — a diff of two structurally equal but never
+    identity-shared inputs — and report it as a fraction of the mutated
+    `api_payloads` case's own deepdiff_rs time.
 
-    Diffing `a` against a fresh, structurally equal (never identity-shared)
-    `copy.deepcopy(a)` pays the full Python-object-to-`Value` conversion of
-    both sides plus onix's cheap whole-input equality short-circuit, but none
-    of the per-node diff bookkeeping the mutated `api_payloads` case also
-    pays. Reporting it as a fraction of that mutated case's own deepdiff_rs
-    time isolates how much of the live-object number is conversion rather
-    than diffing -- the figure the README's "honest reading" cites, generated
-    here rather than hand-carried.
-
-    The `deepcopy` is done once up front, outside the timed region: it is
-    fixture setup (producing the equal comparand), not part of the conversion
-    cost being measured, so timing it would inflate the proxy with pure
-    Python copy time that no diff caller pays.
+    That fraction isolates how much of the live-object number is
+    Python-object-to-`Value` conversion rather than diffing: the equal-inputs
+    diff pays the full conversion of both sides plus onix's cheap whole-input
+    equality short-circuit, but none of the per-node diff bookkeeping the
+    mutated case pays. The `deepcopy` runs once up front, outside the timed
+    region, so it counts as fixture setup rather than measured conversion
+    cost.
 
     :param a: The api_payloads first record list (its own deepcopy is the
         equal comparand).

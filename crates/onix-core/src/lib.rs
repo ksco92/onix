@@ -53,6 +53,33 @@ pub use diff::{DEFAULT_MAX_DEPTH, DiffOptions, diff, diff_with_max_depth, diff_w
 pub use error::Error;
 pub use report::Report;
 
+/// Returns `true` if `value` is nested strictly deeper than `limit` levels,
+/// treating `value` itself as the root (depth `0`): a scalar
+/// (null/bool/number/string) is depth `0`, and a non-empty array/object is
+/// `1 + max(depth of its elements/values)` (`0` if empty).
+///
+/// This is the public entry point to the same depth check the diff engine
+/// uses internally to bound native recursion before cloning a value (see the
+/// [`mod@diff`] module doc). It is **iterative** — an explicit heap-allocated
+/// work-stack, no native recursion — so it is itself safe to run on any input
+/// depth, and it returns as soon as one node past `limit` is seen without
+/// visiting the rest of `value`. Consumers that recurse into a `Value` on the
+/// native stack (for example a binding sizing a worker thread) can use it to
+/// reject or reroute over-deep input up front.
+///
+/// # Examples
+///
+/// ```
+/// use serde_json::json;
+///
+/// assert!(!onix_core::exceeds_depth(&json!([1, 2, 3]), 1));
+/// assert!(onix_core::exceeds_depth(&json!([[[1]]]), 2));
+/// ```
+#[must_use]
+pub fn exceeds_depth(value: &serde_json::Value, limit: usize) -> bool {
+    diff::deeper_than(value, limit)
+}
+
 /// Returns the version of the `onix-core` crate.
 #[must_use]
 pub fn version() -> &'static str {
@@ -61,10 +88,20 @@ pub fn version() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::version;
+    use super::{exceeds_depth, version};
+    use serde_json::json;
 
     #[test]
     fn version_matches_manifest() {
         assert_eq!(version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn exceeds_depth_delegates_to_the_core_depth_check() {
+        // Smoke test that the public wrapper forwards to the internal
+        // `deeper_than` (whose own behavior is covered in `diff::tests`):
+        // `[[[1]]]` is depth 3, so it exceeds limit 2 but not limit 3.
+        assert!(exceeds_depth(&json!([[[1]]]), 2));
+        assert!(!exceeds_depth(&json!([[[1]]]), 3));
     }
 }

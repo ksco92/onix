@@ -1,15 +1,18 @@
 //! `FxHash`: a small, fast, non-cryptographic hasher used for this module's
-//! internal `HashMap`/`HashSet`s ([`HashedList::info`](super::hash::HashedList),
+//! `HashMap`/`HashSet`s ([`HashedList::info`](super::hash::HashedList),
 //! [`AddedCandidates::buckets`](super::pairing::AddedCandidates), the
 //! pairing/`used` sets in [`compute_pairs`](super::pairing::compute_pairs)) —
-//! see [`FxHasher`]'s own doc for why the standard library's DoS-resistant
-//! default (`SipHash`) is the wrong trade-off here.
+//! chosen for speed at the cost of hash-flooding resistance. Some of these
+//! maps key on attacker-controlled data, so this is a deliberate,
+//! measured `DoS` trade-off, not a free choice; see [`FxHasher`]'s own doc for
+//! the exact threat model, the measured cost of the safe alternative, and
+//! why the trade is accepted here.
 
 use std::hash::BuildHasherDefault;
 
 /// A [`std::collections::HashMap`] keyed by this module's own types
 /// ([`ItemKey`], [`Distance`]), using [`FxHasher`] instead of the standard
-/// library's default (`SipHash`) — see that type's doc for why.
+/// library's default (`SipHash`) — see that type's doc for the trade-off.
 pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<FxHasher>>;
 /// The [`HashMap`] equivalent for [`std::collections::HashSet`].
 pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxHasher>>;
@@ -21,23 +24,36 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// dependency: this crate's own quality bar has no new-dependency budget
 /// for this port, and the algorithm is a handful of lines.
 ///
-/// The pairing gate's candidate loop performs up to
-/// `hashes_added.len() * hashes_removed.len()` hash-map lookups/inserts —
-/// for the `ignore_order_10k`-shaped benchmark's worst case (`change_n`
-/// ≈500 on each side) that is ~250,000 candidate pairs, each touching
-/// several of this module's `HashMap`/`HashSet`s ([`HashedList::info`],
-/// [`AddedCandidates::buckets`], the pairing/`used` sets in
-/// [`compute_pairs`]). The standard library's default hasher (`SipHash`) is
-/// deliberately DoS-resistant, which also makes it markedly slower per call
-/// than a simple non-cryptographic hash — a real, measured cost at this
-/// candidate count (`SipHash`'s overhead is protection against an adversary
-/// choosing hash-map keys to force collisions; this module's `ItemKey`
-/// values are derived from *diffed data*, not attacker-chosen hash-map
-/// keys in the `DoS` sense, so that protection buys nothing here). No
-/// cryptographic or DoS-resistance property is needed for these maps
-/// specifically — they never key on unbounded attacker-chosen *strings*
-/// used as a raw index (the actual scenario `SipHash` defends), only on
-/// bounded, already-depth-checked structural keys.
+/// # `DoS` trade-off (this hasher is *not* collision-resistant)
+///
+/// `FxHash` uses a fixed, public seed ([`FX_SEED`]) and no keying, so an
+/// adversary who controls the hashed values can compute keys that all fall
+/// in one bucket and degrade any of this module's `HashMap`/`HashSet`s from
+/// `O(1)` to `O(n)` per operation — worst case pushing
+/// [`HashedList::build`](super::hash::HashedList::build) from `O(n)` to
+/// `O(n²)` on a crafted all-colliding list, on top of the module's already
+/// `O(N²)` pairing (see the parent module doc's complexity note). This
+/// **is** reachable: under the Python binding and the CLI the diffed data is
+/// attacker-controlled, and an [`ItemKey`](super::hash::ItemKey) wraps raw
+/// input strings/structure used directly as a map key. Upstream `DeepDiff`
+/// does not have this exposure — `CPython` hashes `str`/`bytes` with a
+/// per-process-random `SipHash` seed (`PYTHONHASHSEED`) — so this port trades
+/// away a protection the original has.
+///
+/// The trade is deliberate and measured, not an oversight. Re-keying the
+/// input-derived maps to the standard DoS-resistant `SipHash`
+/// (`RandomState`) added a material, measured double-digit-percentage
+/// per-call cost on the pairing-heavy `ignore_order` benchmark shapes
+/// (`change_n` ≈500 on each side → ~250,000 candidate pairs, each touching
+/// several of these maps) — a permanent cost on the module's
+/// common case to defend a worst case that (a) mirrors upstream `DeepDiff`'s
+/// own un-bounded `O(N²)` behavior and (b) only matters for callers feeding
+/// untrusted input, who must already bound input *size* against that `O(N²)`
+/// pairing regardless of hasher. `FxHash` is therefore kept, and the
+/// residual hash-flooding risk is accepted and documented rather than paid
+/// for on every ordinary diff. A caller processing untrusted JSON should
+/// cap input size before enabling `ignore_order` (the size bound that tames
+/// the `O(N²)` pairing also tames this).
 #[derive(Default)]
 pub(crate) struct FxHasher {
     pub(crate) hash: u64,
