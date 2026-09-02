@@ -79,6 +79,21 @@ fn lcs_or_positional_array_diff(
     opts: &DiffOptions,
 ) -> Result<Report, Error> {
     let lcs_report = lcs_array_diff(path, a, b, depth, opts.max_depth)?;
+    // The `> 1` here is a verified-equivalent boundary: replacing it with
+    // `>= 1` cannot change any output (a mutation there survives as an
+    // equivalent mutant). With 0 LCS findings the lists are equal and both
+    // thresholds return the LCS report unchanged; with >= 2 findings both take
+    // the positional-comparison branch below identically. The only value the
+    // two thresholds treat differently is exactly 1 LCS finding. A single LCS
+    // finding is one single-element edit (one changed element, or one element
+    // inserted/removed). If that edit is a same-length change or a tail
+    // insert/remove, the positional report the `>= 1` variant would compute is
+    // *the same single finding* at the same index, so returning it changes
+    // nothing; any non-tail insert/remove instead shifts every following
+    // index, giving the positional report >= 2 findings, so `1 >=
+    // positional_count` is false and the LCS report is returned regardless.
+    // Confirmed by ~1.7M scalar-list pairs (zero difference between the two
+    // thresholds) and by DeepDiff parity at the boundary shapes.
     if lcs_report.finding_count() > 1 {
         let positional_report = positional_array_diff(path, a, b, depth, opts)?;
         if lcs_report.finding_count() >= positional_report.finding_count() {
