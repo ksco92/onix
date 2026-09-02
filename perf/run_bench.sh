@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Benchmark driver: onix vs. real DeepDiff, across the full fixture
-# matrix (every fixture is a real two-tool comparison since M7 — see
+# matrix (every fixture is a real two-tool comparison — see
 # `extra_diff_flags_for` below for `ignore_order_10k`'s `--ignore-order`).
 #
 # Deterministic by design (this harness's own fairness rules): fixed warmup/run
@@ -43,7 +43,7 @@ log() { echo "[run_bench] $*"; }
 
 # Extra CLI flags a fixture's diff needs, on BOTH tools (onix and
 # `run_deepdiff.py` both spell it `--ignore-order`) — empty for every
-# fixture except `ignore_order_10k` (M7's `ignore_order=True` headline
+# fixture except `ignore_order_10k` (the `ignore_order=True` headline
 # comparison). `ignore_order_10k` is an all-numeric flat list, so it never
 # reaches the disclosed, pre-existing `threshold_to_diff_deeper` dict-vs-dict
 # divergence (see `crates/onix-core/tests/golden.rs`'s `KNOWN_DIVERGENT_CASES`)
@@ -69,8 +69,8 @@ extra_diff_flags_for() {
 #     these sizes a single sweep already costs several minutes.
 #
 # ignore_order_10k sits in the heavy tier, not standard: deepdiff's
-# ignore_order=True diff on this fixture costs ~12-13s (M7's own
-# measurement), the same class as flat_dict_1m/identical_1m, not the
+# ignore_order=True diff on this fixture costs ~12-13s (measured on this
+# machine), the same class as flat_dict_1m/identical_1m, not the
 # sub-10s standard-tier fixtures.
 #
 # A plain case statement, not `declare -A` (associative arrays): macOS

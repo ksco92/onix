@@ -2,7 +2,7 @@
 # requires-python = "==3.13.*"
 # dependencies = ["deepdiff==9.1.0"]
 # ///
-"""Diff a fixture pair with real DeepDiff, self-instrumented for M6.
+"""Diff a fixture pair with real DeepDiff, self-instrumented.
 
 Usage::
 
@@ -28,10 +28,9 @@ Prints exactly one line of JSON to **stderr**:
   only (tracemalloc started immediately before, stopped immediately after).
 - `ru_maxrss_*_bytes` is `resource.getrusage(RUSAGE_SELF).ru_maxrss` sampled
   before and after the diff call, isolating "data already loaded" memory
-  from "diff overhead" memory (§5 item 3). **macOS reports `ru_maxrss` in
-  bytes** (Linux reports kB) — this script assumes the macOS convention per
-  the M6 brief's target platform; a Linux port would need to multiply by
-  1024.
+  from "diff overhead" memory. **macOS reports `ru_maxrss` in bytes** (Linux
+  reports kB) — this script assumes the macOS convention of the benchmark's
+  target platform; a Linux port would need to multiply by 1024.
 """
 
 import argparse

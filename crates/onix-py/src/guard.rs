@@ -254,29 +254,12 @@ enum WorkerFailure {
 /// Whether `value` is nested deeper than [`MAX_INLINE_DEPTH`], i.e. deep
 /// enough that a recursive operation on it (diffing it, serializing it, or
 /// dropping it) must run on the sized worker rather than the calling thread.
+///
+/// Delegates to [`onix_core::exceeds_depth`] — the same iterative,
+/// stack-safe depth check the core diff engine uses to bound its own native
+/// recursion — so both crates agree on what "too deep" means by construction
+/// rather than by two copies of the walk staying in sync.
 #[must_use]
 pub(crate) fn is_deep(value: &Value) -> bool {
-    exceeds_depth(value, MAX_INLINE_DEPTH)
-}
-
-/// Returns `true` if `value` is nested strictly deeper than `limit` levels,
-/// treating `value` as its own root (depth `0`). Iterative (an explicit heap
-/// work-stack, no native recursion), so it is itself safe on any stack and
-/// exits as soon as one node past `limit` is seen without visiting the rest.
-fn exceeds_depth(value: &Value, limit: usize) -> bool {
-    let mut stack: Vec<(&Value, usize)> = vec![(value, 0)];
-
-    while let Some((node, depth)) = stack.pop() {
-        if depth > limit {
-            return true;
-        }
-
-        match node {
-            Value::Array(items) => stack.extend(items.iter().map(|item| (item, depth + 1))),
-            Value::Object(map) => stack.extend(map.values().map(|item| (item, depth + 1))),
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-        }
-    }
-
-    false
+    onix_core::exceeds_depth(value, MAX_INLINE_DEPTH)
 }

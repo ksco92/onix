@@ -86,7 +86,7 @@ asymmetric-tie-break example, and index-drift `new_path` (both on a
 real finding and confirmed absent on added/removed). Plus 20 seeded-random
 fuzz cases (`_generate_ignore_order_fuzz_cases`). See
 `crates/onix-core/src/ignore_order/mod.rs`'s module doc for the full,
-source-cited spec this implements; `scripts/m7_differential_fuzz.py` is a
+source-cited spec this implements; `scripts/differential_fuzz.py` is a
 separate, larger-scale (thousands of cases) fuzzer run during development,
 not part of this fixed corpus.
 
@@ -168,5 +168,5 @@ Every other divergence found while building the corpus was fixed in `onix-core` 
 list-LCS `2^53` limitation are the only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
-`scripts/m7_differential_fuzz.py`) found zero *other* unexplained
+`scripts/differential_fuzz.py`) found zero *other* unexplained
 divergences.

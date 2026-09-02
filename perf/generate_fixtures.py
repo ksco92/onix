@@ -2,7 +2,7 @@
 # requires-python = "==3.13.*"
 # dependencies = []
 # ///
-"""Generate onix's M6 deterministic benchmark fixture matrix.
+"""Generate onix's deterministic benchmark fixture matrix.
 
 Writes one directory per fixture under ``perf/fixtures/`` (gitignored — never
 commit fixture data), each holding ``a.json``/``b.json``: a pair of JSON
@@ -145,17 +145,11 @@ def mutate_list(
 ) -> list[JsonValue]:
     """
     Build a mutated copy of a list: ~5% of items changed in place (any
-    index), removals truncate the tail, additions extend it. Both tools
-    diff this the same way, but which algorithm that is now depends on
-    element type (an M6b fix): a list of pure JSON scalars
-    (`flat_list_100k`) gets LCS/`difflib`-style matching on both sides
-    since M6b (`onix-core`'s `lcs.rs` now mirrors DeepDiff's own
-    `_diff_ordered_iterable_by_difflib`), while a list containing dicts
-    (`api_payloads`' record list) still falls back to the plain
-    index-aligned comparison both tools always agreed on. Either way, a
-    tail-only add/remove keeps this fixture's mutation shape realistic
-    rather than an avalanche of "everything past a mid-list deletion is a
-    removal+addition".
+    index), removals truncate the tail, additions extend it.
+
+    Keeping adds and removes tail-only preserves a realistic mutation shape:
+    a mid-list deletion would instead shift every following index and turn
+    the diff into an avalanche of removal+addition pairs.
 
     :param base: The original list; not mutated in place.
     :param rng: Seeded random source.
@@ -351,10 +345,8 @@ def build_nested_uniform(depth: int, branch: int, seed: int) -> tuple[JsonValue,
 def build_deep_nesting(depth: int, seed: int) -> tuple[JsonValue, JsonValue]:
     """
     Build a single-chain (branch-1) nested dict pair `depth` levels deep,
-    with one changed leaf value at the bottom. `depth` is chosen
-    to fit under *both* tools' real ceilings, not the originally-envisioned
-    20k — see `DEEP_NESTING_DEPTH`'s comment above for which ceiling
-    actually binds.
+    with one changed leaf value at the bottom. `depth` is capped by
+    `DEEP_NESTING_DEPTH` (see its comment for which ceiling binds).
 
     :param depth: Number of dict-nesting levels above the leaf.
     :param seed: RNG seed for this fixture.
@@ -394,9 +386,7 @@ def _make_record(index: int, rng: random.Random) -> dict[str, JsonValue]:
         "email": f"user_{index:07d}@example.test",
         "active": rng.random() < 0.8,
         "score": round(rng.uniform(0, 100), 4),
-        # Wrapped in a single-key dict, not a bare string: see the module
-        # note above _mutate_record on why every list nested here holds
-        # unhashable (dict) elements rather than raw scalars.
+        # Wrapped only to keep this fixture byte-identical to RESULTS.md's published shape — see summarize_results.py's render_correctness_section.
         "tags": [{"tag": f"tag_{rng.randint(0, 999)}"} for _ in range(tag_count)],
         "address": {
             "street": f"{rng.randint(1, 9999)} Main St",
@@ -426,15 +416,6 @@ def _mutate_record(record: dict[str, JsonValue], rng: random.Random) -> dict[str
     Mutate a single API-payload record for a "value changed" fixture entry:
     a new score, flipped `active`, and one appended tag (itself an
     `iterable_item_added` inside a nested list — realistic for this shape).
-
-    `tags`/`metadata.flags` wrap their scalars in single-key dicts rather
-    than bare strings/bools — a pre-M6b correctness-precheck finding (real
-    DeepDiff's LCS list-diffing could pick a cheaper edit than onix's old
-    index-aligned algorithm for wholesale-swapped low-cardinality scalar
-    lists); M6b gave onix the same LCS matching for scalar lists, so this
-    may no longer be strictly required, but it's kept as a still-correct,
-    zero-risk safety net rather than re-verified and unwound here — see
-    RESULTS.md's "Correctness precheck" section.
 
     :param record: The original record; not mutated in place.
     :param rng: Seeded random source.
@@ -483,7 +464,7 @@ def build_ignore_order_list(size: int, seed: int) -> tuple[JsonValue, JsonValue]
     """
     Build the `ignore_order_10k` fixture: `b` is a shuffled, ~5%-mutated
     copy of `a` — the headline `ignore_order=True` comparison, diffed by
-    both tools with `--ignore-order` since M7 landed (see
+    both tools with `--ignore-order` (see
     `crates/onix-core/src/ignore_order/mod.rs`).
 
     :param size: Number of items in `a`.

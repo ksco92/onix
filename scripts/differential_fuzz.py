@@ -2,7 +2,7 @@
 # requires-python = "==3.13.*"
 # dependencies = ["deepdiff==9.1.0"]
 # ///
-"""M7 differential fuzzer: onix's `--ignore-order` CLI vs real DeepDiff.
+"""Differential fuzzer: onix's `--ignore-order` CLI vs real DeepDiff.
 
 Generates random JSON list pairs (scalars, nested dicts/lists), runs both
 onix's CLI and real `DeepDiff(ignore_order=True)`, and diffs canonical JSON
@@ -18,7 +18,7 @@ instead of an unexplained mismatch.
 
 Usage::
 
-    uv run scripts/m7_differential_fuzz.py [seed] [count] [--bias-nested-low-overlap-dicts]
+    uv run scripts/differential_fuzz.py [seed] [count] [--bias-nested-low-overlap-dicts]
 
 The optional third argument switches to a generator biased toward nested
 single-dict-in-a-list elements with low key overlap between `a`/`b` --
@@ -234,7 +234,7 @@ def main() -> None:
     known_divergences = 0
     new_path_only_divergences = 0
 
-    with tempfile.TemporaryDirectory(prefix="onix-m7-fuzz-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="onix-fuzz-") as tmp:
         scratch = Path(tmp)
         for i in range(count):
             if bias_nested_dicts:

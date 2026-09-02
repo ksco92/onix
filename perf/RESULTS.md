@@ -21,19 +21,19 @@ Generated entirely by `perf/run_bench.sh` (via `perf/summarize_results.py`) — 
 
 ## Fixture matrix
 
-Generated deterministically by `perf/generate_fixtures.py` (fixed seed `20260831`, recorded there — regeneration is byte-identical; see that file's module docstring for the verification command). ~5% values changed, ~2% added, ~2% removed between each fixture's `a`/`b` pair, except `identical_1m` (byte-identical copy), `startup_trivial` (`{}` vs `{}`), and `ignore_order_10k` (pure shuffle + ~5% value-changed, no add/remove — see M7's `ignore_order.rs`).
+Generated deterministically by `perf/generate_fixtures.py` (fixed seed `20260831`, recorded there — regeneration is byte-identical; see that file's module docstring for the verification command). ~5% values changed, ~2% added, ~2% removed between each fixture's `a`/`b` pair, except `identical_1m` (byte-identical copy), `startup_trivial` (`{}` vs `{}`), and `ignore_order_10k` (pure shuffle + ~5% value-changed, no add/remove — see `ignore_order.rs`).
 
 | Fixture | What it stresses | Input size (a+b) |
 |---|---|---|
 | `flat_dict_10k` | 1-level dict, 10k keys — dict key-set ops | 0.42 MB |
 | `flat_dict_100k` | 1-level dict, 100k keys — dict at moderate scale | 4.20 MB |
 | `flat_dict_1m` | 1-level dict, 1M keys — dict at scale, memory | 41.97 MB |
-| `flat_list_100k` | 1-level list, 100k scalar items — LCS-matched scalar list diffing (M6b) | 1.39 MB |
+| `flat_list_100k` | 1-level list, 100k scalar items — LCS-matched scalar list diffing | 1.39 MB |
 | `nested_uniform_d6_b10` | tree, depth 6, branch 10 (~1M leaves) — recursion overhead | 25.54 MB |
 | `api_payloads` | heterogeneous record list — the "real world" headline number | 51.63 MB |
 | `deep_narrow_d120` | single-chain nesting, depth 120 — both tools' depth ceiling | 0.00 MB |
 | `startup_trivial` | {} vs {} — isolates interpreter/binary startup + import cost | 0.00 MB |
-| `ignore_order_10k` | list, shuffled + 5% mutated, diffed with `--ignore-order` — M7's headline comparison | 0.14 MB |
+| `ignore_order_10k` | list, shuffled + 5% mutated, diffed with `--ignore-order` — the ignore_order headline comparison | 0.14 MB |
 | `identical_1m` | flat_dict_1m vs itself — the no-diff fast path | 41.78 MB |
 
 ## Run procedure (as actually executed)
@@ -75,7 +75,7 @@ found byte-identical.** `run_bench.sh` aborts the entire run — no
 diverge — a perf number on divergent output is void.
 
 All 10 fixtures in the matrix matched on this run —
-`ignore_order_10k` included: since M7, it's a real `onix --ignore-order`
+`ignore_order_10k` included: it's a real `onix --ignore-order`
 vs. `DeepDiff(..., ignore_order=True)` comparison, not a deepdiff-only
 baseline, and it clears the exact same precheck as every other fixture.
 It's also an all-numeric flat list, so it never reaches the disclosed,
@@ -83,23 +83,17 @@ pre-existing `threshold_to_diff_deeper` dict-vs-dict divergence already
 tracked by `crates/onix-core/tests/golden.rs`'s `KNOWN_DIVERGENT_CASES`
 — no special-casing was needed here.
 
-**One real divergence was found at the fixture-design level while building
-this harness during M6** (not in `onix-core`): `api_payloads`' original
-design put raw booleans in `metadata.flags` and raw strings in `tags`.
-Real DeepDiff 9.1.0, even on the default *ordered* path
-(`ignore_order=False`), applies an LCS-style "cheapest edit" match for
-lists of *hashable* scalars — diverging from onix's then-simpler
-index-aligned list algorithm whenever two same-length, low-cardinality
-hashable lists happen to share values at different offsets, which the
-fixture's record-level add/remove mutation made likely. The fixture-level
-fix (wrap every such scalar in a single-key dict, forcing both tools onto
-the shared positional fallback) is still in place, but **the underlying
-gap it worked around was closed by M6b** (`crates/onix-core/src/lcs.rs`):
-onix's ordered-path list diffing now dispatches to the same LCS/`difflib`
-matching DeepDiff uses for scalar-only lists, so the wrapping may no
-longer be strictly required — kept anyway as a zero-risk safety net rather
-than re-verified and unwound here (see `perf/generate_fixtures.py`'s
-`_mutate_record` doc).
+`api_payloads` wraps each scalar in its `tags` and `metadata.flags` lists
+in a single-key dict. An earlier concern was a divergence on the default
+*ordered* path: real DeepDiff 9.1.0 applies an LCS-style "cheapest edit"
+match for lists of *hashable* scalars, which onix's then-simpler
+index-aligned list algorithm did not mirror, so two same-length
+low-cardinality scalar lists sharing values at different offsets could
+diverge. That gap is closed — `crates/onix-core/src/lcs.rs` now dispatches
+scalar-only lists to the same LCS/`difflib` matching DeepDiff uses — and
+differential testing confirms both tools agree without the wrapping. It is
+retained only so the generated fixture byte-matches the shape these
+published measurements used.
 
 ## Finding: onix's practical depth ceiling is lower than expected
 
@@ -166,7 +160,7 @@ Process start to exit, both tools reading the same two JSON files (hyperfine, me
 
 ## CPU time (user+sys) and allocation profile
 
-CPU time is the cloud-cost-relevant number (instances bill CPU-seconds regardless of wall clock) and doubles as the energy proxy documented in the Energy section below. `tracemalloc peak` is deepdiff's traced-allocation peak during the diff call only; onix's equivalent (a counting global allocator behind a bench-only feature) is a **documented TODO**, not implemented this milestone (marked nice-to-have, not required) — see the Deferred work note at the end of this file.
+CPU time is the cloud-cost-relevant number (instances bill CPU-seconds regardless of wall clock) and doubles as the energy proxy documented in the Energy section below. `tracemalloc peak` is deepdiff's traced-allocation peak during the diff call only; onix's equivalent (a counting global allocator behind a bench-only feature) is a **documented TODO**, not implemented (marked nice-to-have, not required) — see the Deferred work note at the end of this file.
 
 | Fixture | onix CPU (user+sys) | deepdiff CPU (user+sys) | deepdiff tracemalloc peak |
 |---|---|---|---|
@@ -202,7 +196,7 @@ smaller gap.
 | Wall clock (mean ± σ) | 1.570 ms ± 0.125 ms | 46.714 ms ± 0.346 ms |
 | Ratio | | 29.86x slower to start |
 
-## Design notes: `ignore_order_10k` (M7's headline comparison)
+## Design notes: `ignore_order_10k` (the ignore_order headline comparison)
 
 `ignore_order_10k` is diffed by both tools with `--ignore-order`
 (`DeepDiff(..., ignore_order=True)` / `onix diff --ignore-order`) — a real
@@ -210,7 +204,7 @@ two-tool comparison like every other fixture (see the Headline table
 above for its row: 176.37x diff-only, this run).
 This was DeepDiff's own documented headline slowness (its `O(changed²)`
 candidate-pairing built from real Python objects) and the motivating
-reason for `onix-core`'s M7 milestone. Three design choices explain the size of the
+reason for `onix-core`'s ignore_order support. Three design choices explain the size of the
 gap:
 
 - **The numeric fast path never builds a `Report`.** For a flat list of
@@ -227,10 +221,11 @@ gap:
   hash-map lookups against already-computed keys.
 - **A from-scratch, dependency-free `FxHasher`** (this crate's own quality
   bar has no new-dependency budget) replaces the standard library's
-  default `SipHash` for this module's internal `HashMap`/`HashSet`s:
-  `SipHash`'s DoS-resistance is a real per-call cost that buys nothing
-  here (these maps never key on attacker-chosen strings the way `SipHash`
-  defends against — see `ignore_order.rs`'s own doc).
+  default `SipHash` for this module's `HashMap`/`HashSet`s. `SipHash`'s
+  DoS-resistance is a real per-call cost: switching the input-keyed maps to
+  it slowed this shape's diff by a measurable margin, so `FxHash` is kept
+  and the residual hash-flooding exposure on attacker-controlled keys is
+  documented as an accepted trade-off — see `ignore_order.rs`'s own doc.
 
 The cost is dominated by `O(change_n²)` (the candidate-pairing loop), not
 `O(n²)` — matching real `DeepDiff`'s own documented cost anatomy (see
@@ -299,12 +294,12 @@ This harness's success thresholds: **≥5x faster (diff-only) OR ≥5x less peak
 
 ### Verdict: **GO**
 
-This is an **upper bound**, not the product validation — onix here diffs data already parsed into `serde_json::Value`, with no FFI or Python-object conversion cost on its ledger. The decision-relevant validation is post-M7/M8 (real `ignore_order` through Python bindings on live Python objects), where per-node FFI or up-front conversion costs will land on onix's side of the ledger. A clean GO here justifies *continuing* toward that validation, not a claim that the product is proven.
+This is an **upper bound**, not the product validation — onix here diffs data already parsed into `serde_json::Value`, with no FFI or Python-object conversion cost on its ledger. The decision-relevant validation is the product surface (real diffing through the Python bindings on live Python objects), where per-node FFI or up-front conversion costs will land on onix's side of the ledger. A clean GO here justifies *continuing* toward that validation, not a claim that the product is proven.
 
 ## Deferred work (documented, not silently dropped)
 
-**Fixture matrix scaled down from the original full table** (this milestone
-was explicitly asked to build "a scalable, representative subset", not the
+**Fixture matrix scaled down from the original full table** (this benchmark
+was explicitly scoped to build "a scalable, representative subset", not the
 full matrix — but here is every cut, not just the headline one):
 
 - **`flat_list_5m`** (the originally envisioned 5-million-item list,
@@ -326,12 +321,12 @@ full matrix — but here is every cut, not just the headline one):
 Also deferred, unrelated to matrix scale:
 
 - **Rust-side counting allocator** (marked nice-to-have, not required):
-  not implemented this milestone. onix's allocation profile is inferred
+  not implemented here. onix's allocation profile is inferred
   only indirectly, via peak RSS and the (already dramatic) CPU-time gap.
-  Left for a follow-up milestone if the allocation-churn detail is ever
+  Left for follow-up if the allocation-churn detail is ever
   decision-relevant.
-- **Criterion micro-benches**: not implemented this
-  milestone — `run_bench.sh`'s cross-language sweep was the priority; a
+- **Criterion micro-benches**: not implemented here —
+  `run_bench.sh`'s cross-language sweep was the priority; a
   per-fixture-shape Criterion suite inside `onix-core` is a natural
   follow-up once the cross-language number exists to compare against.
 - **Energy sampling**: see the Energy section above — CPU-seconds is the
