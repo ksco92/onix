@@ -1,7 +1,7 @@
 //! The [`Report`] type: a DeepDiff-compatible diff result.
 //!
 //! `DeepDiff` groups findings into named categories (`values_changed`,
-//! `type_changes`, and more from M2 onward) keyed by path string within each
+//! `type_changes`, and others) keyed by path string within each
 //! category. `Report` mirrors that shape with one `BTreeMap` per category,
 //! which keeps output deterministic (sorted by path) without any extra
 //! sorting step. Empty categories are omitted from [`Report::to_json_value`],
@@ -57,11 +57,10 @@ pub struct ValuesChangedEntry {
     ///
     /// `DeepDiff` renders every finding's path from the *old* (`t1`) side by
     /// default; at `verbose_level=2` it additionally reports `new_path`
-    /// whenever the new-side path would differ. For every finding this
-    /// engine has ever produced before the M6 list-compat fix, old and new
-    /// paths were always identical (a dict key never moves, and the
-    /// previous index-aligned list algorithm always compared same-index
-    /// pairs) — so this was always `None`. It first becomes `Some` for a
+    /// whenever the new-side path would differ. This is `None` whenever old
+    /// and new paths coincide — a dict key never moves, and index-aligned
+    /// list comparison always pairs same-index elements. It becomes `Some`
+    /// for a
     /// `values_changed`/`type_changes` pair matched by the list-LCS path
     /// (see [`mod@crate::diff`]'s module doc) at two *different* absolute
     /// indices, e.g. a value that shifted from index `5` to index `3`
@@ -121,11 +120,11 @@ impl TypeChangeEntry {
 
 /// A DeepDiff-compatible diff result, grouped into categories.
 ///
-/// Categories implemented so far: `type_changes`, `values_changed` (M1),
-/// `dictionary_item_added`, `dictionary_item_removed` (M2),
-/// `iterable_item_added`, `iterable_item_removed` (M3). Later milestones add
-/// more categories the same way (an additive change, no restructuring of
-/// existing ones).
+/// Categories implemented so far: `type_changes`, `values_changed`,
+/// `dictionary_item_added`, `dictionary_item_removed`,
+/// `iterable_item_added`, `iterable_item_removed`. Further categories would
+/// be added the same way (an additive change, no restructuring of existing
+/// ones).
 ///
 /// Every category is keyed by the structural path (`Vec<PathSegment>`), not
 /// the rendered string — see this module's doc for why.
@@ -383,16 +382,15 @@ impl Report {
     /// call's substitution from that *already-substituted* structural
     /// vector, not from the entry's own base `path` key — so an outer call
     /// composes cleanly on top of an inner one instead of clobbering or
-    /// ignoring it. This fixed a real, confirmed divergence from real
-    /// `DeepDiff`: doubly-nested drift (an item whose *own* recursive diff
-    /// needed a nested `ignore_order` pairing, inside an item that *itself*
-    /// needed pairing with index drift) used to leave the inner
-    /// substitution's `new_path` stale, missing the outer one entirely — see
-    /// `crate::ignore_order`'s module doc for the minimized repro (seed 11,
-    /// case #31) this was found and fixed against. `new_path` is kept as
-    /// structural segments rather than a pre-rendered string specifically so
-    /// this composition is a plain "overwrite one element" mutation, not
-    /// string surgery on an already-rendered, possibly-quoted path.
+    /// ignoring it. This matters for doubly-nested drift: an item whose *own*
+    /// recursive diff needs a nested `ignore_order` pairing, inside an item
+    /// that *itself* needs pairing with index drift, must carry *both* index
+    /// substitutions in its `new_path`, composing the outer and inner
+    /// rewrites rather than letting the outer one overwrite the inner.
+    /// `new_path` is kept as structural segments rather than a pre-rendered
+    /// string specifically so this composition is a plain "overwrite one
+    /// element" mutation, not string surgery on an already-rendered,
+    /// possibly-quoted path.
     ///
     /// `dictionary_item_added`/`removed`/`iterable_item_added`/`removed`
     /// never carry a second path field at all (confirmed empirically), so

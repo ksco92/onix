@@ -150,11 +150,11 @@ pub(crate) fn is_length_excluded_key(key: &str) -> bool {
 /// pair's `diff_length` never pays for a [`Report`]'s `PathSegment`
 /// allocations, `Value` clones, or `BTreeMap` inserts. This matters: a
 /// naive "just call `diff_at` and count its `Report`" implementation would
-/// pay exactly the per-candidate object-construction cost the spec's
-/// performance-anatomy section (§5) identifies as the *entire* reason real
-/// `DeepDiff` is slow here (250k-plus full nested-diff-object constructions
-/// for the `ignore_order_10k`-shaped benchmark) — reproducing that
-/// bottleneck in Rust would defeat the point of this port.
+/// pay exactly the per-candidate object-construction cost that is the
+/// *entire* reason real `DeepDiff` is slow here (250k-plus full
+/// nested-diff-object constructions for the `ignore_order_10k`-shaped
+/// benchmark) — reproducing that bottleneck in Rust would defeat the
+/// point of this port.
 ///
 /// Scalars and dicts are counted directly (no recursion into `diff_at` at
 /// all). **Arrays are the one exception**, delegating to a genuine trial
@@ -162,9 +162,9 @@ pub(crate) fn is_length_excluded_key(key: &str) -> bool {
 /// LCS-vs-positional finding-count tie-break (or a further nested
 /// `ignore_order` pairing) as a *count-only* mirror would be substantial,
 /// rarely-exercised duplicate logic — a structural-distance candidate is
-/// overwhelmingly a "record" (a dict of mostly-scalar fields, the spec's
-/// own worked example), not a value containing a *further* nested array
-/// needing its own tie-break decision. Correctness is preserved either way
+/// overwhelmingly a "record" (a dict of mostly-scalar fields), not a value
+/// containing a *further* nested array needing its own tie-break decision.
+/// Correctness is preserved either way
 /// (the array branch still asks the real engine, guaranteeing the same
 /// number `DeepDiff` would compute); this hybrid trades away the Report-free
 /// property only for the substantially rarer, non-benchmarked case.
@@ -527,9 +527,8 @@ pub(crate) fn count_array_diff_leaves(
 /// equivalent "structurally unreachable" guard (a *static type fact* — a
 /// JSON scalar's nesting is always `0`, true forever), the invariant here
 /// is a *cross-function arithmetic* one, spread across several functions —
-/// exactly the kind of subtle, easy-to-silently-break invariant this
-/// crate's own M3-pre/M4-perf depth-guard history (see the rust coding
-/// guide's learned patterns) took three rounds to get right. Treating an
+/// exactly the kind of subtle, easy-to-silently-break invariant that
+/// depth-guard correctness depends on. Treating an
 /// over-budget nested array trial as a **rejected** candidate (`0` leaves
 /// counted, only reachable this way when `removed`/`added` are themselves
 /// arrays needing more depth than available) rather than propagating an

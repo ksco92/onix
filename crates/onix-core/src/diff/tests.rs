@@ -32,10 +32,9 @@ fn nested_array(depth: usize, leaf: Value) -> Value {
 /// A depth just past [`DEFAULT_MAX_DEPTH`], for tests whose point is
 /// "behaves correctly once past the guard" rather than "handles an
 /// absolutely enormous structure" — small enough to build, diff, and
-/// drop entirely on a plain default-stack test thread (M4
-/// mutation-testing/memory-cost cleanup: seeing past the guard needs
-/// only a small margin, not the `5_000`/`100_000` scales earlier
-/// versions of these tests used).
+/// drop entirely on a plain default-stack test thread — seeing past the
+/// guard needs only a small margin, not a `5_000`/`100_000`-scale
+/// structure.
 const PAST_DEFAULT_MAX_DEPTH: usize = DEFAULT_MAX_DEPTH + 100;
 
 /// A depth that reliably overflows a *native-recursive* equivalent of
@@ -278,7 +277,7 @@ fn equal_dicts_are_empty() {
 
 #[test]
 fn unequal_dicts_now_recurse_instead_of_erroring() {
-    // Regression test for the M1 -> M2 behavior change: this used to
+    // Regression test: this used to
     // return Error::UnsupportedContainerDiff.
     let report = diff(&json!({"a": 1}), &json!({"a": 2})).unwrap();
     assert_eq!(
@@ -403,7 +402,7 @@ fn identical_deep_nested_dicts_are_empty() {
 
 #[test]
 fn nested_unequal_list_inside_dict_now_recurses_instead_of_erroring() {
-    // Regression test for the M2 -> M3 behavior change: this used to
+    // Regression test: this used to
     // return Error::UnsupportedContainerDiff.
     let a = json!({"a": {"b": [1, 2]}});
     let b = json!({"a": {"b": [1, 3]}});
@@ -483,7 +482,7 @@ fn equal_lists_are_empty() {
 
 #[test]
 fn unequal_lists_now_diff_index_aligned_instead_of_erroring() {
-    // Regression test for the M2 -> M3 behavior change: this used to
+    // Regression test: this used to
     // return Error::UnsupportedContainerDiff.
     let report = diff(&json!([1, 2]), &json!([1, 3])).unwrap();
     assert_eq!(
@@ -514,7 +513,7 @@ fn number_as_i128_falls_back_to_u64_beyond_i64_range() {
     assert_eq!(number_as_i128(&n), Some(i128::from(u64::MAX)));
 }
 
-// --- M3-pre: recursion depth guard --------------------------------
+// --- Recursion depth guard -----------------------------------------
 
 #[test]
 fn nested_equal_null_alongside_an_unrelated_change_produces_no_finding_for_it() {
@@ -1142,8 +1141,8 @@ fn compounding_depth_regression_max_depth_20_000_traversal_plus_deep_added_value
 
 #[test]
 fn threshold_collapse_rejects_a_deep_side_on_a_constrained_stack_instead_of_crashing() {
-    // Security-gate regression for the `threshold_to_diff_deeper` collapse
-    // (M2 fix): the collapse clones the whole `a`/`b` dict into a finding,
+    // Security-gate regression for the `threshold_to_diff_deeper` collapse:
+    // the collapse clones the whole `a`/`b` dict into a finding,
     // so cloning before checking depth would hand an attacker-controlled,
     // `RECURSION_OVERFLOW_DEPTH`-deep value straight to `serde_json::Value`'s
     // natively recursive `Clone` with no bound in place yet. Run on a
@@ -1268,8 +1267,8 @@ fn equal_subtree_nested_under_an_unrelated_shallow_change_still_hits_the_bound()
     // unrelated "shallow" key), so that check does not fire, and the
     // "deep" key's subtree — identical on both sides, but past
     // max_depth — still recurses natively and trips the bound. This is
-    // still *safe* (a clean error, not a crash); M4's iterative rewrite
-    // removes this limitation entirely.
+    // still *safe* (a clean error, not a crash); an iterative rewrite
+    // would remove this limitation entirely.
     let deep_equal_a = nested_dict(50, json!("same"));
     let deep_equal_b = nested_dict(50, json!("same"));
     let mut a = Map::new();
@@ -1369,7 +1368,7 @@ fn values_equal_agrees_with_diff_emptiness_across_numeric_matrix() {
     }
 }
 
-// --- M3: list (JSON array) diffing --------------------------------
+// --- List (JSON array) diffing -------------------------------------
 
 #[test]
 fn empty_lists_are_empty() {
@@ -1488,7 +1487,7 @@ fn type_change_at_an_index_from_scalar_to_list() {
 
 #[test]
 fn int_vs_float_single_element_list_matches_via_lcs_python_equality() {
-    // M6 list-compat fix: this used to assert `type_changes` here,
+    // This used to assert `type_changes` here,
     // matching this engine's own (and every *other*) numeric-comparison
     // rule (see `int_vs_float_is_always_type_change_even_when_numerically_equal`
     // and the sibling test below, both still `type_changes`). Real
@@ -1530,7 +1529,7 @@ fn i64_and_u64_same_value_at_an_index_are_equal() {
     assert!(report.is_empty());
 }
 
-// --- M3 depth guard: array recursion and iterable-sink clones must
+// --- Depth guard: array recursion and iterable-sink clones must
 // respect the same combined path-depth-plus-value-depth budget as
 // object_diff (see check_value_depth's and diff_with_max_depth's doc).
 // ---
@@ -1541,20 +1540,15 @@ fn deeply_nested_unequal_list_at_the_bottom_hits_the_depth_bound() {
     // shape as unequal_structure_deeper_than_default_max_depth_errors_via_diff
     // but for arrays instead of dicts.
     //
-    // History (M6 list-compat fix, then M6c fix-round): the original
-    // `array_diff` dispatch inlined its scalar-only-list candidate
-    // computation (two extra `Report` locals), which in an unoptimized
-    // debug build inflates *every* frame of this native list-of-list
-    // recursion regardless of whether that branch ever runs — this
-    // briefly needed `run_on_a_large_stack` to avoid overflowing this
-    // test's thread's default (2 MiB) stack. Splitting that
-    // computation into its own non-recursive helper
-    // (`lcs_or_positional_array_diff`, see `array_diff`'s "Stack-
-    // footprint note") restored the margin, confirmed directly here —
-    // no thread-size accommodation needed any more — and by the
-    // dedicated `array_diff_at_depth_512_on_a_default_stack_completes_without_crashing`
-    // test below, which pins the exact bound this test's shape only
-    // implies.
+    // This runs on the test thread's own default (~2 MiB) stack, with no
+    // large-stack accommodation: `array_diff` keeps its scalar-only-list
+    // candidate computation (two extra `Report` locals) in a separate
+    // non-recursive helper (`lcs_or_positional_array_diff`, see
+    // `array_diff`'s "Stack-footprint note"), so those locals don't inflate
+    // every frame of this native list-of-list recursion in a debug build,
+    // and the bound is reached cleanly. The dedicated
+    // `array_diff_at_depth_512_on_a_default_stack_completes_without_crashing`
+    // test below pins the exact bound this test's shape only implies.
     let a = nested_array(DEFAULT_MAX_DEPTH + 1, json!(1));
     let b = nested_array(DEFAULT_MAX_DEPTH + 1, json!(2));
 
@@ -1572,7 +1566,7 @@ fn deeply_nested_unequal_list_at_the_bottom_hits_the_depth_bound() {
 
 #[test]
 fn array_diff_at_depth_512_on_a_default_stack_completes_without_crashing() {
-    // The M6c debug-stack-margin fix: runs the diff call directly on
+    // Runs the diff call directly on
     // this test's own (default-size, ~2 MiB) thread — no
     // `run_on_a_large_stack` for the diff call itself, which is
     // exactly the point (a library consumer calling `diff`/
@@ -1727,8 +1721,8 @@ fn equal_deeply_nested_lists_at_a_tiny_max_depth_still_succeed() {
     assert!(report.is_empty());
 }
 
-// --- M6 list-compat fix: the tie-break's positional_array_diff call
-// itself must respect the traversal depth bound. ---
+// --- The tie-break's positional_array_diff call must itself respect the
+// traversal depth bound. ---
 
 #[test]
 fn lcs_tie_break_positional_candidate_hits_the_depth_bound_at_the_root() {

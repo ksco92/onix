@@ -51,7 +51,7 @@ fn read_or_bail(path: &str, stderr: &mut dyn Write) -> Result<(String, Value), u
 /// - **stdout** carries only the diff report, as a single line of compact
 ///   JSON from [`onix_core::Report::to_json_value`] (an empty report prints
 ///   `{}`). Compact rather than pretty-printed: this output is meant for
-///   machine consumption (golden-file comparison, the M6 benchmark harness),
+///   machine consumption (golden-file comparison, the benchmark harness),
 ///   where a single deterministic line is easier to diff byte-for-byte than
 ///   a pretty-printed, indentation-sensitive one.
 /// - **stderr** carries usage/error text, and — only when `--timing` is
@@ -84,7 +84,10 @@ fn read_or_bail(path: &str, stderr: &mut dyn Write) -> Result<(String, Value), u
 /// successfully parse is already at most 128 levels deep — far under
 /// [`onix_core::DEFAULT_MAX_DEPTH`] — regardless of how high the configured
 /// bound is.
-#[allow(clippy::missing_panics_doc)] // see the serde_json::to_string comment below
+#[allow(
+    clippy::missing_panics_doc,
+    reason = "see the serde_json::to_string comment below"
+)]
 pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 {
     let parsed = match parse_args(args) {
         Ok(parsed) => parsed,

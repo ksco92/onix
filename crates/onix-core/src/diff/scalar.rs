@@ -151,7 +151,10 @@ pub(crate) fn numbers_equal(old: &Number, new: &Number) -> bool {
 /// for this JSON value model, so exact IEEE-754 equality is the correct
 /// (and only) rule here.
 fn floats_equal(a: f64, b: f64) -> bool {
-    #[allow(clippy::float_cmp)]
+    #[allow(
+        clippy::float_cmp,
+        reason = "exact IEEE-754 equality is the intended rule (Python == semantics, including 0.0 == -0.0); NaN/Infinity are out of scope for this JSON value model"
+    )]
     {
         a == b
     }
