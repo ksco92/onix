@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::Value;
+use crate::value::Value;
 
 use super::fxhash::HashMap;
 
@@ -69,14 +69,25 @@ pub(crate) fn item_key(value: &Value) -> ItemKey {
     match value {
         Value::Null => ItemKey::Null,
         Value::Bool(b) => ItemKey::Bool(*b),
-        Value::String(s) => ItemKey::Str(s.clone()),
+        Value::Str(s) => ItemKey::Str(s.to_string()),
         Value::Number(n) => {
             if n.is_f64() {
-                let bits = n
+                let f = n
                     .as_f64()
-                    .expect("Number::is_f64 guarantees as_f64 succeeds")
-                    .to_bits();
-                ItemKey::Float(bits)
+                    .expect("Number::is_f64 guarantees as_f64 succeeds");
+                // Normalize signed zeros so `-0.0` and `+0.0` produce one
+                // key: Python's `DeepHash` treats them equal (confirmed
+                // against `deepdiff==9.1.0`: `DeepDiff([0.0, -0.0], [],
+                // ignore_order=True)` removes a single item). `f + 0.0` maps
+                // `-0.0` to `+0.0` and is the identity on every other float,
+                // so all other bit patterns are preserved: an integral float
+                // like `2.0` keeps a distinct `Float` key from the integer
+                // `2` (deepdiff reports that pairing as a `type_changes`,
+                // never a hash match), which is why this deliberately does
+                // NOT take the ordered path's `ScalarKey` integral-to-`Int`
+                // canonicalization — the two paths have genuinely different
+                // number semantics.
+                ItemKey::Float((f + 0.0).to_bits())
             } else if let Some(i) = n.as_i64() {
                 ItemKey::Int(i128::from(i))
             } else {
@@ -87,9 +98,11 @@ pub(crate) fn item_key(value: &Value) -> ItemKey {
             }
         }
         Value::Array(items) => ItemKey::List(items.iter().map(item_key).collect()),
-        Value::Object(map) => {
-            ItemKey::Dict(map.iter().map(|(k, v)| (k.clone(), item_key(v))).collect())
-        }
+        Value::Object(map) => ItemKey::Dict(
+            map.iter()
+                .map(|(k, v)| (k.to_string(), item_key(v)))
+                .collect(),
+        ),
     }
 }
 

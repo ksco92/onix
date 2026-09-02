@@ -25,38 +25,42 @@ SCALARS: Final[list[JsonValue]] = [
 SEED_COUNT: Final[int] = 300
 
 
-def _gen_scalar(rng: random.Random) -> JsonValue:
+def _gen_scalar(rng: random.Random, scalars: list[JsonValue] | None = None) -> JsonValue:
     """
     Pick a random scalar.
 
     :param rng: Seeded RNG.
+    :param scalars: Alphabet to draw from; defaults to the module `SCALARS`.
     :return: A random scalar value.
     """
-    return rng.choice(SCALARS)
+    return rng.choice(SCALARS if scalars is None else scalars)
 
 
-def _gen_value(rng: random.Random, depth: int) -> JsonValue:
+def _gen_value(
+    rng: random.Random, depth: int, scalars: list[JsonValue] | None = None
+) -> JsonValue:
     """
     Generate a random JSON-shaped value, nesting up to `depth` levels.
 
     :param rng: Seeded RNG.
     :param depth: Remaining nesting budget.
+    :param scalars: Scalar alphabet to draw leaves from; defaults to `SCALARS`.
     :return: A random value built from the MVP-supported types only.
     """
     if depth <= 0:
-        return _gen_scalar(rng)
+        return _gen_scalar(rng, scalars)
 
     kind = rng.random()
 
     if kind < 0.5:
-        return _gen_scalar(rng)
+        return _gen_scalar(rng, scalars)
 
     if kind < 0.75:
         length = rng.randint(0, 4)
-        return [_gen_value(rng, depth - 1) for _ in range(length)]
+        return [_gen_value(rng, depth - 1, scalars) for _ in range(length)]
 
     keys = rng.sample(DICT_KEYS, rng.randint(0, len(DICT_KEYS)))
-    return {key: _gen_value(rng, depth - 1) for key in keys}
+    return {key: _gen_value(rng, depth - 1, scalars) for key in keys}
 
 
 def _mutate(rng: random.Random, value: JsonValue) -> JsonValue:

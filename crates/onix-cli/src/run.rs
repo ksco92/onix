@@ -114,6 +114,14 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
     };
 
     let diff_start = Instant::now();
+    // Temporary bridge: the core diff consumes the compact `onix_core::Value`.
+    // CLI inputs are parsed by `serde_json::from_str`, whose own recursion
+    // limit bounds their depth, so this `From` conversion is safe here. It
+    // goes away once the CLI parses into the compact value directly. (Because
+    // this sits inside the `--timing` window, the reported diff time
+    // transiently includes this conversion — see perf/RESULTS.md.)
+    let a_value = onix_core::Value::from(a_value);
+    let b_value = onix_core::Value::from(b_value);
     let result = onix_core::diff_with_options(&a_value, &b_value, &opts);
     let diff_ns = diff_start.elapsed().as_nanos();
 

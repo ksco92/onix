@@ -139,10 +139,24 @@ pub(crate) fn diff_to_value(
 ) -> PyResult<Value> {
     if is_deep(&a) || is_deep(&b) {
         run_on_worker(py, move || {
+            // Temporary bridge: the core diff consumes the compact
+            // `onix_core::Value`, so convert here. The (natively recursive)
+            // `From` conversion of a deep input runs on the sized worker
+            // stack, alongside the diff itself. This conversion goes away once
+            // the binding pipeline builds the compact value directly.
+            let a = onix_core::Value::from(a);
+            let b = onix_core::Value::from(b);
             onix_core::diff_with_options(&a, &b, &opts).map(|report| report.to_json_value())
         })?
         .map_err(|error| map_diff_error(&error))
     } else {
+        // Temporary bridge (inline, shallow-input path): both inputs are
+        // known shallow here (the `is_deep` guard above), so converting to the
+        // compact `onix_core::Value` cannot overflow the calling thread. This
+        // conversion goes away once the bindings build the compact value
+        // directly.
+        let a = onix_core::Value::from(a);
+        let b = onix_core::Value::from(b);
         onix_core::diff_with_options(&a, &b, &opts)
             .map(|report| report.to_json_value())
             .map_err(|error| map_diff_error(&error))
@@ -255,11 +269,31 @@ enum WorkerFailure {
 /// enough that a recursive operation on it (diffing it, serializing it, or
 /// dropping it) must run on the sized worker rather than the calling thread.
 ///
-/// Delegates to [`onix_core::exceeds_depth`] — the same iterative,
-/// stack-safe depth check the core diff engine uses to bound its own native
-/// recursion — so both crates agree on what "too deep" means by construction
-/// rather than by two copies of the walk staying in sync.
+/// Iterative (explicit work-stack, no native recursion), so it is itself
+/// safe to run on any input depth on the calling thread — which is exactly
+/// why it operates on the still-`serde_json::Value` binding input rather than
+/// converting to the compact `onix_core::Value` first: that conversion is
+/// natively recursive and must run on the sized worker for a deep value, so
+/// the routing decision has to come first.
+///
+/// Temporary bridge: this operates on the still-`serde_json::Value` binding
+/// input and reimplements the depth walk locally, because
+/// [`onix_core::exceeds_depth`] now takes the compact `onix_core::Value` and
+/// converting to it here would itself recurse on the calling thread. Once the
+/// binding pipeline builds the compact value directly, this reverts to
+/// delegating to [`onix_core::exceeds_depth`].
 #[must_use]
 pub(crate) fn is_deep(value: &Value) -> bool {
-    onix_core::exceeds_depth(value, MAX_INLINE_DEPTH)
+    let mut stack: Vec<(&Value, usize)> = vec![(value, 0)];
+    while let Some((node, depth)) = stack.pop() {
+        if depth > MAX_INLINE_DEPTH {
+            return true;
+        }
+        match node {
+            Value::Array(items) => stack.extend(items.iter().map(|item| (item, depth + 1))),
+            Value::Object(map) => stack.extend(map.values().map(|item| (item, depth + 1))),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+    false
 }

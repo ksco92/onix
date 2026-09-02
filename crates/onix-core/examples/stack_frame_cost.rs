@@ -59,6 +59,11 @@ fn run_probe(shape: &str, depth: usize) -> ! {
             let b = build(&shape, depth, 2);
             // `depth + 1` so the max_depth guard never trips before the
             // intended leaf finding at `depth`.
+            // Temporary bridge: the engine consumes the compact
+            // onix_core::Value; convert here (runs on the sized probe thread
+            // alongside the diff it measures).
+            let a = onix_core::Value::from(a);
+            let b = onix_core::Value::from(b);
             let report =
                 diff_with_max_depth(&a, &b, depth + 1).expect("depth budget covers the input");
             assert!(!report.is_empty(), "unequal inputs must produce a finding");

@@ -90,8 +90,12 @@ fn diff_case(name: &str) -> Value {
     let a = read_json(&case_dir.join("a.json"));
     let b = read_json(&case_dir.join("b.json"));
     let opts = case_options(&case_dir);
-    let report = onix_core::diff_with_options(&a, &b, &opts)
-        .unwrap_or_else(|err| panic!("golden case {name:?}: diff returned an error: {err}"));
+    let report = onix_core::diff_with_options(
+        &onix_core::Value::from(a),
+        &onix_core::Value::from(b),
+        &opts,
+    )
+    .unwrap_or_else(|err| panic!("golden case {name:?}: diff returned an error: {err}"));
     report.to_json_value()
 }
 

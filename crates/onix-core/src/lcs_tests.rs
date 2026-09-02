@@ -1,5 +1,18 @@
-use super::{Tag, all_basic_scalars, compute_opcodes, scalar_key};
+use super::Tag;
+use crate::test_support::{cv, cvec};
 use serde_json::json;
+
+// Thin wrappers routing each `serde_json`-literal-based test through the real
+// compact-typed engine via the shared `crate::test_support` converters.
+fn all_basic_scalars(items: &[serde_json::Value]) -> bool {
+    super::all_basic_scalars(&cvec(items))
+}
+fn compute_opcodes(a: &[serde_json::Value], b: &[serde_json::Value]) -> Vec<super::Opcode> {
+    super::compute_opcodes(&cvec(a), &cvec(b))
+}
+fn scalar_key(value: &serde_json::Value) -> super::ScalarKey {
+    super::scalar_key(&cv(value))
+}
 
 /// Python-`==` equality for two JSON scalars, per [`super::ScalarKey`]'s
 /// doc. Test-only: production code has no remaining use for this as a

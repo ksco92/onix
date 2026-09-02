@@ -89,9 +89,13 @@ fn ignore_order_diff_ok(a: &Value, b: &Value) -> Value {
         ignore_order: true,
         ..DiffOptions::default()
     };
-    diff_with_options(a, b, &opts)
-        .expect("generated values are far under DEFAULT_MAX_DEPTH")
-        .to_json_value()
+    diff_with_options(
+        &onix_core::Value::from(a.clone()),
+        &onix_core::Value::from(b.clone()),
+        &opts,
+    )
+    .expect("generated values are far under DEFAULT_MAX_DEPTH")
+    .to_json_value()
 }
 
 proptest! {

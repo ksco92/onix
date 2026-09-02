@@ -4,7 +4,7 @@
 //!
 //! This module is deliberately *pure*: it knows nothing about
 //! [`crate::report::Report`], [`crate::path::PathSegment`], or recursion
-//! depth — it only turns two slices of [`serde_json::Value`] scalars into an
+//! depth — it only turns two slices of [`crate::value::Value`] scalars into an
 //! ordered list of [`Opcode`]s. [`crate::diff::array_diff`] is what maps
 //! those opcodes into report findings; see that module's doc for the full,
 //! empirically-verified `DeepDiff` list-compat spec this exists to serve.
@@ -40,7 +40,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
+use crate::value::Value;
 
 /// A bucket key for grouping list elements that compare equal the way
 /// Python's `==` (and therefore `difflib`'s matcher, and dict/set hashing)
@@ -92,7 +92,7 @@ pub(crate) fn all_basic_scalars(items: &[Value]) -> bool {
     items.iter().all(|item| {
         matches!(
             item,
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_)
         )
     })
 }
@@ -109,7 +109,7 @@ pub(crate) fn all_basic_scalars(items: &[Value]) -> bool {
 fn scalar_key(value: &Value) -> ScalarKey {
     match value {
         Value::Null => ScalarKey::Null,
-        Value::String(s) => ScalarKey::Str(s.clone()),
+        Value::Str(s) => ScalarKey::Str(s.to_string()),
         Value::Bool(b) => ScalarKey::Int(i128::from(*b)),
         Value::Number(n) => {
             if let Some(i) = n

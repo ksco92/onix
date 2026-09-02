@@ -39,7 +39,7 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::{Map, Value};
+use crate::value::Value;
 
 use crate::path::{PathSegment, render_path};
 
@@ -76,14 +76,17 @@ pub struct ValuesChangedEntry {
 }
 
 impl ValuesChangedEntry {
-    fn to_json_value(&self) -> Value {
-        let mut map = Map::with_capacity(3);
-        map.insert("new_value".to_string(), self.new_value.clone());
-        map.insert("old_value".to_string(), self.old_value.clone());
+    fn to_json_value(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::with_capacity(3);
+        map.insert("new_value".to_string(), self.new_value.to_serde_json());
+        map.insert("old_value".to_string(), self.old_value.to_serde_json());
         if let Some(new_path) = &self.new_path {
-            map.insert("new_path".to_string(), Value::String(render_path(new_path)));
+            map.insert(
+                "new_path".to_string(),
+                serde_json::Value::String(render_path(new_path)),
+            );
         }
-        Value::Object(map)
+        serde_json::Value::Object(map)
     }
 }
 
@@ -105,16 +108,25 @@ pub struct TypeChangeEntry {
 }
 
 impl TypeChangeEntry {
-    fn to_json_value(&self) -> Value {
-        let mut map = Map::with_capacity(5);
-        map.insert("old_type".to_string(), Value::String(self.old_type.clone()));
-        map.insert("new_type".to_string(), Value::String(self.new_type.clone()));
-        map.insert("old_value".to_string(), self.old_value.clone());
-        map.insert("new_value".to_string(), self.new_value.clone());
+    fn to_json_value(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::with_capacity(5);
+        map.insert(
+            "old_type".to_string(),
+            serde_json::Value::String(self.old_type.clone()),
+        );
+        map.insert(
+            "new_type".to_string(),
+            serde_json::Value::String(self.new_type.clone()),
+        );
+        map.insert("old_value".to_string(), self.old_value.to_serde_json());
+        map.insert("new_value".to_string(), self.new_value.to_serde_json());
         if let Some(new_path) = &self.new_path {
-            map.insert("new_path".to_string(), Value::String(render_path(new_path)));
+            map.insert(
+                "new_path".to_string(),
+                serde_json::Value::String(render_path(new_path)),
+            );
         }
-        Value::Object(map)
+        serde_json::Value::Object(map)
     }
 }
 
@@ -173,9 +185,12 @@ fn merge_map(dst: &mut BTreeMap<Vec<PathSegment>, Value>, src: BTreeMap<Vec<Path
 /// that tie-break happens; everywhere else in this file treats `map`'s
 /// structural keys as already-unique (which, structurally, they always are
 /// — see [`insert_checked`]).
-fn render_category(category: &mut Map<String, Value>, map: &BTreeMap<Vec<PathSegment>, Value>) {
+fn render_category(
+    category: &mut serde_json::Map<String, serde_json::Value>,
+    map: &BTreeMap<Vec<PathSegment>, Value>,
+) {
     for (path, value) in map {
-        category.insert(render_path(path), value.clone());
+        category.insert(render_path(path), value.to_serde_json());
     }
 }
 
@@ -186,16 +201,16 @@ fn render_category(category: &mut Map<String, Value>, map: &BTreeMap<Vec<PathSeg
 /// `iterable_item_added`/`removed`), which otherwise differ only in `name`
 /// and which field they read.
 fn serialize_raw_category(
-    root: &mut Map<String, Value>,
+    root: &mut serde_json::Map<String, serde_json::Value>,
     name: &str,
     map: &BTreeMap<Vec<PathSegment>, Value>,
 ) {
     if map.is_empty() {
         return;
     }
-    let mut category = Map::new();
+    let mut category = serde_json::Map::new();
     render_category(&mut category, map);
-    root.insert(name.to_string(), Value::Object(category));
+    root.insert(name.to_string(), serde_json::Value::Object(category));
 }
 
 impl Report {
@@ -487,23 +502,29 @@ impl Report {
     /// structural keys can collapse two entries into one on adversarial
     /// input (see this module's doc and `render_category`).
     #[must_use]
-    pub fn to_json_value(&self) -> Value {
-        let mut root = Map::new();
+    pub fn to_json_value(&self) -> serde_json::Value {
+        let mut root = serde_json::Map::new();
 
         if !self.type_changes.is_empty() {
-            let mut category = Map::new();
+            let mut category = serde_json::Map::new();
             for (path, entry) in &self.type_changes {
                 category.insert(render_path(path), entry.to_json_value());
             }
-            root.insert("type_changes".to_string(), Value::Object(category));
+            root.insert(
+                "type_changes".to_string(),
+                serde_json::Value::Object(category),
+            );
         }
 
         if !self.values_changed.is_empty() {
-            let mut category = Map::new();
+            let mut category = serde_json::Map::new();
             for (path, entry) in &self.values_changed {
                 category.insert(render_path(path), entry.to_json_value());
             }
-            root.insert("values_changed".to_string(), Value::Object(category));
+            root.insert(
+                "values_changed".to_string(),
+                serde_json::Value::Object(category),
+            );
         }
 
         serialize_raw_category(
@@ -523,7 +544,7 @@ impl Report {
             &self.iterable_item_removed,
         );
 
-        Value::Object(root)
+        serde_json::Value::Object(root)
     }
 }
 

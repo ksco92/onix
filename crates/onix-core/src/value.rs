@@ -25,8 +25,9 @@
 //! Conversions in both directions ([`From`]`<`[`serde_json::Value`]`>` and
 //! [`Value::to_serde_json`]) and a direct streaming
 //! [`Deserialize`] (no transient [`serde_json::Value`]
-//! tree) let this type sit at the parse boundary while the diff engine still
-//! consumes [`serde_json::Value`] for now.
+//! tree) let this type sit at the parse boundary; the diff engine consumes
+//! it directly. A caller holding a [`serde_json::Value`] (the CLI, and the
+//! Python bindings for now) converts with [`From`] at that boundary.
 //!
 //! # Stack safety
 //!
@@ -45,9 +46,14 @@
 //! Structural equality ([`PartialEq`]) is likewise iterative (an explicit
 //! work-stack, the same posture as `Drop`), so deep comparison — which the
 //! engine migration will run on attacker-shaped input — cannot overflow the
-//! native stack either. The derived [`Debug`] is deliberately left recursive:
-//! it is debug/test-only, never on the untrusted path, matching
-//! [`serde_json::Value`]'s own posture.
+//! native stack either. The derived [`Debug`] and [`Clone`] are deliberately
+//! left recursive: `Debug` is debug/test-only, and the diff engine only ever
+//! clones a value that has already passed its combined path-plus-value depth
+//! guard (`crate::diff`'s internal `check_value_depth`), so clone recursion
+//! is bounded by `max_depth` — the same guarded posture `serde_json::Value`'s
+//! own recursive `Clone` had before the engine migrated onto this type. A
+//! caller cloning an untrusted value outside that guard should reject
+//! over-deep input up front with [`crate::exceeds_depth`].
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -63,7 +69,7 @@ use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess
 /// their rationale. The variants mirror JSON's six shapes; objects are held
 /// as an [`Object`] (a sorted, exactly-sized entry slice) and numbers as a
 /// [`Number`] preserving the `i64`/`u64`/`f64` distinction.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Value {
     /// JSON `null`.
     Null,
@@ -382,7 +388,7 @@ impl Number {
 ///
 /// See the [module documentation](self) for why entries are sorted and keys
 /// interned (byte-identical rendering and small-map footprint).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Object {
     /// Key-sorted, duplicate-free entries. Invariant: strictly ascending by
     /// key string (enforced by [`Object::from_pairs`]).
@@ -394,7 +400,7 @@ impl Object {
     /// key string and collapses duplicate keys keeping the last value seen
     /// (matching [`serde_json`], whose `BTreeMap` insert overwrites), so the
     /// stored entries satisfy the strictly-ascending invariant.
-    fn from_pairs(mut pairs: Vec<(Arc<str>, Value)>) -> Self {
+    pub(crate) fn from_pairs(mut pairs: Vec<(Arc<str>, Value)>) -> Self {
         // Stable sort keeps duplicate keys in their original order, so the
         // overwrite loop below retains the *last* occurrence's value.
         pairs.sort_by(|(a, _), (b, _)| a.cmp(b));

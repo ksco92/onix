@@ -220,9 +220,12 @@ fn kind_of(value: &Value) -> Kind {
 /// than `DEFAULT_MAX_DEPTH`, so `Err` here would itself be a bug in either
 /// this test file's bound or the engine).
 fn diff_ok(a: &Value, b: &Value) -> Value {
-    diff(a, b)
-        .expect("generated depth is far below DEFAULT_MAX_DEPTH")
-        .to_json_value()
+    diff(
+        &onix_core::Value::from(a.clone()),
+        &onix_core::Value::from(b.clone()),
+    )
+    .expect("generated depth is far below DEFAULT_MAX_DEPTH")
+    .to_json_value()
 }
 
 /// The membership-delta invariant shared by `dictionary_item_added`'s and
