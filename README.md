@@ -35,9 +35,9 @@ In order, each building on the last:
 2. **`crates/onix-core/src/lib.rs`'s doc comment**: the crate's front
    door: an architecture map (parse → diff dispatch → ordered/`ignore_order`
    container comparison → `Report` → render) naming the actual module each
-   step lives in, plus the design decisions behind it (why the diff
-   engine consumes `serde_json::Value` today, how the compact
-   `onix_core::Value` model will replace it, why the engine is recursive
+   step lives in, plus the design decisions behind it (why the engine
+   operates on the compact `onix_core::Value` model while callers convert
+   from `serde_json::Value` at the boundary, why the engine is recursive
    with a depth guard, not iterative (yet), etc.).
    Follow it into `crates/onix-core/src/diff/mod.rs` and
    `crates/onix-core/src/ignore_order/mod.rs`; each is itself a module-doc
@@ -122,8 +122,10 @@ single deterministic line is easiest to diff byte-for-byte.
   quirks" section: an intentionally-unchased path-rendering edge case and
   a narrow list-LCS numeric-precision limit.
 - `--timing` prints exactly one line of JSON to **stderr**:
-  `{"parse_ns": N, "diff_ns": N}` (measuring only the `serde_json` parse of
-  the two inputs and only the diff call, respectively) — the same
+  `{"parse_ns": N, "diff_ns": N}` (measuring the `serde_json` parse of the
+  two inputs, and the diff call, respectively — `diff_ns` currently also
+  includes the boundary conversion of the parsed inputs into the engine's
+  compact value model) — the same
   "diff-only self-instrumentation" the benchmark harness under `perf/`
   uses to isolate diff time from process startup and JSON parsing. Without
   `--timing`, stderr stays empty on a successful run.
@@ -239,7 +241,12 @@ entirely in Rust.
   remaining candidate against every other, the same core cost real `DeepDiff`
   pays for this option. `DeepDiff`'s `max_passes`/`max_diffs` bounds on that
   work are not implemented here, so a caller feeding untrusted input should
-  bound the input size itself rather than rely on an internal cutoff. Note
+  bound the input size itself rather than rely on an internal cutoff. The
+  cost also grows steeply with the **nesting depth** of unpaired containers:
+  ranking candidate pairs computes a recursive pairwise structural distance,
+  so a caller should bound both the size *and* the nesting of untrusted
+  `ignore_order` inputs (a distance-memoization optimization is tracked
+  follow-up work, not in this release). Note
   too that, unlike upstream `DeepDiff` (which Python's randomized string
   hashing protects), onix's `ignore_order` hashes input-derived keys with a
   fixed-seed hash, so crafted inputs can additionally degrade hashing

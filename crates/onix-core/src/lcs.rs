@@ -4,7 +4,7 @@
 //!
 //! This module is deliberately *pure*: it knows nothing about
 //! [`crate::report::Report`], [`crate::path::PathSegment`], or recursion
-//! depth — it only turns two slices of [`serde_json::Value`] scalars into an
+//! depth — it only turns two slices of [`crate::value::Value`] scalars into an
 //! ordered list of [`Opcode`]s. [`crate::diff::array_diff`] is what maps
 //! those opcodes into report findings; see that module's doc for the full,
 //! empirically-verified `DeepDiff` list-compat spec this exists to serve.

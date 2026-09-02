@@ -1,12 +1,6 @@
 use super::{PathSegment, Report, TypeChangeEntry, ValuesChangedEntry};
-use crate::value::Value as CValue;
+use crate::test_support::cv;
 use serde_json::json;
-
-/// Test bridge: report entries now store the compact `crate::value::Value`;
-/// this converts a `serde_json` literal at the construction site.
-fn cv(value: serde_json::Value) -> CValue {
-    CValue::from(value)
-}
 
 /// A one-key structural path, e.g. `key_path("a")` for `root['a']`.
 fn key_path(name: &str) -> Vec<PathSegment> {
@@ -42,8 +36,8 @@ fn values_changed_entry_is_not_empty_and_serializes_exactly() {
     report.insert_values_changed(
         Vec::new(),
         ValuesChangedEntry {
-            old_value: cv(json!(1)),
-            new_value: cv(json!(2)),
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!(2)),
             new_path: None,
         },
     );
@@ -70,8 +64,8 @@ fn type_change_entry_is_not_empty_and_serializes_exactly() {
         TypeChangeEntry {
             old_type: "int".to_string(),
             new_type: "str".to_string(),
-            old_value: cv(json!(1)),
-            new_value: cv(json!("1")),
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!("1")),
             new_path: None,
         },
     );
@@ -100,16 +94,16 @@ fn both_categories_present_omits_neither() {
         TypeChangeEntry {
             old_type: "int".to_string(),
             new_type: "float".to_string(),
-            old_value: cv(json!(1)),
-            new_value: cv(json!(1.5)),
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!(1.5)),
             new_path: None,
         },
     );
     report.insert_values_changed(
         key_path("b"),
         ValuesChangedEntry {
-            old_value: cv(json!("x")),
-            new_value: cv(json!("y")),
+            old_value: cv(&json!("x")),
+            new_value: cv(&json!("y")),
             new_path: None,
         },
     );
@@ -123,7 +117,7 @@ fn both_categories_present_omits_neither() {
 #[test]
 fn dictionary_item_added_entry_is_not_empty_and_serializes_to_raw_value() {
     let mut report = Report::new();
-    report.insert_dictionary_item_added(key_path("c"), cv(json!(3)));
+    report.insert_dictionary_item_added(key_path("c"), cv(&json!(3)));
 
     assert!(!report.is_empty());
     assert_eq!(
@@ -135,7 +129,7 @@ fn dictionary_item_added_entry_is_not_empty_and_serializes_to_raw_value() {
 #[test]
 fn dictionary_item_removed_entry_is_not_empty_and_serializes_to_raw_value() {
     let mut report = Report::new();
-    report.insert_dictionary_item_removed(key_path("b"), cv(json!(2)));
+    report.insert_dictionary_item_removed(key_path("b"), cv(&json!(2)));
 
     assert!(!report.is_empty());
     assert_eq!(
@@ -147,7 +141,7 @@ fn dictionary_item_removed_entry_is_not_empty_and_serializes_to_raw_value() {
 #[test]
 fn iterable_item_added_entry_is_not_empty_and_serializes_to_raw_value() {
     let mut report = Report::new();
-    report.insert_iterable_item_added(index_path(3), cv(json!("x")));
+    report.insert_iterable_item_added(index_path(3), cv(&json!("x")));
 
     assert!(!report.is_empty());
     assert_eq!(
@@ -159,7 +153,7 @@ fn iterable_item_added_entry_is_not_empty_and_serializes_to_raw_value() {
 #[test]
 fn iterable_item_removed_entry_is_not_empty_and_serializes_to_raw_value() {
     let mut report = Report::new();
-    report.insert_iterable_item_removed(index_path(2), cv(json!("y")));
+    report.insert_iterable_item_removed(index_path(2), cv(&json!("y")));
 
     assert!(!report.is_empty());
     assert_eq!(
@@ -176,23 +170,23 @@ fn all_six_categories_present_omits_none() {
         TypeChangeEntry {
             old_type: "int".to_string(),
             new_type: "float".to_string(),
-            old_value: cv(json!(1)),
-            new_value: cv(json!(1.5)),
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!(1.5)),
             new_path: None,
         },
     );
     report.insert_values_changed(
         key_path("b"),
         ValuesChangedEntry {
-            old_value: cv(json!("x")),
-            new_value: cv(json!("y")),
+            old_value: cv(&json!("x")),
+            new_value: cv(&json!("y")),
             new_path: None,
         },
     );
-    report.insert_dictionary_item_added(key_path("c"), cv(json!(3)));
-    report.insert_dictionary_item_removed(key_path("d"), cv(json!(4)));
-    report.insert_iterable_item_added(index_path(0), cv(json!(5)));
-    report.insert_iterable_item_removed(index_path(1), cv(json!(6)));
+    report.insert_dictionary_item_added(key_path("c"), cv(&json!(3)));
+    report.insert_dictionary_item_removed(key_path("d"), cv(&json!(4)));
+    report.insert_iterable_item_added(index_path(0), cv(&json!(5)));
+    report.insert_iterable_item_removed(index_path(1), cv(&json!(6)));
 
     let value = report.to_json_value();
     assert_eq!(value.as_object().unwrap().len(), 6);
@@ -218,8 +212,8 @@ fn finding_count_sums_every_category_distinctly() {
             TypeChangeEntry {
                 old_type: "int".to_string(),
                 new_type: "float".to_string(),
-                old_value: cv(json!(1)),
-                new_value: cv(json!(1.5)),
+                old_value: cv(&json!(1)),
+                new_value: cv(&json!(1.5)),
                 new_path: None,
             },
         );
@@ -228,23 +222,23 @@ fn finding_count_sums_every_category_distinctly() {
         report.insert_values_changed(
             index_path(i),
             ValuesChangedEntry {
-                old_value: cv(json!("x")),
-                new_value: cv(json!("y")),
+                old_value: cv(&json!("x")),
+                new_value: cv(&json!("y")),
                 new_path: None,
             },
         );
     }
     for i in 0..4 {
-        report.insert_dictionary_item_added(index_path(i), cv(json!(1)));
+        report.insert_dictionary_item_added(index_path(i), cv(&json!(1)));
     }
     for i in 0..5 {
-        report.insert_dictionary_item_removed(index_path(i), cv(json!(1)));
+        report.insert_dictionary_item_removed(index_path(i), cv(&json!(1)));
     }
     for i in 0..6 {
-        report.insert_iterable_item_added(index_path(i), cv(json!(1)));
+        report.insert_iterable_item_added(index_path(i), cv(&json!(1)));
     }
     for i in 0..7 {
-        report.insert_iterable_item_removed(index_path(i), cv(json!(1)));
+        report.insert_iterable_item_removed(index_path(i), cv(&json!(1)));
     }
 
     assert_eq!(report.finding_count(), 2 + 3 + 4 + 5 + 6 + 7);
@@ -253,10 +247,10 @@ fn finding_count_sums_every_category_distinctly() {
 #[test]
 fn merge_combines_findings_from_both_reports() {
     let mut left = Report::new();
-    left.insert_dictionary_item_added(key_path("a"), cv(json!(1)));
+    left.insert_dictionary_item_added(key_path("a"), cv(&json!(1)));
 
     let mut right = Report::new();
-    right.insert_dictionary_item_removed(key_path("b"), cv(json!(2)));
+    right.insert_dictionary_item_removed(key_path("b"), cv(&json!(2)));
 
     left.merge(right);
 
@@ -272,14 +266,14 @@ fn merge_combines_findings_from_both_reports() {
 #[test]
 fn merge_combines_iterable_findings_from_both_reports() {
     let mut left = Report::new();
-    left.insert_iterable_item_removed(index_path(3), cv(json!("y")));
+    left.insert_iterable_item_removed(index_path(3), cv(&json!("y")));
 
     // Both new categories on `other` (not `left`), so `merge` exercises
     // both of its new per-category loop bodies (`other.iterable_item_added`
     // and `other.iterable_item_removed`), not just the outer `for`.
     let mut right = Report::new();
-    right.insert_iterable_item_added(index_path(2), cv(json!("x")));
-    right.insert_iterable_item_removed(index_path(4), cv(json!("z")));
+    right.insert_iterable_item_added(index_path(2), cv(&json!("x")));
+    right.insert_iterable_item_removed(index_path(4), cv(&json!("z")));
 
     left.merge(right);
 
@@ -305,16 +299,16 @@ fn multiple_paths_in_same_category_are_sorted_by_path() {
     report.insert_values_changed(
         key_path("b"),
         ValuesChangedEntry {
-            old_value: cv(json!(1)),
-            new_value: cv(json!(2)),
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!(2)),
             new_path: None,
         },
     );
     report.insert_values_changed(
         key_path("a"),
         ValuesChangedEntry {
-            old_value: cv(json!(3)),
-            new_value: cv(json!(4)),
+            old_value: cv(&json!(3)),
+            new_value: cv(&json!(4)),
             new_path: None,
         },
     );
@@ -334,8 +328,8 @@ fn retag_new_path_swaps_prefix_segment_and_keeps_suffix() {
     report.insert_values_changed(
         vec![PathSegment::Index(0), PathSegment::Key("x".to_string())],
         ValuesChangedEntry {
-            old_value: cv(json!(1)),
-            new_value: cv(json!(2)),
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!(2)),
             new_path: None,
         },
     );
@@ -359,8 +353,8 @@ fn retag_new_path_also_retags_type_changes() {
         TypeChangeEntry {
             old_type: "int".to_string(),
             new_type: "str".to_string(),
-            old_value: cv(json!(1)),
-            new_value: cv(json!("1")),
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!("1")),
             new_path: None,
         },
     );
@@ -386,8 +380,8 @@ fn retag_new_path_composes_with_an_already_set_new_path() {
     report.insert_values_changed(
         vec![PathSegment::Index(0), PathSegment::Index(2)],
         ValuesChangedEntry {
-            old_value: cv(json!(1)),
-            new_value: cv(json!(2)),
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!(2)),
             new_path: Some(vec![PathSegment::Index(0), PathSegment::Index(1)]),
         },
     );
@@ -410,16 +404,16 @@ fn inserting_the_same_structural_path_twice_panics_in_debug() {
     report.insert_values_changed(
         key_path("a"),
         ValuesChangedEntry {
-            old_value: cv(json!(1)),
-            new_value: cv(json!(2)),
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!(2)),
             new_path: None,
         },
     );
     report.insert_values_changed(
         key_path("a"),
         ValuesChangedEntry {
-            old_value: cv(json!(3)),
-            new_value: cv(json!(4)),
+            old_value: cv(&json!(3)),
+            new_value: cv(&json!(4)),
             new_path: None,
         },
     );
@@ -469,16 +463,16 @@ fn two_structural_paths_rendering_identically_collapse_without_panicking() {
     report.insert_values_changed(
         flat,
         ValuesChangedEntry {
-            old_value: cv(json!(1)),
-            new_value: cv(json!(2)),
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!(2)),
             new_path: None,
         },
     );
     report.insert_values_changed(
         nested,
         ValuesChangedEntry {
-            old_value: cv(json!(10)),
-            new_value: cv(json!(20)),
+            old_value: cv(&json!(10)),
+            new_value: cv(&json!(20)),
             new_path: None,
         },
     );

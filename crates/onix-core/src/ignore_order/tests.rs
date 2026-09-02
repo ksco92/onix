@@ -1,24 +1,9 @@
 use crate::diff::DiffOptions;
-use crate::value::{Object as CObject, Value as CValue};
+use crate::test_support::{cobj, cv, cvec};
 use serde_json::json;
 
-// --- serde -> compact test bridges (slice 2) ---------------------------
-// The engine consumes the compact `crate::value::Value` now; these thin
-// wrappers convert `serde_json` inputs at the boundary so the existing
-// literal-based tests keep exercising the real compact-typed engine.
-fn cv(value: &serde_json::Value) -> CValue {
-    CValue::from(value.clone())
-}
-fn cvec(items: &[serde_json::Value]) -> Vec<CValue> {
-    items.iter().map(|v| CValue::from(v.clone())).collect()
-}
-fn cobj(map: &serde_json::Map<String, serde_json::Value>) -> CObject {
-    let value = CValue::from(serde_json::Value::Object(map.clone()));
-    match &value {
-        CValue::Object(object) => object.clone(),
-        _ => unreachable!("Value::Object converts to a compact Object"),
-    }
-}
+// Thin wrappers routing each `serde_json`-literal-based test through the real
+// compact-typed engine via the shared `crate::test_support` converters.
 fn diff_with_options(
     a: &serde_json::Value,
     b: &serde_json::Value,
@@ -987,6 +972,30 @@ fn int_float_bool_never_share_a_key_even_at_equal_value() {
     assert_ne!(item_key(&json!(1)), item_key(&json!(true)));
     assert_ne!(item_key(&json!(1.0)), item_key(&json!(true)));
     assert_ne!(item_key(&json!(0)), item_key(&json!(false)));
+}
+
+#[test]
+fn signed_zero_floats_share_a_key_but_stay_distinct_from_the_integer_zero() {
+    // Python's DeepHash treats `-0.0` and `+0.0` as equal (confirmed against
+    // deepdiff==9.1.0: `DeepDiff([0.0, -0.0], [], ignore_order=True)` removes
+    // a single item), so they must key equally...
+    assert_eq!(item_key(&json!(0.0)), item_key(&json!(-0.0)));
+    // ...while an integral float stays distinct from the integer of the same
+    // value (deepdiff reports `[2.0]` vs `[2]` as a type_changes, and
+    // `[0.0]` vs `[0]` likewise), so the float key must NOT collapse to an
+    // integer key the way the ordered path's `ScalarKey` does.
+    assert_ne!(item_key(&json!(2.0)), item_key(&json!(2)));
+    assert_ne!(item_key(&json!(0.0)), item_key(&json!(0)));
+}
+
+#[test]
+fn signed_zero_floats_dedup_to_one_removal_under_ignore_order() {
+    // Full-diff regression for the signed-zero item_key normalization:
+    // deepdiff removes exactly one of two signed zeros.
+    assert_eq!(
+        ignore_order_diff(&json!([0.0, -0.0]), &json!([])),
+        json!({"iterable_item_removed": {"root[0]": 0.0}})
+    );
 }
 
 #[test]

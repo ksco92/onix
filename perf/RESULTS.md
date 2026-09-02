@@ -2,6 +2,8 @@
 
 Generated entirely by `perf/run_bench.sh` (via `perf/summarize_results.py`) — every number below traces back to a real, timestamped run captured under `perf/bench_raw/` (gitignored; regenerate with `perf/run_bench.sh`). No number here was hand-written.
 
+> **Note (2026-09-02):** These figures were captured before the engine's value-model migration, when the diff operated on `serde_json::Value` directly. The engine now operates on the compact `onix_core::Value`, and the CLI converts from `serde_json::Value` at its boundary — a conversion that currently sits inside the CLI's `--timing` diff window, so the reported diff-only time transiently includes it. A full re-measurement accompanies the upcoming parse/bindings migration; until then, treat the diff-only figures here as pre-migration.
+
 ## Environment
 
 | | |
@@ -294,7 +296,7 @@ This harness's success thresholds: **≥5x faster (diff-only) OR ≥5x less peak
 
 ### Verdict: **GO**
 
-This is an **upper bound**, not the product validation — onix here diffs data already parsed into `serde_json::Value`, with no FFI or Python-object conversion cost on its ledger. The decision-relevant validation is the product surface (real diffing through the Python bindings on live Python objects), where per-node FFI or up-front conversion costs will land on onix's side of the ledger. A clean GO here justifies *continuing* toward that validation, not a claim that the product is proven.
+This is an **upper bound**, not the product validation — onix here diffs data read from JSON files (parsed at the CLI boundary and converted into the engine's compact `onix_core::Value`), with no FFI or Python-object conversion cost on its ledger. The decision-relevant validation is the product surface (real diffing through the Python bindings on live Python objects), where per-node FFI or up-front conversion costs will land on onix's side of the ledger. A clean GO here justifies *continuing* toward that validation, not a claim that the product is proven.
 
 ## Deferred work (documented, not silently dropped)
 

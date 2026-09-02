@@ -2,8 +2,8 @@
 //! `_get_rough_distance`, plus the length/leaf-counting helpers
 //! it's built from. Consumed by `super::pairing::compute_pairs` to rank
 //! candidate pairs; has no dependency on this module's hashing layer
-//! (`super::hash`) at all — every function here operates directly on
-//! [`serde_json::Value`].
+//! (`super::hash`) at all — every function here operates directly on the
+//! crate's compact [`Value`].
 
 use crate::value::{Number, Object, Value};
 

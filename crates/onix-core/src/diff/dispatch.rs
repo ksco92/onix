@@ -66,8 +66,9 @@ pub(crate) fn diff_at(
 /// plus per-index values. Because every value the engine sees comes from
 /// [`Value`]'s canonical construction (`From`/`Deserialize`), a given
 /// integer has exactly one representation, so `PartialEq`'s
-/// variant-sensitive `Number` comparison and the old dedicated
-/// [`numbers_equal`](super::numbers_equal) walk agree on every reachable input.
+/// variant-sensitive `Number` comparison and the
+/// separately-maintained [`numbers_equal`](super::numbers_equal) walk agree
+/// on every reachable input.
 #[must_use]
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     a == b

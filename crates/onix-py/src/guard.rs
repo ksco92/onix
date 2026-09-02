@@ -139,20 +139,22 @@ pub(crate) fn diff_to_value(
 ) -> PyResult<Value> {
     if is_deep(&a) || is_deep(&b) {
         run_on_worker(py, move || {
-            // Temporary slice-2 bridge: the core diff now consumes the compact
+            // Temporary bridge: the core diff consumes the compact
             // `onix_core::Value`, so convert here. The (natively recursive)
-            // `From` conversion of a deep input runs on the sized worker stack,
-            // alongside the diff itself. Slice 4 migrates the binding pipeline
-            // to build the compact value directly, removing this conversion.
+            // `From` conversion of a deep input runs on the sized worker
+            // stack, alongside the diff itself. This conversion goes away once
+            // the binding pipeline builds the compact value directly.
             let a = onix_core::Value::from(a);
             let b = onix_core::Value::from(b);
             onix_core::diff_with_options(&a, &b, &opts).map(|report| report.to_json_value())
         })?
         .map_err(|error| map_diff_error(&error))
     } else {
-        // Temporary slice-2 bridge (inline, shallow-input path): both inputs
-        // are known shallow here (the `is_deep` guard above), so converting to
-        // the compact `onix_core::Value` cannot overflow the calling thread.
+        // Temporary bridge (inline, shallow-input path): both inputs are
+        // known shallow here (the `is_deep` guard above), so converting to the
+        // compact `onix_core::Value` cannot overflow the calling thread. This
+        // conversion goes away once the bindings build the compact value
+        // directly.
         let a = onix_core::Value::from(a);
         let b = onix_core::Value::from(b);
         onix_core::diff_with_options(&a, &b, &opts)
@@ -274,10 +276,12 @@ enum WorkerFailure {
 /// natively recursive and must run on the sized worker for a deep value, so
 /// the routing decision has to come first.
 ///
-/// Temporary slice-2 bridge: before the engine migrated onto the compact
-/// value model, this delegated to [`onix_core::exceeds_depth`] (which now
-/// takes `onix_core::Value`). Slice 4 migrates the binding pipeline to the
-/// compact type, at which point this reverts to delegating to the core check.
+/// Temporary bridge: this operates on the still-`serde_json::Value` binding
+/// input and reimplements the depth walk locally, because
+/// [`onix_core::exceeds_depth`] now takes the compact `onix_core::Value` and
+/// converting to it here would itself recurse on the calling thread. Once the
+/// binding pipeline builds the compact value directly, this reverts to
+/// delegating to [`onix_core::exceeds_depth`].
 #[must_use]
 pub(crate) fn is_deep(value: &Value) -> bool {
     let mut stack: Vec<(&Value, usize)> = vec![(value, 0)];

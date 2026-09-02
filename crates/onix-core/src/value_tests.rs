@@ -1,11 +1,12 @@
 //! Tests for the compact [`crate::value`] model: number-distinction edges,
 //! object lookup/order semantics, the streaming `Deserialize` visitor, a
-//! `serde_json::Value` round-trip property, an iterative-`Drop` stack-safety
-//! guard, and a memory-footprint smoke check against `serde_json::Value`.
+//! `serde_json::Value` round-trip property, and the iterative `Drop` and
+//! `PartialEq` stack-safety guards.
 //!
-//! The footprint check installs an instrumented global allocator for the
-//! whole lib unit-test binary; it only counts allocations (delegating to the
-//! system allocator), so it does not change any other test's behavior.
+//! The memory-footprint smoke check lives in its own integration-test binary
+//! (`tests/memory_footprint.rs`) so its process-global counting allocator is
+//! not shared with — and polluted by — the other unit tests running
+//! concurrently in this binary.
 
 use std::sync::Arc;
 

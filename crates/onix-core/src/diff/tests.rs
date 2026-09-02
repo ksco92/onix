@@ -2,33 +2,12 @@ use super::DEFAULT_MAX_DEPTH;
 use crate::error::Error;
 use crate::path::PathSegment;
 use crate::report::Report;
-use crate::value::{Number as CNumber, Object as CObject, Value as CValue};
+use crate::test_support::{cnum, cobj, cv};
+use crate::value::{Object as CObject, Value as CValue};
 use serde_json::{Map, Number, Value, json};
 
-// --- serde -> compact test bridges (slice 2) ---------------------------
-// The engine now consumes the compact `crate::value::Value`; these thin
-// wrappers convert `serde_json` inputs at the call boundary (the same `From`
-// bridge the CLI/bindings use) so the existing literal-based tests keep
-// exercising the real compact-typed engine unchanged.
-fn cv(value: &Value) -> CValue {
-    CValue::from(value.clone())
-}
-fn cnum(n: &Number) -> CNumber {
-    if let Some(u) = n.as_u64() {
-        CNumber::from_u64(u)
-    } else if let Some(i) = n.as_i64() {
-        CNumber::from_i64(i)
-    } else {
-        CNumber::from_f64(n.as_f64().expect("serde Number is u64/i64/f64")).expect("finite")
-    }
-}
-fn cobj(map: &Map<String, Value>) -> CObject {
-    let value = CValue::from(Value::Object(map.clone()));
-    match &value {
-        CValue::Object(object) => object.clone(),
-        _ => unreachable!("Value::Object converts to a compact Object"),
-    }
-}
+// Thin wrappers routing each `serde_json`-literal-based test through the real
+// compact-typed engine via the shared `crate::test_support` converters.
 fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
     super::diff(&cv(a), &cv(b))
 }
@@ -566,6 +545,11 @@ fn number_as_i128_uses_i64_when_available() {
 fn number_as_i128_falls_back_to_u64_beyond_i64_range() {
     let n = Number::from(u64::MAX);
     assert_eq!(number_as_i128(&n), Some(i128::from(u64::MAX)));
+    // A float has no integer representation.
+    assert_eq!(
+        number_as_i128(&Number::from_f64(1.5).expect("finite")),
+        None
+    );
 }
 
 // --- Recursion depth guard -----------------------------------------
