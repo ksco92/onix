@@ -64,11 +64,7 @@ machete:
 # excluded from coverage: it is a cdylib whose logic is only exercised by
 # calling the compiled wheel from Python, which the Rust test harness cannot
 # do, so every onix-py mutant would survive vacuously. This scope matches the
-# reproduce command recorded in perf/MUTANTS.md. Every finding (caught, missed,
-# timeout, or unviable) is triaged there: the set of non-caught mutants is
-# reproducible even though cargo-mutants' caught/missed/timeout split shifts
-# with machine load; a missed mutant either gets a new regression test that
-# kills it, or a recorded explanation of why it's equivalent/non-actionable.
+# reproduce command recorded in perf/MUTANTS.md, where every finding is triaged.
 mutants:
 	@command -v cargo-mutants >/dev/null 2>&1 || { echo "cargo-mutants not installed: cargo install cargo-mutants --locked"; exit 1; }
 	cargo mutants --package onix-core --package onix-cli

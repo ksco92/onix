@@ -412,21 +412,25 @@ code it concerns, as source comments) of why it's equivalent/non-actionable.
 
 **Standing result.** `make mutants` enumerates a deterministic **443**
 mutants (18 in `onix-cli`, 425 in `onix-core`). Every mutant that is not
-caught is one of two harmless kinds: **either it lies in
-`onix-core/src/lcs.rs`'s `find_longest_match`/`get_matching_blocks`** (proven
-equivalent or non-actionable in the surrounding source comments), **or it is a
-`Default`-substitution mutant that cannot compile** (its return type has no
-usable `Default` impl, so it is not a meaningful mutation — this includes both
-of `onix-cli`'s non-caught mutants). No *viable* mutant survives outside that
-`lcs.rs` set. The exact caught/missed/timeout/unviable split is not pinned
-here: `cargo-mutants` classifies those categories partly by wall-clock time
-and, in this workspace, unreliably at the edges, so the split shifts run to
-run while the two harmless kinds above stay fixed — the full, independently
-verified explanation, tool version, and reproduce command are in
+caught is harmless, of one of two kinds. First, **equivalent viable mutants**
+that compile and run but cannot change any output, confined to two spots each
+argued at the source: `onix-core/src/lcs.rs`'s
+`find_longest_match`/`get_matching_blocks`, and `onix-core/src/diff/array.rs`'s
+`lcs_or_positional_array_diff` `> 1` threshold (replacing it with `>= 1` is
+provably output-neutral — verified over ~1.7M scalar-list pairs and by
+DeepDiff parity at the boundary). Second, **`Default`-substitution mutants
+that cannot compile** (the return type has no usable `Default` impl — this
+includes both of `onix-cli`'s non-caught mutants; one `pairing.rs` case fails
+for a second, unrelated reason noted in `perf/MUTANTS.md`). No *viable* mutant
+survives outside those two documented spots. The exact
+caught/missed/timeout/unviable split is not pinned here: `cargo-mutants`
+classifies those categories partly by wall-clock time and, in this workspace,
+unreliably at the edges, so the split shifts run to run while the harmless
+kinds above stay fixed — the full, independently verified explanation, tool
+version, and reproduce command are in
 [perf/MUTANTS.md](https://github.com/ksco92/onix/blob/main/perf/MUTANTS.md).
 Future work that touches this logic should re-run `make mutants` and confirm
-no viable mutant survives outside that `lcs.rs` set or the uncompilable
-`Default`-substitution set.
+no viable mutant survives outside those two documented spots.
 
 ## Benchmarks
 

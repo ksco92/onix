@@ -20,58 +20,66 @@ make mutants        # cargo mutants --package onix-core --package onix-cli
 
 `make mutants` enumerates a deterministic **443** mutants (18 in `onix-cli`,
 425 in `onix-core`). Its classification of each mutant into
-caught / missed / timeout / unviable is **not** reproducible run to run, and
-in this workspace it is unreliable at the edges: it depends on wall-clock
-time (a slow mutant is a "timeout" on one machine and "missed"/"caught" on
-another) and, empirically here, on build caching (a mutant that fails to
-compile has been reported both as "unviable" and, spuriously, as "caught";
-one that the suite deterministically catches has been reported "missed"). So
-the substance below is what was verified independently of any single run's
-labels.
+caught / missed / timeout / unviable is **not** reproducible run to run: it
+depends on wall-clock time (a slow mutant is a "timeout" on one machine and
+"missed"/"caught" on another) and, in this workspace, on build caching (a
+mutant that fails to compile has been reported both as "unviable" and,
+spuriously, as "caught"). So the substance below is what was verified
+independently of any single run's labels.
 
-### Two kinds of mutant are never a real test gap
+### Kinds of mutant that survive, and why none is a real test gap
 
-1. **`Default`-substitution mutants that cannot compile.** cargo-mutants tries
-   replacing a function body with `Default::default()` (and similar). On a
-   return type with no usable `Default` impl this does not compile, so it is
-   not a meaningful behavioral mutation. Verified directly:
+1. **Equivalent viable mutants** — a mutation that compiles and runs but
+   cannot change any output, so no test can kill it. All are confined to two
+   spots, each with the argument written at the source:
+   - `onix-core/src/lcs.rs`'s `find_longest_match` / `get_matching_blocks`:
+     these either force a non-terminating loop (reported as a timeout) or
+     produce a wrong-but-terminating result the surrounding comments prove is
+     equivalent or non-actionable.
+   - `onix-core/src/diff/array.rs`'s `lcs_or_positional_array_diff` `> 1`
+     threshold: replacing `> 1` with `>= 1` is provably output-neutral (see
+     the comment at that line). It only matters when the LCS report has
+     exactly one finding, and there the positional report is either the same
+     single finding or has `>= 2` findings, so the LCS report is returned
+     either way. Confirmed by ~1.7M scalar-list pairs (zero difference) and by
+     DeepDiff 9.1.0 parity at the boundary shapes. `cargo mutants -F
+     'array.rs:97:35'` reports this `>=` mutant missed and the sibling `==`
+     and `<` mutants caught — the expected signature of an equivalent mutant
+     next to non-equivalent ones.
+
+2. **`Default`-substitution mutants that cannot compile.** cargo-mutants tries
+   replacing a function body with `Default::default()` (and similar). Most fail
+   because the return type has no usable `Default` impl — verified directly for
    `parse_diff_args`/`parse_args` in `onix-cli/src/args.rs` (`DiffArgs` derives
-   only `Debug, PartialEq, Eq` — no `Default`; `cargo build` fails with
-   "the trait bound `DiffArgs: Default` is not satisfied"), and `Distance`'s
-   `partial_cmp`/`cmp` in `onix-core/src/ignore_order/distance.rs`
-   (`std::cmp::Ordering` has no `Default`). The other `Default`-substitution
-   mutants a run labels unviable are the same class
-   (`lcs.rs`'s `scalar_key`/`get_matching_blocks`/`compute_opcodes`,
-   `ignore_order`'s `item_key`/`HashedList::build`/`compute_pairs`,
-   `dispatch.rs`'s `scoped`).
+   only `Debug, PartialEq, Eq`; `cargo build` fails with "the trait bound
+   `DiffArgs: Default` is not satisfied") and `Distance`'s `partial_cmp`/`cmp`
+   in `onix-core/src/ignore_order/distance.rs` (`std::cmp::Ordering` has no
+   `Default`); likewise `lcs.rs`'s `scalar_key`/`get_matching_blocks`/
+   `compute_opcodes`, `ignore_order`'s `item_key`/`HashedList::build`, and
+   `dispatch.rs`'s `scoped`. `ignore_order/pairing.rs:93` contributes **two**
+   unviable mutants by two independent mechanisms: the
+   `HashMap::from_iter([(Default::default(), …)])` one fails on the missing
+   `Default` for `ItemKey`, and the `HashMap::new()` one fails because the
+   crate's fxhash-backed `HashMap` type alias has no inherent `::new()` (that
+   associated fn exists only for the `RandomState`-backed `std` `HashMap`) —
+   not a `Default` issue.
 
-2. **`onix-core/src/lcs.rs`'s `find_longest_match` / `get_matching_blocks`
-   mutants.** These either force a non-terminating loop (reported as a
-   timeout) or produce a wrong-but-terminating result that the surrounding
-   source comments prove is equivalent or non-actionable. This is the only
-   place a *viable* mutant is not caught.
-
-Everything else is caught. Where a run has reported a viable mutant "missed"
-outside `lcs.rs` (for example `diff/array.rs:82`'s LCS-vs-positional
-threshold), applying that mutation and running `cargo test -p onix-core`
-directly makes the suite fail — i.e. it is caught, and the "missed" label was
-a build-caching artifact. `onix-cli`'s only non-caught mutants are the two
-`Default`-substitutions above, which cannot compile; every viable `onix-cli`
+Every other viable mutant is caught. `onix-cli`'s only non-caught mutants are
+the two uncompilable `Default`-substitutions above; every viable `onix-cli`
 mutant is caught.
 
 ## A representative run (serial `make mutants`, this tree)
 
 443 mutants tested: 416 caught, 9 missed, 6 timeouts, 12 unviable.
 
-- **Missed (9):** eight in `lcs.rs`'s `get_matching_blocks` (equivalent /
-  non-actionable), plus `diff/array.rs:82` (`> 1` → `>= 1` in
-  `lcs_or_positional_array_diff`), which is in fact caught by the suite — see
-  above.
+- **Missed (9):** eight in `lcs.rs`'s `get_matching_blocks` and one in
+  `diff/array.rs`'s `lcs_or_positional_array_diff` (`> 1` → `>= 1`) — all
+  equivalent, per kind (1).
 - **Timeouts (6):** all in `lcs.rs` (`find_longest_match` /
-  `get_matching_blocks`).
-- **Unviable (12):** the `Default`-substitution mutants of kind (1) above,
-  including `args.rs:32`/`args.rs:76` and `distance.rs:32`/`distance.rs:38`;
-  each cannot compile (no usable `Default` impl), so no test can exercise it.
+  `get_matching_blocks`), per kind (1).
+- **Unviable (12):** the `Default`-substitution (and one `HashMap::new()`)
+  mutants of kind (2), including `args.rs:32`/`args.rs:76` and
+  `distance.rs:32`/`distance.rs:38`; none compiles, so no test can exercise it.
 
 Future work that touches this logic should re-run `make mutants` and confirm
-that no *viable* mutant survives outside `lcs.rs`'s documented equivalent set.
+that no *viable* mutant survives outside the two documented equivalent spots.
