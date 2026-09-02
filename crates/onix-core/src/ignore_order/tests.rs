@@ -976,22 +976,18 @@ fn int_float_bool_never_share_a_key_even_at_equal_value() {
 
 #[test]
 fn signed_zero_floats_share_a_key_but_stay_distinct_from_the_integer_zero() {
-    // Python's DeepHash treats `-0.0` and `+0.0` as equal (confirmed against
-    // deepdiff==9.1.0: `DeepDiff([0.0, -0.0], [], ignore_order=True)` removes
-    // a single item), so they must key equally...
+    // Signed zeros share a key; an integral float stays distinct from the
+    // integer of the same value. See `super::hash::item_key`'s float branch
+    // for the deepdiff-9.1.0 provenance behind both.
     assert_eq!(item_key(&json!(0.0)), item_key(&json!(-0.0)));
-    // ...while an integral float stays distinct from the integer of the same
-    // value (deepdiff reports `[2.0]` vs `[2]` as a type_changes, and
-    // `[0.0]` vs `[0]` likewise), so the float key must NOT collapse to an
-    // integer key the way the ordered path's `ScalarKey` does.
     assert_ne!(item_key(&json!(2.0)), item_key(&json!(2)));
     assert_ne!(item_key(&json!(0.0)), item_key(&json!(0)));
 }
 
 #[test]
 fn signed_zero_floats_dedup_to_one_removal_under_ignore_order() {
-    // Full-diff regression for the signed-zero item_key normalization:
-    // deepdiff removes exactly one of two signed zeros.
+    // Full-diff regression for the signed-zero item_key normalization (see
+    // `super::hash::item_key`'s float branch for the deepdiff-9.1.0 provenance).
     assert_eq!(
         ignore_order_diff(&json!([0.0, -0.0]), &json!([])),
         json!({"iterable_item_removed": {"root[0]": 0.0}})

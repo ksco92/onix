@@ -17,6 +17,7 @@ use serde::de::value::{
 };
 
 use super::{Number, Object, Value};
+use crate::test_support::cv;
 
 /// The convenience alias for `serde`'s in-memory deserializer error type.
 type DeError = serde::de::value::Error;
@@ -162,34 +163,29 @@ fn from_serde_json_round_trips_all_shapes() {
 
 // --- structural equality ------------------------------------------------
 
-/// Convenience: build a compact value from a `serde_json` literal.
-fn cv(json: serde_json::Value) -> Value {
-    Value::from(json)
-}
-
 #[test]
 fn partial_eq_covers_all_early_exits() {
     use serde_json::json;
 
     // Equal within each variant (the no-early-exit paths).
-    assert_eq!(cv(json!(null)), cv(json!(null)));
-    assert_eq!(cv(json!(true)), cv(json!(true)));
-    assert_eq!(cv(json!(1)), cv(json!(1)));
-    assert_eq!(cv(json!("a")), cv(json!("a")));
-    assert_eq!(cv(json!([1, 2])), cv(json!([1, 2])));
-    assert_eq!(cv(json!({"a": 1, "b": 2})), cv(json!({"a": 1, "b": 2})));
+    assert_eq!(cv(&json!(null)), cv(&json!(null)));
+    assert_eq!(cv(&json!(true)), cv(&json!(true)));
+    assert_eq!(cv(&json!(1)), cv(&json!(1)));
+    assert_eq!(cv(&json!("a")), cv(&json!("a")));
+    assert_eq!(cv(&json!([1, 2])), cv(&json!([1, 2])));
+    assert_eq!(cv(&json!({"a": 1, "b": 2})), cv(&json!({"a": 1, "b": 2})));
 
     // Every early-exit inequality path.
-    assert_ne!(cv(json!(true)), cv(json!(false))); // Bool value differs
-    assert_ne!(cv(json!(1)), cv(json!(2))); // Number value differs
-    assert_ne!(cv(json!(1)), cv(json!(1.0))); // int vs float (Number variant)
-    assert_ne!(cv(json!("a")), cv(json!("b"))); // Str value differs
-    assert_ne!(cv(json!([1])), cv(json!([1, 2]))); // Array length differs
-    assert_ne!(cv(json!([1])), cv(json!([2]))); // Array element differs
-    assert_ne!(cv(json!({"a": 1})), cv(json!({"a": 1, "b": 2}))); // Object length differs
-    assert_ne!(cv(json!({"a": 1})), cv(json!({"b": 1}))); // Object key differs
-    assert_ne!(cv(json!({"a": 1})), cv(json!({"a": 2}))); // Object value differs
-    assert_ne!(cv(json!(null)), cv(json!(true))); // different variants
+    assert_ne!(cv(&json!(true)), cv(&json!(false))); // Bool value differs
+    assert_ne!(cv(&json!(1)), cv(&json!(2))); // Number value differs
+    assert_ne!(cv(&json!(1)), cv(&json!(1.0))); // int vs float (Number variant)
+    assert_ne!(cv(&json!("a")), cv(&json!("b"))); // Str value differs
+    assert_ne!(cv(&json!([1])), cv(&json!([1, 2]))); // Array length differs
+    assert_ne!(cv(&json!([1])), cv(&json!([2]))); // Array element differs
+    assert_ne!(cv(&json!({"a": 1})), cv(&json!({"a": 1, "b": 2}))); // Object length differs
+    assert_ne!(cv(&json!({"a": 1})), cv(&json!({"b": 1}))); // Object key differs
+    assert_ne!(cv(&json!({"a": 1})), cv(&json!({"a": 2}))); // Object value differs
+    assert_ne!(cv(&json!(null)), cv(&json!(true))); // different variants
 }
 
 // --- streaming deserialize ----------------------------------------------
