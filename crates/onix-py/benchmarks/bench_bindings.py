@@ -7,22 +7,29 @@ product surface a Python caller uses — live Python objects in, going
 through this crate's own Python-object-to-`Value` conversion — and reports
 that conversion cost as part of the number rather than hiding it.
 
-Three shapes, each timed as median-of-N (`RUNS`, with one discarded warmup
-call first):
+Each case reports three metrics per side (deepdiff and deepdiff_rs): wall
+time, peak resident memory (RSS), and CPU seconds (user + system).
 
-1. `ignore_order`, 10k shuffled ints with ~5% mutated (the exact shape
-   `perf/generate_fixtures.py`'s `ignore_order_10k` fixture uses) — real
-   `DeepDiff(..., ignore_order=True)` vs `deepdiff_rs.DeepDiff(...,
-   ignore_order=True)`, both on the same live Python list objects.
-2. A realistic heterogeneous "API payload" record list (`RECORD_COUNT`
-   records — scalars, nested dicts, nested lists; the same shape as
-   `perf/generate_fixtures.py`'s `api_payloads` fixture) — plain (ordered)
-   `DeepDiff(...)` vs `deepdiff_rs.DeepDiff(...)`.
-3. The same two shapes again, but through the fast, JSON-string-only path:
-   `deepdiff_rs.diff_json(a_text, b_text)` (parse + diff + serialize
-   entirely in Rust, no Python-object traversal at all) vs the equivalent
-   Python workflow a caller holding JSON text would actually run —
-   `json.loads` both sides, diff, `.to_json()`.
+# How the three metrics are measured
+
+Every measurement runs in its own short-lived subprocess — one per tool, per
+case, per run — with all three metrics taken from that same run:
+
+1. Why a subprocess: `resource.getrusage`'s `ru_maxrss` is a whole-process
+   high-water mark, so a single interpreter running both tools back to back
+   could never attribute peak memory to a side. One diff per process fixes it.
+2. Matched shape: each subprocess imports both libraries and builds the same
+   fixture deterministically from a fixed seed, then times only the diff. That
+   shared interpreter + libraries + fixture baseline cancels in the deepdiff /
+   deepdiff_rs ratio, so peak RSS reflects the diff's *incremental* footprint,
+   not a from-zero measurement.
+3. No warmup: each subprocess is a cold start, so the reported figure is the
+   median of `RUNS` independent subprocesses (an in-process warmup is
+   meaningless when every run is a fresh process).
+
+Wall time and CPU seconds are the delta across the diff call alone; peak RSS
+is the process high-water mark. See `_normalize_maxrss` for the byte/kilobyte
+platform normalization.
 
 Usage (from `crates/onix-py/`, after building the extension in release
 mode — a debug build understates onix's numbers by an order of magnitude
@@ -31,14 +38,23 @@ or more):
     uv sync --group test
     uv run --group test maturin develop --release
     uv run --group test python benchmarks/bench_bindings.py
+
+The run prints a human-readable summary, the conversion-overhead proxy, and a
+ready-to-paste Markdown table (the exact README table, every shape with its
+peak-RSS and CPU-seconds sub-rows) so the published numbers are regenerated
+by re-running this script, with no hand-transcription.
 """
 
 import copy
 import json
 import random
+import resource
 import statistics
+import subprocess
+import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Final
 
 from deepdiff import DeepDiff as RealDeepDiff
@@ -180,145 +196,274 @@ def build_api_payloads_case() -> tuple[JsonValue, JsonValue]:
 ##############################################
 ##############################################
 ##############################################
-# Timing
+# One measured diff, run inside its own subprocess
+
+# The measurable cases: the diff each (tool, case) pair performs. The fixture
+# is built once inside the subprocess; the returned callable times only the
+# diff itself. For the JSON-string cases, serialization to text is fixture
+# setup (done before the callable), matching how a caller holding JSON text
+# starts; parsing is inside the callable because a real caller pays it (onix
+# does it inside `diff_json`; the Python side does it with `json.loads`).
+CASE_LABELS: Final[dict[str, str]] = {
+    "ignore_order": "`ignore_order`, 10k shuffled ints, ~5% mutated (live objects)",
+    "api_payloads": "Heterogeneous API-payload records, n=20,000 (live objects)",
+    "ignore_order_json": "Same `ignore_order` shape, via `diff_json` (JSON-string path)",
+    "api_payloads_json": "Same API-payload shape, via `diff_json` (JSON-string path)",
+}
+LIVE_CASES: Final[list[str]] = list(CASE_LABELS)
+# The onix-only conversion-overhead proxy: a diff of two structurally equal
+# but never identity-shared inputs (see `_conversion_proxy_line`).
+PROXY_CASE: Final[str] = "api_payloads_equal"
 
 
-def time_median(fn: Callable[[], object], runs: int = RUNS) -> float:
+def _diff_callable(tool: str, case: str) -> Callable[[], object]:
     """
-    Time `fn` `runs` times (plus one discarded warmup call) and return the median.
+    Build the zero-argument diff callable for one `(tool, case)` pair.
 
-    :param fn: The zero-argument callable to time.
-    :param runs: How many timed calls to take the median of.
-    :return: The median wall-clock time, in seconds.
+    The fixture is constructed here (outside the returned callable) so only
+    the diff itself is timed.
+
+    :param tool: Either `"deepdiff"` or `"deepdiff_rs"`.
+    :param case: One of the keys in :data:`CASE_LABELS`, or :data:`PROXY_CASE`.
+    :return: A callable that performs exactly one diff and returns its result.
     """
-    fn()  # warmup: excludes one-time import/allocator warmup noise
-    samples = []
+    if case in ("ignore_order", "ignore_order_json"):
+        a, b = build_ignore_order_case()
+        ignore_order = True
+    else:
+        a, b = build_api_payloads_case()
+        ignore_order = False
+
+    if case == PROXY_CASE:
+        equal_copy = copy.deepcopy(a)
+        return lambda: OnixDeepDiff(a, equal_copy)
+
+    if case.endswith("_json"):
+        a_text = json.dumps(a)
+        b_text = json.dumps(b)
+        if tool == "deepdiff":
+            return lambda: RealDeepDiff(
+                json.loads(a_text),
+                json.loads(b_text),
+                ignore_order=ignore_order,
+                verbose_level=2,
+            ).to_json()
+        return lambda: diff_json(a_text, b_text, ignore_order=ignore_order)
+
+    if tool == "deepdiff":
+        return lambda: RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)
+    return lambda: OnixDeepDiff(a, b, ignore_order=ignore_order)
+
+
+def _normalize_maxrss(ru_maxrss: int) -> int:
+    """
+    Convert `resource.getrusage`'s `ru_maxrss` to bytes.
+
+    `ru_maxrss` is bytes on macOS but kilobytes on Linux.
+
+    :param ru_maxrss: The raw `ru_maxrss` value.
+    :return: Peak resident set size, in bytes.
+    """
+    if sys.platform == "darwin":
+        return ru_maxrss
+    return ru_maxrss * 1024
+
+
+def _run_worker(tool: str, case: str) -> None:
+    """
+    Perform one diff and print its wall/CPU/RSS measurement as JSON on stdout.
+
+    This is the subprocess entry point: it performs exactly one diff (see the
+    module docstring for why one per process).
+
+    :param tool: Either `"deepdiff"` or `"deepdiff_rs"`.
+    :param case: The case name to measure.
+    """
+    run_diff = _diff_callable(tool, case)
+
+    before = resource.getrusage(resource.RUSAGE_SELF)
+    wall_start = time.perf_counter()
+    result = run_diff()
+    wall_s = time.perf_counter() - wall_start
+    after = resource.getrusage(resource.RUSAGE_SELF)
+
+    cpu_s = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+    rss_bytes = _normalize_maxrss(after.ru_maxrss)
+    del result  # kept alive through the RSS sample so its memory counts toward the peak
+
+    print(json.dumps({"wall_s": wall_s, "cpu_s": cpu_s, "rss_bytes": rss_bytes}))
+
+
+##############################################
+##############################################
+##############################################
+##############################################
+# Orchestration (parent process)
+
+
+@dataclass(frozen=True)
+class Measurement:
+    """
+    The median wall time, CPU seconds, and peak RSS for one tool on one case.
+
+    :param wall_s: Median wall-clock diff time, in seconds.
+    :param cpu_s: Median CPU (user + system) diff time, in seconds.
+    :param rss_bytes: Median process peak RSS, in bytes.
+    """
+
+    wall_s: float
+    cpu_s: float
+    rss_bytes: float
+
+
+def measure(tool: str, case: str, runs: int = RUNS) -> Measurement:
+    """
+    Run `runs` independent subprocesses for one `(tool, case)` and take the
+    median of each metric.
+
+    :param tool: Either `"deepdiff"` or `"deepdiff_rs"`.
+    :param case: The case name to measure.
+    :param runs: How many independent subprocess runs to take the median of.
+    :return: The per-metric medians.
+    """
+    walls: list[float] = []
+    cpus: list[float] = []
+    rsses: list[float] = []
 
     for _ in range(runs):
-        start = time.perf_counter()
-        fn()
-        samples.append(time.perf_counter() - start)
+        completed = subprocess.run(
+            [sys.executable, __file__, "--worker", tool, case],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+        walls.append(payload["wall_s"])
+        cpus.append(payload["cpu_s"])
+        rsses.append(payload["rss_bytes"])
 
-    return statistics.median(samples)
+    return Measurement(statistics.median(walls), statistics.median(cpus), statistics.median(rsses))
 
 
-def report(label: str, deepdiff_seconds: float, onix_seconds: float) -> None:
+def _fmt_ms(seconds: float) -> str:
+    """:return: A duration formatted in milliseconds."""
+    return f"{seconds * 1000:.2f}ms"
+
+
+def _fmt_mb(num_bytes: float) -> str:
+    """:return: A byte count formatted in MB (1 MB = 1_000_000 bytes)."""
+    return f"{num_bytes / 1_000_000:.1f} MB"
+
+
+def _fmt_cpu(seconds: float) -> str:
+    """:return: A CPU duration formatted in seconds."""
+    return f"{seconds:.3f} s"
+
+
+def _fmt_ratio(ratio: float) -> str:
+    """:return: A deepdiff / deepdiff_rs speedup multiple in bold."""
+    return f"**{ratio:.2f}x**"
+
+
+def _print_case_summary(label: str, deepdiff: Measurement, onix: Measurement) -> None:
     """
-    Print one benchmark row: both medians and the speedup multiple.
-
-    :param label: The shape/path being reported.
-    :param deepdiff_seconds: Real DeepDiff's median time, in seconds.
-    :param onix_seconds: deepdiff_rs's median time, in seconds.
-    """
-    multiple = deepdiff_seconds / onix_seconds
-    print(
-        f"{label}: deepdiff={deepdiff_seconds * 1000:.2f}ms  "
-        f"deepdiff_rs={onix_seconds * 1000:.2f}ms  ({multiple:.2f}x)",
-    )
-
-
-##############################################
-##############################################
-##############################################
-##############################################
-# Benchmarks
-
-
-def bench_ignore_order(a: JsonValue, b: JsonValue) -> None:
-    """
-    Benchmark shape (1): `ignore_order=True` on live Python objects.
-
-    :param a: The first list.
-    :param b: The second list.
-    """
-    deepdiff_seconds = time_median(lambda: RealDeepDiff(a, b, ignore_order=True, verbose_level=2))
-    onix_seconds = time_median(lambda: OnixDeepDiff(a, b, ignore_order=True))
-    report(f"ignore_order_10k (live objects, n={IGNORE_ORDER_SIZE})", deepdiff_seconds, onix_seconds)
-
-
-def bench_api_payloads(a: JsonValue, b: JsonValue) -> float:
-    """
-    Benchmark shape (2): plain ordered diff on live heterogeneous records.
-
-    :param a: The first record list.
-    :param b: The second record list.
-    :return: deepdiff_rs's own median time (seconds) on this mutated case,
-        for the conversion-overhead proxy below to be measured against.
-    """
-    deepdiff_seconds = time_median(lambda: RealDeepDiff(a, b, verbose_level=2))
-    onix_seconds = time_median(lambda: OnixDeepDiff(a, b))
-    report(f"api_payloads (live objects, n={RECORD_COUNT})", deepdiff_seconds, onix_seconds)
-
-    return onix_seconds
-
-
-def bench_conversion_proxy(a: JsonValue, mutated_onix_seconds: float) -> None:
-    """
-    Print deepdiff_rs's conversion-overhead proxy: time `OnixDeepDiff(a,
-    deepcopy(a))` — a diff of two structurally equal but never
-    identity-shared inputs — and report it as a fraction of the mutated
-    `api_payloads` case's own deepdiff_rs time.
-
-    That fraction isolates how much of the live-object number is
-    Python-object-to-`Value` conversion rather than diffing: the equal-inputs
-    diff pays the full conversion of both sides plus onix's cheap whole-input
-    equality short-circuit, but none of the per-node diff bookkeeping the
-    mutated case pays. The `deepcopy` runs once up front, outside the timed
-    region, so it counts as fixture setup rather than measured conversion
-    cost.
-
-    :param a: The api_payloads first record list (its own deepcopy is the
-        equal comparand).
-    :param mutated_onix_seconds: deepdiff_rs's median on the mutated
-        api_payloads case, from :func:`bench_api_payloads`.
-    """
-    equal_copy = copy.deepcopy(a)
-    onix_seconds = time_median(lambda: OnixDeepDiff(a, equal_copy))
-    fraction = onix_seconds / mutated_onix_seconds
-    print(
-        f"conversion proxy (deepdiff_rs, DeepDiff(a, deepcopy(a)), n={RECORD_COUNT}): "
-        f"{onix_seconds * 1000:.2f}ms = {fraction * 100:.1f}% of the mutated "
-        f"api_payloads case's {mutated_onix_seconds * 1000:.2f}ms",
-    )
-
-
-def bench_json_path(label: str, a: JsonValue, b: JsonValue, *, ignore_order: bool) -> None:
-    """
-    Benchmark shape (3): the JSON-string-only fast path vs the equivalent
-    Python "parse, diff, serialize" workflow.
+    Print the human-readable three-metric summary for one case.
 
     :param label: The shape being reported.
-    :param a: The first value (will be serialized to JSON text).
-    :param b: The second value (will be serialized to JSON text).
-    :param ignore_order: Whether to diff with `ignore_order=True`.
+    :param deepdiff: Real DeepDiff's medians.
+    :param onix: deepdiff_rs's medians.
     """
-    a_text = json.dumps(a)
-    b_text = json.dumps(b)
+    print(label)
+    print(
+        f"  wall: deepdiff={_fmt_ms(deepdiff.wall_s)}  deepdiff_rs={_fmt_ms(onix.wall_s)}  "
+        f"({_fmt_ratio(deepdiff.wall_s / onix.wall_s)})",
+    )
+    print(
+        f"  peak RSS: deepdiff={_fmt_mb(deepdiff.rss_bytes)}  deepdiff_rs={_fmt_mb(onix.rss_bytes)}  "
+        f"({_fmt_ratio(deepdiff.rss_bytes / onix.rss_bytes)})",
+    )
+    print(
+        f"  CPU seconds: deepdiff={_fmt_cpu(deepdiff.cpu_s)}  deepdiff_rs={_fmt_cpu(onix.cpu_s)}  "
+        f"({_fmt_ratio(deepdiff.cpu_s / onix.cpu_s)})",
+    )
 
-    def deepdiff_json_workflow() -> str:
-        """The equivalent Python workflow a caller holding JSON text would run."""
-        parsed_a = json.loads(a_text)
-        parsed_b = json.loads(b_text)
-        return RealDeepDiff(parsed_a, parsed_b, ignore_order=ignore_order, verbose_level=2).to_json()
 
-    deepdiff_seconds = time_median(deepdiff_json_workflow)
-    onix_seconds = time_median(lambda: diff_json(a_text, b_text, ignore_order=ignore_order))
-    report(f"{label} (JSON-string path)", deepdiff_seconds, onix_seconds)
+def _conversion_proxy_line(onix_api_wall_s: float, proxy_wall_s: float) -> str:
+    """
+    Format the conversion-overhead proxy line.
+
+    :param onix_api_wall_s: deepdiff_rs's median wall time on the mutated
+        api_payloads case.
+    :param proxy_wall_s: deepdiff_rs's median wall time on the equal-inputs
+        proxy (`DeepDiff(a, deepcopy(a))`), which pays the full conversion of
+        both sides plus onix's cheap whole-input equality short-circuit but
+        none of the per-node diff bookkeeping.
+    :return: The formatted line.
+    """
+    fraction = proxy_wall_s / onix_api_wall_s
+    return (
+        f"conversion proxy (deepdiff_rs, DeepDiff(a, deepcopy(a)), n={RECORD_COUNT}): "
+        f"{_fmt_ms(proxy_wall_s)} = {fraction * 100:.1f}% of the mutated "
+        f"api_payloads case's {_fmt_ms(onix_api_wall_s)}"
+    )
+
+
+def _markdown_table(results: dict[str, tuple[Measurement, Measurement]]) -> str:
+    """
+    Build the ready-to-paste README table: four columns, each shape row
+    followed by peak-RSS and CPU-seconds sub-rows.
+
+    :param results: Case name -> `(deepdiff, deepdiff_rs)` measurements.
+    :return: The Markdown table.
+    """
+    lines = [
+        "| Shape | deepdiff | deepdiff_rs | Speedup |",
+        "| --- | --- | --- | --- |",
+    ]
+
+    for case in LIVE_CASES:
+        deepdiff, onix = results[case]
+        lines.append(
+            f"| {CASE_LABELS[case]} | {_fmt_ms(deepdiff.wall_s)} | {_fmt_ms(onix.wall_s)} | "
+            f"{_fmt_ratio(deepdiff.wall_s / onix.wall_s)} |",
+        )
+        lines.append(
+            f"| &nbsp;&nbsp;— peak RSS | {_fmt_mb(deepdiff.rss_bytes)} | {_fmt_mb(onix.rss_bytes)} | "
+            f"{_fmt_ratio(deepdiff.rss_bytes / onix.rss_bytes)} |",
+        )
+        lines.append(
+            f"| &nbsp;&nbsp;— CPU seconds | {_fmt_cpu(deepdiff.cpu_s)} | {_fmt_cpu(onix.cpu_s)} | "
+            f"{_fmt_ratio(deepdiff.cpu_s / onix.cpu_s)} |",
+        )
+
+    return "\n".join(lines)
 
 
 def main() -> None:
-    """Run every benchmark shape and print the results table."""
-    ignore_order_a, ignore_order_b = build_ignore_order_case()
-    api_payloads_a, api_payloads_b = build_api_payloads_case()
+    """Run every benchmark shape in isolated subprocesses and print the results."""
+    print(
+        f"onix bindings benchmark (median of {RUNS} isolated subprocess runs per side)\n",
+    )
 
-    print(f"onix bindings benchmark (median of {RUNS} runs, 1 discarded warmup call)\n")
+    results: dict[str, tuple[Measurement, Measurement]] = {}
 
-    bench_ignore_order(ignore_order_a, ignore_order_b)
-    mutated_onix_seconds = bench_api_payloads(api_payloads_a, api_payloads_b)
-    bench_conversion_proxy(api_payloads_a, mutated_onix_seconds)
-    bench_json_path("ignore_order_10k", ignore_order_a, ignore_order_b, ignore_order=True)
-    bench_json_path("api_payloads", api_payloads_a, api_payloads_b, ignore_order=False)
+    for case in LIVE_CASES:
+        deepdiff = measure("deepdiff", case)
+        onix = measure("deepdiff_rs", case)
+        results[case] = (deepdiff, onix)
+        _print_case_summary(CASE_LABELS[case], deepdiff, onix)
+
+    proxy = measure("deepdiff_rs", PROXY_CASE)
+    onix_api_wall_s = results["api_payloads"][1].wall_s
+    print()
+    print(_conversion_proxy_line(onix_api_wall_s, proxy.wall_s))
+
+    print("\n--- README table (ready to paste) ---\n")
+    print(_markdown_table(results))
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 4 and sys.argv[1] == "--worker":
+        _run_worker(sys.argv[2], sys.argv[3])
+    else:
+        main()

@@ -251,17 +251,40 @@ entirely in Rust.
 `deepdiff_rs` on **live Python objects** — unlike `perf/RESULTS.md`, which
 diffs already-parsed JSON and is explicitly an upper bound, this number
 includes the Python-object-to-`Value` conversion cost a real caller actually
-pays. Median of 11 runs (1 discarded warmup call), measured on the same
-machine (macOS 26.5.1, Apple M5 Max) as `perf/RESULTS.md`:
+pays. Each side is the median of 11 independent, isolated subprocess runs
+(one diff per process, so peak memory can be attributed to a side — see the
+script's docstring), measured on the same machine (macOS 26.5.1, Apple M5
+Max) as `perf/RESULTS.md`:
 
 | Shape | deepdiff | deepdiff_rs | Speedup |
 | --- | --- | --- | --- |
-| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 3159.56ms | 67.53ms | **46.79x** |
-| Heterogeneous API-payload records, n=20,000 (live objects) | 4300.32ms | 126.43ms | **34.01x** |
-| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 3215.37ms | 67.92ms | **47.34x** |
-| Same API-payload shape, via `diff_json` (JSON-string path) | 6135.61ms | 69.71ms | **88.01x** |
+| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 2870.45ms | 70.69ms | **40.61x** |
+| &nbsp;&nbsp;— peak RSS | 227.5 MB | 141.1 MB | **1.61x** |
+| &nbsp;&nbsp;— CPU seconds | 2.868 s | 0.071 s | **40.61x** |
+| Heterogeneous API-payload records, n=20,000 (live objects) | 3234.68ms | 130.58ms | **24.77x** |
+| &nbsp;&nbsp;— peak RSS | 117.6 MB | 276.2 MB | **0.43x** |
+| &nbsp;&nbsp;— CPU seconds | 3.232 s | 0.130 s | **24.77x** |
+| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 2952.13ms | 70.91ms | **41.63x** |
+| &nbsp;&nbsp;— peak RSS | 227.8 MB | 141.2 MB | **1.61x** |
+| &nbsp;&nbsp;— CPU seconds | 2.950 s | 0.071 s | **41.63x** |
+| Same API-payload shape, via `diff_json` (JSON-string path) | 4365.52ms | 80.22ms | **54.42x** |
+| &nbsp;&nbsp;— peak RSS | 138.8 MB | 270.8 MB | **0.51x** |
+| &nbsp;&nbsp;— CPU seconds | 4.362 s | 0.080 s | **54.42x** |
 
-**Fixture note:** the live-object API-payload row (**~34x**) builds `b` as a
+Wall time is the first row of each shape; peak RSS (resident memory) and CPU
+seconds (user + system) are the sub-rows, each the median of the same 11
+isolated subprocess runs per side (the script's docstring explains how the
+subprocess isolation attributes memory to a side). The Speedup column carries
+the deepdiff / deepdiff_rs ratio on every row, computed from full-precision
+values before rounding for display — so a value below 1x on a memory or CPU
+row means `deepdiff_rs` used more than `deepdiff` there, and hand-dividing the
+displayed 3-decimal figures can differ slightly from the bolded ratio. CPU
+tracks wall time closely (single-threaded, CPU-bound work); peak RSS is
+actually higher for `deepdiff_rs` on the heterogeneous records — there the
+binding first converts the whole live object tree into its own value model —
+and lower on the flat-integer shape.
+
+**Fixture note:** the live-object API-payload row (**~25x**) builds `b` as a
 `copy.deepcopy` of `a`, so the two inputs share no identity, matching how
 independently deserialized API responses actually arrive in practice. The
 full rationale for that choice is on `build_api_payloads_case` in
@@ -272,11 +295,11 @@ converting 20,000 realistic nested Python records into `onix_core`'s value
 model one object at a time is genuine, measurable overhead. A proxy that
 isolates it, `DeepDiff(a, copy.deepcopy(a))` (which pays the full conversion
 plus onix's cheap whole-tree equality check, but none of the per-node diff
-bookkeeping the mutated case also pays), accounts for roughly **80%** of the
+bookkeeping the mutated case also pays), accounts for roughly **82%** of the
 mutated case's own total time on this shape; `bench_bindings.py` computes and
 prints that percentage as part of its output. The JSON-string-only
 `diff_json` path skips the conversion entirely and recovers a much larger
-multiple (**~88x**) on the same data. Use `diff_json` when you already have
+multiple (**~54x**) on the same data. Use `diff_json` when you already have
 (or can produce) JSON text; reach for the drop-in `DeepDiff` class when you
 genuinely need to diff live Python objects, and accept the conversion cost
 as part of that convenience. Reproduce with:
