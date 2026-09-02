@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "deepdiff-rs"
-description = "onix is a Rust rewrite of Python DeepDiff's core: byte-compatible output, 64-5757x faster, with `ignore_order` support included."
+description = "onix is a Rust rewrite of Python DeepDiff's core: byte-compatible output, 64-5757x faster, with ignore_order support included."
 readme = "../../README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
