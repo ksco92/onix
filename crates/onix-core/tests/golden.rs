@@ -74,9 +74,10 @@ fn case_options(case_dir: &Path) -> onix_core::DiffOptions {
         .get("ignore_order")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let mut opts = onix_core::DiffOptions::default();
-    opts.ignore_order = ignore_order;
-    opts
+    onix_core::DiffOptions {
+        ignore_order,
+        ..onix_core::DiffOptions::default()
+    }
 }
 
 /// Runs `onix_core::diff_with_options` on a case's `a.json`/`b.json` (per
@@ -108,21 +109,7 @@ fn diff_case(name: &str) -> Value {
 /// original JSON key order through the whole engine to reproduce — not
 /// worth the coupling for this vanishingly rare edge. See
 /// `tests/golden/README.md`.
-///
-/// `ignore_order_nested_low_overlap_dict_pairing`: the *pairing decision*
-/// this case exercises is now fixed and matches real `DeepDiff` exactly
-/// (see `crate::ignore_order`'s own
-/// `ignore_order_pairing_is_not_corrupted_by_a_nested_low_overlap_dict_pair`
-/// unit test) — the one remaining divergence is confined to the nested
-/// `root[2][0]` dict-vs-dict subtree's own *shape*, which is the separate,
-/// disclosed, pre-existing `threshold_to_diff_deeper` gap in
-/// `crate::diff::object_diff`'s real reported output (unrelated to
-/// `ignore_order`, tracked as its own follow-up rather than fixed here —
-/// see `tests/golden/README.md`'s "Known `DeepDiff` quirks" section).
-const KNOWN_DIVERGENT_CASES: &[&str] = &[
-    "path_rendering_collision",
-    "ignore_order_nested_low_overlap_dict_pairing",
-];
+const KNOWN_DIVERGENT_CASES: &[&str] = &["path_rendering_collision"];
 
 /// Every golden case not listed in [`KNOWN_DIVERGENT_CASES`] must match its
 /// `expected.json` exactly. Failures across the *whole* corpus are
@@ -189,28 +176,30 @@ fn path_rendering_collision_does_not_panic_and_is_deepdiff_shaped() {
     assert_eq!(actual, expected_survivor);
 }
 
-/// Pins the *fixed* half of `ignore_order_nested_low_overlap_dict_pairing`
-/// directly against the golden fixture's own `a.json`/`b.json` (not just
-/// the inline-literal unit test in `crate::ignore_order`): the pairing
-/// itself (`1` <-> `2`, `[{aa,bb,cc}]` <-> `[{}]`, `0.0` unpaired-added)
-/// now matches real `DeepDiff`'s own decision exactly — see
-/// [`KNOWN_DIVERGENT_CASES`]'s doc for why this case is still listed there
-/// (the nested `root[2][0]` subtree's own shape, not the pairing, is the
-/// one thing still diverging, and that divergence is the separate,
-/// disclosed, pre-existing `threshold_to_diff_deeper` gap).
+/// Pins `ignore_order_nested_low_overlap_dict_pairing` directly against the
+/// golden fixture's own `a.json`/`b.json` (not just the inline-literal unit
+/// test in `crate::ignore_order`): both the pairing itself (`1` <-> `2`,
+/// `[{aa,bb,cc}]` <-> `[{}]`, `0.0` unpaired-added) and the nested
+/// `root[2][0]` dict-vs-dict subtree's own shape (a collapsed
+/// `values_changed` with `new_path`) now match real `DeepDiff`'s decision
+/// exactly, so this is now covered by the blanket
+/// `every_golden_case_matches_deepdiff` loop too — this test stays as an
+/// explicit, self-documenting pin of the exact shape.
 #[test]
-fn ignore_order_nested_low_overlap_dict_pairing_matches_deepdiff_except_the_disclosed_gap() {
+fn ignore_order_nested_low_overlap_dict_pairing_matches_deepdiff_exactly() {
     let actual = diff_case("ignore_order_nested_low_overlap_dict_pairing");
-    let expected_given_the_pairing_bug_is_fixed = serde_json::json!({
-        "dictionary_item_removed": {
-            "root[2][0]['aa']": 1,
-            "root[2][0]['bb']": 2,
-            "root[2][0]['cc']": 3,
-        },
+    let expected = serde_json::json!({
         "iterable_item_added": {"root[1]": 0.0},
-        "values_changed": {"root[1]": {
-            "new_path": "root[2]", "new_value": 2, "old_value": 1,
-        }},
+        "values_changed": {
+            "root[1]": {
+                "new_path": "root[2]", "new_value": 2, "old_value": 1,
+            },
+            "root[2][0]": {
+                "new_path": "root[3][0]",
+                "new_value": {},
+                "old_value": {"aa": 1, "bb": 2, "cc": 3},
+            },
+        },
     });
-    assert_eq!(actual, expected_given_the_pairing_bug_is_fixed);
+    assert_eq!(actual, expected);
 }

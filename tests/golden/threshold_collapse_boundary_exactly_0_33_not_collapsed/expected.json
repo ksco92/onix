@@ -1,0 +1,205 @@
+{
+  "dictionary_item_removed": {
+    "root['k33']": 33,
+    "root['k34']": 34,
+    "root['k35']": 35,
+    "root['k36']": 36,
+    "root['k37']": 37,
+    "root['k38']": 38,
+    "root['k39']": 39,
+    "root['k40']": 40,
+    "root['k41']": 41,
+    "root['k42']": 42,
+    "root['k43']": 43,
+    "root['k44']": 44,
+    "root['k45']": 45,
+    "root['k46']": 46,
+    "root['k47']": 47,
+    "root['k48']": 48,
+    "root['k49']": 49,
+    "root['k50']": 50,
+    "root['k51']": 51,
+    "root['k52']": 52,
+    "root['k53']": 53,
+    "root['k54']": 54,
+    "root['k55']": 55,
+    "root['k56']": 56,
+    "root['k57']": 57,
+    "root['k58']": 58,
+    "root['k59']": 59,
+    "root['k60']": 60,
+    "root['k61']": 61,
+    "root['k62']": 62,
+    "root['k63']": 63,
+    "root['k64']": 64,
+    "root['k65']": 65,
+    "root['k66']": 66,
+    "root['k67']": 67,
+    "root['k68']": 68,
+    "root['k69']": 69,
+    "root['k70']": 70,
+    "root['k71']": 71,
+    "root['k72']": 72,
+    "root['k73']": 73,
+    "root['k74']": 74,
+    "root['k75']": 75,
+    "root['k76']": 76,
+    "root['k77']": 77,
+    "root['k78']": 78,
+    "root['k79']": 79,
+    "root['k80']": 80,
+    "root['k81']": 81,
+    "root['k82']": 82,
+    "root['k83']": 83,
+    "root['k84']": 84,
+    "root['k85']": 85,
+    "root['k86']": 86,
+    "root['k87']": 87,
+    "root['k88']": 88,
+    "root['k89']": 89,
+    "root['k90']": 90,
+    "root['k91']": 91,
+    "root['k92']": 92,
+    "root['k93']": 93,
+    "root['k94']": 94,
+    "root['k95']": 95,
+    "root['k96']": 96,
+    "root['k97']": 97,
+    "root['k98']": 98,
+    "root['k99']": 99
+  },
+  "values_changed": {
+    "root['k0']": {
+      "new_value": 1000,
+      "old_value": 0
+    },
+    "root['k1']": {
+      "new_value": 1001,
+      "old_value": 1
+    },
+    "root['k10']": {
+      "new_value": 1010,
+      "old_value": 10
+    },
+    "root['k11']": {
+      "new_value": 1011,
+      "old_value": 11
+    },
+    "root['k12']": {
+      "new_value": 1012,
+      "old_value": 12
+    },
+    "root['k13']": {
+      "new_value": 1013,
+      "old_value": 13
+    },
+    "root['k14']": {
+      "new_value": 1014,
+      "old_value": 14
+    },
+    "root['k15']": {
+      "new_value": 1015,
+      "old_value": 15
+    },
+    "root['k16']": {
+      "new_value": 1016,
+      "old_value": 16
+    },
+    "root['k17']": {
+      "new_value": 1017,
+      "old_value": 17
+    },
+    "root['k18']": {
+      "new_value": 1018,
+      "old_value": 18
+    },
+    "root['k19']": {
+      "new_value": 1019,
+      "old_value": 19
+    },
+    "root['k2']": {
+      "new_value": 1002,
+      "old_value": 2
+    },
+    "root['k20']": {
+      "new_value": 1020,
+      "old_value": 20
+    },
+    "root['k21']": {
+      "new_value": 1021,
+      "old_value": 21
+    },
+    "root['k22']": {
+      "new_value": 1022,
+      "old_value": 22
+    },
+    "root['k23']": {
+      "new_value": 1023,
+      "old_value": 23
+    },
+    "root['k24']": {
+      "new_value": 1024,
+      "old_value": 24
+    },
+    "root['k25']": {
+      "new_value": 1025,
+      "old_value": 25
+    },
+    "root['k26']": {
+      "new_value": 1026,
+      "old_value": 26
+    },
+    "root['k27']": {
+      "new_value": 1027,
+      "old_value": 27
+    },
+    "root['k28']": {
+      "new_value": 1028,
+      "old_value": 28
+    },
+    "root['k29']": {
+      "new_value": 1029,
+      "old_value": 29
+    },
+    "root['k3']": {
+      "new_value": 1003,
+      "old_value": 3
+    },
+    "root['k30']": {
+      "new_value": 1030,
+      "old_value": 30
+    },
+    "root['k31']": {
+      "new_value": 1031,
+      "old_value": 31
+    },
+    "root['k32']": {
+      "new_value": 1032,
+      "old_value": 32
+    },
+    "root['k4']": {
+      "new_value": 1004,
+      "old_value": 4
+    },
+    "root['k5']": {
+      "new_value": 1005,
+      "old_value": 5
+    },
+    "root['k6']": {
+      "new_value": 1006,
+      "old_value": 6
+    },
+    "root['k7']": {
+      "new_value": 1007,
+      "old_value": 7
+    },
+    "root['k8']": {
+      "new_value": 1008,
+      "old_value": 8
+    },
+    "root['k9']": {
+      "new_value": 1009,
+      "old_value": 9
+    }
+  }
+}

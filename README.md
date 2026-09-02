@@ -96,9 +96,8 @@ single deterministic line is easiest to diff byte-for-byte.
   source-cited spec this implements. **Known divergences** (both `ignore_order`- and
   ordered-path-related) are tracked in
   [`tests/golden/README.md`](tests/golden/README.md)'s "Known DeepDiff
-  quirks" section — as of M7 there is exactly one, a pre-existing,
-  unrelated-to-`ignore_order` gap in ordinary dict comparison
-  (`threshold_to_diff_deeper`), not yet fixed.
+  quirks" section — an intentionally-unchased path-rendering edge case and
+  a narrow list-LCS numeric-precision limit.
 - `--timing` prints exactly one line of JSON to **stderr** —
   `{"parse_ns": N, "diff_ns": N}` — measuring only the `serde_json` parse of
   the two inputs and only the diff call, respectively — the same

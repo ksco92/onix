@@ -58,8 +58,11 @@ to/from an empty list, tail growth/shrink keyed by absolute original index,
 and a same-length element change), every nesting combination
 (dict-in-dict, list-in-list, dict-in-list, list-in-dict), unicode keys, key
 quoting/escaping edge cases (single quote, double quote, both, a literal
-backslash, and control characters), and one adversarial path-rendering
-collision (see below).
+backslash, and control characters), the `threshold_to_diff_deeper=0.33`
+dict-vs-dict collapse (`threshold_collapse_*` cases: root and nested,
+the boundary at exactly `0.33` vs just below it, dict-in-list, deeply
+nested collapsed values, and alongside an unrelated `type_changes`), and
+one adversarial path-rendering collision (see below).
 
 **List-compat fix (`list_lcs_*` cases, M6b):** `DeepDiff`'s LCS/`difflib`-style
 list matching for all-scalar lists — the M6 repro (a reorder producing an
@@ -141,42 +144,30 @@ not part of this fixed corpus.
   case exercises it; the M6 benchmark fixtures' integers stay well under
   this bound).
 
-- **`threshold_to_diff_deeper` — a real, PRE-EXISTING gap unrelated to
-  `ignore_order` (M7 finding, surfaced by its differential fuzzer, but not
-  an `ignore_order`-specific bug).** Real `DeepDiff`'s default
-  `threshold_to_diff_deeper=0.33` (`_diff_dict`, diff.py) collapses a
-  dict-vs-dict comparison whose key overlap (intersection / union) is
-  below 0.33 into a single wholesale `values_changed` instead of
-  recursing key by key — confirmed to fire identically whether or not
-  `ignore_order` is set. `crate::diff::object_diff` (the actual, ordinary
-  dict-vs-dict diff — in use since M2) has no such check on its real,
-  user-facing reported-output path and always recurses granularly there.
-  Repro: `{"a": 1, "b": 2, "c": 3}` vs `{"d": 4, "e": 5, "f": 6}` — real
-  `DeepDiff` reports one `values_changed` at the dict's own path; onix
-  reports 3 `dictionary_item_removed` + 3 `dictionary_item_added`. **Not
-  fixed in this port** — tracked as its own prominent follow-up slice
-  (planned next-up, after M7 merges). See the golden case
-  `ignore_order_nested_low_overlap_dict_pairing` for this gap surfacing
-  inside a nested `ignore_order` subtree.
-  `crate::ignore_order::count_object_diff_leaves` already implements the
-  same rule correctly for the `ignore_order` *distance* computation.
-  **Update (M7 re-verify round):** this gap used to reach `ignore_order` a
-  *second*, worse way too — `count_array_diff_leaves`'s own trial sub-diff
-  reused the real `object_diff` to recurse into a nested dict-vs-dict pair,
-  so an inflated (non-threshold-aware) leaf count there could push a
-  candidate pair's measured distance past `CUTOFF_DISTANCE_FOR_PAIRS` and
-  corrupt the *pairing decision itself*, not just the reported shape (see
-  `crate::ignore_order`'s `ignore_order_pairing_is_not_corrupted_by_a_
-  nested_low_overlap_dict_pair` regression test for the exact repro). That
-  route is now closed (`crate::DiffOptions::collapse_low_overlap_dicts`, a
-  crate-private, trial-diff-only gate on `object_diff` — never set for a
-  real, user-facing diff): only the plain-dict-comparison reported-shape
-  gap described above remains open.
+`crate::diff::object_diff` (the ordinary dict-vs-dict diff, used
+identically whether or not `ignore_order` is set) implements `DeepDiff`'s
+`threshold_to_diff_deeper=0.33` (`_diff_dict`, diff.py): a dict-vs-dict
+comparison whose key overlap (intersection / union) is below `0.33`
+collapses into a single wholesale `values_changed` (old/new value the
+whole dict) instead of recursing key by key, at every nesting level
+including the root. Repro: `{"a": 1, "b": 2, "c": 3}` vs
+`{"d": 4, "e": 5, "f": 6}` — one `values_changed` at the dict's own path.
+See the `threshold_collapse_*` golden cases for the boundary (exactly
+`0.33` does not collapse; just below does), nesting, and dict-in-list
+coverage, and `ignore_order_nested_low_overlap_dict_pairing` /
+`ignore_order_threshold_collapse_paired_dict` for this collapse surfacing
+inside a paired `ignore_order` subtree.
+`crate::ignore_order::count_object_diff_leaves` applies the identical rule
+for the `ignore_order` *distance* computation, and
+`crate::ignore_order::count_array_diff_leaves`'s own trial sub-diff for a
+nested array pair now measures a nested dict-vs-dict candidate through
+this same real `object_diff` collapse, so no inflated leaf count can flip
+a pairing decision.
 
 Every other divergence found during M5b was fixed in `onix-core` to match
-`DeepDiff` exactly. The two path-rendering exceptions above, the list-LCS
-`2^53` limitation, and the `threshold_to_diff_deeper` gap just above are
-the only accepted, documented exceptions — `ignore_order`'s own
-differential-fuzz testing (thousands of cases across both a general-purpose
-and a nested-low-overlap-dict-biased generator, see `scripts/
-m7_differential_fuzz.py`) found zero *other* unexplained divergences.
+`DeepDiff` exactly. The two path-rendering exceptions above and the
+list-LCS `2^53` limitation are the only accepted, documented exceptions —
+`ignore_order`'s own differential-fuzz testing (thousands of cases across
+both a general-purpose and a nested-low-overlap-dict-biased generator, see
+`scripts/m7_differential_fuzz.py`) found zero *other* unexplained
+divergences.

@@ -174,7 +174,6 @@ fn max_depth_exceeded_on_an_over_budget_item_is_a_clean_error() {
         &DiffOptions {
             max_depth: 3,
             ignore_order: true,
-            collapse_low_overlap_dicts: false,
         },
     )
     .unwrap_err();
@@ -195,7 +194,6 @@ fn max_depth_boundary_is_exact_for_an_item_on_the_a_side() {
         &DiffOptions {
             max_depth: 2,
             ignore_order: true,
-            collapse_low_overlap_dicts: false,
         },
     )
     .unwrap_err();
@@ -211,7 +209,6 @@ fn max_depth_boundary_is_exact_for_an_item_on_the_b_side() {
         &DiffOptions {
             max_depth: 2,
             ignore_order: true,
-            collapse_low_overlap_dicts: false,
         },
     )
     .unwrap_err();
@@ -258,7 +255,6 @@ fn paired_recursion_depth_boundary_is_exact() {
         &DiffOptions {
             max_depth: 2,
             ignore_order: true,
-            collapse_low_overlap_dicts: false,
         },
     )
     .unwrap_err();
@@ -364,9 +360,12 @@ fn structural_pairing_of_records_with_null_bool_and_nested_list_fields() {
 #[test]
 fn ignore_order_is_a_no_op_on_dict_comparison_itself() {
     // Spec §1: dicts are never affected by ignore_order — only
-    // list-typed VALUES inside them, recursively.
+    // list-typed VALUES inside them, recursively. The shared "z" key keeps
+    // key overlap above the threshold_to_diff_deeper cutoff so this
+    // exercises the normal per-key add/remove path rather than a
+    // wholesale collapse.
     assert_eq!(
-        ignore_order_diff(&json!({"a": 1}), &json!({"b": 1})),
+        ignore_order_diff(&json!({"a": 1, "z": 9}), &json!({"b": 1, "z": 9})),
         json!({
             "dictionary_item_added": {"root['b']": 1},
             "dictionary_item_removed": {"root['a']": 1},
@@ -713,38 +712,34 @@ fn ignore_order_pairing_is_not_corrupted_by_a_nested_low_overlap_dict_pair() {
     // producing a completely different report shape from real
     // `DeepDiff`'s.
     //
-    // `crate::diff::object_diff`'s new `collapse_low_overlap_dicts`
-    // trial-only branch (gated by
-    // `crate::DiffOptions::collapse_low_overlap_dicts`, set only by
-    // this module's own `count_array_diff_leaves`) fixes the pairing:
-    // this now matches real `DeepDiff`'s pairing decision exactly
-    // (`1` <-> `2`, `[{aa,bb,cc}]` <-> `[{}]`, `0.0` unpaired-added).
-    //
-    // The nested `root[2][0]` dict-vs-dict subtree's own *shape* still
-    // diverges from real `DeepDiff` (a single collapsed `values_changed`
-    // there) — that is the separate, disclosed, pre-existing
-    // `threshold_to_diff_deeper` gap in `object_diff`'s real (non-trial)
-    // reported output, filed as its own TODO follow-up, not fixed here
-    // (see `tests/golden/README.md`'s "Known DeepDiff quirks" and this
-    // module's `THRESHOLD_TO_DIFF_DEEPER` doc for the full story). This
-    // test pins that the divergence is now confined to *exactly* that
-    // one, already-disclosed shape and nothing worse — see the sibling
-    // golden case `ignore_order_nested_low_overlap_dict_pairing` for
-    // the real-`DeepDiff`-generated `expected.json` this diverges from.
+    // `count_array_diff_leaves`'s trial sub-diff now measures this nested
+    // dict-vs-dict candidate through `crate::diff::object_diff`'s own
+    // unconditional `threshold_to_diff_deeper` collapse, fixing the
+    // pairing: this now matches real `DeepDiff`'s pairing decision exactly
+    // (`1` <-> `2`, `[{aa,bb,cc}]` <-> `[{}]`, `0.0` unpaired-added) — and,
+    // since the collapse is no longer trial-only, the nested `root[2][0]`
+    // subtree's own reported shape now matches real `DeepDiff` exactly
+    // too (a single collapsed `values_changed` with `new_path`, not
+    // granular `dictionary_item_removed`s). See the sibling golden case
+    // `ignore_order_nested_low_overlap_dict_pairing` for the
+    // real-`DeepDiff`-generated `expected.json` this now matches
+    // byte-for-byte.
     let a = json!(["y", 1, [{"aa": 1, "bb": 2, "cc": 3}]]);
     let b = json!(["y", 0.0, 2, [{}]]);
     assert_eq!(
         ignore_order_diff(&a, &b),
         json!({
-            "dictionary_item_removed": {
-                "root[2][0]['aa']": 1,
-                "root[2][0]['bb']": 2,
-                "root[2][0]['cc']": 3,
-            },
             "iterable_item_added": {"root[1]": 0.0},
-            "values_changed": {"root[1]": {
-                "new_path": "root[2]", "new_value": 2, "old_value": 1,
-            }},
+            "values_changed": {
+                "root[1]": {
+                    "new_path": "root[2]", "new_value": 2, "old_value": 1,
+                },
+                "root[2][0]": {
+                    "new_path": "root[3][0]",
+                    "new_value": {},
+                    "old_value": {"aa": 1, "bb": 2, "cc": 3},
+                },
+            },
         })
     );
 }
@@ -869,7 +864,6 @@ fn count_object_diff_leaves_shared_key_recursion_depth_boundary_is_exact() {
     let opts = DiffOptions {
         max_depth: 3,
         ignore_order: false,
-        collapse_low_overlap_dicts: false,
     };
     let a = json!({"x": [{"a": {"b": 1}}]}).as_object().unwrap().clone();
     let b = json!({"x": [{"a": {"b": 9}}]}).as_object().unwrap().clone();
@@ -1066,7 +1060,6 @@ fn rough_distance_depth_boundary_is_exact() {
     let opts = DiffOptions {
         max_depth: 3,
         ignore_order: false,
-        collapse_low_overlap_dicts: false,
     };
     let removed = json!([{"a": {"b": 1}}]);
     let added = json!([{"a": {"b": 9}}]);

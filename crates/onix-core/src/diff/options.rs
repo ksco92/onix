@@ -36,29 +36,6 @@ pub struct DiffOptions {
     /// Dicts are unaffected (always key-compared); this only changes how
     /// *list-typed* values compare, recursively.
     pub ignore_order: bool,
-    /// **Crate-private, trial-diff-only knob — never `true` for a real,
-    /// user-facing diff.** When `true`, [`object_diff`] collapses a
-    /// dict-vs-dict comparison whose key overlap is below `DeepDiff`'s own
-    /// `threshold_to_diff_deeper` into a single wholesale `values_changed`
-    /// (matching `crate::ignore_order::count_object_diff_leaves`'s own
-    /// threshold-aware count) instead of its normal full per-key recursion.
-    ///
-    /// This exists because `ignore_order`'s own candidate-pairing distance
-    /// measurement reuses this very engine (`array_diff`/`object_diff`,
-    /// through [`crate::ignore_order::count_array_diff_leaves`]'s trial
-    /// sub-diff) to measure a nested array pair's distance — and a
-    /// dict-vs-dict pair accepted *inside* that trial must be measured the
-    /// same threshold-aware way real `DeepDiff`'s own distance computation
-    /// measures it (its distance is computed over its `DELTA_VIEW`, which
-    /// already reflects this collapse), or an inflated leaf count can flip
-    /// a pairing decision entirely. It is set only by
-    /// [`crate::ignore_order::count_array_diff_leaves`]'s own internal
-    /// trial `DiffOptions` and is never surfaced on the public API — the
-    /// real, user-facing *reported* shape does not implement this collapse
-    /// (a separate, disclosed, pre-existing gap in [`object_diff`] itself,
-    /// unrelated to `ignore_order` — see `tests/golden/README.md`'s "Known
-    /// `DeepDiff` quirks" section).
-    pub(crate) collapse_low_overlap_dicts: bool,
 }
 
 impl Default for DiffOptions {
@@ -66,7 +43,6 @@ impl Default for DiffOptions {
         Self {
             max_depth: DEFAULT_MAX_DEPTH,
             ignore_order: false,
-            collapse_low_overlap_dicts: false,
         }
     }
 }
@@ -119,8 +95,10 @@ pub fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
 /// use onix_core::diff::{DiffOptions, diff_with_options};
 /// use serde_json::json;
 ///
-/// let mut opts = DiffOptions::default();
-/// opts.ignore_order = true;
+/// let opts = DiffOptions {
+///     ignore_order: true,
+///     ..DiffOptions::default()
+/// };
 /// let report = diff_with_options(&json!([1, 2, 3]), &json!([3, 2, 1]), &opts).unwrap();
 /// assert!(report.is_empty());
 /// ```
@@ -245,7 +223,6 @@ pub fn diff_with_max_depth(a: &Value, b: &Value, max_depth: usize) -> Result<Rep
         &DiffOptions {
             max_depth,
             ignore_order: false,
-            collapse_low_overlap_dicts: false,
         },
     )
 }

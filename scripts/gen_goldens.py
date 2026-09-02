@@ -65,6 +65,56 @@ CASES: dict[str, tuple[JsonValue, JsonValue]] = {
         {"a": {"x": 1, "y": 2}},
         {"a": {"x": 1, "z": 3}},
     ),
+    # threshold_to_diff_deeper=0.33: below this key-overlap ratio
+    # (intersection / union), a dict-vs-dict comparison collapses into one
+    # wholesale values_changed (old/new value the whole dict) instead of
+    # recursing key by key. Zero overlap at the root.
+    "threshold_collapse_root_zero_overlap": (
+        {"a": 1, "b": 2, "c": 3},
+        {"d": 4, "e": 5, "f": 6},
+    ),
+    # Same collapse one level down, nested inside an unrelated key.
+    "threshold_collapse_nested_low_overlap": (
+        {"x": {"a": 1, "b": 2, "c": 3}},
+        {"x": {"d": 4, "e": 5, "f": 6}},
+    ),
+    # A shared key with an unchanged value doesn't save the pair from
+    # collapsing: overlap is 1/5 = 0.2, still below the cutoff, so the
+    # whole dict collapses even though "a" is identical on both sides.
+    "threshold_collapse_shared_key_same_value_still_collapses": (
+        {"a": 1, "b": 2, "c": 3},
+        {"a": 1, "d": 4, "e": 5},
+    ),
+    # Boundary: 33 shared keys out of 100 total is a ratio of exactly
+    # 0.33, which does NOT collapse (the check is strict "<", not "<=").
+    "threshold_collapse_boundary_exactly_0_33_not_collapsed": (
+        {f"k{i}": i for i in range(100)},
+        {f"k{i}": i + 1000 for i in range(33)},
+    ),
+    # One key overlap fewer (32/100 = 0.32) crosses the boundary and
+    # collapses.
+    "threshold_collapse_boundary_just_below_0_32_collapsed": (
+        {f"k{i}": i for i in range(100)},
+        {f"k{i}": i + 1000 for i in range(32)},
+    ),
+    # The same collapse fires for a dict nested inside a list, on the
+    # ordinary (non-ignore_order) index-aligned comparison path.
+    "threshold_collapse_dict_in_list_ordered": (
+        [{"a": 1, "b": 2, "c": 3}],
+        [{"d": 4, "e": 5, "f": 6}],
+    ),
+    # The collapsed old/new value can itself carry arbitrarily nested
+    # structure — the whole dict is cloned in as-is.
+    "threshold_collapse_deep_nested_values": (
+        {"p": {"q": {"r": 1}}, "s": 2, "t": 3},
+        {"u": 4, "v": 5, "w": 6},
+    ),
+    # A collapsed dict-vs-dict pair coexists with an unrelated type_changes
+    # finding elsewhere in the same tree.
+    "threshold_collapse_alongside_type_changes": (
+        {"x": {"a": 1, "b": 2, "c": 3}, "y": 5},
+        {"x": {"d": 4, "e": 5, "f": 6}, "y": "5"},
+    ),
     # List item added/removed: from/to empty, tail growth/shrink (surplus
     # keyed by absolute original index, not renumbered), and a same-length
     # element change.
@@ -285,12 +335,10 @@ IGNORE_ORDER_CASES: dict[str, tuple[JsonValue, JsonValue, dict[str, bool]]] = {
         {"ignore_order": True},
     ),
     # High key-overlap by design (avoids DeepDiff's own default
-    # threshold_to_diff_deeper=0.33 "give up and report a wholesale
-    # values_changed instead of granular add/remove" behavior — a genuine,
-    # PRE-EXISTING gap in onix-core's object_diff, unrelated to ignore_order
-    # (confirmed to fire identically on the plain ordered path too) and
-    # explicitly out of scope for this slice; tracked separately as its
-    # own follow-up, not fixed here.
+    # threshold_to_diff_deeper=0.33 wholesale-collapse behavior, see the
+    # threshold_collapse_* cases above), so this exercises the normal
+    # per-key recursion path and pins down that dict comparison itself is
+    # unaffected by ignore_order.
     "ignore_order_dict_comparison_unaffected": (
         {"a": 1, "s1": 1, "s2": 2, "s3": 3},
         {"b": 1, "s1": 1, "s2": 2, "s3": 3},
@@ -319,24 +367,24 @@ IGNORE_ORDER_CASES: dict[str, tuple[JsonValue, JsonValue, dict[str, bool]]] = {
         [[0.0]],
         {"ignore_order": True},
     ),
-    # Re-verify-round finding: `count_array_diff_leaves`'s trial
-    # sub-diff recursed into a nested dict-vs-dict pair (`[{aa,bb,cc}]` vs
-    # `[{}]`) through the real, non-`threshold_to_diff_deeper`-aware
-    # `crate::diff::object_diff`, inflating that candidate's measured
-    # distance past `CUTOFF_DISTANCE_FOR_PAIRS` and corrupting the *pairing
-    # decision itself* (not just the reported shape) — the disclosed M2
-    # `threshold_to_diff_deeper` gap reaching into `ignore_order` through a
-    # route the M7 review missed the first time. Fixed at the distance
-    # layer (`crate::DiffOptions::collapse_low_overlap_dicts`); the pairing
-    # below now matches real `DeepDiff` exactly. This case is still listed
-    # in `KNOWN_DIVERGENT_CASES` (`crates/onix-core/tests/golden.rs`)
-    # because the nested `root[2][0]` subtree's own *shape* still shows the
-    # separate, disclosed, pre-existing `threshold_to_diff_deeper` gap in
-    # `object_diff`'s real reported output (unfixed, next-up) — see
-    # `tests/golden/README.md`'s "Known DeepDiff quirks".
+    # A nested dict-vs-dict pair with low key overlap (`[{aa,bb,cc}]` vs
+    # `[{}]`) inside an ignore_order pairing candidate: both the pairing
+    # decision itself and the nested pair's own reported shape (a
+    # collapsed values_changed, not granular add/remove) now match real
+    # DeepDiff exactly.
     "ignore_order_nested_low_overlap_dict_pairing": (
         ["y", 1, [{"aa": 1, "bb": 2, "cc": 3}]],
         ["y", 0.0, 2, [{}]],
+        {"ignore_order": True},
+    ),
+    # threshold_to_diff_deeper collapse surfacing through a matched pair
+    # under ignore_order: "anchor" keeps this list's overlap high enough
+    # that get_pairs engages and the low-overlap dicts land in the same
+    # slot, so the collapse is visible in the paired recursion's own
+    # reported output, not just a top-level add/remove.
+    "ignore_order_threshold_collapse_paired_dict": (
+        ["anchor", {"a": 1, "b": 2, "c": 3}],
+        ["anchor", {"d": 4, "e": 5, "f": 6}],
         {"ignore_order": True},
     ),
 }

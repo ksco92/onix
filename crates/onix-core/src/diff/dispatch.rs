@@ -6,7 +6,7 @@
 //! See the parent `diff` module's doc for the full recursion-depth hardening
 //! story (the "M3-pre" section) this file implements.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::error::Error;
 use crate::path::{PathSegment, render_path};
@@ -191,6 +191,48 @@ pub(crate) fn check_value_depth(
     max_depth: usize,
 ) -> Result<(), Error> {
     if deeper_than(value, max_depth.saturating_sub(depth)) {
+        return Err(Error::MaxDepthExceeded {
+            path: render_path(path),
+            max_depth,
+        });
+    }
+    Ok(())
+}
+/// Like [`deeper_than`], but walks a dict's fields directly instead of
+/// requiring an owned `Value::Object` wrapping them — every field starts at
+/// depth `1`, exactly matching what wrapping `map` in a `Value::Object` and
+/// calling [`deeper_than`] on that would compute (an empty map is nesting
+/// `0` either way, since there are no fields to push).
+pub(crate) fn map_deeper_than(map: &Map<String, Value>, limit: usize) -> bool {
+    let mut stack: Vec<(&Value, usize)> = map.values().map(|value| (value, 1)).collect();
+
+    while let Some((v, depth)) = stack.pop() {
+        if depth > limit {
+            return true;
+        }
+        match v {
+            Value::Array(items) => stack.extend(items.iter().map(|item| (item, depth + 1))),
+            Value::Object(map) => stack.extend(map.values().map(|item| (item, depth + 1))),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
+    false
+}
+/// [`check_value_depth`]'s twin for a dict that hasn't been cloned into a
+/// `Value` yet: checks `map`'s own nesting directly ([`map_deeper_than`])
+/// so a caller that is *deciding whether to clone* an untrusted dict — like
+/// [`object_diff`]'s `threshold_to_diff_deeper` collapse, which would
+/// otherwise clone the whole dict into a finding before any depth check
+/// could reject it — can check first and only pay for the clone once this
+/// passes.
+pub(crate) fn check_map_depth(
+    path: &[PathSegment],
+    map: &Map<String, Value>,
+    depth: usize,
+    max_depth: usize,
+) -> Result<(), Error> {
+    if map_deeper_than(map, max_depth.saturating_sub(depth)) {
         return Err(Error::MaxDepthExceeded {
             path: render_path(path),
             max_depth,

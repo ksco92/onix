@@ -222,7 +222,7 @@ pub use options::{DEFAULT_MAX_DEPTH, DiffOptions, diff, diff_with_max_depth, dif
 
 pub(crate) use array::array_diff;
 pub(crate) use dispatch::{
-    check_traversal_depth, check_value_depth, diff_at, scoped, values_equal,
+    check_map_depth, check_traversal_depth, check_value_depth, diff_at, scoped, values_equal,
 };
 pub(crate) use object::object_diff;
 pub(crate) use scalar::{

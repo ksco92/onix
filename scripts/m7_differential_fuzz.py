@@ -9,30 +9,23 @@ onix's CLI and real `DeepDiff(ignore_order=True)`, and diffs canonical JSON
 output. This is a development-time verification tool — not part of `make
 check`, since it shells out to a debug build and to real `deepdiff`.
 
-Known pre-existing divergence class (unrelated to `ignore_order`, confirmed
-to affect the plain ordered path too): DeepDiff's default
-``threshold_to_diff_deeper=0.33`` collapses a dict-vs-dict comparison with
-low key overlap into a single top-level `values_changed` instead of granular
-add/remove/recurse -- onix's existing (pre-M7) `object_diff` never
-implemented this for the *reported* diff (it IS implemented for the
-ignore_order *distance calculation* specifically, in
-`crate::ignore_order::count_object_diff_leaves` -- see that function's
-doc). Mismatches attributable to this reported-shape class are bucketed
-separately so the M7-specific mismatch count is meaningful.
+`object_diff` applies DeepDiff's `threshold_to_diff_deeper=0.33` dict
+collapse unconditionally (root and nested, ordered and under
+ignore_order), so `is_known_threshold_divergence` below is expected to
+report zero hits — it stays in place as a classifier rather than being
+removed, so a future regression here would surface as a named bucket
+instead of an unexplained mismatch.
 
 Usage::
 
     uv run scripts/m7_differential_fuzz.py [seed] [count] [--bias-nested-low-overlap-dicts]
 
 The optional third argument switches to a generator biased toward nested
-single-dict-in-a-list elements with low key overlap between `a`/`b` -- the
-exact shape that used to let the disclosed `threshold_to_diff_deeper`
-reported-shape gap reach *into* `ignore_order`'s own pairing decisions via
-an inflated trial-diff distance (see
-`crate::ignore_order::THRESHOLD_TO_DIFF_DEEPER`'s doc and
-`crate::DiffOptions::collapse_low_overlap_dicts`) -- now fixed at the
-distance layer; the plain generator above essentially never happens to hit
-this shape on its own.
+single-dict-in-a-list elements with low key overlap between `a`/`b` --
+this shape exercises `ignore_order`'s own pairing decisions when a
+candidate pair's distance depends on a nested dict-vs-dict comparison; the
+plain generator above essentially never happens to hit this shape on its
+own.
 """
 
 import json
@@ -178,9 +171,10 @@ def run_deepdiff(a: JsonValue, b: JsonValue) -> JsonValue:
 
 def is_known_threshold_divergence(expected: JsonValue, actual: JsonValue) -> bool:
     """
-    Heuristic: does this mismatch look like the pre-existing
-    threshold_to_diff_deeper=0.33 dict-collapse gap in the reported (not
-    distance) diff shape (unrelated to ignore_order)?
+    Heuristic: does this mismatch look like the threshold_to_diff_deeper=0.33
+    dict-collapse in the reported diff shape? Kept as a named bucket so a
+    future regression here shows up distinctly rather than as an
+    unexplained mismatch; expected to report zero hits.
 
     :param expected: Real DeepDiff's report.
     :param actual: onix's report.
