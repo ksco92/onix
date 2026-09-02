@@ -28,16 +28,11 @@
 //!
 //! # Where the sizes come from
 //!
-//! Both depth constants are derived from a committed, runnable measurement of
-//! the recursive engine's per-level native stack cost, not from a guess. See
-//! `crates/onix-core/examples/stack_frame_cost.rs`, run with
-//! `cargo run -p onix-core --example stack_frame_cost` (and `--release`): it
-//! binary-searches the deepest genuinely-unequal input that does not overflow
-//! a fixed stack. The worst case is nested lists in a debug build (the
-//! profile `cargo test` uses), at roughly 3.5 KiB per level; a release build
-//! costs roughly 0.9 KiB per level. [`PER_LEVEL_STACK_BYTES`] rounds the
-//! debug worst case up to 4 KiB, and the two thresholds size their margins
-//! against it.
+//! Both depth constants are derived from the recursive engine's per-level
+//! native stack cost, measured (not guessed) by a committed, runnable
+//! example — see [`PER_LEVEL_STACK_BYTES`], which records the figure, the
+//! example, and how to reproduce it. The two thresholds size their margins
+//! against that one constant.
 
 use onix_core::{DEFAULT_MAX_DEPTH, DiffOptions};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -59,8 +54,14 @@ use crate::errors::map_diff_error;
 pub(crate) const MAX_DEPTH_CEILING: usize = 20_000;
 
 /// Worst-case native stack, in bytes, one level of the recursive diff engine
-/// costs: the measured debug figure (~3.5 KiB/level) rounded up to 4 KiB. See
-/// this module's doc for how it is measured and reproduced.
+/// costs — the single source of that figure for both the worker stack and the
+/// inline-vs-worker threshold. Measured by
+/// `crates/onix-core/examples/stack_frame_cost.rs` (`cargo run -p onix-core
+/// --example stack_frame_cost`, and `--release`), which binary-searches the
+/// deepest genuinely-unequal input that does not overflow a fixed stack: the
+/// worst case is nested lists in a debug build (the profile `cargo test`
+/// uses) at roughly 3.5 KiB/level, release roughly 0.9 KiB/level. Rounded up
+/// to 4 KiB here.
 const PER_LEVEL_STACK_BYTES: usize = 4_096;
 
 /// Extra multiplier over the bare `ceiling * per-level` figure, so the worker
@@ -81,15 +82,14 @@ const WORKER_STACK_BYTES: usize = MAX_DEPTH_CEILING * PER_LEVEL_STACK_BYTES * ST
 /// The calling thread's stack is out of this crate's control. Python's main
 /// thread stack is large, but worker threads created with
 /// `threading.stack_size()` — as web servers and async executors routinely
-/// do — can be as small as 512 KiB. `crates/onix-core/examples/stack_frame_cost.rs`
-/// measures the diff recursion's worst case (nested lists, debug build) at
-/// roughly 3.5 KiB per level, so a 512 KiB stack is *estimated* to overflow
-/// somewhere around level ~150 (fixed thread-bootstrap overhead makes the true
-/// figure a little lower). This threshold, 32, sits well below that estimate,
-/// leaving room for that overhead and for the report's own serialize/drop
-/// recursion. Real inputs are almost always far shallower than this, so the
-/// inline path handles the overwhelming majority of diffs with no thread-spawn
-/// overhead.
+/// do — can be as small as 512 KiB. At [`PER_LEVEL_STACK_BYTES`] (4 KiB) per
+/// level, a 512 KiB stack holds on the order of 128 levels of diff recursion
+/// (512 KiB / 4 KiB) before overflowing, and somewhat fewer in practice
+/// because thread bootstrap consumes some of it. This threshold, 32, sits
+/// well below that, leaving room for that overhead and for the report's own
+/// serialize/drop recursion. Real inputs are almost always far shallower than
+/// this, so the inline path handles the overwhelming majority of diffs with
+/// no thread-spawn overhead.
 const MAX_INLINE_DEPTH: usize = 32;
 
 /// Resolves the two Python-supplied diff parameters into a [`DiffOptions`],
