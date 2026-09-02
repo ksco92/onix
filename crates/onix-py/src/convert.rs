@@ -1,7 +1,9 @@
-//! Converts a live Python object graph into a [`serde_json::Value`] once,
-//! up front — the [`crate::deepdiff::DeepDiff`] class's "drop-in" layer diffs the
+//! Converts a live Python object graph into an [`onix_core::Value`] once, up
+//! front — the [`crate::deepdiff::DeepDiff`] class's "drop-in" layer diffs the
 //! converted value model natively; it never touches Python objects again
-//! after conversion.
+//! after conversion. The compact value model is built *directly*: there is no
+//! intermediate `serde_json::Value` tree, so the two input trees only ever
+//! exist in the memory-frugal representation.
 //!
 //! # Supported types (documented MVP scope)
 //!
@@ -11,8 +13,8 @@
 //! | `bool` | `Bool` | checked before `int` — `bool` is a Python `int` subclass |
 //! | `int` | `Number` | must fit in `i64` or `u64`; see below |
 //! | `float` | `Number` | must be finite; see below |
-//! | `str` | `String` | |
-//! | `dict` (`str` keys only) | `Object` | |
+//! | `str` | `Str` | |
+//! | `dict` (`str` keys only) | `Object` | keys interned across the whole walk |
 //! | `list` | `Array` | |
 //!
 //! Every other type raises a Python exception instead of converting:
@@ -27,79 +29,78 @@
 //! - Any other unrecognized type (`tuple`, `set`, `frozenset`, dates,
 //!   custom objects, …) raises [`PyTypeError`] naming the type and the
 //!   exact path it was found at (e.g. `"unsupported type for diffing:
-//!   tuple at root['a'][2]"`) — none of these have a lossless JSON
-//!   representation, and real `DeepDiff`'s support for some of them
-//!   (tuples, sets, dates) is explicitly out of scope for this MVP.
+//!   tuple at root['a'][2]"`).
+//!
+//! # Key interning
+//!
+//! Object keys are interned across the whole conversion via a single
+//! [`onix_core::value::Builder`] threaded through the walk: record-shaped
+//! data repeats a handful of keys across tens of thousands of objects, so
+//! each distinct key costs a single shared allocation rather than one per
+//! occurrence.
 //!
 //! # Depth guard, and why this walk is iterative
 //!
 //! This conversion mirrors the Python object graph's own shape. A naive
 //! implementation would walk it via native recursion, exactly the
 //! stack-overflow class `onix_core`'s own diff engine eliminates for the
-//! *diff* itself (see `onix_core::diff`'s module doc: an explicit
-//! heap-allocated work-stack, no native recursion, so nesting depth can
-//! never overflow the call stack). [`to_value`] uses the identical
-//! technique, an explicit `Vec`-backed stack of in-progress
-//! list/dict frames, walked in a single loop, so peak *native* stack usage
-//! is `O(1)` regardless of how deeply the input is nested. Only the heap
-//! (`stack`/`path` below) grows with depth, which is an ordinary,
-//! catchable allocation concern, not an uncatchable process abort. This
-//! matters independently of the `max_depth` budget below: without it, a
-//! sufficiently deep (but otherwise valid) input crashes the whole Python
-//! interpreter (`SIGSEGV`) before the depth check even has a chance to
-//! fire, however small `max_depth` is set to, once native stack space
-//! itself runs out.
+//! *diff* itself. [`to_value`] uses the identical technique, an explicit
+//! `Vec`-backed stack of in-progress list/dict frames walked in a single
+//! loop, so peak *native* stack usage is `O(1)` regardless of how deeply the
+//! input is nested. Because the build is iterative and the compact
+//! [`onix_core::Value`]'s own `Drop` is iterative too, conversion — and the
+//! teardown of a partially built tree on any error path — is stack-safe on
+//! *any* thread at *any* depth, without a sized worker: only the natively
+//! recursive diff engine still needs one (see [`crate::guard`]).
 //!
 //! On top of that native-stack safety, [`to_value`] separately takes the
 //! same `max_depth` budget the diff itself will use and raises
 //! [`crate::errors::MaxDepthError`] once conversion would recurse past it.
-//! That check is independent of, and runs strictly *before*,
-//! `onix_core::diff_with_options`'s own recursion-depth guard on the
-//! *diff*. This uses the identical depth-counting convention as
-//! `onix_core` (the root value is depth `0`; stepping into a dict value or
-//! list element adds one). It is intentionally a little stricter than
-//! `onix_core::diff_with_max_depth`'s own guarantee that two *equal*
-//! inputs of any depth always diff cleanly, because equality can't be known
-//! yet at conversion time, before either side is even a `Value`.
+//! That check runs strictly *before* `onix_core::diff_with_options`'s own
+//! guard, using the identical depth-counting convention (the root value is
+//! depth `0`; stepping into a dict value or list element adds one). It is
+//! intentionally a little stricter than `onix_core::diff_with_max_depth`'s
+//! guarantee that two *equal* inputs of any depth always diff cleanly,
+//! because equality can't be known yet at conversion time.
 use onix_core::path::{PathSegment, render_path};
+use onix_core::value::Builder;
+use onix_core::{Number as CNumber, Value as CValue};
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::iter::{BoundDictIterator, BoundListIterator};
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
-use serde_json::{Map, Number, Value};
+use serde_json::{Number, Value};
 
 use crate::errors::MaxDepthError;
 
-/// One in-progress container on [`to_value`]'s explicit work-stack: either
-/// a list or a dict whose *n*th child has been dispatched for conversion
-/// and whose remaining children (plus everything converted so far) are
-/// parked here until that child's result comes back.
+/// One in-progress container on [`to_value`]'s explicit work-stack: either a
+/// list or a dict whose *n*th child has been dispatched for conversion and
+/// whose remaining children (plus everything converted so far) are parked
+/// here until that child's result comes back.
 ///
-/// The next child's index (for a list) and every child's depth are not
-/// stored here: both are derivable at the one place they are read, in
-/// [`advance_frame`] — the next index is `built.len()` once the finished
-/// child has been pushed, and the child depth is `path.len()` once its path
-/// segment has been pushed. Storing them as fields would just be a second
-/// copy of that state to keep in sync.
+/// The next child's index (for a list) and every child's depth are derivable
+/// at the one place they are read, in [`advance_frame`] — the next index is
+/// `built.len()` once the finished child has been pushed, and the child depth
+/// is `path.len()` once its path segment has been pushed.
 enum Frame<'py> {
     List {
         remaining: BoundListIterator<'py>,
-        built: Vec<Value>,
+        built: Vec<CValue>,
     },
     Dict {
         remaining: BoundDictIterator<'py>,
-        built: Map<String, Value>,
+        built: Vec<(String, CValue)>,
         current_key: String,
     },
 }
 
 /// What happens when converting a single object: either it produced a
-/// finished [`Value`] outright (a scalar, or an empty list/dict), or it's a
-/// non-empty container — [`to_value`]'s loop pushes a [`Frame`] and
-/// descends into the returned first child.
+/// finished [`CValue`] outright (a scalar, or an empty list/dict), or it's a
+/// non-empty container — [`to_value`]'s loop pushes a [`Frame`] and descends
+/// into the returned first child.
 enum Step<'py> {
-    Done(Value),
+    Done(CValue),
     List {
         iter: BoundListIterator<'py>,
         first: Bound<'py, PyAny>,
@@ -111,24 +112,28 @@ enum Step<'py> {
     },
 }
 
-/// Classifies a single Python object: everything [`to_value`]'s loop does
-/// per node except the `max_depth` check (needs the loop's own `depth`
-/// counter) and attaching the result to the work-stack (needs the loop's
-/// own `path`/`stack`) — kept separate so `to_value` itself stays within a
-/// reasonable function length.
+/// Classifies a single Python object: everything [`to_value`]'s loop does per
+/// node except the `max_depth` check (needs the loop's own `depth` counter)
+/// and attaching the result to the work-stack (needs the loop's own
+/// `path`/`stack`).
 ///
 /// `path` is the path to `current` itself (used verbatim for an
 /// unsupported-type error, and — when `current` is a dict — also passed
-/// through to [`next_dict_entry`] for a bad-key error).
-fn classify<'py>(current: &Bound<'py, PyAny>, path: &[PathSegment]) -> PyResult<Step<'py>> {
+/// through to [`next_dict_entry`] for a bad-key error). `builder` builds the
+/// one container this can finish outright, an empty dict.
+fn classify<'py>(
+    current: &Bound<'py, PyAny>,
+    path: &[PathSegment],
+    builder: &mut Builder,
+) -> PyResult<Step<'py>> {
     if current.is_none() {
-        return Ok(Step::Done(Value::Null));
+        return Ok(Step::Done(CValue::Null));
     }
 
     // `bool` is a Python `int` subclass, so this check must precede the
     // `PyInt` one below or every bool would be misread as an int.
     if let Ok(b) = current.cast::<PyBool>() {
-        return Ok(Step::Done(Value::Bool(b.is_true())));
+        return Ok(Step::Done(CValue::Bool(b.is_true())));
     }
 
     if let Ok(i) = current.cast::<PyInt>() {
@@ -140,14 +145,14 @@ fn classify<'py>(current: &Bound<'py, PyAny>, path: &[PathSegment]) -> PyResult<
     }
 
     if let Ok(s) = current.cast::<PyString>() {
-        return Ok(Step::Done(Value::String(s.to_string())));
+        return Ok(Step::Done(CValue::Str(s.to_string().into_boxed_str())));
     }
 
     if let Ok(list) = current.cast::<PyList>() {
         let mut iter = list.iter();
 
         return Ok(match iter.next() {
-            None => Step::Done(Value::Array(Vec::new())),
+            None => Step::Done(CValue::Array(Box::default())),
             Some(first) => Step::List { iter, first },
         });
     }
@@ -156,7 +161,7 @@ fn classify<'py>(current: &Bound<'py, PyAny>, path: &[PathSegment]) -> PyResult<
         let mut iter = dict.iter();
 
         return Ok(match next_dict_entry(&mut iter, path)? {
-            None => Step::Done(Value::Object(Map::new())),
+            None => Step::Done(builder.object(Vec::new())),
             Some((first_key, first_value)) => Step::Dict {
                 iter,
                 first_key,
@@ -175,18 +180,25 @@ enum Advance<'py> {
         pending: (Bound<'py, PyAny>, usize),
         frame: Frame<'py>,
     },
-    Done(Value),
+    Done(CValue),
 }
 
-/// Attaches a just-finished child `value` into `frame` and figures out
-/// what happens next: either `frame` has another child to convert
-/// (`Advance::NeedsChild`, with `path` extended for it), or `frame` is
-/// fully built (`Advance::Done`). `path` must already have had the
-/// finished child's own segment popped by the caller — see [`to_value`].
+/// Attaches a just-finished child `value` into `frame` and figures out what
+/// happens next: either `frame` has another child to convert
+/// (`Advance::NeedsChild`, with `path` extended for it), or `frame` is fully
+/// built (`Advance::Done`). `path` must already have had the finished child's
+/// own segment popped by the caller — see [`to_value`].
+///
+/// On a bad dict key mid-frame the error just propagates: `built` (its
+/// completed entries, possibly including a deep subtree) drops here
+/// naturally, and the compact [`CValue`]'s iterative `Drop` cannot overflow
+/// the calling thread — no worker hand-off is needed, unlike the old
+/// `serde_json::Value` path.
 fn advance_frame<'py>(
     frame: Frame<'py>,
-    value: Value,
+    value: CValue,
     path: &mut Vec<PathSegment>,
+    builder: &mut Builder,
 ) -> PyResult<Advance<'py>> {
     match frame {
         Frame::List {
@@ -197,16 +209,16 @@ fn advance_frame<'py>(
 
             Ok(match remaining.next() {
                 Some(next_item) => {
-                    // The just-finished child was appended above, so the
-                    // next child's index is the new length, and its depth is
-                    // the path length once its segment is pushed.
+                    // The just-finished child was appended above, so the next
+                    // child's index is the new length, and its depth is the
+                    // path length once its segment is pushed.
                     path.push(PathSegment::Index(built.len()));
                     Advance::NeedsChild {
                         pending: (next_item, path.len()),
                         frame: Frame::List { remaining, built },
                     }
                 }
-                None => Advance::Done(Value::Array(built)),
+                None => Advance::Done(CValue::Array(built.into_boxed_slice())),
             })
         }
         Frame::Dict {
@@ -214,10 +226,10 @@ fn advance_frame<'py>(
             mut built,
             current_key,
         } => {
-            built.insert(current_key, value);
+            built.push((current_key, value));
 
-            match next_dict_entry(&mut remaining, path) {
-                Ok(Some((key, next_value))) => {
+            match next_dict_entry(&mut remaining, path)? {
+                Some((key, next_value)) => {
                     path.push(PathSegment::Key(key.clone()));
                     Ok(Advance::NeedsChild {
                         // The child's depth is the path length once its key
@@ -230,68 +242,44 @@ fn advance_frame<'py>(
                         },
                     })
                 }
-                Ok(None) => Ok(Advance::Done(Value::Object(built))),
-                Err(error) => {
-                    // A bad dict key aborts conversion here. `built` may
-                    // already hold deep completed entries (including the child
-                    // just inserted); route them through the sized-worker drop
-                    // path so their natively recursive `Drop` cannot overflow
-                    // the calling thread.
-                    drop_values_safely(built.into_iter().map(|(_key, value)| value));
-                    Err(error)
-                }
+                None => Ok(Advance::Done(builder.object(built))),
             }
         }
     }
 }
 
-/// Drops every [`Value`] in `values` through
-/// [`crate::guard::drop_value_safely`] (wrapping them in one array so a
-/// single depth check and, if needed, a single sized-worker hand-off covers
-/// them all). Used only on the conversion error paths, where a deep subtree
-/// may already have been built before a later sibling failed to convert and
-/// would otherwise be dropped inline on the calling thread.
-fn drop_values_safely<I: IntoIterator<Item = Value>>(values: I) {
-    let salvage: Vec<Value> = values.into_iter().collect();
-    if !salvage.is_empty() {
-        let wrapped = Value::Array(salvage);
-        let deep = crate::guard::is_deep(&wrapped);
-        crate::guard::drop_value_safely(wrapped, deep);
-    }
-}
-
-/// Converts a Python object into a [`Value`], recursing at most
-/// `max_depth` levels deep — see the module doc for the full conversion
-/// table and why this walk uses an explicit stack instead of native
-/// recursion.
+/// Converts a Python object into an [`onix_core::Value`], recursing at most
+/// `max_depth` levels deep — see the module doc for the full conversion table
+/// and why this walk uses an explicit stack instead of native recursion.
 ///
 /// # Errors
 ///
 /// Returns a Python `ValueError`/[`MaxDepthError`] or `TypeError` per the
 /// module doc's conversion table.
-pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<Value> {
+pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CValue> {
+    let mut builder = Builder::new();
     let mut stack: Vec<Frame<'_>> = Vec::new();
     let mut path: Vec<PathSegment> = Vec::new();
     let mut pending: Option<(Bound<'_, PyAny>, usize)> = Some((obj.clone(), 0));
-    let mut finished: Option<Value> = None;
+    let mut finished: Option<CValue> = None;
 
-    let outcome: PyResult<Value> = loop {
+    // On any error break, `stack` (and its parked, possibly deep entries)
+    // drops here at function return. Every `CValue` has an iterative `Drop`,
+    // so that teardown is stack-safe on the calling thread at any depth — the
+    // conversion never needs a sized-worker drop path.
+    loop {
         if let Some((current, depth)) = pending.take() {
             if depth > max_depth {
-                break Err(max_depth_error(max_depth, &path));
+                return Err(max_depth_error(max_depth, &path));
             }
 
-            let step = match classify(&current, &path) {
-                Ok(step) => step,
-                Err(error) => break Err(error),
-            };
-            match step {
+            match classify(&current, &path, &mut builder)? {
                 Step::Done(value) => finished = Some(value),
                 Step::List { iter, first } => {
                     let child_depth = depth + 1;
                     path.push(PathSegment::Index(0));
-                    // `iter` has already yielded `first`, so the finished
-                    // list will hold `iter.len() + 1` elements — pre-size for
+                    // `iter` has already yielded `first`, so the finished list
+                    // will hold `iter.len() + 1` elements — pre-size for
                     // exactly that (`BoundListIterator` is `ExactSizeIterator`).
                     let capacity = iter.len().saturating_add(1);
                     stack.push(Frame::List {
@@ -308,12 +296,10 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<Val
                 } => {
                     let child_depth = depth + 1;
                     path.push(PathSegment::Key(first_key.clone()));
-                    // As above, `iter` has already yielded the first entry, so
-                    // pre-size the map for `iter.len() + 1` entries.
                     let capacity = iter.len().saturating_add(1);
                     stack.push(Frame::Dict {
                         remaining: iter,
-                        built: Map::with_capacity(capacity),
+                        built: Vec::with_capacity(capacity),
                         current_key: first_key,
                     });
                     pending = Some((first_value, child_depth));
@@ -327,52 +313,29 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<Val
         );
 
         match stack.pop() {
-            None => break Ok(value),
+            None => return Ok(value),
             Some(frame) => {
                 path.pop();
 
-                match advance_frame(frame, value, &mut path) {
-                    Ok(Advance::NeedsChild {
+                match advance_frame(frame, value, &mut path, &mut builder)? {
+                    Advance::NeedsChild {
                         pending: next_pending,
                         frame,
-                    }) => {
+                    } => {
                         stack.push(frame);
                         pending = Some(next_pending);
                     }
-                    Ok(Advance::Done(v)) => finished = Some(v),
-                    // `advance_frame` has already salvaged the failing frame's
-                    // own built entries; salvage the rest of the work-stack
-                    // below before returning.
-                    Err(error) => break Err(error),
+                    Advance::Done(v) => finished = Some(v),
                 }
             }
         }
-    };
-
-    if outcome.is_err() {
-        // A deep sibling may have been fully built into a parked frame before
-        // a later sibling (or a bad dict key, or the depth bound) aborted the
-        // conversion. Dropping those frames inline here would run
-        // `serde_json::Value`'s recursive `Drop` on the calling thread and
-        // could overflow it, so route every parked value through the
-        // sized-worker drop path instead. (`finished` is always `None` at any
-        // error break — it is taken before every one — so only `stack` holds
-        // salvageable values.)
-        debug_assert!(finished.is_none());
-        let leftover = stack.into_iter().flat_map(|frame| match frame {
-            Frame::List { built, .. } => built,
-            Frame::Dict { built, .. } => built.into_iter().map(|(_key, value)| value).collect(),
-        });
-        drop_values_safely(leftover);
     }
-
-    outcome
 }
 
-/// Pulls the next `(key, value)` pair out of a dict iterator, validating
-/// that the key is a `str` — shared by [`to_value`]'s initial descent into
-/// a dict and its `Frame::Dict` advance step, so the validation (and its
-/// error message) is written exactly once.
+/// Pulls the next `(key, value)` pair out of a dict iterator, validating that
+/// the key is a `str` — shared by [`to_value`]'s initial descent into a dict
+/// and its `Frame::Dict` advance step, so the validation (and its error
+/// message) is written exactly once.
 ///
 /// `dict_path` is the path to the *dict itself* (not the entry) — that is
 /// deliberately what a bad key's error reports, since a key that fails to
@@ -397,13 +360,13 @@ fn next_dict_entry<'py>(
     Ok(Some((key.to_string(), value)))
 }
 
-fn int_to_value(i: &Bound<'_, PyInt>) -> PyResult<Value> {
+fn int_to_value(i: &Bound<'_, PyInt>) -> PyResult<CValue> {
     if let Ok(v) = i.extract::<i64>() {
-        return Ok(Value::Number(Number::from(v)));
+        return Ok(CValue::Number(CNumber::from_i64(v)));
     }
 
     if let Ok(v) = i.extract::<u64>() {
-        return Ok(Value::Number(Number::from(v)));
+        return Ok(CValue::Number(CNumber::from_u64(v)));
     }
 
     Err(PyValueError::new_err(
@@ -412,8 +375,8 @@ fn int_to_value(i: &Bound<'_, PyInt>) -> PyResult<Value> {
     ))
 }
 
-fn float_to_value(f: f64) -> PyResult<Value> {
-    Number::from_f64(f).map(Value::Number).ok_or_else(|| {
+fn float_to_value(f: f64) -> PyResult<CValue> {
+    CNumber::from_f64(f).map(CValue::Number).ok_or_else(|| {
         PyValueError::new_err(
             "NaN and infinite floats have no JSON representation and are not supported in this \
              MVP",
@@ -444,11 +407,11 @@ fn type_name(obj: &Bound<'_, PyAny>) -> String {
         .map_or_else(|_| "<unknown type>".to_string(), |name| name.to_string())
 }
 
-/// One in-progress container on [`value_to_pyobject`]'s explicit
-/// work-stack — the same technique as [`Frame`]/[`to_value`], applied in
-/// the opposite direction (`Value` -> Python object) so this direction is
-/// equally immune to the native-stack-overflow class described in the
-/// module doc, on a `Value` tree deep enough to matter.
+/// One in-progress container on [`value_to_pyobject`]'s explicit work-stack —
+/// the same technique as [`Frame`]/[`to_value`], applied in the opposite
+/// direction (report `Value` -> Python object) so this direction is equally
+/// immune to the native-stack-overflow class on a `Value` tree deep enough to
+/// matter.
 enum RenderFrame<'py, 'v> {
     Array {
         remaining: std::slice::Iter<'v, Value>,
@@ -461,17 +424,19 @@ enum RenderFrame<'py, 'v> {
     },
 }
 
-/// Converts a rendered [`Value`] (a [`crate::deepdiff::DeepDiff`] report, or one of
-/// its nested values) back into a native Python object — the parsed form
-/// [`crate::deepdiff::DeepDiff::to_dict`] returns. Unlike [`to_value`], this never
-/// fails: every [`Value`] variant has a lossless Python equivalent. It does
-/// not separately enforce `max_depth` — [`Value`] trees this crate ever
-/// renders are already bounded by `to_value`'s own guard on the way in, or
-/// by `onix_core`'s own `max_depth` contract on a diff report's output —
-/// but it still walks via an explicit stack (see [`RenderFrame`]), not
-/// native recursion, so a `Value` tree nested close to a caller-raised
-/// `max_depth` can never overflow the native stack converting it back,
-/// independent of that bound holding.
+/// Converts a rendered report [`serde_json::Value`] (a
+/// [`crate::deepdiff::DeepDiff`] report, or one of its nested values) into a
+/// native Python object — the parsed form
+/// [`crate::deepdiff::DeepDiff::to_dict`] returns.
+///
+/// The report stays a `serde_json::Value` on this output boundary: it holds
+/// only the diff's changed subtrees (a small fraction of either input), so
+/// keeping the proven byte-compatible render path here costs negligible
+/// memory, while the large input trees are the compact model. Unlike
+/// [`to_value`], this never fails: every report value has a lossless Python
+/// equivalent. It walks via an explicit stack (see [`RenderFrame`]), not
+/// native recursion, so a deep report can never overflow the native stack
+/// converting it back.
 pub(crate) fn value_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
     let mut stack: Vec<RenderFrame<'_, '_>> = Vec::new();
     let mut pending: Option<&Value> = Some(value);
@@ -490,9 +455,6 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<Py<Py
                     match iter.next() {
                         None => Vec::<Py<PyAny>>::new().into_py_any(py)?,
                         Some(first) => {
-                            // `iter` has already yielded `first`, so pre-size
-                            // the output for `iter.len() + 1` elements
-                            // (`slice::Iter` is `ExactSizeIterator`).
                             let capacity = iter.len().saturating_add(1);
                             stack.push(RenderFrame::Array {
                                 remaining: iter,
@@ -574,10 +536,9 @@ fn number_to_pyobject(py: Python<'_>, n: &Number) -> PyResult<Py<PyAny>> {
         return v.into_py_any(py);
     }
 
-    // Every Number this crate ever constructs is either an integer that
-    // fit in i64/u64 (see int_to_value, both handled above) or came
-    // through Number::from_f64 (see float_to_value) — so reaching here
-    // always means the f64 case.
+    // Every Number here came through a report's to_json_value(), which only
+    // ever produces i64/u64/finite-f64 — so reaching here is always the f64
+    // case.
     n.as_f64()
         .expect("serde_json::Number is always i64, u64, or f64")
         .into_py_any(py)

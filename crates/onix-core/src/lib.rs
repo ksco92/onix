@@ -6,10 +6,13 @@
 //! A caller hands two already-parsed [`Value`]s (the crate's own compact,
 //! memory-frugal, byte-compatible JSON value model — see [`mod@value`]) to
 //! [`diff()`] (or [`diff_with_options`]/[`diff_with_max_depth`]); this crate
-//! does no parsing of its own. A caller holding a [`serde_json::Value`]
-//! (as `onix-cli` and the Python bindings do today) converts it with
-//! [`From`] at the call boundary; the engine itself operates entirely on the
-//! compact model. From there:
+//! does no parsing of its own. Callers produce a [`Value`] directly: `onix-cli`
+//! stream-parses JSON text straight into one (via its `serde::Deserialize`
+//! impl), and the Python bindings build one from live Python objects via
+//! [`value::Builder`]. [`From`]`<`[`serde_json::Value`]`>` also exists, as
+//! public API for a caller that already holds a `serde_json::Value` — but the
+//! engine never itself materializes one on the input side; it operates
+//! entirely on the compact model. From there:
 //!
 //! 1. **Dispatch** ([`mod@diff`], specifically its `dispatch` submodule):
 //!    `diff_at` recurses through the pair by JSON type, enforcing the
@@ -59,7 +62,7 @@ pub(crate) mod test_support;
 pub use diff::{DEFAULT_MAX_DEPTH, DiffOptions, diff, diff_with_max_depth, diff_with_options};
 pub use error::Error;
 pub use report::Report;
-pub use value::{Number, Value};
+pub use value::{Builder, Number, Value};
 
 /// Returns `true` if `value` is nested strictly deeper than `limit` levels,
 /// treating `value` itself as the root (depth `0`): a scalar

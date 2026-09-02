@@ -6,8 +6,7 @@
 use std::io::Write;
 use std::time::Instant;
 
-use onix_core::DiffOptions;
-use serde_json::Value;
+use onix_core::{DiffOptions, Value};
 
 use super::args::{USAGE, parse_args, resolve_default_max_depth};
 
@@ -113,15 +112,10 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
         ignore_order: parsed.ignore_order,
     };
 
+    // The inputs were already stream-parsed straight into the compact
+    // `onix_core::Value` (see `read_json_file`), so the `--timing` window below
+    // measures the diff alone again — no boundary conversion inside it.
     let diff_start = Instant::now();
-    // Temporary bridge: the core diff consumes the compact `onix_core::Value`.
-    // CLI inputs are parsed by `serde_json::from_str`, whose own recursion
-    // limit bounds their depth, so this `From` conversion is safe here. It
-    // goes away once the CLI parses into the compact value directly. (Because
-    // this sits inside the `--timing` window, the reported diff time
-    // transiently includes this conversion — see perf/RESULTS.md.)
-    let a_value = onix_core::Value::from(a_value);
-    let b_value = onix_core::Value::from(b_value);
     let result = onix_core::diff_with_options(&a_value, &b_value, &opts);
     let diff_ns = diff_start.elapsed().as_nanos();
 
@@ -145,11 +139,10 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
     match result {
         Ok(report) => {
             let value = report.to_json_value();
-            // A Report's to_json_value() is built entirely from data that
-            // round-tripped through serde_json::Value already (the parsed
-            // inputs above) plus our own path strings, so it can never
-            // contain NaN/Infinity — the only way serde_json::to_string can
-            // fail on a Value (every Value::Object key is always a String,
+            // A Report's to_json_value() is built entirely from the parsed,
+            // finite-number inputs above plus our own path strings, so it can
+            // never contain NaN/Infinity — the only way serde_json::to_string
+            // can fail on a Value (every Value::Object key is always a String,
             // so the other failure mode serde_json documents does not apply
             // here). Safe by construction, not by luck.
             let serialized = serde_json::to_string(&value)

@@ -71,23 +71,16 @@ impl DeepDiff {
         let opts = resolve_options(max_depth, ignore_order)?;
         // Conversion is iterative (no native recursion — see `crate::convert`)
         // and needs the GIL to read the live Python objects, so it stays on
-        // the calling thread.
+        // the calling thread. It builds the compact `onix_core::Value`
+        // directly. If converting `t2` fails after `a` is already a (possibly
+        // deep) legal value, the `?` drops `a` here on the early return — its
+        // iterative `Drop` cannot overflow the calling thread, so no
+        // sized-worker hand-off is needed for it.
         let a = to_value(t1, opts.max_depth)?;
-        // If converting `t2` fails after `a` is already a (possibly deep)
-        // legal `Value`, the early return must not drop `a` inline: its
-        // recursive `Drop` could overflow this calling thread. Route it
-        // through the sized-worker drop path first.
-        let b = match to_value(t2, opts.max_depth) {
-            Ok(b) => b,
-            Err(error) => {
-                let a_is_deep = is_deep(&a);
-                drop_value_safely(a, a_is_deep);
-                return Err(error);
-            }
-        };
+        let b = to_value(t2, opts.max_depth)?;
         // The diff is natively recursive: it runs inline when both inputs are
-        // shallow, else on the stack-sized worker (GIL released), which also
-        // drops `a`, `b`, and the intermediate report on its large stack.
+        // shallow, else on the stack-sized worker (GIL released). The rendered
+        // report comes back as a `serde_json::Value`.
         let report_value = diff_to_value(py, a, b, opts)?;
         let report_is_deep = is_deep(&report_value);
 

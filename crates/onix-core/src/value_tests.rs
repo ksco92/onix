@@ -389,3 +389,36 @@ fn deeply_nested_values_drop_without_native_recursion() {
         .join()
         .expect("iterative Drop completes on a small stack");
 }
+
+#[test]
+fn builder_object_sorts_dedups_and_interns_repeated_keys() {
+    use super::Builder;
+
+    let mut builder = Builder::new();
+    // Unsorted input with a duplicate key: rendered back in sorted order,
+    // last value wins for the duplicate.
+    let first = builder.object(vec![
+        ("b".to_owned(), Value::Number(Number::from_u64(1))),
+        ("a".to_owned(), Value::Null),
+        ("b".to_owned(), Value::Number(Number::from_u64(2))),
+    ]);
+    assert_eq!(first.to_serde_json().to_string(), r#"{"a":null,"b":2}"#);
+
+    // A second object reuses the same keys, exercising the interner's
+    // cache-hit path across objects built by one builder.
+    let second = builder.object(vec![
+        ("a".to_owned(), Value::Bool(true)),
+        ("b".to_owned(), Value::Bool(false)),
+    ]);
+    assert_eq!(
+        second.to_serde_json().to_string(),
+        r#"{"a":true,"b":false}"#
+    );
+}
+
+#[test]
+fn builder_default_matches_new() {
+    let mut from_default = super::Builder::default();
+    let value = from_default.object(vec![("k".to_owned(), Value::Null)]);
+    assert_eq!(value.to_serde_json().to_string(), r#"{"k":null}"#);
+}

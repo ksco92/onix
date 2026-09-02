@@ -36,9 +36,9 @@ In order, each building on the last:
    door: an architecture map (parse → diff dispatch → ordered/`ignore_order`
    container comparison → `Report` → render) naming the actual module each
    step lives in, plus the design decisions behind it (why the engine
-   operates on the compact `onix_core::Value` model while callers convert
-   from `serde_json::Value` at the boundary, why the engine is recursive
-   with a depth guard, not iterative (yet), etc.).
+   operates on the compact `onix_core::Value` model, which the CLI and
+   bindings build directly, why the engine is recursive with a depth guard,
+   not iterative (yet), etc.).
    Follow it into `crates/onix-core/src/diff/mod.rs` and
    `crates/onix-core/src/ignore_order/mod.rs`; each is itself a module-doc
    front door to its own submodules, one seam per file (see each
@@ -122,10 +122,9 @@ single deterministic line is easiest to diff byte-for-byte.
   quirks" section: an intentionally-unchased path-rendering edge case and
   a narrow list-LCS numeric-precision limit.
 - `--timing` prints exactly one line of JSON to **stderr**:
-  `{"parse_ns": N, "diff_ns": N}` (measuring the `serde_json` parse of the
-  two inputs, and the diff call, respectively — `diff_ns` currently also
-  includes the boundary conversion of the parsed inputs into the engine's
-  compact value model) — the same
+  `{"parse_ns": N, "diff_ns": N}` (measuring the parse of the two inputs
+  straight into the engine's compact value model, and the diff call,
+  respectively) — the same
   "diff-only self-instrumentation" the benchmark harness under `perf/`
   uses to isolate diff time from process startup and JSON parsing. Without
   `--timing`, stderr stays empty on a successful run.

@@ -21,10 +21,17 @@
 //!    cannot overflow it even at the ceiling ([`diff_to_value`]), with the
 //!    GIL released while it runs. Shallow diffs run inline on the calling
 //!    thread to avoid the fixed cost of spawning a thread.
-//! 3. Every recursive operation on the (potentially deep) result — its JSON
-//!    serialization ([`serialize_value`]) and its `Drop` ([`drop_value_safely`])
-//!    — is likewise routed to the sized worker when the result is deep, and
-//!    the deep input values are dropped on the worker that diffed them.
+//! 3. The rendered report stays a `serde_json::Value`, whose JSON
+//!    serialization ([`serialize_value`]) and `Drop` ([`drop_value_safely`])
+//!    are natively recursive, so a deep report routes those two operations to
+//!    the sized worker too.
+//!
+//! The inputs no longer need any of this for their *own* teardown:
+//! [`crate::convert`] builds the compact [`onix_core::Value`] directly with an
+//! iterative walk, and that type's `Drop` is iterative, so converting and
+//! dropping an input is stack-safe on any thread at any depth. Only the
+//! natively-recursive diff engine itself (mechanism 2) and the serde report
+//! (mechanism 3) still touch the worker.
 //!
 //! # Where the sizes come from
 //!
@@ -133,34 +140,44 @@ pub(crate) fn resolve_options(
 /// `deepdiff_rs.MaxDepthError` if the diff would exceed `opts.max_depth`.
 pub(crate) fn diff_to_value(
     py: Python<'_>,
-    a: Value,
-    b: Value,
+    a: onix_core::Value,
+    b: onix_core::Value,
     opts: DiffOptions,
 ) -> PyResult<Value> {
-    if is_deep(&a) || is_deep(&b) {
+    if input_is_deep(&a) || input_is_deep(&b) {
+        // Only the natively-recursive diff needs the sized worker now: the
+        // inputs were already built (iteratively, stack-safely) by
+        // `crate::convert`, and their compact `Value` `Drop` is iterative too,
+        // so they are moved in and dropped on the worker purely because that
+        // is where they were last used, not for stack safety.
         run_on_worker(py, move || {
-            // Temporary bridge: the core diff consumes the compact
-            // `onix_core::Value`, so convert here. The (natively recursive)
-            // `From` conversion of a deep input runs on the sized worker
-            // stack, alongside the diff itself. This conversion goes away once
-            // the binding pipeline builds the compact value directly.
-            let a = onix_core::Value::from(a);
-            let b = onix_core::Value::from(b);
             onix_core::diff_with_options(&a, &b, &opts).map(|report| report.to_json_value())
         })?
         .map_err(|error| map_diff_error(&error))
     } else {
-        // Temporary bridge (inline, shallow-input path): both inputs are
-        // known shallow here (the `is_deep` guard above), so converting to the
-        // compact `onix_core::Value` cannot overflow the calling thread. This
-        // conversion goes away once the bindings build the compact value
-        // directly.
-        let a = onix_core::Value::from(a);
-        let b = onix_core::Value::from(b);
+        // Shallow inputs: the diff runs inline, and the inputs drop inline
+        // afterwards — their iterative `Drop` cannot overflow the calling
+        // thread regardless.
         onix_core::diff_with_options(&a, &b, &opts)
             .map(|report| report.to_json_value())
             .map_err(|error| map_diff_error(&error))
     }
+}
+
+/// Whether a converted input [`onix_core::Value`] is nested past
+/// [`MAX_INLINE_DEPTH`], so the natively-recursive diff over it must run on
+/// the sized worker rather than the calling thread.
+///
+/// Delegates to [`onix_core::exceeds_depth`] — the same iterative,
+/// stack-safe depth check the diff engine uses internally to bound its own
+/// native recursion — so both crates agree on what "too deep" means by
+/// construction rather than via two copies of the walk. (The direct compact
+/// build makes this delegation possible again: before it, the input was still
+/// a `serde_json::Value` at the routing decision, so this reimplemented the
+/// walk locally to avoid a recursive conversion just to measure depth.)
+#[must_use]
+fn input_is_deep(value: &onix_core::Value) -> bool {
+    onix_core::exceeds_depth(value, MAX_INLINE_DEPTH)
 }
 
 /// Serializes `value` to a JSON string, on the sized worker thread when
@@ -265,23 +282,19 @@ enum WorkerFailure {
     Panicked,
 }
 
-/// Whether `value` is nested deeper than [`MAX_INLINE_DEPTH`], i.e. deep
-/// enough that a recursive operation on it (diffing it, serializing it, or
-/// dropping it) must run on the sized worker rather than the calling thread.
+/// Whether the rendered report `value` (a `serde_json::Value`) is nested past
+/// [`MAX_INLINE_DEPTH`], so the natively-recursive operations on it — its
+/// JSON serialization ([`serialize_value`]) and its `Drop`
+/// ([`drop_value_safely`]) — must run on the sized worker rather than the
+/// calling thread.
 ///
-/// Iterative (explicit work-stack, no native recursion), so it is itself
-/// safe to run on any input depth on the calling thread — which is exactly
-/// why it operates on the still-`serde_json::Value` binding input rather than
-/// converting to the compact `onix_core::Value` first: that conversion is
-/// natively recursive and must run on the sized worker for a deep value, so
-/// the routing decision has to come first.
+/// The report stays a `serde_json::Value` on the output boundary (see
+/// [`crate::convert::value_to_pyobject`]), and `serde_json`'s serialization
+/// and `Drop` of it are natively recursive, so a deep report still needs the
+/// worker for those two operations even though the input trees no longer do.
 ///
-/// Temporary bridge: this operates on the still-`serde_json::Value` binding
-/// input and reimplements the depth walk locally, because
-/// [`onix_core::exceeds_depth`] now takes the compact `onix_core::Value` and
-/// converting to it here would itself recurse on the calling thread. Once the
-/// binding pipeline builds the compact value directly, this reverts to
-/// delegating to [`onix_core::exceeds_depth`].
+/// Iterative itself (explicit work-stack, no native recursion), so it is safe
+/// to run on any report depth on the calling thread.
 #[must_use]
 pub(crate) fn is_deep(value: &Value) -> bool {
     let mut stack: Vec<(&Value, usize)> = vec![(value, 0)];
