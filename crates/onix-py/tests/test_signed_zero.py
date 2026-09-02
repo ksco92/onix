@@ -1,13 +1,9 @@
 """Regression + differential coverage for signed-zero hashing under ignore_order.
 
-Python's DeepHash treats ``-0.0`` and ``+0.0`` as equal, so under
-``ignore_order=True`` a list containing both signed zeros dedups to one item.
-The Rust ignore-order item key normalizes signed zeros to match, while keeping
-an integral float (``2.0``) distinct from the integer of the same value
-(deepdiff reports that pairing as a ``type_changes``). These tests pin both
-halves against real ``deepdiff``, reusing the differential harness in
-``test_differential_fuzz`` (its generator and both-engines comparator) with a
-signed-zero-biased scalar alphabet.
+Directed regression cases plus a signed-zero-biased differential batch, the
+latter reusing ``test_differential_fuzz``'s generator and both-engines
+comparator with a biased scalar alphabet. See ``ignore_order::hash::item_key``'s
+float branch (crates/onix-core) for why signed zeros are normalized.
 """
 
 import json
