@@ -93,7 +93,7 @@ fn lcs_or_positional_array_diff(
     // index, giving the positional report >= 2 findings, so `1 >=
     // positional_count` is false and the LCS report is returned regardless.
     // Confirmed by ~1.7M scalar-list pairs (zero difference between the two
-    // thresholds) and by DeepDiff parity at the boundary shapes.
+    // thresholds) and by DeepDiff 9.1.0 parity at the boundary shapes.
     if lcs_report.finding_count() > 1 {
         let positional_report = positional_array_diff(path, a, b, depth, opts)?;
         if lcs_report.finding_count() >= positional_report.finding_count() {

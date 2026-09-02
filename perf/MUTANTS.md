@@ -37,15 +37,13 @@ independently of any single run's labels.
      produce a wrong-but-terminating result the surrounding comments prove is
      equivalent or non-actionable.
    - `onix-core/src/diff/array.rs`'s `lcs_or_positional_array_diff` `> 1`
-     threshold: replacing `> 1` with `>= 1` is provably output-neutral (see
-     the comment at that line). It only matters when the LCS report has
-     exactly one finding, and there the positional report is either the same
-     single finding or has `>= 2` findings, so the LCS report is returned
-     either way. Confirmed by ~1.7M scalar-list pairs (zero difference) and by
-     DeepDiff 9.1.0 parity at the boundary shapes. `cargo mutants -F
-     'array.rs:97:35'` reports this `>=` mutant missed and the sibling `==`
-     and `<` mutants caught — the expected signature of an equivalent mutant
-     next to non-equivalent ones.
+     threshold: replacing `> 1` with `>= 1` is verified output-neutral —
+     confirmed over ~1.7M scalar-list pairs (zero difference) and by DeepDiff
+     9.1.0 parity at the boundary shapes, and `cargo mutants -F
+     'array.rs:97:35'` reports this `>=` mutant missed with the sibling `==`
+     and `<` mutants caught (the expected signature of an equivalent mutant
+     beside non-equivalent ones). The argument for why is at the comment on
+     that line.
 
 2. **`Default`-substitution mutants that cannot compile.** cargo-mutants tries
    replacing a function body with `Default::default()` (and similar). Most fail

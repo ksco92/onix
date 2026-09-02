@@ -418,7 +418,7 @@ argued at the source: `onix-core/src/lcs.rs`'s
 `find_longest_match`/`get_matching_blocks`, and `onix-core/src/diff/array.rs`'s
 `lcs_or_positional_array_diff` `> 1` threshold (replacing it with `>= 1` is
 provably output-neutral — verified over ~1.7M scalar-list pairs and by
-DeepDiff parity at the boundary). Second, **`Default`-substitution mutants
+DeepDiff 9.1.0 parity at the boundary). Second, **`Default`-substitution mutants
 that cannot compile** (the return type has no usable `Default` impl — this
 includes both of `onix-cli`'s non-caught mutants; one `pairing.rs` case fails
 for a second, unrelated reason noted in `perf/MUTANTS.md`). No *viable* mutant
