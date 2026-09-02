@@ -24,10 +24,10 @@
 //!
 //! Conversions in both directions ([`From`]`<`[`serde_json::Value`]`>` and
 //! [`Value::to_serde_json`]) and a direct streaming
-//! [`Deserialize`] (no transient [`serde_json::Value`]
-//! tree) let this type sit at the parse boundary; the diff engine consumes
-//! it directly. A caller holding a [`serde_json::Value`] (the CLI, and the
-//! Python bindings for now) converts with [`From`] at that boundary.
+//! [`Deserialize`] (no transient [`serde_json::Value`] tree) let this type
+//! sit at the parse boundary; the diff engine consumes it directly. See the
+//! crate root's architecture map for how each caller produces a `Value`;
+//! [`From`] is the path for one that already holds a [`serde_json::Value`].
 //!
 //! # Stack safety
 //!

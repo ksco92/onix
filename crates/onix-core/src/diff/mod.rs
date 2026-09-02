@@ -58,12 +58,11 @@
 //!
 //! The engine operates on the compact `onix_core::Value` model
 //! (`crate::value`), not on `serde_json::Value`: its two input trees are the
-//! memory-frugal representation. A caller holding a `serde_json::Value` (the
-//! CLI, and the Python bindings for now) converts at the boundary with
-//! `From`. Findings are still stored and rendered as `serde_json::Value` on
-//! the output side (`crate::report`), converted from the compact inputs only
-//! at the point a difference is recorded — the two whole input trees never
-//! become `serde_json::Value`.
+//! memory-frugal representation, produced directly by each caller (see the
+//! crate root's architecture map). Findings are still stored and rendered as
+//! `serde_json::Value` on the output side (`crate::report`), converted from
+//! the compact inputs only at the point a difference is recorded — the two
+//! whole input trees never become `serde_json::Value`.
 //!
 //! # List diffing: scalar-list LCS matching
 //!
