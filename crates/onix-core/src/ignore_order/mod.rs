@@ -14,13 +14,19 @@
 //! unimplemented (out of scope above), [`compute_pairs`]'s greedy matching is
 //! an unbounded `O(N²)` in the number of unpaired elements at each list
 //! *level* — so a caller diffing untrusted input must still bound that
-//! input's *width*. Across nesting *levels*, though, the cost is polynomial,
-//! not exponential: ranking a candidate pair whose sides are containers is a
-//! recursive trial diff, and a per-diff distance memo (see the [`memo`]
-//! module) computes each distinct container-pair distance once and reuses it,
-//! so nesting depth no longer multiplies the work. (Scalar candidate pairs
-//! never recurse and bypass the memo entirely, so flat lists pay nothing for
-//! it.)
+//! input's *width*. Across nesting *levels* the per-diff distance memo (see
+//! the [`memo`] module) removes the *exponential* blowup — ranking a
+//! container candidate pair is a recursive trial diff, and the memo computes
+//! each distinct container-pair distance once instead of re-diffing it per
+//! candidate that embeds it (a depth-25 nested list dropped from tens of
+//! seconds to milliseconds). A *polynomial* (super-linear) cost in nesting
+//! depth remains, though, in **both time and memory**: the memo holds one
+//! entry per distinct container pair, keyed by the full recursive `ItemKey`,
+//! so a caller diffing untrusted input must bound its nesting *depth* as well
+//! as its *width* — a few-KB input nested many hundreds of levels deep still
+//! costs seconds and hundreds of MB, all under the default `max_depth`.
+//! (Scalar candidate pairs never recurse and bypass the memo entirely, so
+//! flat lists pay nothing for it.)
 //!
 //! # The algorithm, end to end
 //!
