@@ -33,15 +33,15 @@
 //!
 //! # Depth guard, and why this walk is iterative
 //!
-//! This conversion mirrors the Python object graph's own shape — a naive
+//! This conversion mirrors the Python object graph's own shape. A naive
 //! implementation would walk it via native recursion, exactly the
 //! stack-overflow class `onix_core`'s own diff engine eliminates for the
 //! *diff* itself (see `onix_core::diff`'s module doc: an explicit
 //! heap-allocated work-stack, no native recursion, so nesting depth can
 //! never overflow the call stack). [`to_value`] uses the identical
-//! technique: an explicit `Vec`-backed stack of in-progress
+//! technique, an explicit `Vec`-backed stack of in-progress
 //! list/dict frames, walked in a single loop, so peak *native* stack usage
-//! is `O(1)` regardless of how deeply the input is nested — only the heap
+//! is `O(1)` regardless of how deeply the input is nested. Only the heap
 //! (`stack`/`path` below) grows with depth, which is an ordinary,
 //! catchable allocation concern, not an uncatchable process abort. This
 //! matters independently of the `max_depth` budget below: without it, a
@@ -52,15 +52,15 @@
 //!
 //! On top of that native-stack safety, [`to_value`] separately takes the
 //! same `max_depth` budget the diff itself will use and raises
-//! [`crate::errors::MaxDepthError`] once conversion would recurse past it
-//! — independent of, and running strictly *before*,
+//! [`crate::errors::MaxDepthError`] once conversion would recurse past it.
+//! That check is independent of, and runs strictly *before*,
 //! `onix_core::diff_with_options`'s own recursion-depth guard on the
 //! *diff*. This uses the identical depth-counting convention as
 //! `onix_core` (the root value is depth `0`; stepping into a dict value or
-//! list element adds one). This is intentionally a little stricter than
+//! list element adds one). It is intentionally a little stricter than
 //! `onix_core::diff_with_max_depth`'s own guarantee that two *equal*
-//! inputs of any depth always diff cleanly — equality can't be known yet
-//! at conversion time, before either side is even a `Value`.
+//! inputs of any depth always diff cleanly, because equality can't be known
+//! yet at conversion time, before either side is even a `Value`.
 use onix_core::path::{PathSegment, render_path};
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -75,18 +75,22 @@ use crate::errors::MaxDepthError;
 /// a list or a dict whose *n*th child has been dispatched for conversion
 /// and whose remaining children (plus everything converted so far) are
 /// parked here until that child's result comes back.
+///
+/// The next child's index (for a list) and every child's depth are not
+/// stored here: both are derivable at the one place they are read, in
+/// [`advance_frame`] — the next index is `built.len()` once the finished
+/// child has been pushed, and the child depth is `path.len()` once its path
+/// segment has been pushed. Storing them as fields would just be a second
+/// copy of that state to keep in sync.
 enum Frame<'py> {
     List {
         remaining: BoundListIterator<'py>,
         built: Vec<Value>,
-        next_index: usize,
-        child_depth: usize,
     },
     Dict {
         remaining: BoundDictIterator<'py>,
         built: Map<String, Value>,
         current_key: String,
-        child_depth: usize,
     },
 }
 
@@ -188,22 +192,18 @@ fn advance_frame<'py>(
         Frame::List {
             mut remaining,
             mut built,
-            next_index,
-            child_depth,
         } => {
             built.push(value);
 
             Ok(match remaining.next() {
                 Some(next_item) => {
-                    path.push(PathSegment::Index(next_index));
+                    // The just-finished child was appended above, so the
+                    // next child's index is the new length, and its depth is
+                    // the path length once its segment is pushed.
+                    path.push(PathSegment::Index(built.len()));
                     Advance::NeedsChild {
-                        pending: (next_item, child_depth),
-                        frame: Frame::List {
-                            remaining,
-                            built,
-                            next_index: next_index + 1,
-                            child_depth,
-                        },
+                        pending: (next_item, path.len()),
+                        frame: Frame::List { remaining, built },
                     }
                 }
                 None => Advance::Done(Value::Array(built)),
@@ -213,7 +213,6 @@ fn advance_frame<'py>(
             mut remaining,
             mut built,
             current_key,
-            child_depth,
         } => {
             built.insert(current_key, value);
 
@@ -221,12 +220,13 @@ fn advance_frame<'py>(
                 Some((key, next_value)) => {
                     path.push(PathSegment::Key(key.clone()));
                     Advance::NeedsChild {
-                        pending: (next_value, child_depth),
+                        // The child's depth is the path length once its key
+                        // segment is pushed above.
+                        pending: (next_value, path.len()),
                         frame: Frame::Dict {
                             remaining,
                             built,
                             current_key: key,
-                            child_depth,
                         },
                     }
                 }
@@ -262,11 +262,13 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<Val
                 Step::List { iter, first } => {
                     let child_depth = depth + 1;
                     path.push(PathSegment::Index(0));
+                    // `iter` has already yielded `first`, so the finished
+                    // list will hold `iter.len() + 1` elements — pre-size for
+                    // exactly that (`BoundListIterator` is `ExactSizeIterator`).
+                    let capacity = iter.len().saturating_add(1);
                     stack.push(Frame::List {
                         remaining: iter,
-                        built: Vec::new(),
-                        next_index: 1,
-                        child_depth,
+                        built: Vec::with_capacity(capacity),
                     });
                     pending = Some((first, child_depth));
                     continue;
@@ -278,11 +280,13 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<Val
                 } => {
                     let child_depth = depth + 1;
                     path.push(PathSegment::Key(first_key.clone()));
+                    // As above, `iter` has already yielded the first entry, so
+                    // pre-size the map for `iter.len() + 1` entries.
+                    let capacity = iter.len().saturating_add(1);
                     stack.push(Frame::Dict {
                         remaining: iter,
-                        built: Map::new(),
+                        built: Map::with_capacity(capacity),
                         current_key: first_key,
-                        child_depth,
                     });
                     pending = Some((first_value, child_depth));
                     continue;
@@ -435,9 +439,13 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<Py<Py
                     match iter.next() {
                         None => Vec::<Py<PyAny>>::new().into_py_any(py)?,
                         Some(first) => {
+                            // `iter` has already yielded `first`, so pre-size
+                            // the output for `iter.len() + 1` elements
+                            // (`slice::Iter` is `ExactSizeIterator`).
+                            let capacity = iter.len().saturating_add(1);
                             stack.push(RenderFrame::Array {
                                 remaining: iter,
-                                built: Vec::new(),
+                                built: Vec::with_capacity(capacity),
                             });
                             pending = Some(first);
                             continue;
