@@ -41,6 +41,13 @@
 //! [`serde_json`]'s own posture at those bounded API-boundary calls; the
 //! streaming [`Deserialize`] path is bounded by
 //! [`serde_json`]'s own parser recursion limit.
+//!
+//! Structural equality ([`PartialEq`]) is likewise iterative (an explicit
+//! work-stack, the same posture as `Drop`), so deep comparison — which the
+//! engine migration will run on attacker-shaped input — cannot overflow the
+//! native stack either. The derived [`Debug`] is deliberately left recursive:
+//! it is debug/test-only, never on the untrusted path, matching
+//! [`serde_json::Value`]'s own posture.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -56,7 +63,7 @@ use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess
 /// their rationale. The variants mirror JSON's six shapes; objects are held
 /// as an [`Object`] (a sorted, exactly-sized entry slice) and numbers as a
 /// [`Number`] preserving the `i64`/`u64`/`f64` distinction.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum Value {
     /// JSON `null`.
     Null,
@@ -70,6 +77,18 @@ pub enum Value {
     Array(Box<[Value]>),
     /// An object: key-sorted, exactly-sized entries (see [`Object`]).
     Object(Object),
+}
+
+/// Iterative structural equality (see the private `structural_eq`). Comparing two
+/// deeply nested values uses `O(1)` native stack rather than the native
+/// recursion a derived `PartialEq` would, matching this type's `Drop`, so
+/// equality on attacker-shaped input cannot overflow the stack. The result
+/// is exactly what a derived `PartialEq` produces (verified by a differential
+/// property test before the derive was replaced).
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        structural_eq(self, other)
+    }
 }
 
 impl Value {
@@ -173,16 +192,63 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
     }
 }
 
+/// Iterative structural equality shared by `Value`'s `PartialEq`. Compares
+/// two values with an explicit heap work-stack instead of native recursion,
+/// so a deep comparison uses `O(1)` native stack. Semantics are exactly
+/// those of a derived `PartialEq`: same-variant structural equality, with
+/// `Number`'s variant sensitivity intact (`PosInt(1)` is not equal to
+/// `Float(1.0)`); objects compare over their sorted entries (equal key sets
+/// and per-key values), arrays over equal length and per-index values.
+fn structural_eq(a: &Value, b: &Value) -> bool {
+    let mut stack: Vec<(&Value, &Value)> = vec![(a, b)];
+    while let Some((a, b)) = stack.pop() {
+        match (a, b) {
+            (Value::Null, Value::Null) => {}
+            (Value::Bool(x), Value::Bool(y)) => {
+                if x != y {
+                    return false;
+                }
+            }
+            (Value::Number(x), Value::Number(y)) => {
+                if x != y {
+                    return false;
+                }
+            }
+            (Value::Str(x), Value::Str(y)) => {
+                if x != y {
+                    return false;
+                }
+            }
+            (Value::Array(x), Value::Array(y)) => {
+                if x.len() != y.len() {
+                    return false;
+                }
+                stack.extend(x.iter().zip(y.iter()));
+            }
+            (Value::Object(x), Value::Object(y)) => {
+                if x.entries.len() != y.entries.len() {
+                    return false;
+                }
+                for ((x_key, x_value), (y_key, y_value)) in x.entries.iter().zip(y.entries.iter()) {
+                    if x_key != y_key {
+                        return false;
+                    }
+                    stack.push((x_value, y_value));
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// A JSON number preserving [`serde_json`]'s exact three-way representation:
 /// a non-negative integer (`u64`), a negative integer (`i64`), or a float
-/// (`f64`).
+/// (`f64`). Floats are always finite: the constructors reject non-finite
+/// input, so every stored `f64` round-trips through [`serde_json::Number`].
 ///
-/// This distinction is load-bearing for byte-compatible output. `1` and
-/// `1.0` are different JSON tokens and must render differently; an integer
-/// above [`i64::MAX`] must stay an integer (`u64`), not silently become a
-/// float. Floats are always finite: the constructors reject non-finite
-/// input (JSON has no `NaN`/`Infinity`), so every stored `f64` round-trips
-/// through [`serde_json::Number`].
+/// See the [module documentation](self) for why this int/float distinction
+/// is load-bearing for byte-compatible output.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Number {
     repr: NumberRepr,
@@ -311,15 +377,13 @@ impl Number {
 }
 
 /// A JSON object: key-sorted, exactly-sized entries backed by a single
-/// `Box<[(Arc<str>, Value)]>`.
+/// `Box<[(Arc<str>, Value)]>`, with binary-search lookup
+/// ([`get`](Object::get)/[`contains_key`](Object::contains_key)) and
+/// ascending-key iteration.
 ///
-/// Entries are sorted lexicographically by key string — the same order
-/// [`serde_json`]'s `BTreeMap`-backed object iterates in — so lookups are a
-/// binary search ([`get`](Object::get)/[`contains_key`](Object::contains_key))
-/// and iteration feeds byte-identical rendering. Keys are `Arc<str>` shared
-/// via a per-session `Interner`, so a key repeated across many objects
-/// costs one allocation, not one per occurrence.
-#[derive(Debug, PartialEq)]
+/// See the [module documentation](self) for why entries are sorted and keys
+/// interned (byte-identical rendering and small-map footprint).
+#[derive(Debug)]
 pub struct Object {
     /// Key-sorted, duplicate-free entries. Invariant: strictly ascending by
     /// key string (enforced by [`Object::from_pairs`]).
@@ -431,11 +495,10 @@ impl ExactSizeIterator for Entries<'_> {}
 /// A per-session string interner sharing one `Arc<str>` per distinct key.
 ///
 /// A single [`Interner`] is threaded through one whole conversion or parse
-/// (see [`from_serde`] and the [`Deserialize`] impl), so
-/// the handful of keys a real payload repeats thousands of times collapse to
-/// one heap allocation each, shared by refcount bumps. It exists only during
-/// construction; the finished [`Value`] holds the shared handles and the
-/// interner's lookup table is dropped.
+/// (see [`from_serde`] and the [`Deserialize`] impl); it exists only during
+/// construction, and the finished [`Value`] holds the shared handles while
+/// the lookup table is dropped. See the [module documentation](self) for the
+/// key-interning footprint rationale.
 struct Interner {
     seen: HashSet<Arc<str>>,
 }

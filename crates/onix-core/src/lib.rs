@@ -6,7 +6,11 @@
 //! A caller hands two already-parsed `serde_json::Value`s to [`diff()`] (or
 //! [`diff_with_options`]/[`diff_with_max_depth`]); this crate does no
 //! parsing of its own (see `onix-cli`'s `run` module for where the JSON text
-//! a real CLI invocation reads actually gets parsed). From there:
+//! a real CLI invocation reads actually gets parsed). The crate now also
+//! exports a compact [`value::Value`], a memory-frugal, byte-compatible
+//! counterpart to `serde_json::Value`; the diff engine still consumes
+//! `serde_json::Value` today, and migrating it onto [`value::Value`]
+//! follows. From there:
 //!
 //! 1. **Dispatch** ([`mod@diff`], specifically its `dispatch` submodule):
 //!    `diff_at` recurses through the pair by JSON type, enforcing the

@@ -164,6 +164,38 @@ fn from_serde_json_round_trips_all_shapes() {
     assert_eq!(compact.to_serde_json(), original);
 }
 
+// --- structural equality ------------------------------------------------
+
+/// Convenience: build a compact value from a `serde_json` literal.
+fn cv(json: serde_json::Value) -> Value {
+    Value::from(json)
+}
+
+#[test]
+fn partial_eq_covers_all_early_exits() {
+    use serde_json::json;
+
+    // Equal within each variant (the no-early-exit paths).
+    assert_eq!(cv(json!(null)), cv(json!(null)));
+    assert_eq!(cv(json!(true)), cv(json!(true)));
+    assert_eq!(cv(json!(1)), cv(json!(1)));
+    assert_eq!(cv(json!("a")), cv(json!("a")));
+    assert_eq!(cv(json!([1, 2])), cv(json!([1, 2])));
+    assert_eq!(cv(json!({"a": 1, "b": 2})), cv(json!({"a": 1, "b": 2})));
+
+    // Every early-exit inequality path.
+    assert_ne!(cv(json!(true)), cv(json!(false))); // Bool value differs
+    assert_ne!(cv(json!(1)), cv(json!(2))); // Number value differs
+    assert_ne!(cv(json!(1)), cv(json!(1.0))); // int vs float (Number variant)
+    assert_ne!(cv(json!("a")), cv(json!("b"))); // Str value differs
+    assert_ne!(cv(json!([1])), cv(json!([1, 2]))); // Array length differs
+    assert_ne!(cv(json!([1])), cv(json!([2]))); // Array element differs
+    assert_ne!(cv(json!({"a": 1})), cv(json!({"a": 1, "b": 2}))); // Object length differs
+    assert_ne!(cv(json!({"a": 1})), cv(json!({"b": 1}))); // Object key differs
+    assert_ne!(cv(json!({"a": 1})), cv(json!({"a": 2}))); // Object value differs
+    assert_ne!(cv(json!(null)), cv(json!(true))); // different variants
+}
+
 // --- streaming deserialize ----------------------------------------------
 
 #[test]
@@ -268,7 +300,71 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1000))]
+
+    /// `Value`'s iterative `PartialEq` must agree with an independent oracle:
+    /// `serde_json::Value` equality, which shares the exact semantics a
+    /// derived `PartialEq` would have (number-variant sensitivity, so 1 and
+    /// 1.0 differ; order-insensitive object equality). Both an equal pair
+    /// (same source) and a mixed pair (independent sources) are checked.
+    #[test]
+    fn partial_eq_matches_serde_json_oracle(a_src in arb_json(), b_src in arb_json()) {
+        let a = Value::from(a_src.clone());
+        let a_clone = Value::from(a_src);
+        let b = Value::from(b_src);
+        prop_assert!(a == a_clone);
+        prop_assert_eq!(a == a_clone, a.to_serde_json() == a_clone.to_serde_json());
+        prop_assert_eq!(a == b, a.to_serde_json() == b.to_serde_json());
+    }
+}
+
 // --- stack safety --------------------------------------------------------
+
+#[test]
+fn debug_formatting_covers_all_shapes() {
+    let value = Value::from(serde_json::json!({
+        "n": null, "b": true, "i": -1, "f": 1.5, "s": "x", "arr": [1, {"k": 2}]
+    }));
+    let rendered = format!("{value:?}");
+    assert!(rendered.contains("Object"));
+    assert!(rendered.contains("Array"));
+    assert!(rendered.contains("Number"));
+    assert!(rendered.contains("Bool"));
+    assert!(rendered.contains("Null"));
+}
+
+#[test]
+fn deep_equality_does_not_overflow_native_stack() {
+    // Equality on deeply nested values must not recurse natively: a derived
+    // `PartialEq` would overflow this small stack, the iterative one does not.
+    // Covers both an equal pair and a pair differing only at the deepest leaf.
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            const DEPTH: usize = 200_000;
+            let build = |leaf: Value| {
+                let mut value = leaf;
+                for _ in 0..DEPTH {
+                    value = Value::Array(vec![value].into_boxed_slice());
+                }
+                value
+            };
+            let a = build(Value::Null);
+            let b = build(Value::Null);
+            assert!(a == b, "equal deep values compare equal");
+
+            let differ_at_depth = build(Value::Bool(true));
+            assert!(
+                a != differ_at_depth,
+                "values differing at depth are unequal"
+            );
+        })
+        .expect("probe thread spawns");
+    handle
+        .join()
+        .expect("iterative equality completes on a small stack");
+}
 
 #[test]
 fn deeply_nested_values_drop_without_native_recursion() {

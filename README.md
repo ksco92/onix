@@ -35,9 +35,10 @@ In order, each building on the last:
 2. **`crates/onix-core/src/lib.rs`'s doc comment**: the crate's front
    door: an architecture map (parse → diff dispatch → ordered/`ignore_order`
    container comparison → `Report` → render) naming the actual module each
-   step lives in, plus the design decisions behind it (why
-   `serde_json::Value` with no value-model abstraction, why the engine is
-   recursive with a depth guard, not iterative (yet), etc.).
+   step lives in, plus the design decisions behind it (why the diff
+   engine consumes `serde_json::Value` today, how the compact
+   `onix_core::Value` model will replace it, why the engine is recursive
+   with a depth guard, not iterative (yet), etc.).
    Follow it into `crates/onix-core/src/diff/mod.rs` and
    `crates/onix-core/src/ignore_order/mod.rs`; each is itself a module-doc
    front door to its own submodules, one seam per file (see each
