@@ -259,17 +259,17 @@ Max) as `perf/RESULTS.md`:
 | Shape | deepdiff | deepdiff_rs | Speedup |
 | --- | --- | --- | --- |
 | `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 2870.45ms | 70.69ms | **40.61x** |
-| &nbsp;&nbsp;— peak RSS | 227.5 MB | 141.1 MB | **1.61x** |
-| &nbsp;&nbsp;— CPU seconds | 2.868 s | 0.071 s | **40.61x** |
+| &nbsp;&nbsp;peak RSS | 227.5 MB | 141.1 MB | **1.61x** |
+| &nbsp;&nbsp;CPU seconds | 2.868 s | 0.071 s | **40.61x** |
 | Heterogeneous API-payload records, n=20,000 (live objects) | 3234.68ms | 130.58ms | **24.77x** |
-| &nbsp;&nbsp;— peak RSS | 117.6 MB | 276.2 MB | **0.43x** |
-| &nbsp;&nbsp;— CPU seconds | 3.232 s | 0.130 s | **24.77x** |
+| &nbsp;&nbsp;peak RSS | 117.6 MB | 276.2 MB | **0.43x** |
+| &nbsp;&nbsp;CPU seconds | 3.232 s | 0.130 s | **24.77x** |
 | Same `ignore_order` shape, via `diff_json` (JSON-string path) | 2952.13ms | 70.91ms | **41.63x** |
-| &nbsp;&nbsp;— peak RSS | 227.8 MB | 141.2 MB | **1.61x** |
-| &nbsp;&nbsp;— CPU seconds | 2.950 s | 0.071 s | **41.63x** |
+| &nbsp;&nbsp;peak RSS | 227.8 MB | 141.2 MB | **1.61x** |
+| &nbsp;&nbsp;CPU seconds | 2.950 s | 0.071 s | **41.63x** |
 | Same API-payload shape, via `diff_json` (JSON-string path) | 4365.52ms | 80.22ms | **54.42x** |
-| &nbsp;&nbsp;— peak RSS | 138.8 MB | 270.8 MB | **0.51x** |
-| &nbsp;&nbsp;— CPU seconds | 4.362 s | 0.080 s | **54.42x** |
+| &nbsp;&nbsp;peak RSS | 138.8 MB | 270.8 MB | **0.51x** |
+| &nbsp;&nbsp;CPU seconds | 4.362 s | 0.080 s | **54.42x** |
 
 Wall time is the first row of each shape; peak RSS (resident memory) and CPU
 seconds (user + system) are the sub-rows, each the median of the same 11
