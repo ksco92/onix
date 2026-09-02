@@ -10,7 +10,9 @@ description = "Core structural-diff engine with DeepDiff-compatible reports"
 workspace = true
 
 [dependencies]
+serde = "1"
 serde_json = "1"
 
 [dev-dependencies]
 proptest = "1"
+stats_alloc = "0.1"
