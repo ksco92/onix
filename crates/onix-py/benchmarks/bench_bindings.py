@@ -428,11 +428,11 @@ def _markdown_table(results: dict[str, tuple[Measurement, Measurement]]) -> str:
             f"{_fmt_ratio(deepdiff.wall_s / onix.wall_s)} |",
         )
         lines.append(
-            f"| &nbsp;&nbsp;— peak RSS | {_fmt_mb(deepdiff.rss_bytes)} | {_fmt_mb(onix.rss_bytes)} | "
+            f"| &nbsp;&nbsp;peak RSS | {_fmt_mb(deepdiff.rss_bytes)} | {_fmt_mb(onix.rss_bytes)} | "
             f"{_fmt_ratio(deepdiff.rss_bytes / onix.rss_bytes)} |",
         )
         lines.append(
-            f"| &nbsp;&nbsp;— CPU seconds | {_fmt_cpu(deepdiff.cpu_s)} | {_fmt_cpu(onix.cpu_s)} | "
+            f"| &nbsp;&nbsp;CPU seconds | {_fmt_cpu(deepdiff.cpu_s)} | {_fmt_cpu(onix.cpu_s)} | "
             f"{_fmt_ratio(deepdiff.cpu_s / onix.cpu_s)} |",
         )
 
