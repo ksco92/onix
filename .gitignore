@@ -6,3 +6,7 @@ __pycache__/
 .idea/
 /mutants.out*
 *.proptest-regressions
+crates/onix-py/.venv/
+crates/onix-py/uv.lock
+.pytest_cache/
+*.whl

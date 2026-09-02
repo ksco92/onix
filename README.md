@@ -7,7 +7,8 @@ onix matches report-for-report.
 
 **Status (September 2026):** pre-alpha proof of concept, unpublished; ordered
 + `ignore_order` diffing complete and benchmarked (see
-[perf/RESULTS.md](perf/RESULTS.md)); Python bindings next.
+[perf/RESULTS.md](perf/RESULTS.md)); Python bindings (PyO3, `deepdiff-rs` on
+PyPI once published — see "Python" below) built, not yet published.
 
 ## Reading path (first-time visitor)
 
@@ -30,6 +31,11 @@ In order, each building on the last:
    the code above matches. `crates/onix-core/src/ignore_order/mod.rs`'s own
    doc comment carries the full, source-cited `ignore_order=True` spec this
    crate implements.
+4. **`crates/onix-py/src/lib.rs`'s doc comment** (see "Python" below) — how
+   the Python bindings sit on top of everything above: a one-time
+   Python-object-to-`Value` conversion (`crates/onix-py/src/convert.rs`)
+   feeding the exact same `onix_core::diff_with_options` this README's
+   `onix diff` CLI calls.
 
 ## Setup from scratch
 
@@ -125,6 +131,159 @@ $ echo $?
 0
 ```
 
+## Python
+
+PyO3 bindings (`crates/onix-py`), published to PyPI as **`deepdiff-rs`**
+(Python import name `deepdiff_rs`) — see `crates/onix-py/src/lib.rs`'s doc
+comment for the module map. Not yet published (see "Wheels" below); install
+from source for now.
+
+### Install
+
+```sh
+pip install deepdiff-rs   # once published — see "Wheels" below
+```
+
+From source (this repo):
+
+```sh
+cd crates/onix-py
+uv tool install maturin      # the build tool this crate uses (skip if already installed)
+uv sync --group test         # creates .venv, installs pytest + pinned deepdiff==9.1.0
+uv run --group test maturin develop --release
+```
+
+### The drop-in class
+
+```python
+from deepdiff_rs import DeepDiff
+
+diff = DeepDiff({"a": 1}, {"a": 2})
+if diff:
+    print(diff.to_json())   # byte-compatible with real DeepDiff(...).to_json() at verbose_level=2
+    print(diff.to_dict())   # the parsed form, as a native Python dict
+```
+
+`DeepDiff(t1, t2, ignore_order=False, max_depth=None)` accepts live Python
+objects (`None`/`bool`/`int`/`float`/`str`/`dict`/`list`, arbitrarily
+nested), converts them to `onix_core`'s value model exactly once up front,
+then diffs and renders natively — see `crates/onix-py/src/convert.rs`'s
+module doc for the complete conversion table and every error case below.
+
+### The fast path
+
+If you already have (or are happy to produce) JSON text rather than live
+Python objects, skip the Python-object conversion entirely:
+
+```python
+from deepdiff_rs import diff_json
+
+diff_json('{"a": 1}', '{"a": 2}')
+# '{"values_changed":{"root[\'a\']":{"new_value":2,"old_value":1}}}'
+```
+
+`diff_json(a, b, ignore_order=False, max_depth=None) -> str` parses both
+JSON documents, diffs, and serializes the result back to a JSON string
+entirely in Rust.
+
+### MVP limitations (documented, not accidental)
+
+- **Supported types:** `None`, `bool`, `int`, `float`, `str`, `dict` (`str`
+  keys only), `list` — the rest of `deepdiff.DeepDiff`'s option surface
+  (`exclude_paths`, `significant_digits`, custom operators, `verbose_level
+  != 2`, delta/patch, …) is out of scope for this milestone.
+- **Integers** must fit in `i64` or `u64`; arbitrary-precision Python `int`s
+  (beyond that range) raise `ValueError` — real `DeepDiff` supports them
+  natively.
+- **Floats** must be finite; `NaN`/`inf`/`-inf` raise `ValueError` (JSON has
+  no representation for any of the three).
+- **`dict` keys** must be `str`; a non-`str` key raises `TypeError` naming
+  the key's type.
+- **Tuples, sets, frozensets, dates, and custom objects** are not
+  representable in the JSON-shaped value model and raise `TypeError` naming
+  the type.
+- **`MaxDepthError`** (a `ValueError` subclass) replaces a native crash on
+  adversarially deep input, mirroring `onix_core::Error::MaxDepthExceeded`
+  — but the bindings' own Python-object conversion is bounded by the same
+  `max_depth` budget independently of the diff itself, so (unlike
+  `onix_core::diff_with_max_depth`'s own guarantee) two *equal* inputs
+  deeper than `max_depth` still raise here, since equality isn't known yet
+  at conversion time. Default `max_depth` is `onix_core::DEFAULT_MAX_DEPTH`
+  (512).
+
+### Bindings benchmark
+
+`crates/onix-py/benchmarks/bench_bindings.py` times real `DeepDiff` against
+`deepdiff_rs` on **live Python objects** — unlike `perf/RESULTS.md` (M6),
+which diffs already-parsed JSON and is explicitly an upper bound, this
+number includes the Python-object-to-`Value` conversion cost a real caller
+actually pays. Median of 11 runs (1 discarded warmup call), measured on the
+same machine (macOS 26.5.1, Apple M5 Max) as `perf/RESULTS.md`'s M7 run:
+
+| Shape | deepdiff | deepdiff_rs | Speedup |
+| --- | --- | --- | --- |
+| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 2882.70ms | 67.05ms | **42.99x** |
+| Heterogeneous API-payload records, n=20,000 (live objects) | 126.02ms | 108.15ms | **1.17x** |
+| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 2884.76ms | 66.06ms | **43.67x** |
+| Same API-payload shape, via `diff_json` (JSON-string path) | 4259.80ms | 65.43ms | **65.10x** |
+
+**Honest reading:** the heterogeneous-records live-object case is the
+telling number — only **1.17x**, nowhere near onix-core's own headline
+multiples. Converting 20,000 realistic nested Python dict/list records
+into `onix_core`'s value model one Python object at a time is real,
+measurable overhead that eats almost all of the underlying engine's
+speed advantage — a known, anticipated risk (`perf/RESULTS.md`'s own M6
+numbers are explicitly an upper bound: already-parsed JSON, no
+Python-object conversion). The fast, JSON-string-only `diff_json` path avoids
+that conversion entirely and recovers a large multiple (65-66x) on the same
+data — **use `diff_json` when you already have (or can produce) JSON text**;
+reach for the drop-in `DeepDiff` class when you genuinely need to diff
+live Python objects and accept the conversion cost as part of that
+convenience. Reproduce with:
+
+```sh
+cd crates/onix-py
+uv sync --group test
+uv run --group test maturin develop --release   # release, not debug -- a debug
+                                                 # build understates onix by 10x+
+uv run --group test python benchmarks/bench_bindings.py
+```
+
+### Testing
+
+```sh
+make python-test
+```
+
+Runs the real pytest suite (`crates/onix-py/tests/`) against the compiled
+extension: golden-corpus parity against real `DeepDiff` (reusing
+`tests/golden/`), a differential fuzzer (600 live-object cases, ordered and
+`ignore_order`, against real `DeepDiff`), every conversion-error path above,
+and depth-guard tests proving adversarially deep input raises cleanly
+rather than crashing the process. **Not** part of `make check`: it needs a
+Python venv (`uv`) and a built extension module, which the Rust-only gate
+doesn't set up. This pytest suite is `crates/onix-py`'s coverage authority
+— see the `Makefile`'s `coverage` target for why `cargo-llvm-cov` excludes
+it (a `cdylib` whose logic is only meaningfully exercised by calling the
+compiled wheel from real Python).
+
+### Wheels
+
+```sh
+cd crates/onix-py
+maturin build --release
+```
+
+Builds a single abi3 wheel (`deepdiff_rs-<version>-cp39-abi3-<platform>.whl`,
+Python ≥3.9, one wheel per platform rather than per-CPython-minor-version).
+Publishing to PyPI is out of scope for this milestone (needs the
+maintainer's PyPI credentials or trusted-publishing setup) — the exact
+command, once ready, is:
+
+```sh
+maturin publish --release
+```
+
 ## Quality gates
 
 `make check` is the merge gate; every part must pass:
@@ -134,7 +293,7 @@ $ echo $?
 | `make fmt` | `cargo fmt --all --check` | no diffs |
 | `make clippy` | `cargo clippy --all-targets --all-features -- -D warnings` | zero warnings (pedantic enabled at warn) |
 | `make test` | `cargo test --workspace` | all pass |
-| `make coverage` | `cargo llvm-cov --workspace --fail-under-lines 95` | ≥95% line coverage |
+| `make coverage` | `cargo llvm-cov --workspace --fail-under-lines 95` (`onix-py` excluded — see below) | ≥95% line coverage |
 | `make docs` | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace` | no rustdoc warnings |
 | `make deny` | `cargo deny check` | advisories/licenses/bans/sources clean |
 | `make machete` | `cargo machete` | no unused dependencies |
@@ -148,6 +307,12 @@ own unit tests (`src/tests.rs`, alongside `src/args.rs`/`src/run.rs`'s
 production code) and end-to-end integration tests (`tests/cli.rs`), so the
 exclusion is gone and it's held to the same ≥95% bar as the rest of the
 workspace.
+
+`crates/onix-py` (M8, the PyO3 bindings crate) is excluded for a different,
+structural reason: it's a `cdylib` whose logic is Python-object conversion
+and PyO3 glue, only meaningfully exercised by calling the *compiled wheel*
+from real Python — its coverage authority is `make python-test` instead
+(see the "Python" section's "Testing" subsection above).
 
 **Known accepted artifact (M7b):** a `#[cfg(test)] #[path = "..."] mod
 tests;` file (`diff/tests.rs`, `ignore_order/tests.rs`, `lcs_tests.rs`,
@@ -259,3 +424,7 @@ Raw per-run JSON lands in `perf/bench_raw/` (also gitignored).
 `perf/generate_fixtures.py` and `perf/run_deepdiff.py` are both uv/PEP-723
 pinned scripts (same pattern as `scripts/gen_goldens.py`) — no separate
 Python environment setup needed beyond `uv` itself.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
