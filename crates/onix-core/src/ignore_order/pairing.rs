@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::diff::DiffOptions;
 
+use super::DistanceMemo;
 use super::distance::{Distance, rough_distance};
 use super::fxhash::{HashMap, HashSet};
 use super::hash::{HashedList, ItemKey};
@@ -89,6 +90,7 @@ pub(crate) fn compute_pairs(
     t2: &HashedList<'_>,
     depth: usize,
     opts: &DiffOptions,
+    memo: &DistanceMemo,
 ) -> HashMap<ItemKey, ItemKey> {
     let mut most_in_common_pairs: HashMap<ItemKey, AddedCandidates> = HashMap::default();
     let mut distances_to_from_hashes: BTreeMap<Distance, Vec<ItemKey>> = BTreeMap::new();
@@ -97,13 +99,39 @@ pub(crate) fn compute_pairs(
         let (_, added_value) = t2.get(added_key);
         for removed_key in hashes_removed {
             let (_, removed_value) = t1.get(removed_key);
-            let distance = rough_distance(
-                removed_value,
-                added_value,
-                CUTOFF_DISTANCE_FOR_PAIRS,
-                depth,
-                opts,
-            );
+            // Memoize the distance for container-vs-container candidates —
+            // the pairs whose distance is a recursive trial diff and so the
+            // ones that re-compute exponentially without a cache. Scalar
+            // pairs skip the cache entirely (see `DistanceMemo::should_cache`).
+            // `rough_distance` is a pure function of the two subtrees'
+            // content on this path, so a cached value is identical to a fresh
+            // one — see the `super::memo` module doc for the proof.
+            let distance = if memo.should_cache(removed_key, added_key) {
+                let key = (removed_key.clone(), added_key.clone());
+                if let Some(cached) = memo.get(&key) {
+                    cached
+                } else {
+                    let computed = rough_distance(
+                        removed_value,
+                        added_value,
+                        CUTOFF_DISTANCE_FOR_PAIRS,
+                        depth,
+                        opts,
+                        memo,
+                    );
+                    memo.put(key, computed);
+                    computed
+                }
+            } else {
+                rough_distance(
+                    removed_value,
+                    added_value,
+                    CUTOFF_DISTANCE_FOR_PAIRS,
+                    depth,
+                    opts,
+                    memo,
+                )
+            };
             if distance >= CUTOFF_DISTANCE_FOR_PAIRS {
                 continue;
             }

@@ -1,7 +1,8 @@
 //! `FxHash`: a small, fast, non-cryptographic hasher used for this module's
 //! `HashMap`/`HashSet`s ([`HashedList::info`](super::hash::HashedList),
 //! [`AddedCandidates::buckets`](super::pairing::AddedCandidates), the
-//! pairing/`used` sets in [`compute_pairs`](super::pairing::compute_pairs)) —
+//! pairing/`used` sets in [`compute_pairs`](super::pairing::compute_pairs),
+//! and the [`DistanceMemo`](super::memo::DistanceMemo) cache) —
 //! chosen for speed at the cost of hash-flooding resistance. Some of these
 //! maps key on attacker-controlled data, so this is a deliberate,
 //! measured `DoS` trade-off, not a free choice; see [`FxHasher`]'s own doc for

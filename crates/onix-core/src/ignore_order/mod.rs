@@ -12,8 +12,21 @@
 //!
 //! Because `DeepDiff`'s own `max_passes`/`max_diffs` caps on this work are
 //! unimplemented (out of scope above), [`compute_pairs`]'s greedy matching is
-//! an unbounded `O(N²)` in the number of unpaired elements at each list level,
-//! so a caller diffing untrusted input must bound that input's size itself.
+//! an unbounded `O(N²)` in the number of unpaired elements at each list
+//! *level* — so a caller diffing untrusted input must still bound that
+//! input's *width*. Across nesting *levels* the per-diff distance memo (see
+//! the [`memo`] module) removes the *exponential* blowup — ranking a
+//! container candidate pair is a recursive trial diff, and the memo computes
+//! each distinct container-pair distance once instead of re-diffing it per
+//! candidate that embeds it (a depth-25 nested list dropped from tens of
+//! seconds to milliseconds). A *polynomial* (super-linear) cost in nesting
+//! depth remains, though, in **both time and memory**: the memo holds one
+//! entry per distinct container pair, keyed by the full recursive `ItemKey`,
+//! so a caller diffing untrusted input must bound its nesting *depth* as well
+//! as its *width* — a few-KB input nested many hundreds of levels deep still
+//! costs seconds and hundreds of MB, all under the default `max_depth`.
+//! (Scalar candidate pairs never recurse and bypass the memo entirely, so
+//! flat lists pay nothing for it.)
 //!
 //! # The algorithm, end to end
 //!
@@ -130,7 +143,10 @@
 mod distance;
 mod fxhash;
 mod hash;
+mod memo;
 mod pairing;
+
+pub(crate) use memo::DistanceMemo;
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -167,6 +183,7 @@ pub(crate) fn ignore_order_array_diff(
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
+    memo: &DistanceMemo,
 ) -> Result<Report, Error> {
     // Every item will be structurally hashed (`item_key`, native recursion)
     // and, if left unpaired, cloned whole into the Report — both unbounded
@@ -212,7 +229,7 @@ pub(crate) fn ignore_order_array_diff(
     };
 
     let pairs = if get_pairs {
-        compute_pairs(&hashes_added, &hashes_removed, &t1, &t2, depth, opts)
+        compute_pairs(&hashes_added, &hashes_removed, &t1, &t2, depth, opts, memo)
     } else {
         HashMap::default()
     };
@@ -251,7 +268,7 @@ pub(crate) fn ignore_order_array_diff(
                 // pre-pass already checked). Confirmed by direct mutation:
                 // applying it and re-running this module's test suite
                 // finds no failure.
-                let mut sub = diff_at(path, old_value, new_value, depth, opts)?;
+                let mut sub = diff_at(path, old_value, new_value, depth, opts, memo)?;
                 // Resolve this pair's OWN coincidental add/remove path
                 // collisions before retagging: `DeepDiff`'s
                 // distance/delta computation applies its whole-tree merge

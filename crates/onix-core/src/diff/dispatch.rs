@@ -9,6 +9,7 @@
 use crate::value::{Object, Value};
 
 use crate::error::Error;
+use crate::ignore_order::DistanceMemo;
 use crate::path::{PathSegment, render_path};
 use crate::report::Report;
 
@@ -35,6 +36,7 @@ pub(crate) fn diff_at(
     b: &Value,
     depth: usize,
     opts: &DiffOptions,
+    memo: &DistanceMemo,
 ) -> Result<Report, Error> {
     check_traversal_depth(path, depth, opts.max_depth)?;
 
@@ -49,8 +51,8 @@ pub(crate) fn diff_at(
         (Value::Str(old), Value::Str(new)) => {
             scalar_diff(path, old == new, a, b, depth, opts.max_depth)
         }
-        (Value::Array(old), Value::Array(new)) => array_diff(path, old, new, depth, opts),
-        (Value::Object(old), Value::Object(new)) => object_diff(path, old, new, depth, opts),
+        (Value::Array(old), Value::Array(new)) => array_diff(path, old, new, depth, opts, memo),
+        (Value::Object(old), Value::Object(new)) => object_diff(path, old, new, depth, opts, memo),
         _ => type_change_report(path, a, b, depth, opts.max_depth),
     }
 }

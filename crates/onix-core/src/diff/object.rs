@@ -5,6 +5,7 @@
 use crate::value::{Object, Value};
 
 use crate::error::Error;
+use crate::ignore_order::DistanceMemo;
 use crate::path::PathSegment;
 use crate::report::{Report, ValuesChangedEntry};
 
@@ -66,6 +67,7 @@ pub(crate) fn object_diff(
     b: &Object,
     depth: usize,
     opts: &DiffOptions,
+    memo: &DistanceMemo,
 ) -> Result<Report, Error> {
     // `threshold_to_diff_deeper` collapse — see this function's own doc.
     // The depth check runs against the borrowed maps, BEFORE either is
@@ -110,7 +112,7 @@ pub(crate) fn object_diff(
                             report.insert_dictionary_item_removed(path.clone(), old_value.clone());
                         })
                     }
-                    Some(new_value) => diff_at(path, old_value, new_value, depth + 1, opts)
+                    Some(new_value) => diff_at(path, old_value, new_value, depth + 1, opts, memo)
                         .map(|sub_report| report.merge(sub_report)),
                 }
             },

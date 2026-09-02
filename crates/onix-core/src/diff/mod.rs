@@ -224,6 +224,8 @@ pub(crate) use dispatch::{
     values_equal,
 };
 pub(crate) use object::object_diff;
+#[cfg(test)]
+pub(crate) use options::diff_with_options_memo;
 pub(crate) use scalar::{
     numbers_equal, numeric_diff, python_type_name, scalar_diff, type_change_report,
 };

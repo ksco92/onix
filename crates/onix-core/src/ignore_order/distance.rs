@@ -9,6 +9,8 @@ use crate::value::{Number, Object, Value};
 
 use crate::diff::DiffOptions;
 
+use super::DistanceMemo;
+
 use super::fxhash::HashSet;
 
 /// A total-ordering wrapper for the non-negative, always-finite distances
@@ -168,7 +170,13 @@ pub(crate) fn is_length_excluded_key(key: &str) -> bool {
 /// (the array branch still asks the real engine, guaranteeing the same
 /// number `DeepDiff` would compute); this hybrid trades away the Report-free
 /// property only for the substantially rarer, non-benchmarked case.
-pub(crate) fn count_diff_leaves(a: &Value, b: &Value, depth: usize, opts: &DiffOptions) -> usize {
+pub(crate) fn count_diff_leaves(
+    a: &Value,
+    b: &Value,
+    depth: usize,
+    opts: &DiffOptions,
+    memo: &DistanceMemo,
+) -> usize {
     match (a, b) {
         (Value::Null, Value::Null) => 0,
         (Value::Bool(x), Value::Bool(y)) => usize::from(x != y),
@@ -180,8 +188,8 @@ pub(crate) fn count_diff_leaves(a: &Value, b: &Value, depth: usize, opts: &DiffO
                 type_change_leaf_length(a, b)
             }
         }
-        (Value::Array(x), Value::Array(y)) => count_array_diff_leaves(x, y, depth, opts),
-        (Value::Object(x), Value::Object(y)) => count_object_diff_leaves(x, y, depth, opts),
+        (Value::Array(x), Value::Array(y)) => count_array_diff_leaves(x, y, depth, opts, memo),
+        (Value::Object(x), Value::Object(y)) => count_object_diff_leaves(x, y, depth, opts, memo),
         _ => type_change_leaf_length(a, b),
     }
 }
@@ -425,6 +433,7 @@ pub(crate) fn count_object_diff_leaves(
     b: &Object,
     depth: usize,
     opts: &DiffOptions,
+    memo: &DistanceMemo,
 ) -> usize {
     if is_below_threshold_to_diff_deeper(a, b) {
         return item_length_of_map(b);
@@ -435,7 +444,7 @@ pub(crate) fn count_object_diff_leaves(
     for (key, old_value) in a {
         total += match b.get(key) {
             None => item_length(old_value),
-            Some(new_value) => count_diff_leaves(old_value, new_value, depth + 1, opts),
+            Some(new_value) => count_diff_leaves(old_value, new_value, depth + 1, opts, memo),
         };
     }
     for (key, new_value) in b {
@@ -465,13 +474,15 @@ pub(crate) fn count_array_diff_leaves(
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
+    memo: &DistanceMemo,
 ) -> usize {
     let probe_opts = DiffOptions {
         max_depth: opts.max_depth.saturating_sub(depth),
         ignore_order: opts.ignore_order,
     };
     let mut probe_path = Vec::new();
-    let Ok(mut sub_report) = crate::diff::array_diff(&mut probe_path, a, b, 0, &probe_opts) else {
+    let Ok(mut sub_report) = crate::diff::array_diff(&mut probe_path, a, b, 0, &probe_opts, memo)
+    else {
         return 0;
     };
     // `DeepDiff`'s own `_to_delta_dict` (what its real distance computation
@@ -538,12 +549,13 @@ pub(crate) fn rough_distance(
     cutoff: f64,
     depth: usize,
     opts: &DiffOptions,
+    memo: &DistanceMemo,
 ) -> f64 {
     if let (Some(r), Some(a)) = (numeric_value(removed), numeric_value(added)) {
         return numeric_distance(r, a, cutoff);
     }
 
-    let diff_length = count_diff_leaves(removed, added, depth + 1, opts);
+    let diff_length = count_diff_leaves(removed, added, depth + 1, opts, memo);
     if diff_length == 0 {
         return 0.0;
     }
