@@ -281,18 +281,26 @@ def test_cross_arg_error_from_small_stack_thread_does_not_crash() -> None:
     result = _run_isolated(
         f"""
         import threading
-        threading.stack_size(512 * 1024)
         def deep(d):
             v = 1
             for _ in range(d):
                 v = {{"a": v, "b": 2}}
             return v
+        # Build (and later tear down) the deep Python object on the normal-stack
+        # spawning thread: constructing or dropping a 19,999-deep dict is
+        # CPython's own recursive container code, unrelated to deepdiff_rs, and
+        # would overflow a 512 KiB stack on its own. The small-stack thread must
+        # run ONLY the DeepDiff call and its exception handling, so t1 is passed
+        # in by reference and kept alive here until after the thread joins.
+        t1 = deep({MAX_DEPTH_CEILING} - 1)
+        bad = {{"x": (1, 2)}}
         outcome = []
         def work():
             try:
-                DeepDiff(deep({MAX_DEPTH_CEILING} - 1), {{"x": (1, 2)}}, max_depth={MAX_DEPTH_CEILING})
+                DeepDiff(t1, bad, max_depth={MAX_DEPTH_CEILING})
             except TypeError:
                 outcome.append("ok")
+        threading.stack_size(512 * 1024)
         t = threading.Thread(target=work)
         t.start()
         t.join()
@@ -315,8 +323,8 @@ def test_shallow_diff_per_call_overhead_is_bounded() -> None:
         DeepDiff(a, b)
         samples.append(time.perf_counter() - start)
     median_us = statistics.median(samples) * 1e6
-    # Generous bound (baseline is ~1-2 us); the round-2 unconditional worker
-    # spawn was ~55 us, so this fails loudly if that regresses.
+    # Wide, one-directional bound against a thread-spawn-per-call regression
+    # (baseline is ~1-2 us for the inline shallow path).
     assert median_us < 25.0, f"median {median_us:.2f} us exceeds 25 us"
 
 
