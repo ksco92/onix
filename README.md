@@ -198,10 +198,12 @@ entirely in Rust.
 - **Floats** must be finite; `NaN`/`inf`/`-inf` raise `ValueError` (JSON has
   no representation for any of the three).
 - **`dict` keys** must be `str`; a non-`str` key raises `TypeError` naming
-  the key's type.
+  the key's type and the path to the dict containing it (e.g. `"dict keys
+  must be str, got key of type int at root['a']"`).
 - **Tuples, sets, frozensets, dates, and custom objects** are not
   representable in the JSON-shaped value model and raise `TypeError` naming
-  the type.
+  the type and the exact path it was found at (e.g. `"unsupported type for
+  diffing: tuple at root['a'][2]"`), however deeply nested.
 - **`MaxDepthError`** (a `ValueError` subclass) replaces a native crash on
   adversarially deep input, mirroring `onix_core::Error::MaxDepthExceeded`
   — but the bindings' own Python-object conversion is bounded by the same
@@ -222,21 +224,35 @@ same machine (macOS 26.5.1, Apple M5 Max) as `perf/RESULTS.md`'s M7 run:
 
 | Shape | deepdiff | deepdiff_rs | Speedup |
 | --- | --- | --- | --- |
-| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 2882.70ms | 67.05ms | **42.99x** |
-| Heterogeneous API-payload records, n=20,000 (live objects) | 126.02ms | 108.15ms | **1.17x** |
-| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 2884.76ms | 66.06ms | **43.67x** |
-| Same API-payload shape, via `diff_json` (JSON-string path) | 4259.80ms | 65.43ms | **65.10x** |
+| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 2888.48ms | 60.22ms | **47.97x** |
+| Heterogeneous API-payload records, n=20,000 (live objects) | 3377.67ms | 118.06ms | **28.61x** |
+| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 3070.74ms | 65.40ms | **46.95x** |
+| Same API-payload shape, via `diff_json` (JSON-string path) | 4621.58ms | 64.76ms | **71.36x** |
 
-**Honest reading:** the heterogeneous-records live-object case is the
-telling number — only **1.17x**, nowhere near onix-core's own headline
-multiples. Converting 20,000 realistic nested Python dict/list records
-into `onix_core`'s value model one Python object at a time is real,
-measurable overhead that eats almost all of the underlying engine's
-speed advantage — a known, anticipated risk (`perf/RESULTS.md`'s own M6
-numbers are explicitly an upper bound: already-parsed JSON, no
-Python-object conversion). The fast, JSON-string-only `diff_json` path avoids
-that conversion entirely and recovers a large multiple (65-66x) on the same
-data — **use `diff_json` when you already have (or can produce) JSON text**;
+**Honest reading, corrected:** an earlier version of this benchmark
+reported a misleading **1.17x** for the heterogeneous-records live-object
+row above. The bug was in the fixture, not the measurement: `b` was built
+as `list(a)`, a shallow copy, which leaves ~95% of records
+*identity-shared* between `a` and `b` (`b[i] is a[i]`) since they were
+never actually changed. Real `DeepDiff` fast-paths identical-object
+comparisons via its own `t1 is t2` identity check (`diff.py`) and coasts
+through those records almost for free — a shortcut no realistic caller
+benefits from, since two independently fetched/deserialized API responses
+are never identity-shared at any level. Rebuilding `b` via `copy.deepcopy`
+(every record structurally equal but never identity-shared, matching a
+real caller's inputs) corrects it to the honest **~28x** above.
+
+That number is still far short of onix-core's own headline multiples, for
+a real reason worth stating plainly: converting 20,000 realistic nested
+Python dict/list records into `onix_core`'s value model one Python object
+at a time is genuine, measurable overhead. An "equal-but-freshly-copied"
+proxy measurement — `DeepDiff(a, copy.deepcopy(a))`, which isolates
+conversion plus a cheap whole-tree equality check from the more expensive
+per-node diff bookkeeping the mutated case above also pays — accounts for
+roughly **76%** of that mutated case's own total time on this shape. The
+fast, JSON-string-only `diff_json` path avoids that conversion entirely
+and recovers a much larger multiple (**~71x**) on the same data —
+**use `diff_json` when you already have (or can produce) JSON text**;
 reach for the drop-in `DeepDiff` class when you genuinely need to diff
 live Python objects and accept the conversion cost as part of that
 convenience. Reproduce with:
@@ -389,6 +405,7 @@ this table current rather than letting missed mutants go unexamined.
 ```
 crates/onix-core   # the diff engine (library, no I/O)
 crates/onix-cli    # `onix` binary (thin CLI over the core)
+crates/onix-py     # PyO3 bindings (`deepdiff-rs` on PyPI) — see "Python" above
 scripts/           # scripts/gen_goldens.py: regenerates tests/golden/ from real DeepDiff
 tests/golden       # DeepDiff-generated expected outputs (M5b golden corpus)
 perf/              # cross-language benchmark harness (M6) — see "Benchmarks" below

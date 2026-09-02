@@ -5,9 +5,11 @@ build-backend = "maturin"
 [project]
 name = "deepdiff-rs"
 description = "Rust rewrite of Python DeepDiff's core: byte-compatible deep diffing of JSON, 64-5757x faster, ignore_order included"
+readme = "../../README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Rodrigo Carvajal" }]
+keywords = ["diff", "deepdiff", "json", "rust", "performance"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Rust",
@@ -29,9 +31,11 @@ Repository = "https://github.com/ksco92/onix"
 #
 # `deepdiff==9.1.0` itself requires Python >=3.10, tighter than this
 # package's own `requires-python` (>=3.9) — the marker below keeps `uv
-# sync`'s universal (all-supported-versions) resolution satisfiable; the
-# test suite is only ever actually run under the pinned 3.13 interpreter
-# (see README.md's "Python" section), which the marker allows.
+# sync`'s universal (all-supported-versions) resolution satisfiable. There
+# is no interpreter pin for the test venv itself (unlike the PEP-723
+# scripts under ../../scripts/ and ../../perf/, which do pin an exact
+# version): `uv sync` resolves whatever Python >=3.10 it finds/manages, and
+# the abi3 wheel this crate builds works identically across all of them.
 test = ["pytest>=8", "deepdiff==9.1.0 ; python_version >= '3.10'"]
 
 [tool.maturin]

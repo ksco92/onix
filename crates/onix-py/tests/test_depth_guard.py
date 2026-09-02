@@ -44,6 +44,29 @@ def test_deep_unequal_input_raises_max_depth_error_not_a_crash() -> None:
         DeepDiff(a, b)
 
 
+def test_caller_raised_max_depth_does_not_segfault_the_interpreter() -> None:
+    """
+    Regression test for a real crash: a native-recursion conversion walk
+    checks `depth > max_depth` only *after* descending -- with a small
+    `max_depth` (the default, 512), that check fires long before native
+    stack space runs out, but a caller-raised `max_depth` (e.g. 21_000, far
+    beyond typical realistic nesting but a value a caller is free to pass)
+    let the walk recurse 21,000 native frames deep before the check could
+    even fire, segfaulting the whole interpreter (SIGSEGV) instead of
+    raising a catchable exception. `deepdiff_rs.convert::to_value` now
+    walks iteratively (an explicit heap stack, no native recursion) so this
+    must raise cleanly regardless of how high `max_depth` is set -- the
+    mere fact that this assertion runs at all (rather than the test
+    process crashing outright) is the proof.
+    """
+    max_depth = 21_000
+    a = _nested_list(max_depth + 5_000, leaf=1)
+    b = _nested_list(max_depth + 5_000, leaf=2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b, max_depth=max_depth)
+
+
 def test_max_depth_error_is_a_value_error_subclass() -> None:
     """MaxDepthError is catchable by callers that only expect ValueError."""
     a = _nested_list(1000, leaf=1)

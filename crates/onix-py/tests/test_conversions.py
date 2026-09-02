@@ -112,9 +112,21 @@ def test_custom_object_raises_type_error() -> None:
 
 
 def test_unsupported_type_is_reported_even_when_nested() -> None:
-    """An unsupported type nested inside an otherwise-supported dict still raises."""
-    with pytest.raises(TypeError, match="tuple"):
-        DeepDiff({"a": (1, 2)}, {"a": (1, 3)})
+    """An unsupported type nested inside an otherwise-supported dict raises with its exact path."""
+    with pytest.raises(TypeError, match=r"tuple at root\['a'\]\['b'\]\[1\]"):
+        DeepDiff({"a": {"b": [1, (1, 2)]}}, {"a": {"b": [1, (1, 3)]}})
+
+
+def test_unsupported_type_at_root_reports_bare_root_path() -> None:
+    """A top-level unsupported value reports the bare `root` path."""
+    with pytest.raises(TypeError, match=r"tuple at root;"):
+        DeepDiff((1, 2), (1, 3))
+
+
+def test_non_str_dict_key_error_reports_path_to_the_dict() -> None:
+    """A non-str dict key error reports the path to the dict containing it, not just the type."""
+    with pytest.raises(TypeError, match=r"int at root\['a'\]"):
+        DeepDiff({"a": {1: "x"}}, {"a": {1: "y"}})
 
 
 # diff_json's own error path (JSON parsing, not Python-object conversion)

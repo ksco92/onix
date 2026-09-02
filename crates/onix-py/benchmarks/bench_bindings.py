@@ -33,6 +33,7 @@ or more):
     uv run --group test python benchmarks/bench_bindings.py
 """
 
+import copy
 import json
 import random
 import statistics
@@ -146,11 +147,21 @@ def build_api_payloads_case() -> tuple[JsonValue, JsonValue]:
     Build the `api_payloads` shape: `RECORD_COUNT` heterogeneous records,
     ~5% value-changed at record granularity.
 
+    `b` is a `copy.deepcopy` of `a`, not a shallow `list(a)`: a shallow copy
+    leaves every *unchanged* record (~95% of them) identity-shared between
+    `a` and `b` (`b[i] is a[i]`), which real `DeepDiff` fast-paths via its
+    own `t1 is t2` identity check (`diff.py`) -- a shortcut no realistic
+    caller benefits from, since two independently fetched/deserialized API
+    responses are never identity-shared at any level. `copy.deepcopy`
+    guarantees every record (and everything nested inside it) is a fresh
+    object, structurally equal but never identity-shared, in both the
+    unchanged 95% and the freshly-rebuilt mutated 5% alike.
+
     :return: The `(a, b)` pair, as live Python lists of dicts.
     """
     rng = random.Random(SEED + 1)
     a: list[JsonValue] = [_make_record(i, rng) for i in range(RECORD_COUNT)]
-    b = list(a)
+    b = copy.deepcopy(a)
     change_n = int(RECORD_COUNT * VALUE_CHANGE_RATE)
 
     for index in rng.sample(range(RECORD_COUNT), change_n):
