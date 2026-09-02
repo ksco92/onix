@@ -11,7 +11,7 @@ representation, inside ordered scalar lists (detailed in
 **Status (September 2026):** pre-alpha proof of concept, unpublished; ordered
 + `ignore_order` diffing complete and benchmarked (see
 [perf/RESULTS.md](https://github.com/ksco92/onix/blob/main/perf/RESULTS.md)); Python bindings (PyO3, `deepdiff-rs` on
-PyPI once published; see "Python" below) built, not yet published.
+PyPI once published: see "Python" below) built, not yet published.
 
 ## Table of contents
 
@@ -33,7 +33,7 @@ In order, each building on the last:
 1. **This README**: what onix is, how to build it, and where everything
    lives (see "Layout" below).
 2. **`crates/onix-core/src/lib.rs`'s doc comment**: the crate's front
-   door, an architecture map (parse → diff dispatch → ordered/`ignore_order`
+   door: an architecture map (parse → diff dispatch → ordered/`ignore_order`
    container comparison → `Report` → render) naming the actual module each
    step lives in, plus the design decisions behind it (why
    `serde_json::Value` with no value-model abstraction, why the engine is
@@ -43,12 +43,12 @@ In order, each building on the last:
    front door to its own submodules, one seam per file (see each
    directory's `mod.rs` "Internal layout" section).
 3. **`tests/golden/README.md`**: what the golden corpus pins down, and the
-   one documented `DeepDiff` quirk it doesn't — the empirical ground truth
-   the code above matches. `crates/onix-core/src/ignore_order/mod.rs`'s own
+   one documented `DeepDiff` quirk it doesn't. The corpus is the empirical
+   ground truth the code above matches. `crates/onix-core/src/ignore_order/mod.rs`'s own
    doc comment carries the full, source-cited `ignore_order=True` spec this
    crate implements.
 4. **`crates/onix-py/src/lib.rs`'s doc comment** (see "Python" below): how
-   the Python bindings sit on top of everything above, a one-time
+   the Python bindings sit on top of everything above: a one-time
    Python-object-to-`Value` conversion (`crates/onix-py/src/convert.rs`)
    feeding the exact same `onix_core::diff_with_options` this README's
    `onix diff` CLI calls.
@@ -87,7 +87,7 @@ are run from the repository root.
    ```
 
 Regenerating the golden corpus (see "Golden corpus" below) needs `uv`, which
-installs its own pinned Python 3.13 and `deepdiff` on demand. No separate
+installs its own pinned Python 3.13 and `deepdiff` on demand: no separate
 setup required. Benchmarking (see "Benchmarks" below) additionally needs
 `hyperfine` (`brew install hyperfine`, or any platform: `cargo install
 hyperfine`).
@@ -157,7 +157,7 @@ from source for now.
 ### Install
 
 ```sh
-pip install deepdiff-rs   # once published — see "Wheels" below
+pip install deepdiff-rs   # once published, see "Wheels" below
 ```
 
 From source (this repo):
@@ -205,7 +205,7 @@ entirely in Rust.
 ### MVP limitations (documented, not accidental)
 
 - **Supported types:** `None`, `bool`, `int`, `float`, `str`, `dict` (`str`
-  keys only), `list`; the rest of `deepdiff.DeepDiff`'s option surface
+  keys only), `list`. The rest of `deepdiff.DeepDiff`'s option surface
   (`exclude_paths`, `significant_digits`, custom operators, `verbose_level
   != 2`, delta/patch, …) is not yet implemented.
 - **Integers** must fit in `i64` or `u64`; arbitrary-precision Python `int`s
@@ -276,7 +276,7 @@ seconds (user + system) are the sub-rows, each the median of the same 11
 isolated subprocess runs per side (the script's docstring explains how the
 subprocess isolation attributes memory to a side). The Speedup column carries
 the deepdiff / deepdiff_rs ratio on every row, computed from full-precision
-values before rounding for display, so a value below 1x on a memory or CPU
+values before rounding for display. A value below 1x on a memory or CPU
 row means `deepdiff_rs` used more than `deepdiff` there, and hand-dividing the
 displayed 3-decimal figures can differ slightly from the bolded ratio. CPU
 tracks wall time closely (single-threaded, CPU-bound work); peak RSS is
@@ -373,8 +373,8 @@ maturin publish --release
 | `make deny` | `cargo deny check` | advisories/licenses/bans/sources clean |
 | `make machete` | `cargo machete` | no unused dependencies |
 
-(`make mutants`, mutation testing, is a separate target, run periodically
-rather than on every `check`.)
+(mutation testing via `make mutants` is a separate target that runs
+periodically rather than on every `check`.)
 
 `onix-cli/src/main.rs` is held to the same ≥95% line-coverage bar as the rest
 of the workspace: its `diff` subcommand logic has unit tests (`src/tests.rs`,
@@ -415,7 +415,7 @@ against real `deepdiff` directly (not just the fixed golden corpus).
 ### Mutation testing
 
 `make mutants` runs [`cargo-mutants`](https://mutants.rs/) against
-`onix-core` and `onix-cli`, the two crates coverage holds to the 95% bar,
+`onix-core` and `onix-cli` (the two crates coverage holds to the 95% bar),
 excluding `onix-py` for the same structural reason (see the `Makefile`'s
 `mutants` target). It's the
 coverage gate's honest sibling: 100% line coverage only proves every line
@@ -432,11 +432,12 @@ cargo install cargo-mutants --locked
 make mutants
 ```
 
-Every mutant `make mutants` reports, caught, missed, or unviable (a mutant
-that doesn't even compile, e.g. because a type has no meaningful
-`Default`), gets triaged: a missed mutant either gets a new regression
-test that kills it, or, if justified, an explanation (kept alongside the
-code it concerns, as source comments) of why it's equivalent/non-actionable.
+Every mutant `make mutants` reports falls into one of three buckets
+(caught, missed, or unviable; unviable meaning it doesn't even compile,
+e.g. because a type has no meaningful `Default`), and each gets triaged: a
+missed mutant either gets a new regression test that kills it, or, if
+justified, an explanation (kept alongside the code it concerns, as source
+comments) of why it's equivalent/non-actionable.
 
 **Standing result.** `make mutants` enumerates a deterministic **443**
 mutants (18 in `onix-cli`, 425 in `onix-core`). Every mutant that is not
@@ -479,11 +480,11 @@ perf/run_bench.sh
 ```
 
 This regenerates the deterministic fixture matrix (`perf/fixtures/`,
-gitignored, seeded, byte-identical on regeneration), builds
-`cargo build --release`, runs a correctness precheck (onix vs. real DeepDiff
+gitignored, seeded, byte-identical on regeneration); builds
+`cargo build --release`; runs a correctness precheck (onix vs. real DeepDiff
 must produce byte-identical canonical JSON on every fixture; the run
-aborts otherwise, since a perf number on divergent output is void), sweeps
-wall clock/CPU time/peak RSS with `hyperfine`, and writes `perf/RESULTS.md`.
+aborts otherwise, since a perf number on divergent output is void); sweeps
+wall clock/CPU time/peak RSS with `hyperfine`; and writes `perf/RESULTS.md`.
 Every number in that file traces back to a real run; none are hand-written.
 Raw per-run JSON lands in `perf/bench_raw/` (also gitignored).
 
@@ -496,10 +497,10 @@ Python environment setup needed beyond `uv` itself.
 ```
 crates/onix-core   # the diff engine (library, no I/O)
 crates/onix-cli    # `onix` binary (thin CLI over the core)
-crates/onix-py     # PyO3 bindings (`deepdiff-rs` on PyPI) — see "Python" above
+crates/onix-py     # PyO3 bindings (`deepdiff-rs` on PyPI), see "Python" above
 scripts/           # scripts/gen_goldens.py: regenerates tests/golden/ from real DeepDiff
 tests/golden       # DeepDiff-generated expected outputs (golden corpus)
-perf/              # cross-language benchmark harness — see "Benchmarks" above
+perf/              # cross-language benchmark harness, see "Benchmarks" above
 ```
 
 ## Contributing and support
