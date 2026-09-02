@@ -1,0 +1,44 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "deepdiff-rs"
+description = "Rust rewrite of Python DeepDiff's core: byte-compatible deep diffing of JSON, 64-5757x faster, ignore_order included"
+readme = "../../README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Rodrigo Carvajal" }]
+keywords = ["diff", "deepdiff", "json", "rust", "performance"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/ksco92/onix"
+Repository = "https://github.com/ksco92/onix"
+
+[dependency-groups]
+# Test-only dependencies (never shipped in the wheel): pytest to run
+# crates/onix-py/tests/, and real deepdiff pinned to the exact version the
+# whole repo's golden corpus is generated against (see
+# ../../tests/golden/README.md) — parity is only meaningful against one
+# fixed incumbent version.
+#
+# `deepdiff==9.1.0` itself requires Python >=3.10, tighter than this
+# package's own `requires-python` (>=3.9) — the marker below keeps `uv
+# sync`'s universal (all-supported-versions) resolution satisfiable. There
+# is no interpreter pin for the test venv itself (unlike the PEP-723
+# scripts under ../../scripts/ and ../../perf/, which do pin an exact
+# version): `uv sync` resolves whatever Python >=3.10 it finds/manages, and
+# the abi3 wheel this crate builds works identically across all of them.
+test = ["pytest>=8", "deepdiff==9.1.0 ; python_version >= '3.10'"]
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "deepdiff_rs"
+features = ["pyo3/extension-module"]
