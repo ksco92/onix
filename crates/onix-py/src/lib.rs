@@ -19,11 +19,14 @@
 //! `errors` holds the Python-visible exception type (`errors::MaxDepthError`)
 //! both entry points raise instead of ever letting
 //! `onix_core::Error::MaxDepthExceeded` — or a native stack overflow on
-//! adversarially deep input — escape as anything else.
+//! adversarially deep input — escape as anything else. `guard` holds the
+//! shared native-stack-overflow hardening (the `max_depth` ceiling and the
+//! sized diff worker thread) both entry points route their diff through.
 mod convert;
 mod deepdiff;
 mod errors;
 mod fast_path;
+mod guard;
 
 use pyo3::prelude::*;
 
@@ -32,5 +35,6 @@ fn deepdiff_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<deepdiff::DeepDiff>()?;
     m.add_function(wrap_pyfunction!(fast_path::diff_json, m)?)?;
     m.add("MaxDepthError", py.get_type::<errors::MaxDepthError>())?;
+    m.add("MAX_DEPTH_CEILING", guard::MAX_DEPTH_CEILING)?;
     Ok(())
 }

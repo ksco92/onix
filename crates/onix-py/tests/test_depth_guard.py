@@ -8,15 +8,43 @@ fixture is constructed.
 """
 
 import json
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
-from deepdiff_rs import DeepDiff, MaxDepthError, diff_json
+from deepdiff_rs import MAX_DEPTH_CEILING, DeepDiff, MaxDepthError, diff_json
 
 type JsonValue = dict[str, "JsonValue"] | list["JsonValue"] | str | int | float | bool | None
 
 # onix_core::DEFAULT_MAX_DEPTH -- see crates/onix-core/src/diff/options.rs.
 DEFAULT_MAX_DEPTH = 512
+
+
+def _run_isolated(body: str) -> subprocess.CompletedProcess[str]:
+    """
+    Run `body` in a fresh Python subprocess and return the completed process.
+
+    Used for the cases whose *whole point* is that they no longer crash the
+    interpreter: before the sized-worker fix they aborted the process with a
+    native SIGSEGV, which in-process would take pytest itself down (an
+    unhelpful "dead test run" rather than a failed test). Isolating them means
+    a regression surfaces as a non-zero return code on this one subprocess --
+    an ordinary failed assertion -- not a dead suite.
+
+    :param body: Python source to run; it should assert its own expectations
+        and exit 0 on success.
+    :return: The completed subprocess (inspect ``returncode``/``stderr``).
+    """
+    src = "from deepdiff_rs import DeepDiff, MaxDepthError, diff_json\n" + textwrap.dedent(body)
+    return subprocess.run(
+        [sys.executable, "-c", src],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
 
 
 def _nested_list(depth: int, leaf: JsonValue) -> JsonValue:
@@ -44,22 +72,9 @@ def test_deep_unequal_input_raises_max_depth_error_not_a_crash() -> None:
         DeepDiff(a, b)
 
 
-def test_caller_raised_max_depth_does_not_segfault_the_interpreter() -> None:
-    """
-    Regression test for a real crash: a native-recursion conversion walk
-    checks `depth > max_depth` only *after* descending -- with a small
-    `max_depth` (the default, 512), that check fires long before native
-    stack space runs out, but a caller-raised `max_depth` (e.g. 21_000, far
-    beyond typical realistic nesting but a value a caller is free to pass)
-    let the walk recurse 21,000 native frames deep before the check could
-    even fire, segfaulting the whole interpreter (SIGSEGV) instead of
-    raising a catchable exception. `deepdiff_rs.convert::to_value` now
-    walks iteratively (an explicit heap stack, no native recursion) so this
-    must raise cleanly regardless of how high `max_depth` is set -- the
-    mere fact that this assertion runs at all (rather than the test
-    process crashing outright) is the proof.
-    """
-    max_depth = 21_000
+def test_input_deeper_than_max_depth_raises_at_conversion_time() -> None:
+    """Input nested past a raised (but in-ceiling) max_depth raises MaxDepthError at conversion."""
+    max_depth = 15_000
     a = _nested_list(max_depth + 5_000, leaf=1)
     b = _nested_list(max_depth + 5_000, leaf=2)
 
@@ -118,6 +133,103 @@ def test_default_max_depth_matches_onix_core() -> None:
 
     with pytest.raises(MaxDepthError):
         DeepDiff(a_over, b_over)
+
+
+# The sized-worker cases: genuinely-unequal input nested BELOW max_depth (so
+# conversion succeeds and the diff itself runs), which is the exact shape that
+# used to overflow the native stack and SIGSEGV the interpreter. Each runs in
+# its own subprocess so a regression is a failed assertion, not a dead suite.
+
+
+def test_deep_unequal_lists_below_max_depth_return_correct_diff() -> None:
+    """10,000-deep unequal lists with a higher max_depth diff correctly (no crash)."""
+    result = _run_isolated(
+        """
+        import json
+        depth = 10_000
+        a = 1
+        b = 2
+        for _ in range(depth):
+            a = [a]
+            b = [b]
+        report = json.loads(DeepDiff(a, b, max_depth=12_000).to_json())
+        changed = report["values_changed"]
+        assert len(changed) == 1, changed
+        (path, delta), = changed.items()
+        assert path.count("[") == depth, path
+        assert delta == {"new_value": 2, "old_value": 1}, delta
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_near_ceiling_lists_and_dicts_return_correct_diff() -> None:
+    """Unequal lists AND dicts nested near the ceiling diff correctly (no crash)."""
+    result = _run_isolated(
+        f"""
+        import json
+        depth = {MAX_DEPTH_CEILING} - 1_000
+        max_depth = {MAX_DEPTH_CEILING}
+
+        list_a, list_b = 1, 2
+        dict_a, dict_b = 1, 2
+        for _ in range(depth):
+            list_a, list_b = [list_a], [list_b]
+            dict_a, dict_b = {{"k": dict_a}}, {{"k": dict_b}}
+
+        for a, b, opener in ((list_a, list_b, "["), (dict_a, dict_b, "[")):
+            report = json.loads(DeepDiff(a, b, max_depth=max_depth).to_json())
+            (path, delta), = report["values_changed"].items()
+            assert path.count(opener) == depth, (opener, path.count(opener))
+            assert delta == {{"new_value": 2, "old_value": 1}}, delta
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_deep_report_lifecycle_to_dict_then_del_does_not_crash() -> None:
+    """A deep diff report survives to_dict() and del (its deep Value drops safely)."""
+    result = _run_isolated(
+        f"""
+        big = 1
+        for _ in range({MAX_DEPTH_CEILING} - 5_000):
+            big = {{"k": big}}
+        diff = DeepDiff({{}}, {{"x": big}}, max_depth={MAX_DEPTH_CEILING})
+        parsed = diff.to_dict()
+        assert "dictionary_item_added" in parsed, parsed.keys()
+        del parsed
+        del diff
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_max_depth_above_ceiling_raises_value_error_naming_the_ceiling() -> None:
+    """A max_depth above the ceiling is refused up front with a catchable ValueError."""
+    with pytest.raises(ValueError, match=str(MAX_DEPTH_CEILING)) as excinfo:
+        DeepDiff([1], [2], max_depth=MAX_DEPTH_CEILING + 1)
+
+    # Not a MaxDepthError: this is the up-front ceiling refusal, a different
+    # (shallower) path than a nesting that exceeds an in-range max_depth.
+    assert not isinstance(excinfo.value, MaxDepthError)
+
+
+def test_max_depth_exactly_at_ceiling_is_accepted() -> None:
+    """max_depth == the ceiling is allowed (the boundary is inclusive)."""
+    diff = DeepDiff([1], [2], max_depth=MAX_DEPTH_CEILING)
+    assert bool(diff) is True
+
+
+def test_diff_json_max_depth_above_ceiling_raises_value_error() -> None:
+    """diff_json enforces the same ceiling as the DeepDiff class."""
+    with pytest.raises(ValueError, match=str(MAX_DEPTH_CEILING)):
+        diff_json("[1]", "[2]", max_depth=MAX_DEPTH_CEILING + 1)
 
 
 # diff_json's own depth guard (no Python-object conversion involved -- JSON
