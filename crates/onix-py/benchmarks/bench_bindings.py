@@ -232,16 +232,53 @@ def bench_ignore_order(a: JsonValue, b: JsonValue) -> None:
     report(f"ignore_order_10k (live objects, n={IGNORE_ORDER_SIZE})", deepdiff_seconds, onix_seconds)
 
 
-def bench_api_payloads(a: JsonValue, b: JsonValue) -> None:
+def bench_api_payloads(a: JsonValue, b: JsonValue) -> float:
     """
     Benchmark shape (2): plain ordered diff on live heterogeneous records.
 
     :param a: The first record list.
     :param b: The second record list.
+    :return: deepdiff_rs's own median time (seconds) on this mutated case,
+        for the conversion-overhead proxy below to be measured against.
     """
     deepdiff_seconds = time_median(lambda: RealDeepDiff(a, b, verbose_level=2))
     onix_seconds = time_median(lambda: OnixDeepDiff(a, b))
     report(f"api_payloads (live objects, n={RECORD_COUNT})", deepdiff_seconds, onix_seconds)
+
+    return onix_seconds
+
+
+def bench_conversion_proxy(a: JsonValue, mutated_onix_seconds: float) -> None:
+    """
+    Print deepdiff_rs's conversion-overhead proxy on the api_payloads shape.
+
+    Diffing `a` against a fresh, structurally equal (never identity-shared)
+    `copy.deepcopy(a)` pays the full Python-object-to-`Value` conversion of
+    both sides plus onix's cheap whole-input equality short-circuit, but none
+    of the per-node diff bookkeeping the mutated `api_payloads` case also
+    pays. Reporting it as a fraction of that mutated case's own deepdiff_rs
+    time isolates how much of the live-object number is conversion rather
+    than diffing -- the figure the README's "honest reading" cites, generated
+    here rather than hand-carried.
+
+    The `deepcopy` is done once up front, outside the timed region: it is
+    fixture setup (producing the equal comparand), not part of the conversion
+    cost being measured, so timing it would inflate the proxy with pure
+    Python copy time that no diff caller pays.
+
+    :param a: The api_payloads first record list (its own deepcopy is the
+        equal comparand).
+    :param mutated_onix_seconds: deepdiff_rs's median on the mutated
+        api_payloads case, from :func:`bench_api_payloads`.
+    """
+    equal_copy = copy.deepcopy(a)
+    onix_seconds = time_median(lambda: OnixDeepDiff(a, equal_copy))
+    fraction = onix_seconds / mutated_onix_seconds
+    print(
+        f"conversion proxy (deepdiff_rs, DeepDiff(a, deepcopy(a)), n={RECORD_COUNT}): "
+        f"{onix_seconds * 1000:.2f}ms = {fraction * 100:.1f}% of the mutated "
+        f"api_payloads case's {mutated_onix_seconds * 1000:.2f}ms",
+    )
 
 
 def bench_json_path(label: str, a: JsonValue, b: JsonValue, *, ignore_order: bool) -> None:
@@ -276,7 +313,8 @@ def main() -> None:
     print(f"onix bindings benchmark (median of {RUNS} runs, 1 discarded warmup call)\n")
 
     bench_ignore_order(ignore_order_a, ignore_order_b)
-    bench_api_payloads(api_payloads_a, api_payloads_b)
+    mutated_onix_seconds = bench_api_payloads(api_payloads_a, api_payloads_b)
+    bench_conversion_proxy(api_payloads_a, mutated_onix_seconds)
     bench_json_path("ignore_order_10k", ignore_order_a, ignore_order_b, ignore_order=True)
     bench_json_path("api_payloads", api_payloads_a, api_payloads_b, ignore_order=False)
 

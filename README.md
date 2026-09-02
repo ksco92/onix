@@ -1,14 +1,27 @@
 # onix
 
-Rust rewrite of Python DeepDiff's core: byte-compatible deep diffing of JSON, 64-5757x faster, ignore_order included
+**Rust rewrite of Python DeepDiff's core: byte-compatible deep diffing of JSON, 64-5757x faster, ignore_order included.**
 
 See [DeepDiff](https://github.com/seperman/deepdiff) for the Python original
 onix matches report-for-report.
 
 **Status (September 2026):** pre-alpha proof of concept, unpublished; ordered
 + `ignore_order` diffing complete and benchmarked (see
-[perf/RESULTS.md](perf/RESULTS.md)); Python bindings (PyO3, `deepdiff-rs` on
+[perf/RESULTS.md](https://github.com/ksco92/onix/blob/main/perf/RESULTS.md)); Python bindings (PyO3, `deepdiff-rs` on
 PyPI once published — see "Python" below) built, not yet published.
+
+## Table of contents
+
+- [Reading path (first-time visitor)](https://github.com/ksco92/onix/blob/main/README.md#reading-path-first-time-visitor)
+- [Setup from scratch](https://github.com/ksco92/onix/blob/main/README.md#setup-from-scratch)
+- [Usage: `onix diff`](https://github.com/ksco92/onix/blob/main/README.md#usage-onix-diff)
+- [Python](https://github.com/ksco92/onix/blob/main/README.md#python)
+- [Quality gates](https://github.com/ksco92/onix/blob/main/README.md#quality-gates)
+- [Golden corpus](https://github.com/ksco92/onix/blob/main/README.md#golden-corpus)
+- [Benchmarks](https://github.com/ksco92/onix/blob/main/README.md#benchmarks)
+- [Layout](https://github.com/ksco92/onix/blob/main/README.md#layout)
+- [Contributing and support](https://github.com/ksco92/onix/blob/main/README.md#contributing-and-support)
+- [License](https://github.com/ksco92/onix/blob/main/README.md#license)
 
 ## Reading path (first-time visitor)
 
@@ -50,7 +63,7 @@ are run from the repository root.
    ```
 
    The exact toolchain version is pinned in
-   [`rust-toolchain.toml`](rust-toolchain.toml); rustup installs it (plus the
+   [`rust-toolchain.toml`](https://github.com/ksco92/onix/blob/main/rust-toolchain.toml); rustup installs it (plus the
    `clippy`, `rustfmt`, and `llvm-tools-preview` components) automatically the
    first time you run a `cargo` command in this repo.
 
@@ -101,7 +114,7 @@ single deterministic line is easiest to diff byte-for-byte.
   `crates/onix-core/src/ignore_order/mod.rs`'s module doc for the full,
   source-cited spec this implements. **Known divergences** (both `ignore_order`- and
   ordered-path-related) are tracked in
-  [`tests/golden/README.md`](tests/golden/README.md)'s "Known DeepDiff
+  [`tests/golden/README.md`](https://github.com/ksco92/onix/blob/main/tests/golden/README.md)'s "Known DeepDiff
   quirks" section — an intentionally-unchased path-rendering edge case and
   a narrow list-LCS numeric-precision limit.
 - `--timing` prints exactly one line of JSON to **stderr** —
@@ -205,13 +218,25 @@ entirely in Rust.
   the type and the exact path it was found at (e.g. `"unsupported type for
   diffing: tuple at root['a'][2]"`), however deeply nested.
 - **`MaxDepthError`** (a `ValueError` subclass) replaces a native crash on
-  adversarially deep input, mirroring `onix_core::Error::MaxDepthExceeded`
-  — but the bindings' own Python-object conversion is bounded by the same
+  adversarially deep input, mirroring `onix_core::Error::MaxDepthExceeded`.
+  But the bindings' own Python-object conversion is bounded by the same
   `max_depth` budget independently of the diff itself, so (unlike
   `onix_core::diff_with_max_depth`'s own guarantee) two *equal* inputs
   deeper than `max_depth` still raise here, since equality isn't known yet
   at conversion time. Default `max_depth` is `onix_core::DEFAULT_MAX_DEPTH`
   (512).
+- **`max_depth` has a hard ceiling**, exposed as `deepdiff_rs.MAX_DEPTH_CEILING`
+  (currently 20,000). The diff engine is recursive, so a caller-raised
+  `max_depth` is what makes a deep-enough input recurse far enough to
+  overflow the native stack. Requesting a `max_depth` above the ceiling is
+  refused up front with a plain `ValueError` naming the ceiling (not a
+  `MaxDepthError`), because such a depth cannot be diffed without that risk.
+  For any `max_depth` at or below the ceiling the diff runs on a worker
+  thread whose stack is sized so that no in-range input can overflow it, so
+  the outcome is always either a correct result or a catchable exception,
+  never a process crash. The default (512) is far below the ceiling and is
+  unaffected; real-world JSON is essentially never nested even into the
+  hundreds.
 
 ### Bindings benchmark
 
@@ -224,38 +249,34 @@ same machine (macOS 26.5.1, Apple M5 Max) as `perf/RESULTS.md`'s M7 run:
 
 | Shape | deepdiff | deepdiff_rs | Speedup |
 | --- | --- | --- | --- |
-| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 2888.48ms | 60.22ms | **47.97x** |
-| Heterogeneous API-payload records, n=20,000 (live objects) | 3377.67ms | 118.06ms | **28.61x** |
-| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 3070.74ms | 65.40ms | **46.95x** |
-| Same API-payload shape, via `diff_json` (JSON-string path) | 4621.58ms | 64.76ms | **71.36x** |
+| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 3256.98ms | 67.10ms | **48.54x** |
+| Heterogeneous API-payload records, n=20,000 (live objects) | 4410.58ms | 127.38ms | **34.62x** |
+| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 3191.80ms | 66.90ms | **47.71x** |
+| Same API-payload shape, via `diff_json` (JSON-string path) | 6034.73ms | 66.24ms | **91.11x** |
 
-**Honest reading, corrected:** an earlier version of this benchmark
-reported a misleading **1.17x** for the heterogeneous-records live-object
-row above. The bug was in the fixture, not the measurement: `b` was built
-as `list(a)`, a shallow copy, which leaves ~95% of records
-*identity-shared* between `a` and `b` (`b[i] is a[i]`) since they were
-never actually changed. Real `DeepDiff` fast-paths identical-object
-comparisons via its own `t1 is t2` identity check (`diff.py`) and coasts
-through those records almost for free — a shortcut no realistic caller
-benefits from, since two independently fetched/deserialized API responses
-are never identity-shared at any level. Rebuilding `b` via `copy.deepcopy`
-(every record structurally equal but never identity-shared, matching a
-real caller's inputs) corrects it to the honest **~28x** above.
+**Honest reading:** the live-object API-payload row (**~35x**) builds `b`
+as a `copy.deepcopy` of `a`, never a shallow `list(a)`. A shallow copy
+would leave ~95% of records identity-shared between the two inputs, which
+real `DeepDiff` fast-paths via its own `t1 is t2` identity check, flattering
+onix to a meaningless multiple that no real caller sees (two independently
+deserialized API responses are never identity-shared). The full rationale
+lives at the fixture builder in
+`crates/onix-py/benchmarks/bench_bindings.py`.
 
-That number is still far short of onix-core's own headline multiples, for
-a real reason worth stating plainly: converting 20,000 realistic nested
-Python dict/list records into `onix_core`'s value model one Python object
-at a time is genuine, measurable overhead. An "equal-but-freshly-copied"
-proxy measurement — `DeepDiff(a, copy.deepcopy(a))`, which isolates
-conversion plus a cheap whole-tree equality check from the more expensive
-per-node diff bookkeeping the mutated case above also pays — accounts for
-roughly **76%** of that mutated case's own total time on this shape. The
-fast, JSON-string-only `diff_json` path avoids that conversion entirely
-and recovers a much larger multiple (**~71x**) on the same data —
-**use `diff_json` when you already have (or can produce) JSON text**;
-reach for the drop-in `DeepDiff` class when you genuinely need to diff
-live Python objects and accept the conversion cost as part of that
-convenience. Reproduce with:
+That multiple is still well short of onix-core's own headline numbers, for
+a reason worth stating plainly. Converting 20,000 realistic nested Python
+records into `onix_core`'s value model one object at a time is genuine,
+measurable overhead. A proxy that isolates it, `DeepDiff(a,
+copy.deepcopy(a))` (which pays the full conversion plus onix's cheap
+whole-tree equality check, but none of the per-node diff bookkeeping the
+mutated case also pays), accounts for roughly **77%** of the mutated case's
+own total time on this shape, and `bench_bindings.py` now computes and
+prints that percentage as part of its output. The JSON-string-only
+`diff_json` path skips the conversion entirely and recovers a much larger
+multiple (**~91x**) on the same data. Use `diff_json` when you already have
+(or can produce) JSON text; reach for the drop-in `DeepDiff` class when you
+genuinely need to diff live Python objects, and accept the conversion cost
+as part of that convenience. Reproduce with:
 
 ```sh
 cd crates/onix-py
@@ -351,7 +372,7 @@ path-rendering collision; see below). Each case directory carries its own
 `options.json` (currently just `{"ignore_order": bool}`), read per case so
 the same test runs both the ordered and `ignore_order=True` corpora. This is
 the correctness bar for the whole compatibility claim — see
-[`tests/golden/README.md`](tests/golden/README.md) for the pinned
+[`tests/golden/README.md`](https://github.com/ksco92/onix/blob/main/tests/golden/README.md) for the pinned
 `deepdiff`/Python versions, the case list, and the regeneration command
 (`uv run scripts/gen_goldens.py`). `scripts/m7_differential_fuzz.py` is a
 separate, non-`make-check` development-time tool that fuzzes `--ignore-order`
@@ -382,34 +403,30 @@ that doesn't even compile, e.g. because a type has no meaningful
 test that kills it, or, if justified, an explanation (kept alongside the
 code it concerns, as source comments) of why it's equivalent/non-actionable.
 
-**Standing result, by area** (most recent targeted run each area received;
-`make mutants` now runs `--workspace`, so a full run covers both crates at
-once):
+**Standing result**, from a single `--workspace`-scoped run whose full
+per-file breakdown, tool version, and reproduce command are committed
+alongside the numbers in
+[perf/MUTANTS.md](https://github.com/ksco92/onix/blob/main/perf/MUTANTS.md):
 
-| Area | Mutants tested | Caught | Missed | Unviable | Notes |
+| Crate | Tested | Caught | Missed | Timeout | Unviable |
 | --- | --- | --- | --- | --- | --- |
-| `onix-core`'s depth-hardening (traversal/value-depth guards) | 109 | 107 | 0 | 2 | — |
-| `onix-cli`'s `diff` subcommand logic | 124 | 121 | 0 | 3 | — |
-| List diffing (`crate::lcs`, index-aligned/LCS matching) | 265 | 244 | 9 | 6 | plus 6 timeouts; all 9 missed and all 6 timeouts are proven equivalent/non-actionable (see the surrounding source comments for the mathematical argument) |
-| `ignore_order=True` engine (`crate::ignore_order`) | 140 | 133 | 1 | 6 | the 1 missed mutant is proven unreachable (see the surrounding source comments) |
+| `onix-core` | 425 | 412 | 6 | 6 | 1 |
+| `onix-cli` | 18 | 17 | 0 | 0 | 1 |
+| **Total** | **443** | **429** | **6** | **6** | **2** |
+
+All 6 missed and all 6 timeouts fall in `onix-core/src/lcs.rs`
+(`get_matching_blocks` and `find_longest_match`); each is equivalent or
+non-actionable, with the argument kept in the surrounding source comments.
+The 2 unviable mutants substitute a `Default` the type does not usefully
+provide, so they do not compile and no test can exercise them.
 
 A "timeout" is `cargo-mutants`' own non-passing category for a mutant that
 forces an infinite loop rather than a wrong-but-terminating result — not
 something a test suite could plausibly race against faster than the tool's
 own per-mutant timeout already does, so no action is taken on those either.
-Future work that touches this logic should re-run `make mutants` and keep
-this table current rather than letting missed mutants go unexamined.
-
-## Layout
-
-```
-crates/onix-core   # the diff engine (library, no I/O)
-crates/onix-cli    # `onix` binary (thin CLI over the core)
-crates/onix-py     # PyO3 bindings (`deepdiff-rs` on PyPI) — see "Python" above
-scripts/           # scripts/gen_goldens.py: regenerates tests/golden/ from real DeepDiff
-tests/golden       # DeepDiff-generated expected outputs (M5b golden corpus)
-perf/              # cross-language benchmark harness (M6) — see "Benchmarks" below
-```
+Future work that touches this logic should re-run `make mutants`, refresh
+`perf/MUTANTS.md`, and keep this table current rather than letting missed
+mutants go unexamined.
 
 ## Benchmarks
 
@@ -442,6 +459,34 @@ Raw per-run JSON lands in `perf/bench_raw/` (also gitignored).
 pinned scripts (same pattern as `scripts/gen_goldens.py`) — no separate
 Python environment setup needed beyond `uv` itself.
 
+## Layout
+
+```
+crates/onix-core   # the diff engine (library, no I/O)
+crates/onix-cli    # `onix` binary (thin CLI over the core)
+crates/onix-py     # PyO3 bindings (`deepdiff-rs` on PyPI) — see "Python" above
+scripts/           # scripts/gen_goldens.py: regenerates tests/golden/ from real DeepDiff
+tests/golden       # DeepDiff-generated expected outputs (M5b golden corpus)
+perf/              # cross-language benchmark harness (M6) — see "Benchmarks" above
+```
+
+## Contributing and support
+
+This is a pre-alpha proof of concept, and issues and pull requests are
+welcome. There is no separate contributor process yet: open an issue on the
+[GitHub repository](https://github.com/ksco92/onix) to report a bug, a
+`DeepDiff` divergence, or a question, and include the two inputs and the
+reports both engines produce for a divergence.
+
+Before sending a change, run the full gate from the repository root:
+
+```sh
+make check        # fmt, clippy, tests, coverage, docs, cargo-deny, cargo-machete
+make python-test  # the Python binding suite (needs uv + a built extension)
+```
+
+Both must pass; `make check` is the same gate the project holds itself to.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/ksco92/onix/blob/main/LICENSE).
