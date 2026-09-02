@@ -1,24 +1,29 @@
 //! The diff engine's entry point.
 //!
-//! M1 handled scalars only, always reported at the `root` path. M2 added full
-//! dict (JSON object) diffing: keys present in only one side become
-//! `dictionary_item_added`/`dictionary_item_removed` findings, and keys
-//! present in both sides recurse — through the same dispatch used at the
-//! root — carrying the growing path with them. M3 adds full list (JSON
-//! array) diffing the same way, index-aligned rather than key-aligned:
-//! indices present at the same position on both sides recurse, and a length
-//! mismatch reports the longer side's surplus tail as
-//! `iterable_item_added`/`iterable_item_removed` (see the internal
-//! `array_diff` function).
+//! Two already-parsed values go through one recursive type-dispatch
+//! (`diff_at` in `super::dispatch`), which handles, in the same pass:
+//!
+//! - **Scalars** — compared by value and type, producing `values_changed` or
+//!   `type_changes`.
+//! - **Dicts (JSON objects)** — compared by key set: a key present on only
+//!   one side becomes `dictionary_item_added`/`dictionary_item_removed`, and
+//!   a shared key recurses through the same dispatch, carrying the growing
+//!   path with it.
+//! - **Lists (JSON arrays)** — compared index-aligned by default, or via an
+//!   LCS/`difflib`-style match when both lists are scalar-only (see "List
+//!   diffing" below); a length mismatch reports the longer side's surplus
+//!   tail as `iterable_item_added`/`iterable_item_removed` (see the internal
+//!   `array_diff` function).
+//!
 //! Deep nesting of any mix of dicts/lists/scalars, deep
 //! `values_changed`/`type_changes` paths, and a container found partway
 //! through recursion (e.g. a list nested inside a dict, or vice versa) all
 //! fall out of that single recursive dispatch with no special-casing.
 //!
-//! # M3-pre: hardening against a stack-overflow `DoS` on deeply nested input
+//! # Hardening against a stack-overflow `DoS` on deeply nested input
 //!
-//! Two independent overflow paths were demonstrated on untrusted deeply
-//! nested input, and both are closed here:
+//! Two independent native-overflow paths on untrusted deeply nested input
+//! are both closed here:
 //!
 //! 1. **Traversal recursion.** The engine's own internal native recursion
 //!    (walking into shared dict keys looking for a difference) is bounded by
@@ -41,30 +46,27 @@
 //!    how deep its path already is, exceeds `max_depth`, and returns
 //!    [`crate::Error::MaxDepthExceeded`] instead of cloning it. The two are checked
 //!    against one *shared* `max_depth` budget rather than each getting their
-//!    own independent `max_depth` — checking the value against a flat,
-//!    position-independent `max_depth` was itself a real, reproduced
-//!    vulnerability (a deep traversal *plus* a deep value at the bottom
-//!    could together demand roughly `2 * max_depth` native frames at the
-//!    `.clone()` call). See [`diff_with_max_depth`]'s doc for the exact,
-//!    corrected contract.
+//!    own independent `max_depth`: because both run as native recursion on
+//!    the same call stack, checking the value against a flat,
+//!    position-independent `max_depth` would let a deep traversal *plus* a
+//!    deep value at the bottom together demand roughly `2 * max_depth` native
+//!    frames at the `.clone()` call. See [`diff_with_max_depth`]'s doc for
+//!    the exact contract.
 //!
-//! The full iterative rewrite of the recursive *diff* engine itself is M4;
-//! this slice only makes M1-M3's recursive engine safe to run on untrusted
-//! input in the meantime.
+//! This practical depth limit is a property of the recursive engine; an
+//! iterative work-stack rewrite would remove it entirely.
 //!
 //! The engine operates directly on `serde_json::Value` with no value-model
 //! trait/enum abstraction — a deliberate deferral: introducing one would be
 //! speculative until a second input format (e.g. Python bindings operating
 //! on native Python objects) actually exists to justify it.
 //!
-//! # List diffing: the M6 list-compat fix
+//! # List diffing: scalar-list LCS matching
 //!
-//! M6's benchmark run found a genuine `DeepDiff` compatibility gap in
-//! `array_diff`'s original (M3) index-aligned-only algorithm: `DeepDiff`
-//! does *not* always compare lists index by index. This section is the
-//! precise, empirically-verified spec (`crate::lcs`'s doc, plus
-//! `tests/golden/`'s new cases, are the executable form of it) reverse
-//! engineered from real `deepdiff==9.1.0`'s `diff.py`/`model.py`.
+//! `DeepDiff` does *not* always compare lists index by index. This section
+//! is the precise, empirically-verified spec (`crate::lcs`'s doc, plus
+//! `tests/golden/`'s scalar-list cases, are the executable form of it)
+//! reverse engineered from real `deepdiff==9.1.0`'s `diff.py`/`model.py`.
 //!
 //! **The condition.** `DeepDiff` tries an LCS/`difflib`-style match instead
 //! of (or alongside) the index-aligned scan whenever every element of
@@ -72,9 +74,9 @@
 //! (`_all_values_basic_hashable`; see `crate::lcs::all_basic_scalars`). A
 //! dict or a nested list *anywhere* in either list disqualifies the whole
 //! comparison back to plain index-aligned, unconditionally — this is why
-//! the M6 fixture design trick of wrapping a scalar in a single-key dict
-//! reliably forces the old algorithm (see `perf/RESULTS.md`'s "Correctness
-//! precheck" section, and `tests/golden/README.md`).
+//! wrapping a scalar in a single-key dict reliably forces the index-aligned
+//! algorithm (see `perf/RESULTS.md`'s "Correctness precheck" section, and
+//! `tests/golden/README.md`).
 //!
 //! **The two candidates and the "keep the smaller" tie-break.** When the
 //! condition holds, `DeepDiff` (`_diff_iterable_in_order`) computes the LCS
@@ -89,8 +91,8 @@
 //! result (an add + a remove) instead of the 5-finding positional
 //! all-type-changed result, while `[1.0, 2]` vs `[2, 1]` — where the LCS
 //! pass also finds 2 findings but the positional pass ties it at 2 —
-//! resolves to the positional (index-aligned) result instead. Both were
-//! confirmed against real `DeepDiff` while building this fix.
+//! resolves to the positional (index-aligned) result instead. Both match
+//! real `DeepDiff`.
 //!
 //! **Opcode-to-finding mapping** (`_diff_ordered_iterable_by_difflib`, see
 //! `lcs_array_diff`): an `'equal'` opcode block is *never diffed further*
@@ -108,14 +110,10 @@
 //! share a matching element pair, so every paired position is guaranteed
 //! to actually differ.
 //!
-//! **The `autojunk` finding.** `DeepDiff` always constructs its matcher
-//! with `isjunk=None, autojunk=False` — the `difflib` default-on heuristic
-//! that would otherwise treat a value occupying >1% of a ≥200-item sequence
-//! as "junk" to exclude from matching is explicitly disabled. Confirmed
-//! empirically with a 250-item fixture where one value occupies 249 of 250
-//! slots: the popular value still matches normally, with no behavior change
-//! at the ≥200 threshold. `crate::lcs` therefore implements no
-//! junk/autojunk logic at all — see that module's doc.
+//! **The `autojunk` finding.** `DeepDiff` constructs its matcher with
+//! `isjunk=None, autojunk=False`, so `difflib`'s popular-element exclusion
+//! never applies. `crate::lcs` implements no junk/autojunk logic at all —
+//! see that module's doc for the full rule and its empirical basis.
 //!
 //! **The `[1]` vs `[1.0]` hashability finding.** The LCS match's own notion
 //! of "equal" is Python's `==`, not this engine's own scalar equality:
@@ -151,11 +149,9 @@
 //! and a `'replace'` opcode's ranges are proven to share no matching
 //! element pair at all (not even at mismatched positions) — see
 //! `crate::lcs::compute_opcodes`'s doc. So the "moved" branch can never
-//! actually fire for a basic-hashable list, confirmed both by this proof
-//! and by a 200,000-iteration randomized search over real `difflib` opcodes
-//! that never found a counterexample.
+//! actually fire for a basic-hashable list.
 //!
-//! # The mutual-add-remove merge (M6c reviewer finding)
+//! # The mutual-add-remove merge
 //!
 //! `DeepDiff` runs one more pass this port initially missed: after the
 //! **entire** diff tree is built (not per-list — globally, once), it
@@ -173,7 +169,6 @@
 //! on **any** list shape, including lists disqualified from LCS matching
 //! entirely, whenever the plain index-aligned or LCS candidate happens to
 //! leave a same-path add and remove both standing.
-
 //!
 //! # Internal layout
 //!
@@ -185,8 +180,8 @@
 //!   [`diff_with_max_depth()`]).
 //! - `dispatch` — the recursive traversal core: `diff_at` (the type-dispatch
 //!   switch every recursion step goes through), the depth-guard invariants
-//!   (`check_traversal_depth`, `check_value_depth` — see this doc's "M3-pre"
-//!   section above for *why* they exist), the iterative (non-recursive)
+//!   (`check_traversal_depth`, `check_value_depth` — see this doc's
+//!   "Hardening" section above for *why* they exist), the iterative (non-recursive)
 //!   `values_equal`/`deeper_than` used to check those invariants without
 //!   risking the very overflow they guard against, and `scoped`, the shared
 //!   push/pop path-buffer helper every container loop below uses.
@@ -196,7 +191,7 @@
 //!   `scalar_diff`, `numeric_diff`) `diff_at` dispatches to for a
 //!   non-container pair.
 //! - `array` — list (JSON array) diffing: `array_diff`'s LCS-vs-positional
-//!   dispatch (see "List diffing: the M6 list-compat fix" above) and its two
+//!   dispatch (see "List diffing" above) and its two
 //!   candidate algorithms.
 //! - `object` — dict (JSON object) diffing: `object_diff`'s key-set walk.
 //!

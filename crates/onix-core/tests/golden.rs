@@ -1,4 +1,4 @@
-//! M5b golden-corpus test: proves `onix`'s report matches real `DeepDiff`
+//! Golden-corpus test: proves `onix`'s report matches real `DeepDiff`
 //! (`verbose_level=2`, `to_json()`) byte-for-byte after canonical
 //! re-serialization, on every hand-designed case under `tests/golden/` at
 //! the repository root.
@@ -145,7 +145,7 @@ fn every_golden_case_matches_deepdiff() {
     );
 }
 
-/// The M5b regression this test guards against: a dict key whose own text
+/// The regression this test guards against: a dict key whose own text
 /// contains `']['`-shaped syntax used to `debug_assert`-panic
 /// (`report.rs`'s duplicate-path guard treated the rendered *string* as the
 /// uniqueness key) instead of collapsing cleanly the way real `DeepDiff`

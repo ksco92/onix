@@ -31,16 +31,12 @@
 //! 3. **The get-pairs gate**: `(hashes_added.len() + hashes_removed.len()) /
 //!    (t1_distinct + t2_distinct + 1) > 0.7` disables pairing entirely,
 //!    falling back to raw per-hash add/remove. **The denominator is the
-//!    number of *distinct hashes*, not the raw list length** — confirmed by
-//!    reading `deepdiff/diff.py` directly (`len(full_t1_hashtable)`) after
-//!    an initial hand-derivation based on raw list length (which happens to
-//!    coincide with distinct-hash count on a duplicate-free example)
-//!    produced a pairing that real `DeepDiff` did not: `[1,1,2]` vs `[3,4]`
-//!    has *3* raw items but only *2* distinct
-//!    hashes per side, pushing the ratio from `4/7` (list length, would
-//!    engage pairing) to `4/5` (distinct count, correctly disables it) —
-//!    verified by tracing real `deepdiff==9.1.0` with the pairing function
-//!    monkeypatched to prove it is never even called for that input.
+//!    number of *distinct hashes*, not the raw list length**
+//!    (`len(full_t1_hashtable)` in `deepdiff/diff.py`). The distinction
+//!    matters whenever a side has duplicates: `[1,1,2]` vs `[3,4]` has *3*
+//!    raw items but only *2* distinct hashes per side, which moves the ratio
+//!    from `4/7` (list length — would engage pairing) to `4/5` (distinct
+//!    count — correctly disables it), matching real `deepdiff==9.1.0`.
 //! 4. **If pairing is engaged**, [`compute_pairs`] runs the exact greedy,
 //!    non-globally-optimal, asymmetrically-tie-broken matching described in
 //!    its own doc.
@@ -49,14 +45,14 @@
 //!    partner (old) and itself (new), keyed at the removed side's index,
 //!    with [`crate::report::Report::retag_new_path`] applied when the old
 //!    and new indices differ (see that method's doc for the *every nested
-//!    finding*, not just one, subtlety this was confirmed to need); an
+//!    finding*, not just one, subtlety it handles); an
 //!    unpaired added hash is a plain `iterable_item_added` at its own index;
 //!    an unpaired removed hash (whatever `hashes_removed` has left after the
 //!    added-hash loop consumed every paired partner) is a plain
 //!    `iterable_item_removed` at its own index.
 //!
 //! After the whole recursive traversal finishes, [`crate::diff`]'s existing
-//! whole-tree [`crate::report::Report::merge_mutual_add_removes`] pass (M6c)
+//! whole-tree [`crate::report::Report::merge_mutual_add_removes`] pass
 //! still runs exactly once, unchanged — it is what turns many of this
 //! module's own raw adds/removes into `values_changed` on typical small,
 //! heavily-changed fixtures (the `get_pairs=False` common case), and this
@@ -81,56 +77,33 @@
 //! [`crate::diff::array_diff`] call — see [`rough_distance`]'s doc for its
 //! own remaining-budget bound.
 //!
-//! # Two real divergences found by differential fuzzing — both fixed
+//! # Two `DeepDiff` behaviors the pairing depends on
 //!
-//! `scripts/m7_differential_fuzz.py` (thousands of seeded random cases
-//! against real `deepdiff==9.1.0`, run repeatedly across this module's
-//! development and its later review round) found and root-caused two
-//! distinct divergences, both now fixed; a large re-run after both fixes
-//! (6,100 cases across the original and fresh seeds, including every seed
-//! that had previously found a mismatch) found **zero** unexplained
-//! mismatches and zero `new_path`-composition-only mismatches — only the
-//! pre-existing, unrelated `threshold_to_diff_deeper` class remains (see
-//! `crate::ignore_order::count_object_diff_leaves`'s own doc).
+//! Both are documented at the functions that implement them, not restated
+//! in full here:
 //!
-//! **1. An incomplete, special-cased type-change coercion rule** (found via
-//! a pairing-assignment divergence, seed 103 case #61, where every
-//! individual candidate distance matched real `DeepDiff` by hand but the
-//! *outer greedy assignment* still picked different pairs — root-caused to
-//! a single wrong term, not a pairing-algorithm bug): [`type_change_leaf_length`]
-//! originally special-cased "omit `new_value` when it's literally `true`",
-//! discovered from probes that all happened to use a truthy old value.
-//! Real `DeepDiff`'s rule (`model.py::TreeResult._from_tree_type_changes`,
-//! the `DELTA_VIEW` branch) is general: omit `new_value` whenever
-//! `new_type(old_value) == new_value` (Python's own coercion, e.g.
-//! `float(0) == 0.0`, `int(True) == 1`, `bool(0) == False`) — see
-//! [`coerce_for_type_change`]'s own doc for the exact matrix implemented.
-//! `Report::distance_leaf_length` also had its own separate, *inline*
-//! reimplementation of the same (incomplete) rule instead of delegating to
-//! [`type_change_leaf_length`] — the sibling the reviewer who caught this
-//! flagged by name; both are fixed together (`distance_leaf_length` now
-//! delegates).
+//! 1. **Type-change coercion in the delta view.** A `type_changes` finding's
+//!    `new_value` is omitted from the leaf-length measure whenever
+//!    `new_type(old_value) == new_value` under Python's own coercion (e.g.
+//!    `float(0) == 0.0`, `int(True) == 1`, `bool(0) == False`) — the general
+//!    rule real `DeepDiff` applies
+//!    (`model.py::TreeResult._from_tree_type_changes`, `DELTA_VIEW` branch).
+//!    See [`coerce_for_type_change`] for the exact matrix.
+//!    [`type_change_leaf_length`] and `Report::distance_leaf_length` both
+//!    route through it, so this rule lives in exactly one place.
+//! 2. **`new_path` composition across nesting levels.** A paired item whose
+//!    own recursive diff needs a further `ignore_order` pairing with index
+//!    drift must carry *both* index substitutions in its `new_path`; the
+//!    inner pairing sets `new_path` before the outer pairing's own
+//!    [`crate::report::Report::retag_new_path`] runs, so `retag_new_path`
+//!    composes onto whatever structural `new_path` is already present rather
+//!    than overwriting it — see that method's doc.
 //!
-//! **2. `retag_new_path` didn't compose across more than one nesting
-//! level.** A paired item's own recursive diff can itself contain a
-//! *nested* `ignore_order` list that needs its own pairing with index
-//! drift; that inner pairing sets `new_path` before the *outer* pairing's
-//! own `retag_new_path` call runs. The original implementation skipped
-//! retagging whenever `new_path` was already `Some`, leaving the outer
-//! substitution un-applied (minimal repro: seed 11, case #31 —
-//! `a = [[0, [], true], -3, ...]`, `b = [0.0, [0, 1], true,
-//! ...]`: real `DeepDiff` reports `root[0][2]`'s `type_changes` with
-//! `new_path: "root[1][1]"`, composing both the outer `[0]->[1]` and inner
-//! `[2]->[1]` substitutions; onix reported the stale `"root[0][1]"`,
-//! missing the outer one). Fixed by changing
-//! [`crate::report::ValuesChangedEntry::new_path`]/[`crate::report::TypeChangeEntry::new_path`]
-//! from a pre-rendered `String` to structural `Vec<PathSegment>` segments
-//! (rendered only at serialization time) and making
-//! [`crate::report::Report::retag_new_path`] *compose* onto whatever
-//! structural vector is already present (starting from the entry's own
-//! `path` key only the first time), instead of skipping entries that
-//! already have a `new_path` — see that method's own doc.
-
+//! Differential fuzzing against real `deepdiff==9.1.0`
+//! (`scripts/m7_differential_fuzz.py`) surfaces no unexplained divergences;
+//! the one accepted, documented exception is the `threshold_to_diff_deeper`
+//! class described on `crate::ignore_order::count_object_diff_leaves`'s own
+//! doc.
 //!
 //! # Internal layout
 //!

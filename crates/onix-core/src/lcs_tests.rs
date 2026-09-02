@@ -128,11 +128,11 @@ fn both_empty_is_no_opcodes() {
     assert!(compute_opcodes(&a, &a).is_empty());
 }
 
-/// The M6 repro: real `DeepDiff` matches this as an insert of `True` at
+/// Real `DeepDiff` matches this as an insert of `True` at
 /// the front plus a delete of the trailing `False` — see
 /// `crate::diff`'s module doc and `tests/golden/list_lcs_repro_bool_reorder`.
 #[test]
-fn m6_repro_bool_reorder_matches_real_deepdiff_opcodes() {
+fn repro_bool_reorder_matches_real_deepdiff_opcodes() {
     let a = vec![json!(false), json!(true), json!(false)];
     let b = vec![json!(true), json!(false), json!(true)];
     let ops = compute_opcodes(&a, &b);

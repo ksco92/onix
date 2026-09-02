@@ -1,4 +1,4 @@
-# M5b golden corpus
+# Golden corpus
 
 This directory is the correctness gate for `onix`'s compatibility claim: proof
 that `onix`'s report is byte-identical (canonical JSON) to real `DeepDiff`'s
@@ -32,8 +32,7 @@ quirks" below). It runs as part of the normal `cargo test` / `make check`.
 
 - **Python:** 3.13 (installed on demand by `uv`)
 - **deepdiff:** `9.1.0` exactly (pinned in `scripts/gen_goldens.py`'s inline
-  script metadata, resolved from PyPI's latest `8.x`+ line at the time M5b was
-  built — see that file's `# /// script` header)
+  script metadata, resolved from PyPI's latest `8.x`+ line; see that file's `# /// script` header)
 
 ## Regenerating
 
@@ -64,8 +63,8 @@ the boundary at exactly `0.33` vs just below it, dict-in-list, deeply
 nested collapsed values, and alongside an unrelated `type_changes`), and
 one adversarial path-rendering collision (see below).
 
-**List-compat fix (`list_lcs_*` cases, M6b):** `DeepDiff`'s LCS/`difflib`-style
-list matching for all-scalar lists — the M6 repro (a reorder producing an
+**List-compat cases (`list_lcs_*`):** `DeepDiff`'s LCS/`difflib`-style
+list matching for all-scalar lists — the reorder repro (a reorder producing an
 add+remove instead of three `values_changed`), a same-length replace, a
 mid-list insert/delete, a shifted list, repeated elements, disqualification
 by an unhashable (dict or nested-list) element, mixed scalar kinds, the
@@ -77,13 +76,13 @@ the "keep the smaller, ties favor index-aligned" count comparison, and the
 `crates/onix-core/src/diff/mod.rs`'s "List diffing" module doc for the
 full spec these pin down.
 
-**`ignore_order=True` (`ignore_order_*` cases, M7):** pure shuffle, shuffle
+**`ignore_order=True` (`ignore_order_*` cases):** pure shuffle, shuffle
 plus a changed/added/removed value, duplicate-multiplicity invisibility,
 nested-dict pairing, list-in-dict-in-list, mixed type changes, `[1]` vs
 `[1.0]` (a real `type_changes` here, unlike the ordered LCS path's `{}`),
 bool-vs-int never hash-equal, one-sided all-added/all-removed, the
-`cutoff_intersection_for_pairs=0.7` gate on both sides, the spec's own
-worked asymmetric-tie-break example, and index-drift `new_path` (both on a
+`cutoff_intersection_for_pairs=0.7` gate on both sides, a worked
+asymmetric-tie-break example, and index-drift `new_path` (both on a
 real finding and confirmed absent on added/removed). Plus 20 seeded-random
 fuzz cases (`_generate_ignore_order_fuzz_cases`). See
 `crates/onix-core/src/ignore_order/mod.rs`'s module doc for the full,
@@ -119,7 +118,7 @@ not part of this fixed corpus.
   `expected.json`; see that test and `crate::report`'s module doc for the
   full mechanics (structural- vs. rendered-path keying).
 
-- **`[1]` vs `[1.0]` inside a list diffs to nothing at all (M6b).** This is
+- **`[1]` vs `[1.0]` inside a list diffs to nothing at all.** This is
   *not* a divergence — it is `DeepDiff`'s own real, faithfully-reproduced
   behavior, surprising as it looks: the list-LCS matcher's notion of
   "equal" is Python's `==` (which treats `1 == 1.0 == True`), not
@@ -141,7 +140,7 @@ not part of this fixed corpus.
   exact value. Real Python performs exact arbitrary-precision int/float
   comparison here even for huge numbers — an accepted, narrow, documented
   limitation of this port rather than a chased-down divergence (no golden
-  case exercises it; the M6 benchmark fixtures' integers stay well under
+  case exercises it; the benchmark fixtures' integers stay well under
   this bound).
 
 `crate::diff::object_diff` (the ordinary dict-vs-dict diff, used
@@ -164,7 +163,7 @@ nested array pair now measures a nested dict-vs-dict candidate through
 this same real `object_diff` collapse, so no inflated leaf count can flip
 a pairing decision.
 
-Every other divergence found during M5b was fixed in `onix-core` to match
+Every other divergence found while building the corpus was fixed in `onix-core` to match
 `DeepDiff` exactly. The two path-rendering exceptions above and the
 list-LCS `2^53` limitation are the only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across

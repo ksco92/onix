@@ -1,6 +1,6 @@
-//! Property-based tests for `ignore_order=True` (M7)'s algebraic invariants.
+//! Property-based tests for `ignore_order=True`'s algebraic invariants.
 //!
-//! Complements `proptest_diff.rs` (the ordered-path invariants from M4) with
+//! Complements `proptest_diff.rs` (the ordered-path invariants) with
 //! the one invariant genuinely specific to `ignore_order`: a shuffled copy of
 //! any list diffs to an empty report, for arbitrary JSON-shaped list
 //! elements (scalars and small nested containers), not just the hand-picked

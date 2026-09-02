@@ -185,9 +185,9 @@ pub fn diff_with_options(a: &Value, b: &Value, opts: &DiffOptions) -> Result<Rep
 /// always a clean, catchable [`Error::MaxDepthExceeded`] — never a stack
 /// overflow.
 ///
-/// This bound is temporary scaffolding: M4 replaces the recursive engine
-/// with an iterative work-stack, at which point this practical depth limit
-/// (and the nested-equal-subtree edge case above) goes away entirely.
+/// This practical depth limit is a property of the recursive engine: an
+/// iterative work-stack rewrite would remove it (and the
+/// nested-equal-subtree edge case above) entirely.
 ///
 /// # Errors
 ///

@@ -1,7 +1,7 @@
 //! List (JSON array) diffing: [`array_diff`]'s dispatch between the
 //! LCS/`difflib`-style match and the plain index-aligned comparison — see
-//! the parent `diff` module's "List diffing: the M6 list-compat fix" doc
-//! section for the full, empirically-verified spec this implements.
+//! the parent `diff` module's "List diffing" doc section for the full,
+//! empirically-verified spec this implements.
 
 use serde_json::Value;
 
@@ -18,9 +18,8 @@ use super::{
 /// Diffs two lists (JSON arrays) at `path`, `depth` levels deep.
 ///
 /// Dispatches between two candidate algorithms, matching `DeepDiff`'s own
-/// `_diff_iterable_in_order` dispatch exactly (see this module's own doc
-/// section "List diffing: the M6 list-compat fix" for the full,
-/// empirically-verified spec):
+/// `_diff_iterable_in_order` dispatch exactly (see the parent `diff` module's
+/// "List diffing" doc section for the full, empirically-verified spec):
 ///
 /// - **When every element of *both* `a` and `b` is a JSON scalar** (null,
 ///   bool, number, or string — `DeepDiff`'s "basic hashable" check, see
@@ -208,9 +207,8 @@ fn insert_lcs_pair_finding(
 /// condition, and a scalar's intrinsic nesting is always `0` — exactly the
 /// reasoning [`insert_lcs_pair_finding`]'s own doc gives for skipping the
 /// same check on its `'replace'` pairs. Calling it here too would only add
-/// dead-weight guard code with no reachable failure path (and an
-/// unkillable `cargo mutants` mutant to go with it, found and removed
-/// during this fix's own mutation-testing round).
+/// dead-weight guard code with no reachable failure path (and an unkillable
+/// `cargo mutants` mutant to go with it).
 ///
 /// `path` is the shared traversal buffer (see [`diff_at`]'s doc); every
 /// finding below is recorded through [`scoped`], so `path` is restored to

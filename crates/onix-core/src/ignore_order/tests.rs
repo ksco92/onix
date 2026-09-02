@@ -296,11 +296,11 @@ fn numeric_pairing_at_two_distances_reuses_the_used_check_across_buckets() {
 
 #[test]
 fn distance_pairing_tie_between_two_records_favors_the_earliest_t1_index() {
-    // The spec's own worked structural-distance tie example (§2.4.2):
+    // Worked structural-distance tie example:
     // {"a":1,"b":1}->{"a":1,"b":3} and {"a":1,"b":2}->{"a":1,"b":3} both
     // measure the SAME distance (0.1) — diff_length only counts how
-    // many fields differ, not the magnitude of the change. The
-    // asymmetric tie-break (§2.3) makes the EARLIEST t1 index win.
+    // many fields differ, not the magnitude of the change. DeepDiff's
+    // asymmetric tie-break makes the EARLIEST t1 index win.
     let anchors: Vec<serde_json::Value> = (0..10).map(|i| json!(format!("anchor{i}"))).collect();
     let mut a = anchors.clone();
     a.push(json!({"a": 1, "b": 1})); // root[10] — earliest, should win the pairing
@@ -359,7 +359,7 @@ fn structural_pairing_of_records_with_null_bool_and_nested_list_fields() {
 
 #[test]
 fn ignore_order_is_a_no_op_on_dict_comparison_itself() {
-    // Spec §1: dicts are never affected by ignore_order — only
+    // Dicts are never affected by ignore_order — only
     // list-typed VALUES inside them, recursively. The shared "z" key keeps
     // key overlap above the threshold_to_diff_deeper cutoff so this
     // exercises the normal per-key add/remove path rather than a
@@ -654,7 +654,7 @@ fn type_change_leaf_length_omits_new_value_when_the_coercion_reproduces_it() {
 
 #[test]
 fn ignore_order_pairing_rejects_a_false_negative_from_the_old_special_case() {
-    // The reviewer's minimal repro: a structural pair whose distance
+    // A minimal repro: a structural pair whose distance
     // depends on the general coercion rule (float(0) == 0.0), not just
     // the old `new_value == true` special case. Real deepdiff: distance
     // 0.25 < 0.3 (pairs, recursing to a nested type_changes); the old
@@ -697,7 +697,7 @@ fn ignore_order_pairing_generalizes_past_the_true_literal_special_case() {
 
 #[test]
 fn ignore_order_pairing_is_not_corrupted_by_a_nested_low_overlap_dict_pair() {
-    // Reviewer-minimized repro (2x3 distance matrix: removed = {1,
+    // Minimized repro (2x3 distance matrix: removed = {1,
     // [{aa,bb,cc}]}, added = {0.0, 2, [{}]}): `count_array_diff_leaves`'s
     // trial sub-diff for the `[{aa,bb,cc}]` vs `[{}]` candidate pair
     // used to recurse into a nested dict-vs-dict comparison through the

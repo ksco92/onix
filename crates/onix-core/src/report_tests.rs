@@ -366,10 +366,9 @@ fn retag_new_path_also_retags_type_changes() {
 
 #[test]
 fn retag_new_path_composes_with_an_already_set_new_path() {
-    // Mirrors the real doubly-nested repro this fixed (M7 review round,
-    // seed 11 case #31): an INNER retag already ran (simulating a
-    // nested pairing's own index-2 -> index-1 drift), leaving new_path
-    // at [Index(0), Index(1)] ("root[0][1]") while the entry's own
+    // Mirrors a doubly-nested drift scenario: an INNER retag already ran
+    // (simulating a nested pairing's own index-2 -> index-1 drift), leaving
+    // new_path at [Index(0), Index(1)] ("root[0][1]") while the entry's own
     // structural key is still [Index(0), Index(2)] ("root[0][2]").  A
     // subsequent OUTER retag (prefix_depth=0, the list-level index
     // drifting 0 -> 1) must overwrite ONLY that outer segment on TOP of
@@ -427,7 +426,7 @@ fn inserting_the_same_structural_path_twice_panics_in_debug() {
 /// than silently vanishing or corrupting the report.
 #[test]
 fn two_structural_paths_rendering_identically_collapse_without_panicking() {
-    // Same shape as the M5b regression (`tests/golden/path_rendering_collision`):
+    // Same shape as the `tests/golden/path_rendering_collision` regression:
     // a single key whose own text contains `][` next to quote
     // characters renders identically to two nested single-quote-containing
     // keys. Both `k1`/`k2` and `flat_key` must contain a single quote so

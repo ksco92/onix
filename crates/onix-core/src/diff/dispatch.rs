@@ -4,7 +4,7 @@
 //! and `super::object` uses to push/pop path segments as they recurse.
 //!
 //! See the parent `diff` module's doc for the full recursion-depth hardening
-//! story (the "M3-pre" section) this file implements.
+//! (its "Hardening" section) this file implements.
 
 use serde_json::{Map, Value};
 

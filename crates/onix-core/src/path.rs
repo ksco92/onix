@@ -2,7 +2,7 @@
 //!
 //! A path locates a value inside a nested dict/list structure, e.g.
 //! `root['a'][3]['b c']`. This module owns the (small) segment vocabulary and
-//! the textual rendering rules, kept isolated from the diff engine. The M5
+//! the textual rendering rules, kept isolated from the diff engine. The
 //! golden corpus (generated against real `DeepDiff`) is the final authority
 //! on quoting; see [`quote_key`]'s doc for the (surprisingly escape-free)
 //! rule it verified.
@@ -71,8 +71,8 @@ pub fn render_path(segments: &[PathSegment]) -> String {
 }
 
 /// Quotes a dict key exactly the way `DeepDiff` does when rendering
-/// `root['key']` segments — which, per the M5 golden corpus generated
-/// against real `DeepDiff`, is **not** Python `repr()`-style escaping.
+/// `root['key']` segments — which, per the golden corpus generated against
+/// real `DeepDiff`, is **not** Python `repr()`-style escaping.
 ///
 /// `DeepDiff`'s own path-rendering code
 /// (`deepdiff/model.py::ChildRelationship.stringify_param`, via
@@ -91,7 +91,7 @@ pub fn render_path(segments: &[PathSegment]) -> String {
 /// wrapping quote character (e.g. a key that is both single- and
 /// double-quoted, wrapped in double quotes with the inner double quote left
 /// bare) — `DeepDiff` does this too, confirmed empirically; matching it
-/// byte-for-byte is the M5 correctness bar, not producing a "more correct"
+/// byte-for-byte is the correctness bar, not producing a "more correct"
 /// escaping of our own invention. See `tests/golden/README.md` for the
 /// verification commands.
 ///
@@ -158,15 +158,15 @@ mod tests {
     }
 
     /// A key containing a single quote wraps in double quotes, matching
-    /// real `DeepDiff` (verified in the M5 golden corpus: `key_single_quote`).
+    /// real `DeepDiff` (verified in the golden corpus: `key_single_quote`).
     #[test]
     fn quote_key_with_single_quote_uses_double_quotes() {
         assert_eq!(quote_key("it's"), "\"it's\"");
     }
 
     /// A key containing only a double quote (no single quote) wraps in
-    /// single quotes, with the double quote left bare — no escaping (M5
-    /// golden: `key_double_quote`).
+    /// single quotes, with the double quote left bare — no escaping
+    /// (golden: `key_double_quote`).
     #[test]
     fn quote_key_with_double_quote_only_uses_single_quotes_unescaped() {
         assert_eq!(quote_key(r#"he said "hi""#), r#"'he said "hi"'"#);
@@ -175,8 +175,8 @@ mod tests {
     /// A key containing both quote kinds still wraps in double quotes (the
     /// single-quote rule takes priority), leaving the inner double quotes
     /// bare and unescaped — real `DeepDiff` produces this same
-    /// "self-quoting" output rather than escaping it (M5 golden:
-    /// `key_both_quotes`).
+    /// "self-quoting" output rather than escaping it
+    /// (golden: `key_both_quotes`).
     #[test]
     fn quote_key_with_both_quote_kinds_uses_double_quotes_unescaped() {
         // key: it's "cool"    (single quote after "it", double-quoted "cool")
@@ -197,7 +197,7 @@ mod tests {
     }
 
     /// No escaping of any kind: a literal backslash passes through as one
-    /// character, not two (M5 golden: `key_backslash`).
+    /// character, not two (golden: `key_backslash`).
     #[test]
     fn quote_key_does_not_escape_backslashes() {
         assert_eq!(quote_key(r"a\b"), r"'a\b'");
@@ -214,7 +214,7 @@ mod tests {
     }
 
     /// No escaping of control characters either: newline, tab, NUL, and DEL
-    /// all pass through as their literal (unescaped) characters (M5 golden:
+    /// all pass through as their literal (unescaped) characters (golden:
     /// `key_control_chars`, which combines all four in one key).
     #[test]
     fn quote_key_does_not_escape_control_characters() {

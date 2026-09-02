@@ -1,9 +1,12 @@
 # onix
 
-**Rust rewrite of Python DeepDiff's core: byte-compatible deep diffing of JSON, 64-5757x faster, ignore_order included.**
+**onix is a Rust rewrite of Python DeepDiff's core — byte-compatible output, 64-5757x faster, with `ignore_order` support included.**
 
 See [DeepDiff](https://github.com/seperman/deepdiff) for the Python original
-that onix matches report-for-report.
+that onix matches report-for-report. Output is byte-identical apart from one
+documented boundary case: integers past `2^53`, the limit of exact `f64`
+representation, inside ordered scalar lists (detailed in
+[`tests/golden/README.md`](https://github.com/ksco92/onix/blob/main/tests/golden/README.md)).
 
 **Status (September 2026):** pre-alpha proof of concept, unpublished; ordered
 + `ignore_order` diffing complete and benchmarked (see
@@ -33,8 +36,8 @@ In order, each building on the last:
    door: an architecture map (parse → diff dispatch → ordered/`ignore_order`
    container comparison → `Report` → render) naming the actual module each
    step lives in, plus the design decisions behind it (why
-   `serde_json::Value` with no value-model abstraction, why a recursive
-   engine with a depth guard rather than an iterative one yet, etc.).
+   `serde_json::Value` with no value-model abstraction, why the engine is
+   recursive with a depth guard, not iterative (yet), etc.).
    Follow it into `crates/onix-core/src/diff/mod.rs` and
    `crates/onix-core/src/ignore_order/mod.rs` — each is itself a module-doc
    front door to its own submodules, one seam per file (see each
@@ -98,7 +101,7 @@ onix diff <a.json> <b.json> [--max-depth N] [--ignore-order] [--timing]
 Reads both files as JSON and prints a DeepDiff-compatible report to **stdout**
 as a single line of compact JSON (an empty report prints `{}`); compact,
 rather than pretty-printed, because this output is meant for machine
-consumption (golden-file comparison, the M6 benchmark harness), where a
+consumption (golden-file comparison, the benchmark harness), where a
 single deterministic line is easiest to diff byte-for-byte.
 
 - `--max-depth N` overrides the recursion-depth bound passed to
@@ -215,31 +218,36 @@ entirely in Rust.
   must be str, got key of type int at root['a']"`).
 - **Tuples, sets, frozensets, dates, and custom objects** are not
   representable in the JSON-shaped value model and raise `TypeError` naming
-  the type and the exact path it was found at (e.g. `"unsupported type for
-  diffing: tuple at root['a'][2]"`), however deeply nested.
+  the type and the exact path it was found at, no matter how deeply nested
+  (e.g. `"unsupported type for diffing: tuple at root['a'][2]"`).
 - **`MaxDepthError`** (a `ValueError` subclass) replaces a native crash on
   adversarially deep input, mirroring `onix_core::Error::MaxDepthExceeded`.
-  But the bindings' own Python-object conversion is bounded by the same
-  `max_depth` budget independently of the diff itself, so (unlike
-  `onix_core::diff_with_max_depth`'s own guarantee) two *equal* inputs
-  deeper than `max_depth` still raise here, since equality isn't known yet
-  at conversion time. Default `max_depth` is `onix_core::DEFAULT_MAX_DEPTH`
-  (512).
+  Unlike `onix_core::diff_with_max_depth` (which never raises on inputs that
+  are equal, however deep), the Python bindings raise even for equal inputs
+  beyond `max_depth`, because conversion happens (and is depth-checked)
+  before the equality check ever runs. Default `max_depth` is
+  `onix_core::DEFAULT_MAX_DEPTH` (512).
 - **`max_depth` has a hard ceiling**, exposed as `deepdiff_rs.MAX_DEPTH_CEILING`
   (currently 20,000). A `max_depth` above it is refused up front with a plain
   `ValueError` naming the ceiling (not a `MaxDepthError`); at or below it, the
   outcome is always a correct result or a catchable exception, never a process
   crash. The default (512) is unaffected. The rationale for the specific
   ceiling is on `MAX_DEPTH_CEILING` in `crates/onix-py/src/guard.rs`.
+- **`ignore_order` pairing is `O(N²)`** in the number of unpaired elements
+  per side: pairing the leftover elements of two lists compares every
+  remaining candidate against every other, the same core cost real `DeepDiff`
+  pays for this option. `DeepDiff`'s `max_passes`/`max_diffs` bounds on that
+  work are not implemented here, so a caller feeding untrusted input should
+  bound the input size itself rather than rely on an internal cutoff.
 
 ### Bindings benchmark
 
 `crates/onix-py/benchmarks/bench_bindings.py` times real `DeepDiff` against
-`deepdiff_rs` on **live Python objects** — unlike `perf/RESULTS.md` (M6),
-which diffs already-parsed JSON and is explicitly an upper bound, this
-number includes the Python-object-to-`Value` conversion cost a real caller
-actually pays. Median of 11 runs (1 discarded warmup call), measured on the
-same machine (macOS 26.5.1, Apple M5 Max) as `perf/RESULTS.md`'s M7 run:
+`deepdiff_rs` on **live Python objects** — unlike `perf/RESULTS.md`, which
+diffs already-parsed JSON and is explicitly an upper bound, this number
+includes the Python-object-to-`Value` conversion cost a real caller actually
+pays. Median of 11 runs (1 discarded warmup call), measured on the same
+machine (macOS 26.5.1, Apple M5 Max) as `perf/RESULTS.md`:
 
 | Shape | deepdiff | deepdiff_rs | Speedup |
 | --- | --- | --- | --- |
@@ -248,23 +256,19 @@ same machine (macOS 26.5.1, Apple M5 Max) as `perf/RESULTS.md`'s M7 run:
 | Same `ignore_order` shape, via `diff_json` (JSON-string path) | 3215.37ms | 67.92ms | **47.34x** |
 | Same API-payload shape, via `diff_json` (JSON-string path) | 6135.61ms | 69.71ms | **88.01x** |
 
-**Honest reading:** the live-object API-payload row (**~34x**) builds `b`
-as a `copy.deepcopy` of `a`, never a shallow `list(a)`. A shallow copy
-would leave ~95% of records identity-shared between the two inputs, which
-real `DeepDiff` fast-paths via its own `t1 is t2` identity check, flattering
-onix to a meaningless multiple that no real caller sees (two independently
-deserialized API responses are never identity-shared). The full rationale
-lives at the fixture builder in
+**Fixture note:** the live-object API-payload row (**~34x**) builds `b` as a
+`copy.deepcopy` of `a`, so the two inputs share no identity, matching how
+independently deserialized API responses actually arrive in practice. The
+full rationale for that choice is on `build_api_payloads_case` in
 `crates/onix-py/benchmarks/bench_bindings.py`.
 
-That multiple is still well short of onix-core's own headline numbers, for
-a reason worth stating plainly. Converting 20,000 realistic nested Python
-records into `onix_core`'s value model one object at a time is genuine,
-measurable overhead. A proxy that isolates it, `DeepDiff(a,
-copy.deepcopy(a))` (which pays the full conversion plus onix's cheap
-whole-tree equality check, but none of the per-node diff bookkeeping the
-mutated case also pays), accounts for roughly **80%** of the mutated case's
-own total time on this shape, and `bench_bindings.py` now computes and
+That multiple is well short of onix-core's own headline numbers because
+converting 20,000 realistic nested Python records into `onix_core`'s value
+model one object at a time is genuine, measurable overhead. A proxy that
+isolates it, `DeepDiff(a, copy.deepcopy(a))` (which pays the full conversion
+plus onix's cheap whole-tree equality check, but none of the per-node diff
+bookkeeping the mutated case also pays), accounts for roughly **80%** of the
+mutated case's own total time on this shape; `bench_bindings.py` computes and
 prints that percentage as part of its output. The JSON-string-only
 `diff_json` path skips the conversion entirely and recovers a much larger
 multiple (**~88x**) on the same data. Use `diff_json` when you already have
@@ -341,31 +345,27 @@ maturin publish --release
 | `make deny` | `cargo deny check` | advisories/licenses/bans/sources clean |
 | `make machete` | `cargo machete` | no unused dependencies |
 
-(`make mutants` — mutation testing — exists as a per-milestone target from M4 on
-and is deliberately not part of `check`.)
+(`make mutants` — mutation testing — is a separate target, run periodically
+rather than on every `check`.)
 
-`onix-cli/src/main.rs` was excluded from the coverage denominator through M4
-(it was a logic-free shim); M5a gave it real `diff` subcommand logic plus its
-own unit tests (`src/tests.rs`, alongside `src/args.rs`/`src/run.rs`'s
-production code) and end-to-end integration tests (`tests/cli.rs`), so the
-exclusion is gone and it's held to the same ≥95% bar as the rest of the
-workspace.
+`onix-cli/src/main.rs` is held to the same ≥95% line-coverage bar as the rest
+of the workspace: its `diff` subcommand logic has unit tests (`src/tests.rs`,
+alongside `src/args.rs`/`src/run.rs`'s production code) and end-to-end
+integration tests (`tests/cli.rs`).
 
-`crates/onix-py` (M8, the PyO3 bindings crate) is excluded for a different,
+`crates/onix-py` (the PyO3 bindings crate) is excluded for a different,
 structural reason: it's a `cdylib` whose logic is Python-object conversion
 and PyO3 glue, only meaningfully exercised by calling the *compiled wheel*
 from real Python — its coverage authority is `make python-test` instead
 (see the "Python" section's "Testing" subsection above).
 
-**Known accepted artifact (M7b):** a `#[cfg(test)] #[path = "..."] mod
-tests;` file (`diff/tests.rs`, `ignore_order/tests.rs`, `lcs_tests.rs`,
-`report_tests.rs`, `onix-cli/src/tests.rs`) doesn't appear anywhere in
-`cargo-llvm-cov`'s report — not as its own row, not folded into another
-file's totals — so the reported percentage moved (a smaller denominator)
-even though the absolute miss counts are identical to before the M7b split
-(27 regions / 10 lines / 2 functions, both times). See the `Makefile`'s
-`coverage` target comment for the full explanation and what it does (and
-doesn't) mean for what's actually tested.
+**Coverage-tooling quirk:** `cargo-llvm-cov` doesn't attribute lines in
+`#[path = "..."]`-included test modules (`diff/tests.rs`,
+`ignore_order/tests.rs`, `lcs_tests.rs`, `report_tests.rs`,
+`onix-cli/src/tests.rs`) to any file in its report. That shrinks the
+denominator and can move the reported percentage without changing what is
+actually tested. See the `Makefile`'s `coverage` target comment for the full
+mechanism.
 
 ## Golden corpus
 
@@ -412,22 +412,22 @@ code it concerns, as source comments) of why it's equivalent/non-actionable.
 
 **Standing result.** `make mutants` enumerates a deterministic **443**
 mutants (18 in `onix-cli`, 425 in `onix-core`). Every mutant that is not
-caught is harmless, of one of two kinds. First, **equivalent viable mutants**
-that compile and run but cannot change any output, confined to two spots each
-argued at the source: `onix-core/src/lcs.rs`'s
-`find_longest_match`/`get_matching_blocks`, and `onix-core/src/diff/array.rs`'s
-`lcs_or_positional_array_diff` `> 1` threshold (replacing it with `>= 1` is
-provably output-neutral — verified over ~1.7M scalar-list pairs and by
-DeepDiff 9.1.0 parity at the boundary). Second, **`Default`-substitution mutants
-that cannot compile** (the return type has no usable `Default` impl — this
-includes both of `onix-cli`'s non-caught mutants; one `pairing.rs` case fails
-for a second, unrelated reason noted in `perf/MUTANTS.md`). No *viable* mutant
-survives outside those two documented spots. The exact
-caught/missed/timeout/unviable split is not pinned here: `cargo-mutants`
-classifies those categories partly by wall-clock time and, in this workspace,
-unreliably at the edges, so the split shifts run to run while the harmless
-kinds above stay fixed — the full, independently verified explanation, tool
-version, and reproduce command are in
+caught is harmless, of one of two kinds. First, **equivalent viable mutants**:
+mutations that compile and run but can't change any output. These are
+confined to two spots: `onix-core/src/lcs.rs`'s
+`find_longest_match`/`get_matching_blocks`, and the `> 1` threshold in
+`onix-core/src/diff/array.rs`'s `lcs_or_positional_array_diff` (`>= 1` is
+provably equivalent there, verified over ~1.7M scalar-list pairs and against
+DeepDiff 9.1.0 at the boundary). Second, **`Default`-substitution mutants that
+don't compile**, because the return type has no usable `Default` impl. This
+covers both of `onix-cli`'s non-caught mutants; `perf/MUTANTS.md` notes a
+second, unrelated reason one `pairing.rs` case also fails to compile. No
+*viable* mutant survives outside those two documented spots.
+
+`cargo-mutants` classifies mutants into caught/missed/timeout/unviable partly
+by wall-clock time, and that classification is noisy at the edges in this
+workspace — so the exact split can shift between runs even though the two
+harmless kinds above never change. Tool version and reproduce command are in
 [perf/MUTANTS.md](https://github.com/ksco92/onix/blob/main/perf/MUTANTS.md).
 Future work that touches this logic should re-run `make mutants` and confirm
 no viable mutant survives outside those two documented spots.
@@ -435,7 +435,7 @@ no viable mutant survives outside those two documented spots.
 ## Benchmarks
 
 `perf/RESULTS.md` is onix's own published performance claim against pinned
-real `deepdiff` (9.1.0), covering the full fixture matrix including the M7
+real `deepdiff` (9.1.0), covering the full fixture matrix including the
 `ignore_order_10k` comparison — its own "Run procedure" section documents
 what's measured and this harness's fairness rules, and its "Deferred work"
 section discloses every deliberately scaled-down or deferred part of the
@@ -470,8 +470,8 @@ crates/onix-core   # the diff engine (library, no I/O)
 crates/onix-cli    # `onix` binary (thin CLI over the core)
 crates/onix-py     # PyO3 bindings (`deepdiff-rs` on PyPI) — see "Python" above
 scripts/           # scripts/gen_goldens.py: regenerates tests/golden/ from real DeepDiff
-tests/golden       # DeepDiff-generated expected outputs (M5b golden corpus)
-perf/              # cross-language benchmark harness (M6) — see "Benchmarks" above
+tests/golden       # DeepDiff-generated expected outputs (golden corpus)
+perf/              # cross-language benchmark harness — see "Benchmarks" above
 ```
 
 ## Contributing and support

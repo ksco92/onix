@@ -9,10 +9,10 @@
 //! those opcodes into report findings; see that module's doc for the full,
 //! empirically-verified `DeepDiff` list-compat spec this exists to serve.
 //!
-//! # Why this exists (the M6 finding)
+//! # Why this exists
 //!
 //! `DeepDiff`'s default (non-`ignore_order`) list comparison is *not*
-//! always the simple index-aligned scan `onix` shipped through M6: when
+//! always a simple index-aligned scan: when
 //! every element of *both* lists is a JSON scalar (`DeepDiff`'s own
 //! `_all_values_basic_hashable` check — null/bool/number/string; a dict or
 //! list anywhere in either list disqualifies the whole comparison), it
@@ -195,12 +195,10 @@ struct Match {
 /// anything, so the DP chain alone already finds every genuinely
 /// contiguous run the extension step could ever find; re-extending
 /// afterwards can only ever re-derive a run already reflected in some
-/// `run_length` the DP itself computed. **Proven, not just reasoned about**:
-/// a 400,000-trial randomized differential test against real `difflib`
-/// (`isjunk=None, autojunk=False`) — spanning empty/short/length-30 inputs
-/// and both low- and high-duplicate-density alphabets, including
-/// cross-type numeric alphabets — comparing `get_opcodes()` with and
-/// without this extension step found zero divergences.
+/// `run_length` the DP itself computed. Dropping it therefore changes no
+/// opcode output for this configuration — verified by a 400,000-trial
+/// randomized differential test against real `difflib` (zero divergences),
+/// not only by the argument above.
 ///
 /// `b2j` maps each of `b`'s [`ScalarKey`]s to the (ascending) list of
 /// indices it occurs at in `b`; built once per `a`/`b` pair and reused
