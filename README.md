@@ -411,21 +411,22 @@ test that kills it, or, if justified, an explanation (kept alongside the
 code it concerns, as source comments) of why it's equivalent/non-actionable.
 
 **Standing result.** `make mutants` enumerates a deterministic **443**
-mutants (18 in `onix-cli`, 425 in `onix-core`). The reproducible, load-
-independent outcome: **every non-caught mutant lies in
+mutants (18 in `onix-cli`, 425 in `onix-core`). Every mutant that is not
+caught is one of two harmless kinds: **either it lies in
 `onix-core/src/lcs.rs`'s `find_longest_match`/`get_matching_blocks`** (proven
-equivalent or non-actionable in the surrounding source comments), or is a
-`Default`-substitution mutant that does not compile; **`onix-cli` is fully
-caught**, and nothing else in `onix-core` survives. A representative
-quiet-machine run tested 443 and caught 424, with the remaining 19 confined
-to that `lcs.rs` set. The exact caught/missed/timeout split is not pinned
-here because `cargo-mutants` classifies those `lcs.rs` mutants as
-missed-versus-timeout by wall-clock time, so the split shifts with machine
-speed and load while the set stays fixed — the full explanation, tool
-version, and reproduce command are in
+equivalent or non-actionable in the surrounding source comments), **or it is a
+`Default`-substitution mutant that cannot compile** (its return type has no
+usable `Default` impl, so it is not a meaningful mutation — this includes both
+of `onix-cli`'s non-caught mutants). No *viable* mutant survives outside that
+`lcs.rs` set. The exact caught/missed/timeout/unviable split is not pinned
+here: `cargo-mutants` classifies those categories partly by wall-clock time
+and, in this workspace, unreliably at the edges, so the split shifts run to
+run while the two harmless kinds above stay fixed — the full, independently
+verified explanation, tool version, and reproduce command are in
 [perf/MUTANTS.md](https://github.com/ksco92/onix/blob/main/perf/MUTANTS.md).
-Future work that touches this logic should re-run `make mutants`, refresh
-`perf/MUTANTS.md`, and confirm no mutant escapes that `lcs.rs` set.
+Future work that touches this logic should re-run `make mutants` and confirm
+no viable mutant survives outside that `lcs.rs` set or the uncompilable
+`Default`-substitution set.
 
 ## Benchmarks
 
