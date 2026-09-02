@@ -1,5 +1,70 @@
-use crate::diff::{DiffOptions, diff_with_options};
+use crate::diff::DiffOptions;
+use crate::value::{Object as CObject, Value as CValue};
 use serde_json::json;
+
+// --- serde -> compact test bridges (slice 2) ---------------------------
+// The engine consumes the compact `crate::value::Value` now; these thin
+// wrappers convert `serde_json` inputs at the boundary so the existing
+// literal-based tests keep exercising the real compact-typed engine.
+fn cv(value: &serde_json::Value) -> CValue {
+    CValue::from(value.clone())
+}
+fn cvec(items: &[serde_json::Value]) -> Vec<CValue> {
+    items.iter().map(|v| CValue::from(v.clone())).collect()
+}
+fn cobj(map: &serde_json::Map<String, serde_json::Value>) -> CObject {
+    let value = CValue::from(serde_json::Value::Object(map.clone()));
+    match &value {
+        CValue::Object(object) => object.clone(),
+        _ => unreachable!("Value::Object converts to a compact Object"),
+    }
+}
+fn diff_with_options(
+    a: &serde_json::Value,
+    b: &serde_json::Value,
+    opts: &DiffOptions,
+) -> Result<crate::report::Report, crate::error::Error> {
+    crate::diff::diff_with_options(&cv(a), &cv(b), opts)
+}
+fn item_length(value: &serde_json::Value) -> usize {
+    super::distance::item_length(&cv(value))
+}
+fn type_change_leaf_length(a: &serde_json::Value, b: &serde_json::Value) -> usize {
+    super::distance::type_change_leaf_length(&cv(a), &cv(b))
+}
+fn rough_length(value: &serde_json::Value) -> usize {
+    super::distance::rough_length(&cv(value))
+}
+fn numeric_value(value: &serde_json::Value) -> Option<f64> {
+    super::distance::numeric_value(&cv(value))
+}
+fn count_diff_leaves(
+    a: &serde_json::Value,
+    b: &serde_json::Value,
+    depth: usize,
+    opts: &DiffOptions,
+) -> usize {
+    super::distance::count_diff_leaves(&cv(a), &cv(b), depth, opts)
+}
+fn count_object_diff_leaves(
+    a: &serde_json::Map<String, serde_json::Value>,
+    b: &serde_json::Map<String, serde_json::Value>,
+    depth: usize,
+    opts: &DiffOptions,
+) -> usize {
+    super::distance::count_object_diff_leaves(&cobj(a), &cobj(b), depth, opts)
+}
+fn count_array_diff_leaves(
+    a: &[serde_json::Value],
+    b: &[serde_json::Value],
+    depth: usize,
+    opts: &DiffOptions,
+) -> usize {
+    super::distance::count_array_diff_leaves(&cvec(a), &cvec(b), depth, opts)
+}
+fn item_key(value: &serde_json::Value) -> super::hash::ItemKey {
+    super::hash::item_key(&cv(value))
+}
 
 fn ignore_order_diff(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
     diff_with_options(
@@ -374,12 +439,9 @@ fn ignore_order_is_a_no_op_on_dict_comparison_itself() {
 }
 
 use super::distance::{
-    Distance, THRESHOLD_TO_DIFF_DEEPER, count_array_diff_leaves, count_diff_leaves,
-    count_object_diff_leaves, is_length_excluded_key, item_length, numeric_distance, numeric_value,
-    rough_length, type_change_leaf_length,
+    Distance, THRESHOLD_TO_DIFF_DEEPER, is_length_excluded_key, numeric_distance,
 };
 use super::fxhash::{FX_SEED, FxHasher};
-use super::hash::item_key;
 use super::pairing::CUTOFF_DISTANCE_FOR_PAIRS;
 
 // --- Distance -----------------------------------------------------
@@ -1036,7 +1098,13 @@ fn rough_distance_structural_formula_is_diff_length_over_summed_rough_lengths() 
     // arithmetic mistakes.
     let removed = json!([1, 2]);
     let added = json!([1, 2, 3]);
-    let d = super::distance::rough_distance(&removed, &added, CUTOFF_DISTANCE_FOR_PAIRS, 0, &opts);
+    let d = super::distance::rough_distance(
+        &cv(&removed),
+        &cv(&added),
+        CUTOFF_DISTANCE_FOR_PAIRS,
+        0,
+        &opts,
+    );
     assert!((d - 1.0 / 7.0).abs() < 1e-12, "expected 1/7, got {d}");
 }
 
@@ -1063,7 +1131,13 @@ fn rough_distance_depth_boundary_is_exact() {
     };
     let removed = json!([{"a": {"b": 1}}]);
     let added = json!([{"a": {"b": 9}}]);
-    let d = super::distance::rough_distance(&removed, &added, CUTOFF_DISTANCE_FOR_PAIRS, 0, &opts);
+    let d = super::distance::rough_distance(
+        &cv(&removed),
+        &cv(&added),
+        CUTOFF_DISTANCE_FOR_PAIRS,
+        0,
+        &opts,
+    );
     assert_eq!(d, 0.0);
 }
 

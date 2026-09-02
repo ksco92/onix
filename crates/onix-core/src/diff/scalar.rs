@@ -3,7 +3,7 @@
 //! [`super::diff_at`] dispatches to whenever a pair is not two dicts or two
 //! arrays.
 
-use serde_json::{Number, Value};
+use crate::value::{Number, Value};
 
 use crate::error::Error;
 use crate::path::PathSegment;
@@ -11,20 +11,20 @@ use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
 
 use super::check_value_depth;
 
-/// The Python type name `DeepDiff` would report for a given `serde_json`
-/// value.
+/// The Python type name `DeepDiff` would report for a given [`Value`].
 ///
-/// Numbers are split into `"int"` and `"float"` based on how `serde_json`
-/// parsed them: a JSON literal with no decimal point or exponent (e.g. `1`)
-/// is an int; one with either (e.g. `1.0`) is a float. This mirrors
-/// `DeepDiff`'s default behavior of treating `1` and `1.0` as different types.
+/// Numbers are split into `"int"` and `"float"` by the compact [`Number`]'s
+/// preserved representation (which carries `serde_json`'s original parse: a
+/// JSON literal with no decimal point or exponent, e.g. `1`, is an int; one
+/// with either, e.g. `1.0`, is a float). This mirrors `DeepDiff`'s default
+/// behavior of treating `1` and `1.0` as different types.
 pub(crate) fn python_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "NoneType",
         Value::Bool(_) => "bool",
         Value::Number(n) if n.is_f64() => "float",
         Value::Number(_) => "int",
-        Value::String(_) => "str",
+        Value::Str(_) => "str",
         Value::Array(_) => "list",
         Value::Object(_) => "dict",
     }
@@ -121,8 +121,7 @@ pub(crate) fn numeric_diff(
 /// same kind: floats compare by exact IEEE-754 `==` (see [`floats_equal`]);
 /// ints compare by value across `i64`/`u64` representations (see
 /// [`number_as_i128`]), so `9_000_000_000_000_000_000u64` and its `i64`
-/// counterpart compare equal even though `serde_json` stored them
-/// differently.
+/// counterpart compare equal even though they use different representations.
 pub(crate) fn numbers_equal(old: &Number, new: &Number) -> bool {
     if old.is_f64() != new.is_f64() {
         return false;
@@ -161,7 +160,7 @@ fn floats_equal(a: f64, b: f64) -> bool {
 }
 /// Converts a non-float [`Number`] to `i128`, so ints stored as `u64` and
 /// `i64` compare equal by value regardless of which representation
-/// `serde_json` chose.
+/// the compact `Number` preserves from `serde_json`'s original parse.
 pub(crate) fn number_as_i128(n: &Number) -> Option<i128> {
     n.as_i64()
         .map(i128::from)

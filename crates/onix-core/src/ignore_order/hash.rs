@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::Value;
+use crate::value::Value;
 
 use super::fxhash::HashMap;
 
@@ -69,7 +69,7 @@ pub(crate) fn item_key(value: &Value) -> ItemKey {
     match value {
         Value::Null => ItemKey::Null,
         Value::Bool(b) => ItemKey::Bool(*b),
-        Value::String(s) => ItemKey::Str(s.clone()),
+        Value::Str(s) => ItemKey::Str(s.to_string()),
         Value::Number(n) => {
             if n.is_f64() {
                 let bits = n
@@ -87,9 +87,11 @@ pub(crate) fn item_key(value: &Value) -> ItemKey {
             }
         }
         Value::Array(items) => ItemKey::List(items.iter().map(item_key).collect()),
-        Value::Object(map) => {
-            ItemKey::Dict(map.iter().map(|(k, v)| (k.clone(), item_key(v))).collect())
-        }
+        Value::Object(map) => ItemKey::Dict(
+            map.iter()
+                .map(|(k, v)| (k.to_string(), item_key(v)))
+                .collect(),
+        ),
     }
 }
 

@@ -5,7 +5,7 @@
 //! (`super::hash`) at all — every function here operates directly on
 //! [`serde_json::Value`].
 
-use serde_json::{Number, Value};
+use crate::value::{Number, Object, Value};
 
 use crate::diff::DiffOptions;
 
@@ -93,7 +93,7 @@ pub(crate) fn numeric_distance(n1: f64, n2: f64, cutoff: f64) -> f64 {
 /// safety" doc section).
 pub(crate) fn rough_length(value: &Value) -> usize {
     match value {
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => 1,
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_) => 1,
         Value::Array(items) => 1 + items.iter().map(rough_length).sum::<usize>(),
         Value::Object(map) => 1 + map.values().map(|v| 1 + rough_length(v)).sum::<usize>(),
     }
@@ -118,7 +118,7 @@ pub(crate) fn rough_length(value: &Value) -> usize {
 pub(crate) fn item_length(value: &Value) -> usize {
     match value {
         Value::Null => 0,
-        Value::Bool(_) | Value::Number(_) | Value::String(_) => 1,
+        Value::Bool(_) | Value::Number(_) | Value::Str(_) => 1,
         Value::Array(items) => items.iter().map(item_length).sum(),
         Value::Object(map) => item_length_of_map(map),
     }
@@ -127,7 +127,7 @@ pub(crate) fn item_length(value: &Value) -> usize {
 /// [`item_length`]'s dict case, factored out so
 /// [`count_object_diff_leaves`]'s `threshold_to_diff_deeper` branch (whose
 /// "new value" is a whole map, not a [`Value`]) can share it directly.
-fn item_length_of_map(map: &serde_json::Map<String, Value>) -> usize {
+fn item_length_of_map(map: &Object) -> usize {
     map.iter()
         .filter(|(key, _)| !is_length_excluded_key(key))
         .map(|(_, v)| item_length(v))
@@ -172,7 +172,7 @@ pub(crate) fn count_diff_leaves(a: &Value, b: &Value, depth: usize, opts: &DiffO
     match (a, b) {
         (Value::Null, Value::Null) => 0,
         (Value::Bool(x), Value::Bool(y)) => usize::from(x != y),
-        (Value::String(x), Value::String(y)) => usize::from(x != y),
+        (Value::Str(x), Value::Str(y)) => usize::from(x != y),
         (Value::Number(x), Value::Number(y)) => {
             if x.is_f64() == y.is_f64() {
                 usize::from(!crate::diff::numbers_equal(x, y))
@@ -242,8 +242,8 @@ fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value>
         Value::Number(n) if n.is_f64() => {
             coerce_to_f64(old_value).and_then(|f| Number::from_f64(f).map(Value::Number))
         }
-        Value::Number(_) => coerce_to_i64(old_value).map(|i| Value::Number(Number::from(i))),
-        Value::String(_) => coerce_to_python_str(old_value).map(Value::String),
+        Value::Number(_) => coerce_to_i64(old_value).map(|i| Value::Number(Number::from_i64(i))),
+        Value::Str(_) => coerce_to_python_str(old_value).map(|s| Value::Str(s.into_boxed_str())),
         Value::Null | Value::Array(_) | Value::Object(_) => None,
     }
 }
@@ -262,7 +262,7 @@ fn is_truthy(value: &Value) -> bool {
         Value::Null => false,
         Value::Bool(b) => *b,
         Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
+        Value::Str(s) => !s.is_empty(),
         Value::Array(items) => !items.is_empty(),
         Value::Object(map) => !map.is_empty(),
     }
@@ -278,7 +278,7 @@ fn coerce_to_f64(value: &Value) -> Option<f64> {
         Value::Null | Value::Array(_) | Value::Object(_) => None,
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.trim().parse::<f64>().ok(),
+        Value::Str(s) => s.trim().parse::<f64>().ok(),
     }
 }
 
@@ -324,7 +324,7 @@ fn coerce_to_i64(value: &Value) -> Option<i64> {
                     .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok()))
             }
         }
-        Value::String(s) => s.trim().parse::<i64>().ok(),
+        Value::Str(s) => s.trim().parse::<i64>().ok(),
     }
 }
 
@@ -360,7 +360,7 @@ fn coerce_to_python_str(value: &Value) -> Option<String> {
                 n.as_u64().map(|u| u.to_string())
             }
         }
-        Value::String(s) => Some(s.clone()),
+        Value::Str(s) => Some(s.to_string()),
     }
 }
 
@@ -394,12 +394,9 @@ pub(crate) const THRESHOLD_TO_DIFF_DEEPER: f64 = 0.33;
 /// [`count_object_diff_leaves`] (the count-only distance mirror) and
 /// `crate::diff::object_diff`'s own unconditional collapse — see
 /// [`THRESHOLD_TO_DIFF_DEEPER`]'s own doc for why both exist.
-pub(crate) fn is_below_threshold_to_diff_deeper(
-    a: &serde_json::Map<String, Value>,
-    b: &serde_json::Map<String, Value>,
-) -> bool {
+pub(crate) fn is_below_threshold_to_diff_deeper(a: &Object, b: &Object) -> bool {
     let union_len = a.keys().chain(b.keys()).collect::<HashSet<_>>().len();
-    let intersect_len = a.keys().filter(|key| b.contains_key(key.as_str())).count();
+    let intersect_len = a.keys().filter(|key| b.contains_key(key)).count();
     #[allow(
         clippy::cast_precision_loss,
         reason = "key counts are small, far under f64's exact-integer range"
@@ -424,8 +421,8 @@ pub(crate) fn is_below_threshold_to_diff_deeper(
 /// cost of a full `Report` for a distance measurement (see
 /// [`count_diff_leaves`]'s own doc).
 pub(crate) fn count_object_diff_leaves(
-    a: &serde_json::Map<String, Value>,
-    b: &serde_json::Map<String, Value>,
+    a: &Object,
+    b: &Object,
     depth: usize,
     opts: &DiffOptions,
 ) -> usize {

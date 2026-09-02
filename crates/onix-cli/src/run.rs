@@ -114,6 +114,13 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
     };
 
     let diff_start = Instant::now();
+    // Temporary slice-2 bridge: the core diff now consumes the compact
+    // `onix_core::Value`. CLI inputs are parsed by `serde_json::from_str`,
+    // whose own recursion limit bounds their depth, so this `From` conversion
+    // is safe here. Slice 4 migrates the CLI to parse into the compact value
+    // directly, removing this per-call conversion.
+    let a_value = onix_core::Value::from(a_value);
+    let b_value = onix_core::Value::from(b_value);
     let result = onix_core::diff_with_options(&a_value, &b_value, &opts);
     let diff_ns = diff_start.elapsed().as_nanos();
 

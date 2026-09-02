@@ -6,16 +6,13 @@
 //! See the parent `diff` module's doc for the full recursion-depth hardening
 //! (its "Hardening" section) this file implements.
 
-use serde_json::{Map, Value};
+use crate::value::{Object, Value};
 
 use crate::error::Error;
 use crate::path::{PathSegment, render_path};
 use crate::report::Report;
 
-use super::{
-    DiffOptions, array_diff, numbers_equal, numeric_diff, object_diff, scalar_diff,
-    type_change_report,
-};
+use super::{DiffOptions, array_diff, numeric_diff, object_diff, scalar_diff, type_change_report};
 
 /// The recursive core of [`diff_with_max_depth()`]: identical dispatch, but
 /// carrying the path and depth accumulated so far, so that nested findings
@@ -49,7 +46,7 @@ pub(crate) fn diff_at(
         (Value::Number(old), Value::Number(new)) => {
             numeric_diff(path, old, new, a, b, depth, opts.max_depth)
         }
-        (Value::String(old), Value::String(new)) => {
+        (Value::Str(old), Value::Str(new)) => {
             scalar_diff(path, old == new, a, b, depth, opts.max_depth)
         }
         (Value::Array(old), Value::Array(new)) => array_diff(path, old, new, depth, opts),
@@ -57,79 +54,23 @@ pub(crate) fn diff_at(
         _ => type_change_report(path, a, b, depth, opts.max_depth),
     }
 }
-/// Iteratively (no native recursion) checks whether two JSON values are
-/// deeply equal, using an explicit heap-allocated work-stack instead of the
-/// call stack. This exists so container equality can be checked on
-/// arbitrarily deep input without risking a stack overflow — unlike
-/// `serde_json::Value`'s derived `PartialEq`, which recurses natively and
-/// has no depth bound at all.
+/// Deep structural equality of two values, used by
+/// [`diff_with_options`](super::diff_with_options) for its top-level
+/// "equal inputs of any depth return an empty report" fast path.
 ///
-/// Equality semantics deliberately match the diff engine's own, not
-/// `serde_json`'s derived `PartialEq`, for numbers: two numbers are equal
-/// only if they are the same "kind" (both ints or both floats — an int and a
-/// float holding the same numeric value are never equal here, matching
-/// `DeepDiff` always reporting that as a `type_changes`) and, within a kind,
-/// numerically equal (ints compare by value across `i64`/`u64`
-/// representations; floats compare by exact IEEE-754 `==`). This shares a
-/// single internal `numbers_equal` helper with the recursive engine's own
-/// scalar comparison, so there is exactly one place numeric-equality rules
-/// live.
-///
-/// Objects compare by identical key sets plus equal values per shared key
-/// (key order does not matter); arrays compare by equal length plus equal
-/// values per index.
-///
-/// Native-stack safety is the only guarantee this makes: pushing every
-/// element/value pair of a container onto the work-stack in one go means
-/// peak heap usage is bounded by *input size* (roughly width × depth for a
-/// wide-and-deep adversarial shape), not by nesting depth alone. That is an
-/// acceptable, deliberate trade — the goal is eliminating native-stack
-/// overflow (an uncatchable process abort), not bounding total memory (an
-/// ordinary, catchable allocation failure).
+/// Delegates to [`Value`]'s own [`PartialEq`], which is iterative (an
+/// explicit heap work-stack, no native recursion — see the `value` module's
+/// "Stack safety" doc) and whose semantics are exactly this engine's: an int
+/// and a float are never equal, ints compare by value, floats by exact
+/// IEEE-754 `==`, objects by key set plus per-key values, arrays by length
+/// plus per-index values. Because every value the engine sees comes from
+/// [`Value`]'s canonical construction (`From`/`Deserialize`), a given
+/// integer has exactly one representation, so `PartialEq`'s
+/// variant-sensitive `Number` comparison and the old dedicated
+/// [`numbers_equal`](super::numbers_equal) walk agree on every reachable input.
 #[must_use]
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
-    let mut stack: Vec<(&Value, &Value)> = vec![(a, b)];
-
-    while let Some((x, y)) = stack.pop() {
-        match (x, y) {
-            (Value::Null, Value::Null) => {}
-            (Value::Bool(x), Value::Bool(y)) => {
-                if x != y {
-                    return false;
-                }
-            }
-            (Value::Number(x), Value::Number(y)) => {
-                if !numbers_equal(x, y) {
-                    return false;
-                }
-            }
-            (Value::String(x), Value::String(y)) => {
-                if x != y {
-                    return false;
-                }
-            }
-            (Value::Array(x), Value::Array(y)) => {
-                if x.len() != y.len() {
-                    return false;
-                }
-                stack.extend(x.iter().zip(y.iter()));
-            }
-            (Value::Object(x), Value::Object(y)) => {
-                if x.len() != y.len() {
-                    return false;
-                }
-                for (key, x_value) in x {
-                    match y.get(key) {
-                        Some(y_value) => stack.push((x_value, y_value)),
-                        None => return false,
-                    }
-                }
-            }
-            _ => return false,
-        }
-    }
-
-    true
+    a == b
 }
 /// Returns `true` if `value`'s own internal nesting exceeds `limit`,
 /// treating `value` as if it were its own root (depth `0`) — independent of
@@ -157,7 +98,7 @@ pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
         match v {
             Value::Array(items) => stack.extend(items.iter().map(|item| (item, depth + 1))),
             Value::Object(map) => stack.extend(map.values().map(|item| (item, depth + 1))),
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_) => {}
         }
     }
 
@@ -166,9 +107,11 @@ pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
 /// Guards every place a whole value is about to be cloned into a [`Report`]:
 /// returns `Err(Error::MaxDepthExceeded)` if `value`'s own nesting (see
 /// [`deeper_than`]) exceeds the *remaining* depth budget at `depth`, so the
-/// clone that would otherwise hand an attacker-controlled deep value to
-/// `serde_json`'s natively recursive `Clone`/`Drop`/serialization never
-/// happens.
+/// clone that would otherwise hand an attacker-controlled deep value to the
+/// compact `Value`'s natively recursive (depth-guarded) `Clone`, or to
+/// [`crate::report::Report::to_json_value`]'s recursive render, never
+/// happens. (The compact `Value`'s own `Drop` is iterative, so teardown is
+/// safe regardless — see the `value` module's "Stack safety" note.)
 ///
 /// `depth` is how deep the *path* to this finding already is (the same
 /// convention as [`diff_at`]'s own `depth`: root `0`, one more per dict-key
@@ -214,7 +157,7 @@ pub(crate) fn check_value_depth(
 /// [`deeper_than`]'s own early-return, and introduces no native recursion
 /// of its own — each delegated [`deeper_than`] call is independently
 /// iterative, so this composes without compounding stack usage.
-pub(crate) fn map_deeper_than(map: &Map<String, Value>, limit: usize) -> bool {
+pub(crate) fn map_deeper_than(map: &Object, limit: usize) -> bool {
     if limit == 0 {
         !map.is_empty()
     } else {
@@ -230,7 +173,7 @@ pub(crate) fn map_deeper_than(map: &Map<String, Value>, limit: usize) -> bool {
 /// passes.
 pub(crate) fn check_map_depth(
     path: &[PathSegment],
-    map: &Map<String, Value>,
+    map: &Object,
     depth: usize,
     max_depth: usize,
 ) -> Result<(), Error> {

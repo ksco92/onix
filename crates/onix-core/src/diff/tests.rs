@@ -1,10 +1,65 @@
-use super::dispatch::{deeper_than, map_deeper_than};
-use super::scalar::number_as_i128;
-use super::{
-    DEFAULT_MAX_DEPTH, diff, diff_with_max_depth, python_type_name, scalar_diff, values_equal,
-};
+use super::DEFAULT_MAX_DEPTH;
 use crate::error::Error;
+use crate::path::PathSegment;
+use crate::report::Report;
+use crate::value::{Number as CNumber, Object as CObject, Value as CValue};
 use serde_json::{Map, Number, Value, json};
+
+// --- serde -> compact test bridges (slice 2) ---------------------------
+// The engine now consumes the compact `crate::value::Value`; these thin
+// wrappers convert `serde_json` inputs at the call boundary (the same `From`
+// bridge the CLI/bindings use) so the existing literal-based tests keep
+// exercising the real compact-typed engine unchanged.
+fn cv(value: &Value) -> CValue {
+    CValue::from(value.clone())
+}
+fn cnum(n: &Number) -> CNumber {
+    if let Some(u) = n.as_u64() {
+        CNumber::from_u64(u)
+    } else if let Some(i) = n.as_i64() {
+        CNumber::from_i64(i)
+    } else {
+        CNumber::from_f64(n.as_f64().expect("serde Number is u64/i64/f64")).expect("finite")
+    }
+}
+fn cobj(map: &Map<String, Value>) -> CObject {
+    let value = CValue::from(Value::Object(map.clone()));
+    match &value {
+        CValue::Object(object) => object.clone(),
+        _ => unreachable!("Value::Object converts to a compact Object"),
+    }
+}
+fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
+    super::diff(&cv(a), &cv(b))
+}
+fn diff_with_max_depth(a: &Value, b: &Value, max_depth: usize) -> Result<Report, Error> {
+    super::diff_with_max_depth(&cv(a), &cv(b), max_depth)
+}
+fn python_type_name(value: &Value) -> &'static str {
+    super::python_type_name(&cv(value))
+}
+fn values_equal(a: &Value, b: &Value) -> bool {
+    super::values_equal(&cv(a), &cv(b))
+}
+fn scalar_diff(
+    path: &[PathSegment],
+    equal: bool,
+    a: &Value,
+    b: &Value,
+    depth: usize,
+    max_depth: usize,
+) -> Result<Report, Error> {
+    super::scalar_diff(path, equal, &cv(a), &cv(b), depth, max_depth)
+}
+fn deeper_than(value: &Value, limit: usize) -> bool {
+    super::dispatch::deeper_than(&cv(value), limit)
+}
+fn map_deeper_than(map: &Map<String, Value>, limit: usize) -> bool {
+    super::dispatch::map_deeper_than(&cobj(map), limit)
+}
+fn number_as_i128(n: &Number) -> Option<i128> {
+    super::scalar::number_as_i128(&cnum(n))
+}
 
 /// Wraps `leaf` in `depth` single-key (`"k"`) nested dicts, so `leaf`
 /// itself sits at nesting depth `depth` (root, i.e. `depth == 0`, is
@@ -1158,17 +1213,30 @@ fn threshold_collapse_rejects_a_deep_side_on_a_constrained_stack_instead_of_cras
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            let mut a = Map::new();
-            a.insert("p".to_string(), json!(1));
-            a.insert("q".to_string(), json!(2));
-            let mut b = Map::new();
-            b.insert("r".to_string(), json!(3));
-            b.insert(
-                "deep".to_string(),
-                nested_array(RECURSION_OVERFLOW_DEPTH, json!(1)),
-            );
+            // Build the deep side as a COMPACT value ITERATIVELY (a flat
+            // loop, no native recursion) and call the real compact engine
+            // directly: the whole point is that the engine's iterative
+            // `map_deeper_than` guard rejects it on this constrained stack
+            // *before* any recursive clone. Going through the serde `From`
+            // bridge (the other tests' shim) would itself recurse here and
+            // defeat the test, so this one bypasses it.
+            let deep = {
+                let mut value = CValue::from(json!(1));
+                for _ in 0..RECURSION_OVERFLOW_DEPTH {
+                    value = CValue::Array(vec![value].into_boxed_slice());
+                }
+                value
+            };
+            let a = CValue::Object(CObject::from_pairs(vec![
+                (std::sync::Arc::from("p"), CValue::from(json!(1))),
+                (std::sync::Arc::from("q"), CValue::from(json!(2))),
+            ]));
+            let b = CValue::Object(CObject::from_pairs(vec![
+                (std::sync::Arc::from("r"), CValue::from(json!(3))),
+                (std::sync::Arc::from("deep"), deep),
+            ]));
 
-            let err = diff_with_max_depth(&Value::Object(a), &Value::Object(b), 1).unwrap_err();
+            let err = super::diff_with_max_depth(&a, &b, 1).unwrap_err();
             assert_eq!(
                 err,
                 Error::MaxDepthExceeded {

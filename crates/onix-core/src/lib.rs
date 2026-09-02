@@ -3,14 +3,13 @@
 //!
 //! # Architecture map
 //!
-//! A caller hands two already-parsed `serde_json::Value`s to [`diff()`] (or
-//! [`diff_with_options`]/[`diff_with_max_depth`]); this crate does no
-//! parsing of its own (see `onix-cli`'s `run` module for where the JSON text
-//! a real CLI invocation reads actually gets parsed). The crate now also
-//! exports a compact [`value::Value`], a memory-frugal, byte-compatible
-//! counterpart to `serde_json::Value`; the diff engine still consumes
-//! `serde_json::Value` today, and migrating it onto [`value::Value`]
-//! follows. From there:
+//! A caller hands two already-parsed [`Value`]s (the crate's own compact,
+//! memory-frugal, byte-compatible JSON value model — see [`mod@value`]) to
+//! [`diff()`] (or [`diff_with_options`]/[`diff_with_max_depth`]); this crate
+//! does no parsing of its own. A caller holding a [`serde_json::Value`]
+//! (as `onix-cli` and the Python bindings do today) converts it with
+//! [`From`] at the call boundary; the engine itself operates entirely on the
+//! compact model. From there:
 //!
 //! 1. **Dispatch** ([`mod@diff`], specifically its `dispatch` submodule):
 //!    `diff_at` recurses through the pair by JSON type, enforcing the
@@ -76,13 +75,14 @@ pub use value::{Number, Value};
 /// # Examples
 ///
 /// ```
+/// use onix_core::Value;
 /// use serde_json::json;
 ///
-/// assert!(!onix_core::exceeds_depth(&json!([1, 2, 3]), 1));
-/// assert!(onix_core::exceeds_depth(&json!([[[1]]]), 2));
+/// assert!(!onix_core::exceeds_depth(&Value::from(json!([1, 2, 3])), 1));
+/// assert!(onix_core::exceeds_depth(&Value::from(json!([[[1]]])), 2));
 /// ```
 #[must_use]
-pub fn exceeds_depth(value: &serde_json::Value, limit: usize) -> bool {
+pub fn exceeds_depth(value: &Value, limit: usize) -> bool {
     diff::deeper_than(value, limit)
 }
 
@@ -95,6 +95,7 @@ pub fn version() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{exceeds_depth, version};
+    use crate::Value;
     use serde_json::json;
 
     #[test]
@@ -107,7 +108,7 @@ mod tests {
         // Smoke test that the public wrapper forwards to the internal
         // `deeper_than` (whose own behavior is covered in `diff::tests`):
         // `[[[1]]]` is depth 3, so it exceeds limit 2 but not limit 3.
-        assert!(exceeds_depth(&json!([[[1]]]), 2));
-        assert!(!exceeds_depth(&json!([[[1]]]), 3));
+        assert!(exceeds_depth(&Value::from(json!([[[1]]])), 2));
+        assert!(!exceeds_depth(&Value::from(json!([[[1]]])), 3));
     }
 }

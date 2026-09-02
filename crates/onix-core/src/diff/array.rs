@@ -3,7 +3,7 @@
 //! the parent `diff` module's "List diffing" doc section for the full,
 //! empirically-verified spec this implements.
 
-use serde_json::Value;
+use crate::value::Value;
 
 use crate::error::Error;
 use crate::ignore_order;

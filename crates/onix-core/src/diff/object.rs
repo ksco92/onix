@@ -2,7 +2,7 @@
 //! keys become leaf findings, shared keys recurse through
 //! `super::dispatch`'s [`super::diff_at`] one level deeper.
 
-use serde_json::{Map, Value};
+use crate::value::{Object, Value};
 
 use crate::error::Error;
 use crate::path::PathSegment;
@@ -62,17 +62,18 @@ use super::{DiffOptions, check_map_depth, check_value_depth, diff_at, scoped};
 /// so one key's finding never leaks a stale segment into another's path.
 pub(crate) fn object_diff(
     path: &mut Vec<PathSegment>,
-    a: &Map<String, Value>,
-    b: &Map<String, Value>,
+    a: &Object,
+    b: &Object,
     depth: usize,
     opts: &DiffOptions,
 ) -> Result<Report, Error> {
     // `threshold_to_diff_deeper` collapse — see this function's own doc.
     // The depth check runs against the borrowed maps, BEFORE either is
     // cloned into a finding: cloning first and checking after would hand
-    // an attacker-controlled, arbitrarily deep `a`/`b` straight to
-    // `serde_json::Value`'s natively recursive `Clone` with no bound in
-    // place yet — see `check_map_depth`'s own doc.
+    // an attacker-controlled, arbitrarily deep `a`/`b` straight to the
+    // compact `Value`'s natively recursive (but depth-guarded) `Clone` with
+    // no bound in place yet — see `check_map_depth`'s own doc and the
+    // `value` module's "Stack safety" note on why `Clone` stays recursive.
     if crate::ignore_order::is_below_threshold_to_diff_deeper(a, b) {
         check_map_depth(path, a, depth, opts.max_depth)?;
         check_map_depth(path, b, depth, opts.max_depth)?;
@@ -101,7 +102,7 @@ pub(crate) fn object_diff(
     for (key, old_value) in a {
         scoped(
             path,
-            PathSegment::Key(key.clone()),
+            PathSegment::Key(key.to_string()),
             |path| -> Result<(), Error> {
                 match b.get(key) {
                     None => {
@@ -118,7 +119,7 @@ pub(crate) fn object_diff(
 
     for (key, new_value) in b {
         if !a.contains_key(key) {
-            scoped(path, PathSegment::Key(key.clone()), |path| {
+            scoped(path, PathSegment::Key(key.to_string()), |path| {
                 check_value_depth(path, new_value, depth + 1, opts.max_depth).map(|()| {
                     report.insert_dictionary_item_added(path.clone(), new_value.clone());
                 })

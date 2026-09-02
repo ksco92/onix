@@ -56,10 +56,14 @@
 //! This practical depth limit is a property of the recursive engine; an
 //! iterative work-stack rewrite would remove it entirely.
 //!
-//! The engine operates directly on `serde_json::Value` today. A compact
-//! value model (`onix_core::Value`) now exists alongside it, and migrating
-//! the engine onto it follows as a deliberate next step — sequenced after
-//! the model and its conversions landed, rather than bundled with them.
+//! The engine operates on the compact `onix_core::Value` model
+//! (`crate::value`), not on `serde_json::Value`: its two input trees are the
+//! memory-frugal representation. A caller holding a `serde_json::Value` (the
+//! CLI, and the Python bindings for now) converts at the boundary with
+//! `From`. Findings are still stored and rendered as `serde_json::Value` on
+//! the output side (`crate::report`), converted from the compact inputs only
+//! at the point a difference is recorded — the two whole input trees never
+//! become `serde_json::Value`.
 //!
 //! # List diffing: scalar-list LCS matching
 //!

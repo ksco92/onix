@@ -1,5 +1,20 @@
-use super::{Tag, all_basic_scalars, compute_opcodes, scalar_key};
+use super::Tag;
+use crate::value::Value as CValue;
 use serde_json::json;
+
+// --- serde -> compact test bridges (slice 2) ---------------------------
+fn cvec(items: &[serde_json::Value]) -> Vec<CValue> {
+    items.iter().map(|v| CValue::from(v.clone())).collect()
+}
+fn all_basic_scalars(items: &[serde_json::Value]) -> bool {
+    super::all_basic_scalars(&cvec(items))
+}
+fn compute_opcodes(a: &[serde_json::Value], b: &[serde_json::Value]) -> Vec<super::Opcode> {
+    super::compute_opcodes(&cvec(a), &cvec(b))
+}
+fn scalar_key(value: &serde_json::Value) -> super::ScalarKey {
+    super::scalar_key(&CValue::from(value.clone()))
+}
 
 /// Python-`==` equality for two JSON scalars, per [`super::ScalarKey`]'s
 /// doc. Test-only: production code has no remaining use for this as a

@@ -136,7 +136,7 @@ mod pairing;
 #[path = "tests.rs"]
 mod tests;
 
-use serde_json::Value;
+use crate::value::Value;
 
 use crate::diff::{DiffOptions, check_value_depth, diff_at, scoped};
 use crate::error::Error;

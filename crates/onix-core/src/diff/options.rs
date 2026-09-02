@@ -4,7 +4,7 @@
 //! `super::dispatch`'s recursive [`super::diff_at`], differing only in how
 //! much of [`DiffOptions`] the caller controls.
 
-use serde_json::Value;
+use crate::value::Value;
 
 use crate::error::Error;
 use crate::report::Report;
@@ -62,10 +62,11 @@ impl Default for DiffOptions {
 /// # Examples
 ///
 /// ```
+/// use onix_core::Value;
 /// use onix_core::diff::diff;
 /// use serde_json::json;
 ///
-/// let report = diff(&json!(1), &json!(2)).unwrap();
+/// let report = diff(&Value::from(json!(1)), &Value::from(json!(2))).unwrap();
 /// assert!(!report.is_empty());
 /// assert_eq!(
 ///     report.to_json_value(),
@@ -92,6 +93,7 @@ pub fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
 /// # Examples
 ///
 /// ```
+/// use onix_core::Value;
 /// use onix_core::diff::{DiffOptions, diff_with_options};
 /// use serde_json::json;
 ///
@@ -99,7 +101,9 @@ pub fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
 ///     ignore_order: true,
 ///     ..DiffOptions::default()
 /// };
-/// let report = diff_with_options(&json!([1, 2, 3]), &json!([3, 2, 1]), &opts).unwrap();
+/// let report =
+///     diff_with_options(&Value::from(json!([1, 2, 3])), &Value::from(json!([3, 2, 1])), &opts)
+///         .unwrap();
 /// assert!(report.is_empty());
 /// ```
 pub fn diff_with_options(a: &Value, b: &Value, opts: &DiffOptions) -> Result<Report, Error> {
@@ -197,15 +201,17 @@ pub fn diff_with_options(a: &Value, b: &Value, opts: &DiffOptions) -> Result<Rep
 /// # Examples
 ///
 /// ```
+/// use onix_core::Value;
 /// use onix_core::diff::{DEFAULT_MAX_DEPTH, diff_with_max_depth};
 /// use serde_json::json;
 ///
 /// // A tiny bound is enough for a shallow diff.
-/// let report = diff_with_max_depth(&json!({"a": 1}), &json!({"a": 2}), 3).unwrap();
+/// let report =
+///     diff_with_max_depth(&Value::from(json!({"a": 1})), &Value::from(json!({"a": 2})), 3).unwrap();
 /// assert!(!report.is_empty());
 ///
 /// // Equal inputs never hit the bound, no matter how deep.
-/// let deep = json!({"a": {"b": {"c": {"d": {"e": 1}}}}});
+/// let deep = Value::from(json!({"a": {"b": {"c": {"d": {"e": 1}}}}}));
 /// let report = diff_with_max_depth(&deep, &deep, 1).unwrap();
 /// assert!(report.is_empty());
 /// # let _ = DEFAULT_MAX_DEPTH;
