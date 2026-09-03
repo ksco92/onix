@@ -224,6 +224,37 @@ LIVE_CASES: Final[list[str]] = list(CASE_LABELS)
 PROXY_CASE: Final[str] = "api_payloads_equal"
 
 
+def _text_diff_callable(
+    tool: str,
+    supply_a: Callable[[], str],
+    supply_b: Callable[[], str],
+    ignore_order: bool,
+) -> Callable[[], object]:
+    """
+    Build the diff callable for the two JSON-text cases (`_json` and `_file`).
+
+    Both cases differ only in how they obtain the two JSON strings; the tool
+    dispatch is identical, so it lives here once. `supply_a`/`supply_b` return
+    the JSON text and are invoked *inside* the returned (timed) callable, so
+    any per-diff cost a real caller pays to obtain the text — reading a file
+    from disk in the `_file` case — is timed identically on both sides.
+
+    :param tool: Either `"deepdiff"` or `"deepdiff_rs"`.
+    :param supply_a: Zero-argument callable returning the `a` JSON text.
+    :param supply_b: Zero-argument callable returning the `b` JSON text.
+    :param ignore_order: Whether to diff order-insensitively.
+    :return: A callable that performs exactly one diff and returns its result.
+    """
+    if tool == "deepdiff":
+        return lambda: RealDeepDiff(
+            json.loads(supply_a()),
+            json.loads(supply_b()),
+            ignore_order=ignore_order,
+            verbose_level=2,
+        ).to_json()
+    return lambda: diff_json(supply_a(), supply_b(), ignore_order=ignore_order)
+
+
 def _diff_callable(tool: str, case: str) -> Callable[[], object]:
     """
     Build the zero-argument diff callable for one `(tool, case)` pair.
@@ -247,35 +278,32 @@ def _diff_callable(tool: str, case: str) -> Callable[[], object]:
         return lambda: OnixDeepDiff(a, equal_copy)
 
     if case.endswith("_file"):
-        tmpdir = tempfile.mkdtemp(prefix="onix-bench-")
-        a_path = Path(tmpdir) / "a.json"
-        b_path = Path(tmpdir) / "b.json"
+        tmp = tempfile.TemporaryDirectory(prefix="onix-bench-")
+        a_path = Path(tmp.name) / "a.json"
+        b_path = Path(tmp.name) / "b.json"
         a_path.write_text(json.dumps(a), encoding="utf-8")
         b_path.write_text(json.dumps(b), encoding="utf-8")
-        if tool == "deepdiff":
-            return lambda: RealDeepDiff(
-                json.loads(a_path.read_text(encoding="utf-8")),
-                json.loads(b_path.read_text(encoding="utf-8")),
-                ignore_order=ignore_order,
-                verbose_level=2,
-            ).to_json()
-        return lambda: diff_json(
-            a_path.read_text(encoding="utf-8"),
-            b_path.read_text(encoding="utf-8"),
-            ignore_order=ignore_order,
+        inner = _text_diff_callable(
+            tool,
+            lambda: a_path.read_text(encoding="utf-8"),
+            lambda: b_path.read_text(encoding="utf-8"),
+            ignore_order,
         )
+
+        # Keep the TemporaryDirectory alive until after the diff has run by
+        # binding it into the returned callable: the files must still exist
+        # when the timed callable reads them, and cleanup must not fall inside
+        # the timed window. Its finalizer removes the dir at process exit, so
+        # nothing leaks across the (up to 22) subprocesses a run spawns.
+        def run_file_diff(_keep_alive: tempfile.TemporaryDirectory = tmp) -> object:
+            return inner()
+
+        return run_file_diff
 
     if case.endswith("_json"):
         a_text = json.dumps(a)
         b_text = json.dumps(b)
-        if tool == "deepdiff":
-            return lambda: RealDeepDiff(
-                json.loads(a_text),
-                json.loads(b_text),
-                ignore_order=ignore_order,
-                verbose_level=2,
-            ).to_json()
-        return lambda: diff_json(a_text, b_text, ignore_order=ignore_order)
+        return _text_diff_callable(tool, lambda: a_text, lambda: b_text, ignore_order)
 
     if tool == "deepdiff":
         return lambda: RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)

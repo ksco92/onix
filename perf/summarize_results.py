@@ -828,9 +828,10 @@ def render_go_no_go(report: Report) -> str:
     lines.append("")
     lines.append(
         "This is an **upper "
-        "bound**, not the product validation — onix here diffs data "
-        "already parsed into `serde_json::Value`, with no FFI or "
-        "Python-object conversion cost on its ledger. The decision-relevant "
+        "bound**, not the product validation — onix here diffs data the "
+        "CLI stream-parses straight from JSON text into the compact "
+        "`onix_core::Value`, with no intermediate `serde_json` tree and no "
+        "FFI or Python-object conversion cost on this path's ledger. The decision-relevant "
         "validation is the product surface (real diffing through the Python "
         "bindings on live Python objects), where per-node FFI or up-front "
         "conversion costs will land on onix's side of the ledger. A clean "

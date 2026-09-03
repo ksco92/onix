@@ -294,8 +294,8 @@ the deepdiff / deepdiff_rs ratio on every row, computed from full-precision
 values before rounding for display. A value below 1x on a memory or CPU
 row means `deepdiff_rs` used more than `deepdiff` there, and hand-dividing the
 displayed 3-decimal figures can differ slightly from the bolded ratio. CPU
-tracks wall time closely (single-threaded, CPU-bound work); peak RSS tells a
-shape-dependent story. On the `ignore_order` integer shape `deepdiff_rs` uses
+tracks wall time closely (single-threaded, CPU-bound work). On the
+`ignore_order` integer shape `deepdiff_rs` uses
 markedly less memory (**1.61x**), because deepdiff hashes every element to
 match items across the shuffle and those hashes dominate its footprint. On the
 heterogeneous records passed as **live Python objects** it uses somewhat more
