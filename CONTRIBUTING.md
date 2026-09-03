@@ -123,26 +123,18 @@ pre-fix binary.
 
 ## Benchmarking
 
-[`perf/RESULTS.md`](perf/RESULTS.md) is onix's published performance claim
-against pinned real `deepdiff` 9.1.0, over the full fixture matrix. It is
-always the live, regenerable claim; every number in it traces to a real run.
-Regenerate it from scratch:
+Two benchmarks live in the repo; both are reproduced from source here, and the README's [Performance](README.md#performance) section holds the numbers and what they mean.
+
+[`perf/RESULTS.md`](perf/RESULTS.md) is the engine benchmark against pinned real `deepdiff` 9.1.0 over the full fixture matrix. Regenerate it from scratch:
 
 ```sh
 brew install hyperfine   # or: cargo install hyperfine
 perf/run_bench.sh
 ```
 
-This regenerates the deterministic fixture matrix, builds `cargo build
---release`, runs a correctness precheck (onix and DeepDiff must produce
-byte-identical canonical JSON on every fixture, else the run aborts), sweeps
-wall clock/CPU/peak RSS with `hyperfine`, and writes `perf/RESULTS.md`. The
-report's own "Run procedure", "Correctness precheck", and "Deferred work"
-sections carry the full methodology and every deliberately scaled-down part of
-the matrix.
+This regenerates the deterministic fixture matrix (written to `perf/fixtures/`, gitignored), builds `cargo build --release`, runs a correctness precheck (onix and DeepDiff must produce byte-identical canonical JSON on every fixture, else the run aborts), sweeps wall clock/CPU/peak RSS with `hyperfine`, and writes `perf/RESULTS.md`; raw per-run JSON lands in `perf/bench_raw/` (also gitignored). The report's own "Run procedure", "Correctness precheck", and "Deferred work" sections carry the full methodology and every deliberately scaled-down part of the matrix.
 
-The Python-bindings benchmark is separate and measures live Python objects (the
-cost a real caller pays), unlike `perf/RESULTS.md`, which is an upper bound:
+The Python-bindings benchmark is a separate script:
 
 ```sh
 cd crates/onix-py
@@ -151,9 +143,7 @@ uv run --group test maturin develop --release   # release, not debug: a debug bu
 uv run --group test python benchmarks/bench_bindings.py
 ```
 
-`crates/onix-py/benchmarks/bench_bindings.py`'s docstring explains its
-subprocess isolation, the median-of-11 sampling, and the live-object fixture
-choices; the README's Performance table reports its committed numbers.
+`crates/onix-py/benchmarks/bench_bindings.py`'s docstring explains its subprocess isolation, the median-of-11 sampling, and the live-object fixture choices.
 
 ## Mutation testing
 

@@ -40,7 +40,7 @@ test:
 # `cargo test` harness cannot do (see crates/onix-py/Cargo.toml's
 # `extension-module` feature doc for why the crate builds two different
 # ways for `cargo test` vs. a Python-loadable wheel). Its coverage
-# authority is instead `make python-test` (README.md's "Python" section):
+# authority is instead `make python-test` (CONTRIBUTING.md's "Python bindings" section):
 # a structural exclusion, not a logic-free-shim one.
 coverage:
 	cargo llvm-cov --workspace --fail-under-lines 95 --ignore-filename-regex 'crates/onix-py/src/'
@@ -70,7 +70,7 @@ mutants:
 # Regenerates perf/RESULTS.md from a real run against pinned deepdiff.
 # Slow (tens of minutes on the full fixture matrix, including two
 # multi-second-per-diff "very heavy" fixtures) — see perf/run_bench.sh and
-# README.md's "Benchmarks" section.
+# CONTRIBUTING.md's "Benchmarking" section.
 bench:
 	@command -v hyperfine >/dev/null 2>&1 || { echo "hyperfine not installed: brew install hyperfine (or: cargo install hyperfine)"; exit 1; }
 	perf/run_bench.sh
@@ -78,8 +78,8 @@ bench:
 # The real product validation for crates/onix-py (its coverage
 # authority — see the `coverage` target's comment above). Not part of
 # `check`: it needs a Python venv (uv) and a release build of the extension
-# module, neither of which the Rust-only gate sets up. See README.md's
-# "Python" section for the manual equivalent step by step.
+# module, neither of which the Rust-only gate sets up. See CONTRIBUTING.md's
+# "Python bindings" section for the manual equivalent step by step.
 python-test:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not installed: see https://docs.astral.sh/uv/"; exit 1; }
 	@command -v maturin >/dev/null 2>&1 || { echo "maturin not installed: uv tool install maturin"; exit 1; }
