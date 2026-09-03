@@ -75,6 +75,10 @@ attribute lines in `#[path = "..."]`-included test modules to any file, which
 shrinks the denominator without changing what is tested; the `Makefile`'s
 `coverage` target documents the full mechanism.
 
+CI also exports the same `cargo llvm-cov` line-coverage run as an lcov file
+and uploads it to Codecov for the README coverage badge, so `onix-py` is
+excluded there for the identical reason it is excluded from `make coverage`.
+
 ## Reading path
 
 The code is best read in this order, each step building on the last:

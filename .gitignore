@@ -10,3 +10,4 @@ crates/onix-py/.venv/
 crates/onix-py/uv.lock
 .pytest_cache/
 *.whl
+/lcov.info
