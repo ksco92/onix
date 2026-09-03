@@ -505,7 +505,8 @@ impl Report {
     /// Empty categories are omitted entirely (an empty report renders to an
     /// empty object), matching `DeepDiff`'s own behavior. Rendering each
     /// category's structural keys can collapse two entries into one on
-    /// adversarial input (see this module's doc and [`push_raw_category`]).
+    /// adversarial input — see this module's doc, and the crate-private
+    /// `push_raw_category` for the mechanics.
     #[must_use]
     pub fn to_value(&self) -> Value {
         let mut builder = Builder::new();
