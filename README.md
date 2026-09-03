@@ -1,7 +1,9 @@
 # deepdiff-rs
 
 [![CI](https://img.shields.io/github/actions/workflow/status/ksco92/onix/check.yml?branch=main&label=CI)](https://github.com/ksco92/onix/actions/workflows/check.yml)
+[![coverage](https://codecov.io/gh/ksco92/onix/branch/main/graph/badge.svg)](https://codecov.io/gh/ksco92/onix)
 [![PyPI](https://img.shields.io/pypi/v/deepdiff-rs.svg)](https://pypi.org/project/deepdiff-rs/)
+[![downloads](https://img.shields.io/pypi/dm/deepdiff-rs.svg)](https://pypi.org/project/deepdiff-rs/)
 [![license](https://img.shields.io/github/license/ksco92/onix.svg)](LICENSE)
 [![last commit](https://img.shields.io/github/last-commit/ksco92/onix.svg)](https://github.com/ksco92/onix/commits/main)
 
@@ -9,7 +11,7 @@
 
 `deepdiff-rs` reads live Python objects (or JSON) and produces the exact same report [DeepDiff](https://github.com/seperman/deepdiff) does at `verbose_level=2`, so it slots into code that already parses DeepDiff output while running dramatically faster on large or deeply nested inputs.
 
-Status (September 2026): pre-alpha proof of concept. Ordered and `ignore_order` diffing are complete, differentially tested against real DeepDiff 9.1.0, and [benchmarked](perf/RESULTS.md); `deepdiff-rs` is published to PyPI, the `onix` CLI builds and runs from source, and nothing is on crates.io yet.
+Status (September 2026): `deepdiff-rs` 0.x is live on PyPI (Python 3.9+, wheels for Linux x86_64/aarch64, macOS arm64/x86_64, and Windows x64, plus an sdist); the `onix` CLI builds from source, and nothing is on crates.io yet. Ordered and `ignore_order` diffing are complete, differentially tested against real DeepDiff 9.1.0, and [benchmarked](perf/RESULTS.md). It is 0.x, not stable or 1.0: the API may still change before 1.0.
 
 ## Table of contents
 
@@ -178,7 +180,7 @@ perf/              # cross-language benchmark harness and RESULTS.md
 
 ## Contributing
 
-This is a pre-alpha proof of concept and issues and pull requests are welcome. Open an issue to report a bug, a DeepDiff divergence (include both inputs and the report each engine produces), or a question. Building from source, the quality gates, the golden corpus, benchmarking, mutation testing, and publishing are all in [CONTRIBUTING.md](CONTRIBUTING.md).
+Issues and pull requests are welcome. Open an issue to report a bug, a DeepDiff divergence (include both inputs and the report each engine produces), or a question. Building from source, the quality gates, the golden corpus, benchmarking, mutation testing, and publishing are all in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
