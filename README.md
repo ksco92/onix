@@ -1,6 +1,6 @@
 # onix
 
-**onix is a Rust rewrite of Python DeepDiff's core: byte-compatible output, 64-5757x faster, with `ignore_order` support included.**
+**onix is a Rust rewrite of Python DeepDiff's core: byte-compatible output, 37-4588x faster, with `ignore_order` support included.**
 
 See [DeepDiff](https://github.com/seperman/deepdiff) for the Python original
 that onix matches report-for-report. Output is byte-identical apart from one
@@ -270,18 +270,21 @@ Max) as `perf/RESULTS.md`:
 
 | Shape | deepdiff | deepdiff_rs | Speedup |
 | --- | --- | --- | --- |
-| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 2870.45ms | 70.69ms | **40.61x** |
-| &nbsp;&nbsp;peak RSS | 227.5 MB | 141.1 MB | **1.61x** |
-| &nbsp;&nbsp;CPU seconds | 2.868 s | 0.071 s | **40.61x** |
-| Heterogeneous API-payload records, n=20,000 (live objects) | 3234.68ms | 130.58ms | **24.77x** |
-| &nbsp;&nbsp;peak RSS | 117.6 MB | 276.2 MB | **0.43x** |
-| &nbsp;&nbsp;CPU seconds | 3.232 s | 0.130 s | **24.77x** |
-| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 2952.13ms | 70.91ms | **41.63x** |
-| &nbsp;&nbsp;peak RSS | 227.8 MB | 141.2 MB | **1.61x** |
-| &nbsp;&nbsp;CPU seconds | 2.950 s | 0.071 s | **41.63x** |
-| Same API-payload shape, via `diff_json` (JSON-string path) | 4365.52ms | 80.22ms | **54.42x** |
-| &nbsp;&nbsp;peak RSS | 138.8 MB | 270.8 MB | **0.51x** |
-| &nbsp;&nbsp;CPU seconds | 4.362 s | 0.080 s | **54.42x** |
+| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 3128.94ms | 82.57ms | **37.89x** |
+| &nbsp;&nbsp;peak RSS | 228.0 MB | 141.2 MB | **1.61x** |
+| &nbsp;&nbsp;CPU seconds | 3.128 s | 0.083 s | **37.88x** |
+| Heterogeneous API-payload records, n=20,000 (live objects) | 3466.52ms | 149.18ms | **23.24x** |
+| &nbsp;&nbsp;peak RSS | 117.5 MB | 148.3 MB | **0.79x** |
+| &nbsp;&nbsp;CPU seconds | 3.465 s | 0.149 s | **23.24x** |
+| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 3133.45ms | 83.16ms | **37.68x** |
+| &nbsp;&nbsp;peak RSS | 228.9 MB | 141.7 MB | **1.62x** |
+| &nbsp;&nbsp;CPU seconds | 3.131 s | 0.083 s | **37.68x** |
+| Same API-payload shape, via `diff_json` (JSON-string path) | 4568.33ms | 86.33ms | **52.92x** |
+| &nbsp;&nbsp;peak RSS | 139.0 MB | 141.7 MB | **0.98x** |
+| &nbsp;&nbsp;CPU seconds | 4.566 s | 0.086 s | **52.90x** |
+| Same API-payload shape, both tools reading two JSON files from disk | 4571.28ms | 85.35ms | **53.56x** |
+| &nbsp;&nbsp;peak RSS | 139.0 MB | 141.8 MB | **0.98x** |
+| &nbsp;&nbsp;CPU seconds | 4.569 s | 0.085 s | **53.54x** |
 
 Wall time is the first row of each shape; peak RSS (resident memory) and CPU
 seconds (user + system) are the sub-rows, each the median of the same 11
@@ -291,12 +294,21 @@ the deepdiff / deepdiff_rs ratio on every row, computed from full-precision
 values before rounding for display. A value below 1x on a memory or CPU
 row means `deepdiff_rs` used more than `deepdiff` there, and hand-dividing the
 displayed 3-decimal figures can differ slightly from the bolded ratio. CPU
-tracks wall time closely (single-threaded, CPU-bound work); peak RSS is
-actually higher for `deepdiff_rs` on the heterogeneous records (there the
-binding first converts the whole live object tree into its own value model)
-and lower on the flat-integer shape.
+tracks wall time closely (single-threaded, CPU-bound work); peak RSS tells a
+shape-dependent story. On the `ignore_order` integer shape `deepdiff_rs` uses
+markedly less memory (**1.61x**), because deepdiff hashes every element to
+match items across the shuffle and those hashes dominate its footprint. On the
+heterogeneous records passed as **live Python objects** it uses somewhat more
+(**0.79x**, roughly 30 MB above deepdiff on this shape), because the binding
+holds the caller's whole Python object tree *and* builds its own compact
+`Value` copy alongside it — the conversion tax made concrete. Once the input
+is JSON text instead of live objects — whether an in-memory string or two
+files read from disk — there is no live Python tree to retain and the two
+sides land at parity (**~0.98x**): onix parses straight into its compact
+`Value`, deepdiff parses into a Python object tree, and the footprints cancel
+out even as onix stays ~53x faster.
 
-**Fixture note:** the live-object API-payload row (**~25x**) builds `b` as a
+**Fixture note:** the live-object API-payload row (**~23x**) builds `b` as a
 `copy.deepcopy` of `a`, so the two inputs share no identity, matching how
 independently deserialized API responses actually arrive in practice. The
 full rationale for that choice is on `build_api_payloads_case` in
@@ -307,11 +319,13 @@ converting 20,000 realistic nested Python records into `onix_core`'s value
 model one object at a time is genuine, measurable overhead. A proxy that
 isolates it, `DeepDiff(a, copy.deepcopy(a))` (which pays the full conversion
 plus onix's cheap whole-tree equality check, but none of the per-node diff
-bookkeeping the mutated case also pays), accounts for roughly **82%** of the
+bookkeeping the mutated case also pays), accounts for roughly **78%** of the
 mutated case's own total time on this shape; `bench_bindings.py` computes and
-prints that percentage as part of its output. The JSON-string-only
-`diff_json` path skips the conversion entirely and recovers a much larger
-multiple (**~54x**) on the same data. Use `diff_json` when you already have
+prints that percentage as part of its output. The `diff_json` path skips the
+conversion entirely and recovers a much larger multiple (**~53x**) on the same
+data, whether the JSON arrives as an in-memory string or is read from two
+files on disk (both are measured — they perform identically, confirming the
+cost lives in the parse target, not the file I/O). Use `diff_json` when you already have
 (or can produce) JSON text; reach for the drop-in `DeepDiff` class when you
 genuinely need to diff live Python objects, and accept the conversion cost
 as part of that convenience. Reproduce with:
