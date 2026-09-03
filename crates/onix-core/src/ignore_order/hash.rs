@@ -57,6 +57,10 @@ pub(crate) enum ItemKey {
     Str(String),
     /// Order- and count-insensitive: see this type's own doc.
     List(BTreeSet<ItemKey>),
+    /// A tuple, keyed exactly like [`ItemKey::List`] (order- and
+    /// count-insensitive) but in its own bucket, so a tuple and a list
+    /// holding the same items never hash-match — see this type's own doc.
+    Tuple(BTreeSet<ItemKey>),
     /// Key-sorted, recursively keyed values.
     Dict(BTreeMap<String, ItemKey>),
 }
@@ -98,6 +102,7 @@ pub(crate) fn item_key(value: &Value) -> ItemKey {
             }
         }
         Value::Array(items) => ItemKey::List(items.iter().map(item_key).collect()),
+        Value::Tuple(items) => ItemKey::Tuple(items.iter().map(item_key).collect()),
         Value::Object(map) => ItemKey::Dict(
             map.iter()
                 .map(|(k, v)| (k.to_string(), item_key(v)))

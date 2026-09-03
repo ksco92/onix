@@ -96,7 +96,9 @@ pub(crate) fn numeric_distance(n1: f64, n2: f64, cutoff: f64) -> f64 {
 pub(crate) fn rough_length(value: &Value) -> usize {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_) => 1,
-        Value::Array(items) => 1 + items.iter().map(rough_length).sum::<usize>(),
+        Value::Array(items) | Value::Tuple(items) => {
+            1 + items.iter().map(rough_length).sum::<usize>()
+        }
         Value::Object(map) => 1 + map.values().map(|v| 1 + rough_length(v)).sum::<usize>(),
     }
 }
@@ -121,7 +123,7 @@ pub(crate) fn item_length(value: &Value) -> usize {
     match value {
         Value::Null => 0,
         Value::Bool(_) | Value::Number(_) | Value::Str(_) => 1,
-        Value::Array(items) => items.iter().map(item_length).sum(),
+        Value::Array(items) | Value::Tuple(items) => items.iter().map(item_length).sum(),
         Value::Object(map) => item_length_of_map(map),
     }
 }
@@ -188,7 +190,9 @@ pub(crate) fn count_diff_leaves(
                 type_change_leaf_length(a, b)
             }
         }
-        (Value::Array(x), Value::Array(y)) => count_array_diff_leaves(x, y, depth, opts, memo),
+        (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+            count_array_diff_leaves(x, y, depth, opts, memo)
+        }
         (Value::Object(x), Value::Object(y)) => count_object_diff_leaves(x, y, depth, opts, memo),
         _ => type_change_leaf_length(a, b),
     }
@@ -211,12 +215,32 @@ pub(crate) fn count_diff_leaves(
 /// doc for the exact coercion matrix implemented and its documented,
 /// narrow scope.
 pub(crate) fn type_change_leaf_length(old_value: &Value, new_value: &Value) -> usize {
-    let new_value_omitted =
-        coerce_for_type_change(old_value, new_value).is_some_and(|coerced| coerced == *new_value);
-    if new_value_omitted {
+    if new_value_reproduced_by_coercion(old_value, new_value) {
         1
     } else {
         1 + item_length(new_value)
+    }
+}
+
+/// Whether `new_type(old_value)` reproduces `new_value` exactly — the
+/// `include_values` test [`type_change_leaf_length`]'s doc cites.
+///
+/// The sequence pair (`list(a_tuple)` / `tuple(a_list)`) is answered
+/// directly from the two item slices rather than through
+/// [`coerce_for_type_change`]: the coerced value would be an allocation-heavy
+/// deep copy of `old_value`, built on the pairing hot path only to be
+/// compared and thrown away, and the two constructors reproduce the other
+/// sequence exactly when the items match. Confirmed against real
+/// `deepdiff==9.1.0`: `DeepDiff((1, 2), [1, 2], view="_delta")` omits
+/// `new_value` (so a tuple-vs-list pair stays within the pairing cutoff and
+/// is reported as a `type_changes`), while `DeepDiff((1, 2), [1, 3],
+/// view="_delta")` keeps it.
+fn new_value_reproduced_by_coercion(old_value: &Value, new_value: &Value) -> bool {
+    match (old_value, new_value) {
+        (Value::Tuple(old_items), Value::Array(new_items))
+        | (Value::Array(old_items), Value::Tuple(new_items)) => old_items == new_items,
+        _ => coerce_for_type_change(old_value, new_value)
+            .is_some_and(|coerced| coerced == *new_value),
     }
 }
 
@@ -232,7 +256,9 @@ pub(crate) fn type_change_leaf_length(old_value: &Value, new_value: &Value) -> u
 /// Scoped to the coercions confirmed against real `deepdiff==9.1.0` for
 /// this fix (numeric family `bool`/`int`/`float` in every direction,
 /// `str` <-> number, and `None`/`list`/`dict` -> `bool`, all via direct
-/// `DeepDiff(..., view=DELTA_VIEW)._to_delta_dict(...)` probes). Coercions
+/// `DeepDiff(..., view=DELTA_VIEW)._to_delta_dict(...)` probes) — plus the
+/// `list`/`tuple` pair, which [`new_value_reproduced_by_coercion`] answers
+/// before ever calling this. Coercions
 /// *into* a container or `None` (i.e. `new_value` is `Null`/an
 /// array/object) are deliberately **not** attempted and always return
 /// `None`: every such coercion this domain could reach (e.g. `dict(5)`,
@@ -252,7 +278,7 @@ fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value>
         }
         Value::Number(_) => coerce_to_i64(old_value).map(|i| Value::Number(Number::from_i64(i))),
         Value::Str(_) => coerce_to_python_str(old_value).map(|s| Value::Str(s.into_boxed_str())),
-        Value::Null | Value::Array(_) | Value::Object(_) => None,
+        Value::Null | Value::Array(_) | Value::Tuple(_) | Value::Object(_) => None,
     }
 }
 
@@ -271,7 +297,7 @@ fn is_truthy(value: &Value) -> bool {
         Value::Bool(b) => *b,
         Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
         Value::Str(s) => !s.is_empty(),
-        Value::Array(items) => !items.is_empty(),
+        Value::Array(items) | Value::Tuple(items) => !items.is_empty(),
         Value::Object(map) => !map.is_empty(),
     }
 }
@@ -283,7 +309,7 @@ fn is_truthy(value: &Value) -> bool {
 /// real Python).
 fn coerce_to_f64(value: &Value) -> Option<f64> {
     match value {
-        Value::Null | Value::Array(_) | Value::Object(_) => None,
+        Value::Null | Value::Array(_) | Value::Tuple(_) | Value::Object(_) => None,
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         Value::Number(n) => n.as_f64(),
         Value::Str(s) => s.trim().parse::<f64>().ok(),
@@ -313,7 +339,7 @@ const I64_MAX_AS_F64: f64 = i64::MAX as f64;
 
 fn coerce_to_i64(value: &Value) -> Option<i64> {
     match value {
-        Value::Null | Value::Array(_) | Value::Object(_) => None,
+        Value::Null | Value::Array(_) | Value::Tuple(_) | Value::Object(_) => None,
         Value::Bool(b) => Some(i64::from(*b)),
         Value::Number(n) => {
             if n.is_f64() {
@@ -352,7 +378,7 @@ fn coerce_to_i64(value: &Value) -> Option<i64> {
 fn coerce_to_python_str(value: &Value) -> Option<String> {
     match value {
         Value::Null => Some("None".to_string()),
-        Value::Array(_) | Value::Object(_) => None,
+        Value::Array(_) | Value::Tuple(_) | Value::Object(_) => None,
         Value::Bool(b) => Some(if *b { "True" } else { "False" }.to_string()),
         Value::Number(n) => {
             if n.is_f64() {

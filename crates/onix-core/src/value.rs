@@ -31,7 +31,8 @@
 //!
 //! # Stack safety
 //!
-//! [`Value`] nests through `Box<[Value]>`, so a naive derived `Drop` would
+//! [`Value`] nests through `Box<[Value]>` (both [`Value::Array`] and
+//! [`Value::Tuple`]) and through [`Object`]'s entries, so a naive derived `Drop` would
 //! recurse natively — an uncatchable process abort on adversarially deep
 //! input, the same latent sink [`serde_json::Value`]'s derived `Drop` has.
 //! This type instead implements an **iterative `Drop`** (see the `impl Drop`
@@ -66,9 +67,22 @@ use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess
 /// [`serde_json::Value`].
 ///
 /// See the [module documentation](self) for the representation choices and
-/// their rationale. The variants mirror JSON's six shapes; objects are held
-/// as an [`Object`] (a sorted, exactly-sized entry slice) and numbers as a
-/// [`Number`] preserving the `i64`/`u64`/`f64` distinction.
+/// their rationale. Six of the variants mirror JSON's own shapes; objects
+/// are held as an [`Object`] (a sorted, exactly-sized entry slice) and
+/// numbers as a [`Number`] preserving the `i64`/`u64`/`f64` distinction.
+///
+/// [`Value::Tuple`] is the seventh, and the only one JSON itself cannot
+/// express: a Python `tuple`, which `DeepDiff` diffs positionally exactly
+/// like a `list` but reports as a *different type* from one (`tuple` vs
+/// `list` is a `type_changes` finding, and the two never hash-match under
+/// `ignore_order`). It carries the same `Box<[Value]>` payload as
+/// [`Value::Array`] and renders to the same JSON array in
+/// [`Value::to_serde_json`]; the separate variant is what makes the
+/// type distinction structural, so mixing the two can only ever be a
+/// compile error or a `type_changes`, never a silent equality. Neither
+/// [`From`]`<`[`serde_json::Value`]`>` nor [`Deserialize`] can produce one
+/// (JSON has no tuple literal): a tuple enters the model only from a caller
+/// holding real Python objects, through [`Value::Tuple`] directly.
 #[derive(Debug, Clone)]
 pub enum Value {
     /// JSON `null`.
@@ -81,6 +95,9 @@ pub enum Value {
     Str(Box<str>),
     /// An array, stored as an exactly-sized `Box<[Value]>`.
     Array(Box<[Value]>),
+    /// A Python tuple, stored exactly like [`Value::Array`] but kept as a
+    /// distinct variant — see this type's own doc for why.
+    Tuple(Box<[Value]>),
     /// An object: key-sorted, exactly-sized entries (see [`Object`]).
     Object(Object),
 }
@@ -111,7 +128,7 @@ impl Value {
             Value::Bool(b) => serde_json::Value::Bool(*b),
             Value::Number(n) => serde_json::Value::Number(n.to_serde_number()),
             Value::Str(s) => serde_json::Value::String(s.as_ref().to_owned()),
-            Value::Array(items) => {
+            Value::Array(items) | Value::Tuple(items) => {
                 serde_json::Value::Array(items.iter().map(Value::to_serde_json).collect())
             }
             Value::Object(obj) => {
@@ -182,10 +199,10 @@ impl Drop for Value {
 }
 
 /// Moves `value`'s direct children onto `stack`, leaving `value` holding
-/// empty containers. Scalars contribute nothing.
+/// empty containers (arrays and tuples alike). Scalars contribute nothing.
 fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
     match value {
-        Value::Array(items) => {
+        Value::Array(items) | Value::Tuple(items) => {
             let taken = std::mem::take(items);
             stack.extend(taken.into_vec());
         }
@@ -198,7 +215,9 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
 }
 
 /// Iterative structural equality backing `Value`'s [`PartialEq`]. Semantics
-/// match a derived `PartialEq`: same-variant structural equality, with
+/// match a derived `PartialEq`: same-variant structural equality — so an
+/// array and a tuple holding identical items are never equal, matching
+/// `DeepDiff`'s own `tuple`-vs-`list` type distinction — with
 /// `Number`'s variant sensitivity intact (`PosInt(1)` is not equal to
 /// `Float(1.0)`); objects compare over their sorted entries (equal key sets
 /// and per-key values), arrays over equal length and per-index values. See
@@ -224,7 +243,7 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
                     return false;
                 }
             }
-            (Value::Array(x), Value::Array(y)) => {
+            (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
                 if x.len() != y.len() {
                     return false;
                 }

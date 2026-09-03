@@ -39,7 +39,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::value::Value;
+use crate::value::{Builder, Value};
 
 use crate::path::{PathSegment, render_path};
 
@@ -76,17 +76,15 @@ pub struct ValuesChangedEntry {
 }
 
 impl ValuesChangedEntry {
-    fn to_json_value(&self) -> serde_json::Value {
-        let mut map = serde_json::Map::with_capacity(3);
-        map.insert("new_value".to_string(), self.new_value.to_serde_json());
-        map.insert("old_value".to_string(), self.old_value.to_serde_json());
+    fn to_value(&self, builder: &mut Builder) -> Value {
+        let mut entries = vec![
+            ("new_value".to_string(), self.new_value.clone()),
+            ("old_value".to_string(), self.old_value.clone()),
+        ];
         if let Some(new_path) = &self.new_path {
-            map.insert(
-                "new_path".to_string(),
-                serde_json::Value::String(render_path(new_path)),
-            );
+            entries.push(("new_path".to_string(), rendered(new_path)));
         }
-        serde_json::Value::Object(map)
+        builder.object(entries)
     }
 }
 
@@ -108,26 +106,30 @@ pub struct TypeChangeEntry {
 }
 
 impl TypeChangeEntry {
-    fn to_json_value(&self) -> serde_json::Value {
-        let mut map = serde_json::Map::with_capacity(5);
-        map.insert(
-            "old_type".to_string(),
-            serde_json::Value::String(self.old_type.clone()),
-        );
-        map.insert(
-            "new_type".to_string(),
-            serde_json::Value::String(self.new_type.clone()),
-        );
-        map.insert("old_value".to_string(), self.old_value.to_serde_json());
-        map.insert("new_value".to_string(), self.new_value.to_serde_json());
+    fn to_value(&self, builder: &mut Builder) -> Value {
+        let mut entries = vec![
+            (
+                "old_type".to_string(),
+                Value::Str(self.old_type.clone().into_boxed_str()),
+            ),
+            (
+                "new_type".to_string(),
+                Value::Str(self.new_type.clone().into_boxed_str()),
+            ),
+            ("old_value".to_string(), self.old_value.clone()),
+            ("new_value".to_string(), self.new_value.clone()),
+        ];
         if let Some(new_path) = &self.new_path {
-            map.insert(
-                "new_path".to_string(),
-                serde_json::Value::String(render_path(new_path)),
-            );
+            entries.push(("new_path".to_string(), rendered(new_path)));
         }
-        serde_json::Value::Object(map)
+        builder.object(entries)
     }
+}
+
+/// A structural path rendered into the string [`Value`] a report entry
+/// carries it as (`new_path`).
+fn rendered(path: &[PathSegment]) -> Value {
+    Value::Str(render_path(path).into_boxed_str())
 }
 
 /// A DeepDiff-compatible diff result, grouped into categories.
@@ -176,41 +178,36 @@ fn merge_map(dst: &mut BTreeMap<Vec<PathSegment>, Value>, src: BTreeMap<Vec<Path
     }
 }
 
-/// Renders `map`'s structural keys and inserts each into `category`,
-/// **collapsing any rendered-string collision** (two structural paths whose
-/// [`render_path`] output is identical — see this module's doc) into a
-/// single JSON entry: `Map::insert` overwrites on a repeated string key, so
-/// the survivor is whichever structural path is greatest, i.e. the *last*
-/// one visited in `map`'s ascending structural order. This is the one place
-/// that tie-break happens; everywhere else in this file treats `map`'s
-/// structural keys as already-unique (which, structurally, they always are
-/// — see [`insert_checked`]).
-fn render_category(
-    category: &mut serde_json::Map<String, serde_json::Value>,
-    map: &BTreeMap<Vec<PathSegment>, Value>,
-) {
-    for (path, value) in map {
-        category.insert(render_path(path), value.to_serde_json());
-    }
-}
-
-/// Serializes `map` into `root` under `name`, skipping it entirely when
-/// `map` is empty (matching `DeepDiff`'s own `to_json()` behavior of
-/// omitting empty categories). Shared by [`Report::to_json_value`]'s four
-/// raw-`Value` categories (`dictionary_item_added`/`removed`,
+/// Pushes `map` onto `root` under `name` as one rendered category, skipping
+/// it entirely when `map` is empty (matching `DeepDiff`'s own `to_json()`
+/// behavior of omitting empty categories). Shared by [`Report::to_value`]'s
+/// four raw-`Value` categories (`dictionary_item_added`/`removed`,
 /// `iterable_item_added`/`removed`), which otherwise differ only in `name`
 /// and which field they read.
-fn serialize_raw_category(
-    root: &mut serde_json::Map<String, serde_json::Value>,
+///
+/// Rendering the structural keys **collapses any rendered-string collision**
+/// (two structural paths whose [`render_path`] output is identical — see
+/// this module's doc) into a single entry: [`Builder::object`] keeps the
+/// last value seen for a repeated key, so the survivor is whichever
+/// structural path is greatest, i.e. the *last* one visited in `map`'s
+/// ascending structural order. This is the one place that tie-break happens;
+/// everywhere else in this file treats `map`'s structural keys as
+/// already-unique (which, structurally, they always are — see
+/// [`insert_checked`]).
+fn push_raw_category(
+    root: &mut Vec<(String, Value)>,
+    builder: &mut Builder,
     name: &str,
     map: &BTreeMap<Vec<PathSegment>, Value>,
 ) {
     if map.is_empty() {
         return;
     }
-    let mut category = serde_json::Map::new();
-    render_category(&mut category, map);
-    root.insert(name.to_string(), serde_json::Value::Object(category));
+    let entries: Vec<(String, Value)> = map
+        .iter()
+        .map(|(path, value)| (render_path(path), value.clone()))
+        .collect();
+    root.push((name.to_string(), builder.object(entries)));
 }
 
 impl Report {
@@ -494,57 +491,80 @@ impl Report {
             + self.iterable_item_removed.len()
     }
 
-    /// Serializes the report to the `DeepDiff` `to_json()` shape at
-    /// `verbose_level=2`.
+    /// Renders the report into the `DeepDiff` `to_json()` shape at
+    /// `verbose_level=2`, as the crate's own [`Value`] model.
     ///
-    /// Empty categories are omitted entirely (an empty report serializes to
-    /// `{}`), matching `DeepDiff`'s own behavior. Rendering each category's
-    /// structural keys can collapse two entries into one on adversarial
-    /// input (see this module's doc and `render_category`).
+    /// This is the type-preserving rendering: a finding whose value is a
+    /// [`Value::Tuple`] still carries a tuple here, where
+    /// [`Self::to_json_value`] (and any JSON text rendered from it) can only
+    /// show the array a tuple serializes as. A consumer that reconstructs
+    /// native values from a report — the Python bindings' `to_dict()` —
+    /// reads this; a consumer that only needs JSON reads
+    /// [`Self::to_json_value`].
+    ///
+    /// Empty categories are omitted entirely (an empty report renders to an
+    /// empty object), matching `DeepDiff`'s own behavior. Rendering each
+    /// category's structural keys can collapse two entries into one on
+    /// adversarial input (see this module's doc and [`push_raw_category`]).
     #[must_use]
-    pub fn to_json_value(&self) -> serde_json::Value {
-        let mut root = serde_json::Map::new();
+    pub fn to_value(&self) -> Value {
+        let mut builder = Builder::new();
+        let mut root: Vec<(String, Value)> = Vec::new();
 
         if !self.type_changes.is_empty() {
-            let mut category = serde_json::Map::new();
-            for (path, entry) in &self.type_changes {
-                category.insert(render_path(path), entry.to_json_value());
-            }
-            root.insert(
-                "type_changes".to_string(),
-                serde_json::Value::Object(category),
-            );
+            let entries: Vec<(String, Value)> = self
+                .type_changes
+                .iter()
+                .map(|(path, entry)| (render_path(path), entry.to_value(&mut builder)))
+                .collect();
+            root.push(("type_changes".to_string(), builder.object(entries)));
         }
 
         if !self.values_changed.is_empty() {
-            let mut category = serde_json::Map::new();
-            for (path, entry) in &self.values_changed {
-                category.insert(render_path(path), entry.to_json_value());
-            }
-            root.insert(
-                "values_changed".to_string(),
-                serde_json::Value::Object(category),
-            );
+            let entries: Vec<(String, Value)> = self
+                .values_changed
+                .iter()
+                .map(|(path, entry)| (render_path(path), entry.to_value(&mut builder)))
+                .collect();
+            root.push(("values_changed".to_string(), builder.object(entries)));
         }
 
-        serialize_raw_category(
+        push_raw_category(
             &mut root,
+            &mut builder,
             "dictionary_item_added",
             &self.dictionary_item_added,
         );
-        serialize_raw_category(
+        push_raw_category(
             &mut root,
+            &mut builder,
             "dictionary_item_removed",
             &self.dictionary_item_removed,
         );
-        serialize_raw_category(&mut root, "iterable_item_added", &self.iterable_item_added);
-        serialize_raw_category(
+        push_raw_category(
             &mut root,
+            &mut builder,
+            "iterable_item_added",
+            &self.iterable_item_added,
+        );
+        push_raw_category(
+            &mut root,
+            &mut builder,
             "iterable_item_removed",
             &self.iterable_item_removed,
         );
 
-        serde_json::Value::Object(root)
+        builder.object(root)
+    }
+
+    /// Serializes the report to the `DeepDiff` `to_json()` shape at
+    /// `verbose_level=2` as a [`serde_json::Value`] — [`Self::to_value`]
+    /// rendered out to JSON's own value model, where a
+    /// [`Value::Tuple`] becomes the JSON array `DeepDiff`'s own
+    /// `to_json()` shows for a tuple.
+    #[must_use]
+    pub fn to_json_value(&self) -> serde_json::Value {
+        self.to_value().to_serde_json()
     }
 }
 

@@ -135,7 +135,7 @@ fn scalar_key(value: &Value) -> ScalarKey {
                 ScalarKey::Float(f.to_bits())
             }
         }
-        Value::Array(_) | Value::Object(_) => {
+        Value::Array(_) | Value::Tuple(_) | Value::Object(_) => {
             unreachable!("scalar_key called on a non-scalar; caller must check all_basic_scalars")
         }
     }

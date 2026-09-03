@@ -1,5 +1,6 @@
 use crate::diff::DiffOptions;
-use crate::test_support::{cobj, cv, cvec};
+use crate::test_support::{cobj, ctup, cv, cvec};
+use crate::value::Value as CValue;
 use serde_json::json;
 
 // Thin wrappers routing each `serde_json`-literal-based test through the real
@@ -60,7 +61,10 @@ fn count_array_diff_leaves(
     )
 }
 fn item_key(value: &serde_json::Value) -> super::hash::ItemKey {
-    super::hash::item_key(&cv(value))
+    item_key_compact(&cv(value))
+}
+fn item_key_compact(value: &CValue) -> super::hash::ItemKey {
+    super::hash::item_key(value)
 }
 
 fn ignore_order_diff(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
@@ -1305,5 +1309,127 @@ fn deep_nested_ignore_order_completes_quickly_with_memoization() {
     assert!(
         depth_25.as_secs() < 5,
         "depth-25 nested ignore_order took {depth_25:?}, over the 5s bound"
+    );
+}
+
+// --- tuples under ignore_order -------------------------------------------
+//
+// Every expected value below was confirmed against a real
+// `deepdiff==9.1.0` probe. Tuples cannot be written as JSON literals, so
+// these build compact values directly and route through one local helper.
+
+/// `ignore_order_diff` for values that are already compact (a tuple has no
+/// `serde_json` literal form).
+fn ignore_order_diff_compact(a: &CValue, b: &CValue) -> serde_json::Value {
+    crate::diff::diff_with_options(
+        a,
+        b,
+        &DiffOptions {
+            ignore_order: true,
+            ..DiffOptions::default()
+        },
+    )
+    .unwrap()
+    .to_json_value()
+}
+
+/// A compact array of compact values, for a list holding a tuple.
+fn carr(items: Vec<CValue>) -> CValue {
+    CValue::Array(items.into_boxed_slice())
+}
+
+#[test]
+fn a_tuple_and_a_list_with_the_same_items_never_hash_match() {
+    // DeepHash carries the type, so `[(1, 2)]` vs `[[1, 2]]` does not match
+    // as equal: the two items pair by distance and the type change is
+    // reported.
+    assert_ne!(
+        item_key_compact(&ctup(&[json!(1), json!(2)])),
+        item_key_compact(&cv(&json!([1, 2]))),
+    );
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1), json!(2)])]),
+            &cv(&json!([[1, 2]])),
+        ),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "tuple", "new_type": "list",
+            "old_value": [1, 2], "new_value": [1, 2],
+        }}})
+    );
+}
+
+#[test]
+fn a_tuple_nested_in_a_list_hashes_order_insensitively() {
+    // `DeepHash`'s `ignore_iterable_order` default applies to tuples too:
+    // `[(1, 2)]` vs `[(2, 1)]` reports nothing at all.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1), json!(2)])]),
+            &carr(vec![ctup(&[json!(2), json!(1)])]),
+        ),
+        json!({})
+    );
+}
+
+#[test]
+fn a_tuple_is_itself_paired_by_hash_under_ignore_order() {
+    // The container being diffed is the tuple: `(1, 2, 3)` vs `(3, 2, 5)`
+    // pairs 1 <-> 5 across drifted indices, carrying `new_path`.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &ctup(&[json!(1), json!(2), json!(3)]),
+            &ctup(&[json!(3), json!(2), json!(5)]),
+        ),
+        json!({"values_changed": {"root[0]": {
+            "new_value": 5, "old_value": 1, "new_path": "root[2]",
+        }}})
+    );
+}
+
+#[test]
+fn a_changed_tuple_inside_a_list_pairs_and_carries_new_path() {
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![cv(&json!("anchor")), ctup(&[json!(1), json!(2)])]),
+            &carr(vec![ctup(&[json!(1), json!(3)]), cv(&json!("anchor"))]),
+        ),
+        json!({"values_changed": {"root[1][1]": {
+            "new_value": 3, "old_value": 2, "new_path": "root[0][1]",
+        }}})
+    );
+}
+
+#[test]
+fn a_tuple_and_a_list_whose_items_differ_fall_back_to_raw_add_remove() {
+    // The pairing distance hinges on `list(t1) == t2`: with differing items
+    // the delta view keeps `new_value`, the distance crosses the cutoff, and
+    // real DeepDiff reports a whole-value change rather than a type change.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1), json!(2)])]),
+            &cv(&json!([[1, 3]])),
+        ),
+        json!({"values_changed": {"root[0]": {
+            "new_value": [1, 3], "old_value": [1, 2],
+        }}})
+    );
+}
+
+#[test]
+fn tuple_and_list_leaf_lengths_follow_the_sequence_coercion_rule() {
+    // The rule directly: `list((1, 2)) == [1, 2]` omits `new_value` (leaf
+    // length 1), and it applies in both directions; differing items keep it.
+    assert_eq!(
+        super::distance::type_change_leaf_length(&ctup(&[json!(1), json!(2)]), &cv(&json!([1, 2])),),
+        1
+    );
+    assert_eq!(
+        super::distance::type_change_leaf_length(&cv(&json!([1, 2])), &ctup(&[json!(1), json!(2)]),),
+        1
+    );
+    assert_eq!(
+        super::distance::type_change_leaf_length(&ctup(&[json!(1), json!(2)]), &cv(&json!([1, 3])),),
+        3
     );
 }

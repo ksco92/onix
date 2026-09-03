@@ -51,7 +51,9 @@ pub(crate) fn diff_at(
         (Value::Str(old), Value::Str(new)) => {
             scalar_diff(path, old == new, a, b, depth, opts.max_depth)
         }
-        (Value::Array(old), Value::Array(new)) => array_diff(path, old, new, depth, opts, memo),
+        (Value::Array(old), Value::Array(new)) | (Value::Tuple(old), Value::Tuple(new)) => {
+            array_diff(path, old, new, depth, opts, memo)
+        }
         (Value::Object(old), Value::Object(new)) => object_diff(path, old, new, depth, opts, memo),
         _ => type_change_report(path, a, b, depth, opts.max_depth),
     }
@@ -99,7 +101,9 @@ pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
             return true;
         }
         match v {
-            Value::Array(items) => stack.extend(items.iter().map(|item| (item, depth + 1))),
+            Value::Array(items) | Value::Tuple(items) => {
+                stack.extend(items.iter().map(|item| (item, depth + 1)));
+            }
             Value::Object(map) => stack.extend(map.values().map(|item| (item, depth + 1))),
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_) => {}
         }

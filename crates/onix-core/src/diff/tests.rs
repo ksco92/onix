@@ -2,7 +2,7 @@ use super::DEFAULT_MAX_DEPTH;
 use crate::error::Error;
 use crate::path::PathSegment;
 use crate::report::Report;
-use crate::test_support::{cnum, cobj, cv};
+use crate::test_support::{cnum, cobj, ctup, cv};
 use crate::value::{Object as CObject, Value as CValue};
 use serde_json::{Map, Number, Value, json};
 
@@ -1852,4 +1852,185 @@ fn lcs_tie_break_positional_candidate_succeeds_at_a_sufficient_max_depth() {
             "values_changed": {"root[1]": {"new_value": 1, "old_value": 2}},
         })
     );
+}
+
+// --- tuples -------------------------------------------------------------
+//
+// Every expected value in this section was confirmed against a real
+// `deepdiff==9.1.0` probe (`DeepDiff(t1, t2, verbose_level=2).to_json()`),
+// not derived from this engine's own behavior.
+
+#[test]
+fn tuple_vs_tuple_diffs_positionally_like_a_list() {
+    let report = super::diff(
+        &ctup(&[json!(1), json!(2), json!(3)]),
+        &ctup(&[json!(1), json!(2), json!(4)]),
+    )
+    .unwrap();
+    assert_eq!(
+        report.to_json_value(),
+        json!({"values_changed": {"root[2]": {"new_value": 4, "old_value": 3}}})
+    );
+}
+
+#[test]
+fn equal_tuples_are_empty() {
+    let report = super::diff(&ctup(&[json!(1), json!(2)]), &ctup(&[json!(1), json!(2)])).unwrap();
+    assert!(report.is_empty());
+}
+
+#[test]
+fn tuple_vs_list_at_root_is_a_type_change() {
+    let report = super::diff(&ctup(&[json!(1), json!(2)]), &cv(&json!([1, 2]))).unwrap();
+    assert_eq!(
+        report.to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "tuple", "new_type": "list",
+            "old_value": [1, 2], "new_value": [1, 2],
+        }}})
+    );
+}
+
+#[test]
+fn list_vs_tuple_nested_in_a_dict_is_a_type_change() {
+    let mut a = Map::new();
+    a.insert("a".to_string(), json!([1, 2]));
+    let b = CValue::Object(CObject::from_pairs(vec![(
+        std::sync::Arc::from("a"),
+        ctup(&[json!(1), json!(2)]),
+    )]));
+    let report = super::diff(&cv(&Value::Object(a)), &b).unwrap();
+    assert_eq!(
+        report.to_json_value(),
+        json!({"type_changes": {"root['a']": {
+            "old_type": "list", "new_type": "tuple",
+            "old_value": [1, 2], "new_value": [1, 2],
+        }}})
+    );
+}
+
+#[test]
+fn empty_tuple_vs_empty_list_is_a_type_change() {
+    let report = super::diff(&ctup(&[]), &cv(&json!([]))).unwrap();
+    assert_eq!(
+        report.to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "tuple", "new_type": "list",
+            "old_value": [], "new_value": [],
+        }}})
+    );
+}
+
+#[test]
+fn tuple_growing_reports_the_surplus_tail_as_added() {
+    let report = super::diff(
+        &ctup(&[json!(1), json!(2)]),
+        &ctup(&[json!(1), json!(2), json!(3)]),
+    )
+    .unwrap();
+    assert_eq!(
+        report.to_json_value(),
+        json!({"iterable_item_added": {"root[2]": 3}})
+    );
+}
+
+#[test]
+fn tuple_of_dicts_recurses_into_the_dict() {
+    let report = super::diff(&ctup(&[json!({"a": 1})]), &ctup(&[json!({"a": 2})])).unwrap();
+    assert_eq!(
+        report.to_json_value(),
+        json!({"values_changed": {"root[0]['a']": {"new_value": 2, "old_value": 1}}})
+    );
+}
+
+#[test]
+fn tuple_of_scalars_uses_the_same_lcs_match_a_list_would() {
+    // The exact pair (and expected output) of the
+    // `list_lcs_new_path_after_index_drift` golden case, as a tuple: real
+    // DeepDiff runs its difflib match inside a tuple exactly as inside a
+    // list.
+    let report = super::diff(
+        &ctup(&[
+            json!(0),
+            json!(0),
+            json!(3),
+            json!(3),
+            json!(0),
+            json!(1),
+            json!(0),
+        ]),
+        &ctup(&[json!(4), json!(3), json!(0), json!(4)]),
+    )
+    .unwrap();
+    assert_eq!(
+        report.to_json_value(),
+        json!({
+            "values_changed": {
+                "root[0]": {"new_value": 4, "old_value": 0},
+                "root[5]": {"new_value": 4, "old_value": 1, "new_path": "root[3]"},
+            },
+            "iterable_item_removed": {"root[1]": 0, "root[2]": 3, "root[6]": 0},
+        })
+    );
+}
+
+#[test]
+fn a_tuple_element_disqualifies_a_list_from_lcs_matching() {
+    // `[(1, 2), 3]` vs `[3]`: a tuple is not a basic-hashable scalar, so the
+    // list falls back to index-aligned comparison (a type change at index 0
+    // plus a removed tail), exactly like a nested list or dict element.
+    let report = super::diff(
+        &CValue::Array(vec![ctup(&[json!(1), json!(2)]), cv(&json!(3))].into_boxed_slice()),
+        &cv(&json!([3])),
+    )
+    .unwrap();
+    assert_eq!(
+        report.to_json_value(),
+        json!({
+            "type_changes": {"root[0]": {
+                "old_type": "tuple", "new_type": "int",
+                "old_value": [1, 2], "new_value": 3,
+            }},
+            "iterable_item_removed": {"root[1]": 3},
+        })
+    );
+}
+
+#[test]
+fn python_type_name_of_a_tuple_is_tuple() {
+    assert_eq!(super::python_type_name(&ctup(&[json!(1)])), "tuple");
+}
+
+#[test]
+fn a_tuple_never_equals_a_list_with_the_same_items() {
+    assert!(!super::values_equal(
+        &ctup(&[json!(1), json!(2)]),
+        &cv(&json!([1, 2]))
+    ));
+    assert!(super::values_equal(
+        &ctup(&[json!(1), json!(2)]),
+        &ctup(&[json!(1), json!(2)])
+    ));
+}
+
+#[test]
+fn tuple_nesting_counts_toward_the_value_depth_guard() {
+    // Tuples nest exactly like arrays, so `deeper_than` must see through
+    // them: `((1,),)` is depth 2.
+    let nested = CValue::Tuple(vec![ctup(&[json!(1)])].into_boxed_slice());
+    assert!(super::dispatch::deeper_than(&nested, 1));
+    assert!(!super::dispatch::deeper_than(&nested, 2));
+}
+
+#[test]
+fn a_dict_value_that_is_a_too_deep_tuple_errors_instead_of_being_cloned() {
+    // The clone-into-report guard applies to a tuple-shaped added value the
+    // same as to an array-shaped one.
+    let mut deep = CValue::Null;
+    for _ in 0..5 {
+        deep = CValue::Tuple(vec![deep].into_boxed_slice());
+    }
+    let b = CValue::Object(CObject::from_pairs(vec![(std::sync::Arc::from("a"), deep)]));
+    let error = super::diff_with_max_depth(&cv(&json!({})), &b, 4).unwrap_err();
+    assert!(matches!(error, Error::MaxDepthExceeded { .. }));
 }
