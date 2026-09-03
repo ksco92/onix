@@ -114,13 +114,13 @@ empirically probed while building this fixture (see
   (non-`unbounded_depth`) parser, which hard-caps at 128 levels of *parser*
   recursion — completely independent of `onix_core::diff_with_max_depth`'s
   own `--max-depth`/`DEFAULT_MAX_DEPTH` guard (512 by default), which never
-  even gets exercised here because parsing fails first. This is documented in
-  `onix-cli`'s own rustdoc (the `run` function's "Stack safety on
+  even gets exercised here because parsing fails first. This is documented
+  in `onix-cli`'s own rustdoc (the `run` function's "Stack safety on
   adversarially deep input" section, `crates/onix-cli/src/run.rs`) as
-  expected behavior, not a bug — but it means **onix's real depth ceiling for
-  JSON-file input is `serde_json`'s
-  128, not the 512 the CLI flag suggests**, and it is the *tighter* of the
-  two tools' ceilings, not the looser ~500 originally anticipated.
+  expected behavior, not a bug — but it means **onix's real depth ceiling
+  for JSON-file input is `serde_json`'s 128, not the 512 the CLI flag
+  suggests**, and it is the *tighter* of the two tools' ceilings, not the
+  looser ~500 originally anticipated.
 
 `deep_narrow_d120` was sized (120, with margin) to a depth both tools can
 following this harness's own guiding principle: report the depth
