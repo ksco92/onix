@@ -291,6 +291,7 @@ This harness's success thresholds: **≥5x faster (diff-only) OR ≥5x less peak
 - **Majority of fixtures clear the ≥5x bar:** YES.
 - **`api_payloads` strictly better on both axes:** YES (diff-only 585.92x, memory 2.02x).
 - **No fixture where onix is slower (diff-only) than deepdiff.**
+- **Why the largest flat dicts show the slimmest margin:** onix's diff-only speedup and memory ratio bottom out on `flat_dict_1m` (1M unique keys). The compact model stores each object as a sorted key/value slice looked up by binary search, so at this size the dominant cost is key `memcmp` during lookup — worse cache behavior than a `BTreeMap` descent — and unique keys defeat the interner. It is an accepted constant-factor representation tradeoff: the same compact layout is what earns the large memory wins on realistic record and nested data.
 
 ### Verdict: **GO**
 
