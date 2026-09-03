@@ -33,3 +33,11 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: make check
         run: make check
+      - name: Export lcov coverage
+        run: cargo llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex 'crates/onix-py/src/'
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: false
