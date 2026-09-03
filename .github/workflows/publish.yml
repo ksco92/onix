@@ -1,21 +1,27 @@
 name: Publish to PyPI
 
 # Runs on every push to `main` (i.e. every PR merge) and on manual dispatch.
+# workflow_dispatch has no branch restriction of its own, so the `main`-only
+# invariant is enforced directly on the `version_check` and `publish` jobs
+# (`if: github.ref == 'refs/heads/main'`) rather than left to live only in
+# PyPI's trusted-publisher branch scope.
+#
 # Publishes the `deepdiff-rs` wheels (and sdist) for the version currently in
 # the workspace `Cargo.toml` IF AND ONLY IF that exact version is not already
-# on PyPI. A PR that forgets to bump the version becomes a cheap no-op here
-# once the wheel matrix confirms nothing changed; catching a missing bump is
-# a review-time concern, not this workflow's.
+# on PyPI. The `version_check` job alone decides this, by looking the version
+# up on PyPI before any wheel build starts: a PR that forgets to bump the
+# version becomes a cheap no-op there (one HTTP call, no builders ever run).
+# Catching a missing bump is a review-time concern, not this workflow's.
 #
 # `deepdiff-rs` is a PyO3 extension module (crate `onix-py`) built with
 # maturin, published as a single abi3 wheel per platform (Python 3.9+, one
 # wheel covers every interpreter) plus an sdist. Publishing uses trusted
 # publishing (OIDC): pypa/gh-action-pypi-publish exchanges this workflow's
 # GitHub OIDC token for a short-lived PyPI credential. No `PYPI_TOKEN`
-# secret. Trust is configured at pypi.org -> deepdiff-rs -> Publishing,
-# scoped to repo ksco92/onix, workflow publish.yml, branch main, no
-# environment. Until that's configured, the publish job fails; the version
-# check and wheel builds still succeed and upload their artifacts.
+# secret. Trusted publishing is configured at pypi.org for project
+# deepdiff-rs, scoped to repo ksco92/onix, workflow publish.yml, branch main,
+# no environment -- the publish job exchanges the OIDC token directly, with
+# no stored secret to manage.
 
 on:
   push:
@@ -40,6 +46,10 @@ jobs:
   # ---------------------------------------------------------------------
   version_check:
     name: Check PyPI for current version
+    # Belt-and-braces: workflow_dispatch can target any ref, so this job
+    # (and every job downstream of it) self-enforces main-only publishing
+    # rather than relying solely on PyPI's trusted-publisher branch scope.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -197,7 +207,10 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: [version_check, linux, macos, windows, sdist]
-    if: needs.version_check.outputs.skip == 'false'
+    # Belt-and-braces main-only guard (see version_check above) plus the
+    # version-not-already-published check. Both must hold, independently of
+    # whichever upstream jobs happened to run.
+    if: github.ref == 'refs/heads/main' && needs.version_check.outputs.skip == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

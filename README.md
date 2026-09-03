@@ -1,15 +1,15 @@
 # deepdiff-rs
 
 [![CI](https://img.shields.io/github/actions/workflow/status/ksco92/onix/check.yml?branch=main&label=CI)](https://github.com/ksco92/onix/actions/workflows/check.yml)
+[![PyPI](https://img.shields.io/pypi/v/deepdiff-rs.svg)](https://pypi.org/project/deepdiff-rs/)
 [![license](https://img.shields.io/github/license/ksco92/onix.svg)](LICENSE)
 [![last commit](https://img.shields.io/github/last-commit/ksco92/onix.svg)](https://github.com/ksco92/onix/commits/main)
-<!-- PyPI badge goes here once deepdiff-rs is published: [![PyPI](https://img.shields.io/pypi/v/deepdiff-rs.svg)](https://pypi.org/project/deepdiff-rs/) -->
 
 **onix is a Rust rewrite of Python DeepDiff's core: byte-compatible output, 37-4588x faster, with `ignore_order` support included.** Install it as `deepdiff-rs`, a drop-in `DeepDiff` class for Python, or run the diff engine as the `onix` command-line tool.
 
 `deepdiff-rs` reads live Python objects (or JSON) and produces the exact same report [DeepDiff](https://github.com/seperman/deepdiff) does at `verbose_level=2`, so it slots into code that already parses DeepDiff output while running dramatically faster on large or deeply nested inputs.
 
-Status (September 2026): pre-alpha proof of concept. Ordered and `ignore_order` diffing are complete, differentially tested against real DeepDiff 9.1.0, and [benchmarked](perf/RESULTS.md); the Python bindings and the `onix` CLI both build and run from source, though nothing is published to PyPI or crates.io yet.
+Status (September 2026): pre-alpha proof of concept. Ordered and `ignore_order` diffing are complete, differentially tested against real DeepDiff 9.1.0, and [benchmarked](perf/RESULTS.md); `deepdiff-rs` is published to PyPI, the `onix` CLI builds and runs from source, and nothing is on crates.io yet.
 
 ## Table of contents
 
@@ -27,8 +27,10 @@ Status (September 2026): pre-alpha proof of concept. Ordered and `ignore_order` 
 Python (the `deepdiff-rs` package, import name `deepdiff_rs`):
 
 ```sh
-pip install deepdiff-rs   # once published; from source:
+pip install deepdiff-rs
 ```
+
+From source:
 
 ```sh
 cd crates/onix-py
