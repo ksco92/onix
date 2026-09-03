@@ -84,11 +84,12 @@ def test_tuple_is_accepted_and_diffed_positionally() -> None:
     assert diff.to_dict() == {"values_changed": {"root[2]": {"new_value": 4, "old_value": 3}}}
 
 
-def test_namedtuple_is_accepted_as_a_tuple() -> None:
-    """A namedtuple converts through the tuple path (by position, not by field)."""
+def test_namedtuple_raises_type_error_naming_the_class() -> None:
+    """A namedtuple is not a plain tuple to DeepDiff (it walks fields), so it is refused."""
     point = collections.namedtuple("Point", "x y")
-    diff = DeepDiff((point(1, 2),), (point(1, 3),))
-    assert diff.to_dict() == {"values_changed": {"root[0][1]": {"new_value": 3, "old_value": 2}}}
+
+    with pytest.raises(TypeError, match="Point"):
+        DeepDiff((point(1, 2),), (point(1, 3),))
 
 
 def test_set_raises_type_error() -> None:

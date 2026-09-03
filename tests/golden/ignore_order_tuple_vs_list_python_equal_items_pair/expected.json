@@ -1,0 +1,14 @@
+{
+  "type_changes": {
+    "root[0]": {
+      "new_type": "list",
+      "new_value": [
+        1.0
+      ],
+      "old_type": "tuple",
+      "old_value": [
+        1
+      ]
+    }
+  }
+}

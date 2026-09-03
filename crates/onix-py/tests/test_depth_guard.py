@@ -260,6 +260,49 @@ def test_deep_report_lifecycle_to_dict_then_del_does_not_crash() -> None:
     assert "OK" in result.stdout
 
 
+def test_deep_report_renders_to_json_from_a_small_stack_thread() -> None:
+    """
+    A report nested past the inline threshold renders to JSON without crashing.
+
+    Rendering a report to JSON is natively recursive, so a deep one must go to
+    the sized worker thread; if it were rendered inline it would overflow a
+    512 KiB-stack Python thread and take the interpreter down with it. The
+    deep values are built (and torn down) on the spawning thread -- CPython's
+    own container code, unrelated to deepdiff_rs -- so the small-stack thread
+    runs only the two rendering calls.
+    """
+    result = _run_isolated(
+        f"""
+        import threading
+        depth = {MAX_DEPTH_CEILING} - 5_000
+        deep_tuple, deep_list = 1, 1
+        for _ in range(depth):
+            deep_tuple = (deep_tuple,)
+            deep_list = [deep_list]
+
+        # A tuple-vs-list type change at the root: one entry carrying both
+        # deep values, so the report itself is nested far past the threshold.
+        diff = DeepDiff(deep_tuple, deep_list, max_depth={MAX_DEPTH_CEILING})
+        outcome = []
+
+        def work():
+            outcome.append(len(diff.to_json()))
+            outcome.append(len(repr(diff)))
+
+        threading.stack_size(512 * 1024)
+        t = threading.Thread(target=work)
+        t.start()
+        t.join()
+        assert len(outcome) == 2, outcome
+        assert outcome[0] > depth, outcome
+        assert outcome[1] > outcome[0], outcome
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
 def test_max_depth_above_ceiling_raises_value_error_naming_the_ceiling() -> None:
     """A max_depth above the ceiling is refused up front with a catchable ValueError."""
     with pytest.raises(ValueError, match=str(MAX_DEPTH_CEILING)) as excinfo:

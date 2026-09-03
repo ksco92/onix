@@ -44,6 +44,15 @@ SEED_COUNT: Final[int] = 300
 # independent corpora rather than the same shapes with tuples sprinkled in.
 TUPLE_SEED_BASE: Final[int] = 1_000_000
 
+# Two edits that only the tuple batch applies, both aimed at shapes this slice
+# turns on and that kind-preserving mutation alone can never produce: flipping
+# a sequence between list and tuple while keeping its items, and re-typing a
+# number inside a tuple within Python's `1 == 1.0 == True` family (which is
+# what makes DeepHash's cache hand two tuples the same digest). Kept
+# low-probability so a case still usually differs in more ordinary ways too.
+KIND_FLIP_PROBABILITY: Final[float] = 0.15
+RETYPE_PROBABILITY: Final[float] = 0.25
+
 
 def _gen_scalar(rng: random.Random, scalars: list[JsonValue] | None = None) -> JsonValue:
     """
@@ -143,7 +152,63 @@ def _generate_case(seed: int, tuples: bool = False) -> tuple[JsonValue, JsonValu
     rng = random.Random(seed)
     a = _gen_value(rng, 3, tuples=tuples)
     b = _mutate(rng, a, tuples=tuples)
+
+    if tuples:
+        b = _tuple_edge_mutations(rng, b)
+
     return a, b
+
+
+def _retype_number(rng: random.Random, value: JsonValue) -> JsonValue:
+    """
+    Re-type a number within Python's numeric equality family, keeping its value.
+
+    :param rng: Seeded RNG.
+    :param value: The number to re-type.
+    :return: An equal value of a different type (`1` -> `1.0` or `True`), or
+        `value` unchanged when no equal re-typing exists.
+    """
+    if isinstance(value, bool):
+        return int(value) if rng.random() < 0.5 else float(value)
+
+    if isinstance(value, int):
+        if value in (0, 1) and rng.random() < 0.5:
+            return bool(value)
+
+        return float(value)
+
+    if isinstance(value, float) and value.is_integer() and abs(value) < 2**53:
+        return int(value) if rng.random() < 0.5 else bool(value) if value in (0.0, 1.0) else int(value)
+
+    return value
+
+
+def _tuple_edge_mutations(rng: random.Random, value: JsonValue, in_tuple: bool = False) -> JsonValue:
+    """
+    Apply the two tuple-specific edits recursively (see KIND_FLIP_PROBABILITY).
+
+    :param rng: Seeded RNG.
+    :param value: The value to edit.
+    :param in_tuple: Whether `value` sits inside a tuple, which is where a
+        numeric re-type is worth making.
+    :return: The edited value.
+    """
+    if isinstance(value, (list, tuple)):
+        as_tuple = isinstance(value, tuple)
+        items = [_tuple_edge_mutations(rng, item, in_tuple=as_tuple) for item in value]
+
+        if rng.random() < KIND_FLIP_PROBABILITY:
+            as_tuple = not as_tuple
+
+        return tuple(items) if as_tuple else items
+
+    if isinstance(value, dict):
+        return {key: _tuple_edge_mutations(rng, item) for key, item in value.items()}
+
+    if in_tuple and isinstance(value, (bool, int, float)) and rng.random() < RETYPE_PROBABILITY:
+        return _retype_number(rng, value)
+
+    return value
 
 
 def _normalize_types(value: JsonValue | type) -> JsonValue:

@@ -113,7 +113,7 @@ the "keep the smaller, ties favor index-aligned" count comparison, and the
 `crates/onix-core/src/diff/mod.rs`'s "List diffing" module doc for the
 full spec these pin down.
 
-**Tuple cases (`tuple_*`, `ignore_order_tuple_*`):** a tuple diffs positionally
+**Tuple cases (`tuple_*`, `ignore_order_tuple_*`, `ignore_order_unhashable_tuple_*`):** a tuple diffs positionally
 exactly like a list (element change, length change, tuples of dicts, tuples in
 tuples, and the same difflib match — including its `new_path` — for all-scalar
 contents), while a tuple *versus* a list is a `type_changes` at the container
@@ -122,7 +122,11 @@ tuple element disqualifies its list from the difflib match the way a nested list
 does. Under `ignore_order`, a tuple is hash-paired like a list, a nested tuple
 hashes order-insensitively, and a tuple never hash-matches a list with the same
 items (DeepHash carries the type), which surfaces as a `type_changes` on the
-paired items rather than nothing at all.
+paired items rather than nothing at all. The `ignore_order_tuple_digest_*`
+cases pin `DeepHash`'s shared-cache collision (see "Known DeepDiff quirks"
+below): which numeric type a hashable tuple holds stops mattering once a
+Python-equal tuple has been hashed, while an unhashable one keeps its own
+digest.
 
 **`ignore_order=True` (`ignore_order_*` cases):** pure shuffle, shuffle
 plus a changed/added/removed value, duplicate-multiplicity invisibility,
@@ -178,16 +182,37 @@ not part of this fixed corpus.
   the mechanics and `list_lcs_int_vs_float_single_matches_via_python_equality`
   for the golden case.
 
-- **A `namedtuple` is diffed by position, not by field.** Real `DeepDiff` walks a
-  `namedtuple`'s *fields* (`root[0].x`, with the class name as the reported type),
-  because it inspects `_fields`; `deepdiff_rs` converts a `namedtuple` through the
-  ordinary tuple path it is a subclass of, so the same values are compared but the
-  paths are indices and the type name is `tuple`. An accepted, documented
-  limitation of the bindings' MVP conversion table, pinned by
-  `crates/onix-py/tests/test_tuples.py` (which asserts *both* tools' actual
-  output) rather than chased. No golden case uses a `namedtuple`: the corpus's
-  fixtures are JSON files, and the tagged encoding above deliberately has no tag
-  for "an arbitrary class".
+- **A hashable tuple can inherit another tuple's hash.** Under `ignore_order`,
+  `DeepDiff([(1,)], [(1.0,)])` is **empty** — the two tuples "match" even though
+  their contents are of different types, and `DeepDiff([(1,), (1.0,)], [])`
+  reports a single removal rather than two. This is not a rounding rule: `DeepHash`
+  keys its cache by the object itself (only bare numbers are type-wrapped) and
+  `DeepDiff` shares one cache across every hashtable it builds in a run, so a tuple
+  that is Python-equal to one hashed earlier inherits that tuple's digest. A tuple
+  holding a list or a dict is unhashable, misses the cache, and keeps its own
+  type-strict digest (`DeepDiff([(1, [1])], [(1.0, [1])], ignore_order=True)` is a
+  `type_changes`). Which member of an equality class is hashed first is therefore
+  observable, and reproduced: see the `ignore_order_tuple_digest_*` cases and
+  `crates/onix-core/src/ignore_order/memo.rs`'s "Tuple digests" section, which
+  cites the upstream source lines. **`frozenset` is hashable too**, so the same
+  mechanism will apply to it when set support lands.
+
+- **A `namedtuple` is not diffed as a tuple; `deepdiff_rs` refuses it.** Real
+  `DeepDiff` walks a `namedtuple`'s *fields* (`root[0].x`, with the class name as
+  the reported type), because it inspects `_fields`/`_asdict`. This MVP has no
+  field-walking conversion, and diffing one as a plain tuple would silently return
+  index paths and the type name `tuple` instead — so the conversion raises
+  `TypeError` naming the class, like any other unsupported type.
+  `crates/onix-py/tests/test_tuples.py` asserts both the refusal and the real
+  tool's own output. No golden case uses a `namedtuple`: the corpus's fixtures are
+  JSON files, and the tagged encoding above deliberately has no tag for "an
+  arbitrary class".
+
+- **`to_dict()` reports a `type_changes` entry's types as names, not classes.**
+  Real `DeepDiff` puts the type objects themselves (`<class 'tuple'>`) in
+  `to_dict()`; `deepdiff_rs` puts the same names its `to_json()` uses (`"tuple"`).
+  Values are unaffected — a tuple comes back as a tuple. See
+  `crates/onix-py/src/deepdiff.rs`'s `to_dict` doc.
 
 - **List-LCS numeric matching is exact only within `2^53`.** The matcher's
   cross-type equality (previous bullet) normalizes any integral value —

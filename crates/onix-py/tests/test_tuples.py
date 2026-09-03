@@ -10,7 +10,9 @@ golden corpus's tagged encoding never being interpreted by the product).
 """
 
 import collections
+import json
 
+import pytest
 from deepdiff import DeepDiff as RealDeepDiff
 
 from deepdiff_rs import DeepDiff, diff_json
@@ -56,23 +58,34 @@ def test_to_dict_matches_real_deepdiff_on_tuple_values() -> None:
         assert DeepDiff(a, b).to_dict() == expected, (a, b)
 
 
-def test_namedtuple_is_diffed_by_position_not_by_field() -> None:
+def test_namedtuple_is_refused_rather_than_diffed_as_a_plain_tuple() -> None:
     """
-    Documented MVP limitation: a namedtuple converts through the tuple path.
+    A namedtuple is a tuple subclass, but DeepDiff diffs it by field, not by index.
 
-    Real DeepDiff walks a namedtuple's fields (``root[0].x``) and names its
-    class as the type; onix treats it as the tuple it is a subclass of, so the
-    values compared are the same but the paths (and type names) differ. See
-    ``crates/onix-py/src/convert.rs``'s module doc and ``tests/golden/README.md``.
+    Real DeepDiff reports ``root[0].x`` and names the class as the type; this
+    MVP has no field-walking conversion, and returning index paths instead
+    would be a silent disagreement, so the conversion refuses it by name. The
+    real tool's own output is asserted here so the gap stays visible.
     """
     point = collections.namedtuple("Point", "x")
     a, b = (point(1),), (point(2),)
 
-    assert DeepDiff(a, b).to_dict() == {
-        "values_changed": {"root[0][0]": {"new_value": 2, "old_value": 1}}
-    }
+    with pytest.raises(TypeError, match="Point"):
+        DeepDiff(a, b)
+
     assert RealDeepDiff(a, b, verbose_level=2).to_dict() == {
         "values_changed": {"root[0].x": {"new_value": 2, "old_value": 1}}
+    }
+
+
+def test_a_plain_tuple_subclass_is_still_diffed_as_a_tuple() -> None:
+    """Only namedtuples (identified by ``_fields``) are refused, not every tuple subclass."""
+
+    class Pair(tuple):
+        pass
+
+    assert DeepDiff(Pair((1, 2)), Pair((1, 3))).to_dict() == {
+        "values_changed": {"root[1]": {"new_value": 3, "old_value": 2}}
     }
 
 
@@ -86,3 +99,38 @@ def test_the_golden_corpus_tag_is_ordinary_data_to_the_product() -> None:
     assert DeepDiff({"$tuple": [1]}, {"$tuple": [2]}).to_dict() == {
         "values_changed": {"root['$tuple'][0]": {"new_value": 2, "old_value": 1}}
     }
+
+
+def test_python_equal_tuples_match_under_ignore_order_like_real_deepdiff() -> None:
+    """DeepHash's cache makes a hashable tuple inherit an earlier Python-equal one's digest."""
+    for a, b in (
+        ([(1,)], [(1.0,)]),
+        ([(True,)], [(1,)]),
+        ([("a", 1)], [("a", 1.0)]),
+        ([{"k": (1,)}], [{"k": (1.0,)}]),
+    ):
+        expected = json.loads(RealDeepDiff(a, b, ignore_order=True, verbose_level=2).to_json())
+        actual = json.loads(DeepDiff(a, b, ignore_order=True).to_json())
+        assert actual == expected == {}, (a, b, actual)
+
+
+def test_an_unhashable_tuple_does_not_inherit_a_digest() -> None:
+    """A tuple holding a list cannot be a dict key, so it keeps its own type-strict digest."""
+    a, b = [(1, [1])], [(1.0, [1])]
+
+    expected = json.loads(RealDeepDiff(a, b, ignore_order=True, verbose_level=2).to_json())
+    actual = json.loads(DeepDiff(a, b, ignore_order=True).to_json())
+
+    assert actual == expected
+    assert "type_changes" in actual
+
+
+def test_a_tuple_pairs_with_a_python_equal_list_as_a_type_change() -> None:
+    """`list((1,)) == [1.0]`, so the pair stays within DeepDiff's pairing cutoff."""
+    a, b = [(1,)], [[1.0]]
+
+    expected = json.loads(RealDeepDiff(a, b, ignore_order=True, verbose_level=2).to_json())
+    actual = json.loads(DeepDiff(a, b, ignore_order=True).to_json())
+
+    assert actual == expected
+    assert actual["type_changes"]["root[0]"]["old_type"] == "tuple"

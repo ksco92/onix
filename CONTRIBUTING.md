@@ -118,11 +118,13 @@ uv run scripts/gen_goldens.py
 
 Never hand-edit files under `tests/golden/`; every case is defined in
 `scripts/gen_goldens.py`. A case value JSON cannot express (a tuple today,
-sets and dates later) is written in the tagged encoding `scripts/golden_tags.py`
-defines and [`tests/golden/README.md`](tests/golden/README.md) documents; the
-product's own parse paths never interpret those tags. `scripts/differential_fuzz.py` is a separate,
-development-time fuzzer that compares `--ignore-order` against real `deepdiff`
-across thousands of generated cases, beyond the fixed corpus.
+sets and dates later) is written in the tagged encoding
+`scripts/golden_tags.py` defines and
+[`tests/golden/README.md`](tests/golden/README.md) documents; the product's
+own parse paths never interpret those tags. `scripts/differential_fuzz.py`
+is a separate, development-time fuzzer that compares `--ignore-order`
+against real `deepdiff` across thousands of generated cases, beyond the
+fixed corpus.
 
 ## Python bindings
 
