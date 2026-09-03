@@ -79,10 +79,23 @@ shrinks the denominator without changing what is tested; the `Makefile`'s
 
 The code is best read in this order, each step building on the last:
 
-1. This file and the [README](README.md): what onix is, how to build it, and where everything lives.
-2. [`crates/onix-core/src/lib.rs`](crates/onix-core/src/lib.rs)'s module doc: the engine's front door, an architecture map (parse, diff dispatch, ordered/`ignore_order` comparison, `Report`, render) that names the module each step lives in. Follow it into [`crates/onix-core/src/diff/mod.rs`](crates/onix-core/src/diff/mod.rs) and [`crates/onix-core/src/ignore_order/mod.rs`](crates/onix-core/src/ignore_order/mod.rs), each its own module-doc front door.
-3. [`tests/golden/README.md`](tests/golden/README.md): what the compatibility corpus pins down, and the documented DeepDiff quirks it deliberately does not chase.
-4. [`crates/onix-py/src/lib.rs`](crates/onix-py/src/lib.rs)'s module doc: how the Python bindings sit on top, converting Python objects to the engine's value model once ([`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)) before calling the same core the CLI does.
+1. This file and the [README](README.md): what onix is, how to build it, and
+   where everything lives.
+2. [`crates/onix-core/src/lib.rs`](crates/onix-core/src/lib.rs)'s module doc:
+   the engine's front door, an architecture map (parse, diff dispatch,
+   ordered/`ignore_order` comparison, `Report`, render) that names the module
+   each step lives in. Follow it into
+   [`crates/onix-core/src/diff/mod.rs`](crates/onix-core/src/diff/mod.rs) and
+   [`crates/onix-core/src/ignore_order/mod.rs`](crates/onix-core/src/ignore_order/mod.rs),
+   each its own module-doc front door.
+3. [`tests/golden/README.md`](tests/golden/README.md): what the compatibility
+   corpus pins down, and the documented DeepDiff quirks it deliberately does
+   not chase.
+4. [`crates/onix-py/src/lib.rs`](crates/onix-py/src/lib.rs)'s module doc: how
+   the Python bindings sit on top, converting Python objects to the engine's
+   value model once
+   ([`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)) before
+   calling the same core the CLI does.
 
 ## Golden corpus
 
@@ -123,16 +136,26 @@ pre-fix binary.
 
 ## Benchmarking
 
-Two benchmarks live in the repo; both are reproduced from source here, and the README's [Performance](README.md#performance) section holds the numbers and what they mean.
+Two benchmarks live in the repo; both are reproduced from source here, and the
+README's [Performance](README.md#performance) section holds the numbers and
+what they mean.
 
-[`perf/RESULTS.md`](perf/RESULTS.md) is the engine benchmark against pinned real `deepdiff` 9.1.0 over the full fixture matrix. Regenerate it from scratch:
+[`perf/RESULTS.md`](perf/RESULTS.md) is the engine benchmark against pinned
+real `deepdiff` 9.1.0 over the full fixture matrix. Regenerate it from scratch:
 
 ```sh
 brew install hyperfine   # or: cargo install hyperfine
 perf/run_bench.sh
 ```
 
-This regenerates the deterministic fixture matrix (written to `perf/fixtures/`, gitignored), builds `cargo build --release`, runs a correctness precheck (onix and DeepDiff must produce byte-identical canonical JSON on every fixture, else the run aborts), sweeps wall clock/CPU/peak RSS with `hyperfine`, and writes `perf/RESULTS.md`; raw per-run JSON lands in `perf/bench_raw/` (also gitignored). The report's own "Run procedure", "Correctness precheck", and "Deferred work" sections carry the full methodology and every deliberately scaled-down part of the matrix.
+This regenerates the deterministic fixture matrix (written to `perf/fixtures/`,
+gitignored), builds `cargo build --release`, runs a correctness precheck (onix
+and DeepDiff must produce byte-identical canonical JSON on every fixture, else
+the run aborts), sweeps wall clock/CPU/peak RSS with `hyperfine`, and writes
+`perf/RESULTS.md`; raw per-run JSON lands in `perf/bench_raw/` (also
+gitignored). The report's own "Run procedure", "Correctness precheck", and
+"Deferred work" sections carry the full methodology and every deliberately
+scaled-down part of the matrix.
 
 The Python-bindings benchmark is a separate script:
 
@@ -143,7 +166,9 @@ uv run --group test maturin develop --release   # release, not debug: a debug bu
 uv run --group test python benchmarks/bench_bindings.py
 ```
 
-`crates/onix-py/benchmarks/bench_bindings.py`'s docstring explains its subprocess isolation, the median-of-11 sampling, and the live-object fixture choices.
+`crates/onix-py/benchmarks/bench_bindings.py`'s docstring explains its
+subprocess isolation, the median-of-11 sampling, and the live-object fixture
+choices.
 
 ## Mutation testing
 

@@ -40,7 +40,8 @@ test:
 # `cargo test` harness cannot do (see crates/onix-py/Cargo.toml's
 # `extension-module` feature doc for why the crate builds two different
 # ways for `cargo test` vs. a Python-loadable wheel). Its coverage
-# authority is instead `make python-test` (CONTRIBUTING.md's "Python bindings" section):
+# authority is instead `make python-test` (CONTRIBUTING.md's "Python
+# bindings" section):
 # a structural exclusion, not a logic-free-shim one.
 coverage:
 	cargo llvm-cov --workspace --fail-under-lines 95 --ignore-filename-regex 'crates/onix-py/src/'
