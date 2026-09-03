@@ -20,6 +20,43 @@ tests/golden/<case_name>/
                     # only option this corpus varies)
 ```
 
+## Values JSON cannot express: the tagged encoding
+
+DeepDiff diffs Python objects, and several of the types it handles have no JSON
+literal. A case that needs one writes it as a **tagged object**: a JSON object with
+**exactly one** key, and that key one of the reserved names below.
+
+| Tag | Decodes to | Status |
+| --- | --- | --- |
+| `$tuple` | `tuple` | supported |
+| `$set` | `set` | reserved |
+| `$frozenset` | `frozenset` | reserved |
+| `$datetime` | `datetime.datetime` | reserved |
+| `$date` | `datetime.date` | reserved |
+
+So `{"$tuple": [1, 2]}` is the tuple `(1, 2)`, and `[{"$tuple": []}]` is a list
+holding the empty tuple. **Any other object is plain data**, including one that has a
+reserved key alongside others (`{"$tuple": [1], "x": 2}` is a two-key dict). The
+reserved names are claimed all at once, before their types are supported, so a
+fixture can never use one as an ordinary dict key and then change meaning later; a
+decoder that meets a tag it cannot decode yet fails loudly.
+
+The one cost of the encoding is that a dict whose *only* key is a reserved name
+cannot be a fixture value. `scripts/golden_tags.py`'s `encode_tags` refuses to write
+such a value rather than writing a file that would decode back into something else.
+
+Two implementations of the rule, one per language, cover the corpus's three readers:
+
+- `scripts/golden_tags.py` — the definition, used both by the generator (which also
+  reads every file it writes back and checks it against the case it came from) and by
+  `crates/onix-py/tests/test_golden_parity.py`.
+- `crates/onix-core/tests/golden.rs` — the Rust decoder, building the engine's own
+  value model.
+
+**The product never interprets a tag.** `onix_core::Value`'s `Deserialize`,
+`deepdiff_rs.diff_json`, the `DeepDiff` class, and the CLI all read `{"$tuple": [1]}`
+as the one-key dict it literally is; each of those paths has a test pinning that.
+
 `crates/onix-core/tests/golden.rs` reads every case directory present here
 (there is no separate hand-maintained case list), runs
 `onix_core::diff_with_options` with each case's own `options.json`, and
@@ -76,6 +113,17 @@ the "keep the smaller, ties favor index-aligned" count comparison, and the
 `crates/onix-core/src/diff/mod.rs`'s "List diffing" module doc for the
 full spec these pin down.
 
+**Tuple cases (`tuple_*`, `ignore_order_tuple_*`):** a tuple diffs positionally
+exactly like a list (element change, length change, tuples of dicts, tuples in
+tuples, and the same difflib match — including its `new_path` — for all-scalar
+contents), while a tuple *versus* a list is a `type_changes` at the container
+itself, at the root and nested in a dict, including the empty-vs-empty pair. A
+tuple element disqualifies its list from the difflib match the way a nested list
+does. Under `ignore_order`, a tuple is hash-paired like a list, a nested tuple
+hashes order-insensitively, and a tuple never hash-matches a list with the same
+items (DeepHash carries the type), which surfaces as a `type_changes` on the
+paired items rather than nothing at all.
+
 **`ignore_order=True` (`ignore_order_*` cases):** pure shuffle, shuffle
 plus a changed/added/removed value, duplicate-multiplicity invisibility,
 nested-dict pairing, list-in-dict-in-list, mixed type changes, `[1]` vs
@@ -129,6 +177,17 @@ not part of this fixed corpus.
   `crates/onix-core/src/lcs.rs`'s `ScalarKey`/`find_longest_match` doc for
   the mechanics and `list_lcs_int_vs_float_single_matches_via_python_equality`
   for the golden case.
+
+- **A `namedtuple` is diffed by position, not by field.** Real `DeepDiff` walks a
+  `namedtuple`'s *fields* (`root[0].x`, with the class name as the reported type),
+  because it inspects `_fields`; `deepdiff_rs` converts a `namedtuple` through the
+  ordinary tuple path it is a subclass of, so the same values are compared but the
+  paths are indices and the type name is `tuple`. An accepted, documented
+  limitation of the bindings' MVP conversion table, pinned by
+  `crates/onix-py/tests/test_tuples.py` (which asserts *both* tools' actual
+  output) rather than chased. No golden case uses a `namedtuple`: the corpus's
+  fixtures are JSON files, and the tagged encoding above deliberately has no tag
+  for "an arbitrary class".
 
 - **List-LCS numeric matching is exact only within `2^53`.** The matcher's
   cross-type equality (previous bullet) normalizes any integral value —

@@ -1,0 +1,8 @@
+{
+  "values_changed": {
+    "root[0]['a']": {
+      "new_value": 2,
+      "old_value": 1
+    }
+  }
+}
