@@ -1,4 +1,10 @@
-//! Per-diff-invocation memoization of pairwise subtree distances — the fix
+//! The two caches one `ignore_order` diff shares across its whole run: the
+//! pairwise subtree distances it has already computed, and the digests it has
+//! already assigned to hashable tuples.
+//!
+//! # Pairwise distances
+//!
+//! Memoizing them is the fix
 //! for the otherwise-exponential cost of `ignore_order` pairing on nested
 //! containers.
 //!
@@ -39,30 +45,63 @@
 //! keys `rough_distance` losslessly. Caching by it is therefore
 //! observationally identical to recomputing — verified empirically by the
 //! with/without differential test in `super::tests`.
+//!
+//! # Tuple digests
+//!
+//! The second cache is **not** an optimization: it is `DeepHash`'s own
+//! observable behavior. `DeepHash` keys its `hashes` dict by the object
+//! itself and only type-wraps bare numbers (`deephash.py`'s `_make_hash_key`,
+//! lines 616-628: `if not self.ignore_numeric_type_changes and
+//! isinstance(obj, only_numbers): return (type(obj), obj)`, `return obj`
+//! otherwise), and `DeepDiff` shares one such dict across every hashtable it
+//! builds in a run (`diff.py`'s `_create_hashtable`, lines 1286-1296, whose
+//! own comment states that the `self.hashes` dictionary is shared between
+//! different runs of `DeepHash` so that an object already calculated to have
+//! a hash is not re-calculated). A **hashable** tuple is therefore looked up under
+//! Python's own `==`/`hash`, so a tuple that is Python-equal to one hashed
+//! earlier in the run *inherits that tuple's digest* instead of computing its
+//! own — which is why real `DeepDiff` reports `DeepDiff([(1,)], [(1.0,)],
+//! ignore_order=True)` as `{}`. An unhashable tuple (one holding a list or a
+//! dict) misses that lookup — `self.hashes[hash_key]` raises `TypeError`,
+//! caught at `deephash.py` line 656 — and is stored by object identity
+//! (line 744-747), so it never collides; `DeepDiff([(1, [1])], [(1.0, [1])],
+//! ignore_order=True)` is a `type_changes`, as this port reproduces.
+//!
+//! [`super::hash::item_key`] consults this cache at every tuple node it
+//! walks, in the order the engine hashes items (t1's list, then t2's — the
+//! same order `_create_hashtable` uses), so the *first* Python-equality class
+//! member seen decides the digest for all of them. That ordering is
+//! observable, and matching it is the point: `[(1.0,)]` vs `[(1, 1)]` is a
+//! `type_changes` in real `DeepDiff` while `[(1,)]` vs `[(1, 1)]` is empty,
+//! because in the first case the class digest was fixed by the float tuple
+//! before the deduplicated `(1, 1)` content digest could match it.
 
 use std::cell::RefCell;
 
 use super::fxhash::HashMap;
-use super::hash::ItemKey;
+use super::hash::{ItemKey, PyHashKey};
 
-/// A per-top-level-diff cache of container-pair [`rough_distance`] results,
-/// keyed by the `(removed, added)` [`ItemKey`] pair. Created in
-/// `crate::diff::diff_with_options`, threaded (by shared reference, interior
-/// mutability) through the whole recursive diff, and dropped when it returns.
-/// No eviction and no tuning knobs: it is bounded by the number of distinct
-/// container-pair queries one diff makes.
+/// The per-top-level-diff caches described in this module's doc: container-pair
+/// [`rough_distance`] results keyed by the `(removed, added)` [`ItemKey`]
+/// pair, and tuple digests keyed by Python's own equality
+/// ([`PyHashKey`]). Created in `crate::diff::diff_with_options`, threaded (by
+/// shared reference, interior mutability) through the whole recursive diff,
+/// and dropped when it returns. No eviction and no tuning knobs: both are
+/// bounded by the number of distinct queries one diff makes.
 ///
 /// [`rough_distance`]: super::distance::rough_distance
-pub(crate) struct DistanceMemo {
+pub(crate) struct IgnoreOrderMemo {
     cache: RefCell<HashMap<(ItemKey, ItemKey), f64>>,
+    tuple_digests: RefCell<HashMap<PyHashKey, ItemKey>>,
     enabled: bool,
 }
 
-impl DistanceMemo {
+impl IgnoreOrderMemo {
     /// A live cache (production path).
     pub(crate) fn new() -> Self {
         Self {
             cache: RefCell::new(HashMap::default()),
+            tuple_digests: RefCell::new(HashMap::default()),
             enabled: true,
         }
     }
@@ -74,6 +113,7 @@ impl DistanceMemo {
     pub(crate) fn disabled() -> Self {
         Self {
             cache: RefCell::new(HashMap::default()),
+            tuple_digests: RefCell::new(HashMap::default()),
             enabled: false,
         }
     }
@@ -96,10 +136,35 @@ impl DistanceMemo {
     pub(crate) fn put(&self, key: (ItemKey, ItemKey), value: f64) {
         self.cache.borrow_mut().insert(key, value);
     }
+
+    /// The digest for a hashable tuple whose Python equality identity is
+    /// `key`: the one already assigned to an earlier Python-equal tuple in
+    /// this run, or `compute()`'s result, recorded for the rest of the run.
+    ///
+    /// See this module's "Tuple digests" section for why this cache is part
+    /// of the observable behavior rather than a speed-up. `compute` runs with
+    /// no borrow held, so it is free to recurse back into this same cache for
+    /// a nested tuple. The `disabled()` cache still serves this method: it
+    /// turns off *distance* memoization only, which is the one thing proven
+    /// decision-neutral.
+    pub(crate) fn tuple_digest(
+        &self,
+        key: PyHashKey,
+        compute: impl FnOnce() -> ItemKey,
+    ) -> ItemKey {
+        if let Some(existing) = self.tuple_digests.borrow().get(&key) {
+            return existing.clone();
+        }
+        let computed = compute();
+        self.tuple_digests
+            .borrow_mut()
+            .insert(key, computed.clone());
+        computed
+    }
 }
 
-/// Whether `key` is a container (list/dict) rather than a scalar — the two
+/// Whether `key` is a container (list/tuple/dict) rather than a scalar — the
 /// variants whose distance is computed by a recursive trial diff.
 fn is_container(key: &ItemKey) -> bool {
-    matches!(key, ItemKey::List(_) | ItemKey::Dict(_))
+    matches!(key, ItemKey::List(_) | ItemKey::Tuple(_) | ItemKey::Dict(_))
 }

@@ -9,7 +9,7 @@ use crate::value::{Number, Object, Value};
 
 use crate::diff::DiffOptions;
 
-use super::DistanceMemo;
+use super::IgnoreOrderMemo;
 
 use super::fxhash::HashSet;
 
@@ -177,7 +177,7 @@ pub(crate) fn count_diff_leaves(
     b: &Value,
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> usize {
     match (a, b) {
         (Value::Null, Value::Null) => 0,
@@ -230,17 +230,60 @@ pub(crate) fn type_change_leaf_length(old_value: &Value, new_value: &Value) -> u
 /// [`coerce_for_type_change`]: the coerced value would be an allocation-heavy
 /// deep copy of `old_value`, built on the pairing hot path only to be
 /// compared and thrown away, and the two constructors reproduce the other
-/// sequence exactly when the items match. Confirmed against real
-/// `deepdiff==9.1.0`: `DeepDiff((1, 2), [1, 2], view="_delta")` omits
-/// `new_value` (so a tuple-vs-list pair stays within the pairing cutoff and
-/// is reported as a `type_changes`), while `DeepDiff((1, 2), [1, 3],
+/// sequence exactly when its items are equal *the way Python's `==` is*
+/// ([`python_eq`]), not the way this engine's own type-aware equality is.
+/// Confirmed against real `deepdiff==9.1.0`: `DeepDiff((1,), [1.0],
+/// view="_delta")` omits `new_value` (so the pair stays within the pairing
+/// cutoff and reports as a `type_changes`), while `DeepDiff((1, 2), [1, 3],
 /// view="_delta")` keeps it.
 fn new_value_reproduced_by_coercion(old_value: &Value, new_value: &Value) -> bool {
     match (old_value, new_value) {
         (Value::Tuple(old_items), Value::Array(new_items))
-        | (Value::Array(old_items), Value::Tuple(new_items)) => old_items == new_items,
+        | (Value::Array(old_items), Value::Tuple(new_items)) => {
+            old_items.len() == new_items.len()
+                && old_items
+                    .iter()
+                    .zip(new_items.iter())
+                    .all(|(a, b)| python_eq(a, b))
+        }
         _ => coerce_for_type_change(old_value, new_value)
             .is_some_and(|coerced| coerced == *new_value),
+    }
+}
+
+/// Python's `==` between two values: a scalar pair compares by the crate's
+/// one definition of that rule ([`crate::lcs::python_scalar_key`], which
+/// collapses `1`, `1.0` and `True`), and a container pair compares
+/// element-wise but stays **kind-distinct** — a list never equals a tuple,
+/// and neither equals a dict, exactly as in Python. Confirmed against real
+/// `deepdiff==9.1.0` at the boundary this exists for: `[(1, (2,))]` vs
+/// `[[1, [2]]]` is a whole-value change (the nested `(2,)` does not equal
+/// `[2]`), while `[(1, [2])]` vs `[[1, [2]]]` is a `type_changes`.
+///
+/// Recurses natively, like every other function in this module — safe for
+/// the same reason (see this module's "Depth safety" doc section).
+fn python_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| python_eq(a, b))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|((x_key, x_value), (y_key, y_value))| {
+                        x_key == y_key && python_eq(x_value, y_value)
+                    })
+        }
+        _ => match (
+            crate::lcs::python_scalar_key(a),
+            crate::lcs::python_scalar_key(b),
+        ) {
+            (Some(x), Some(y)) => x == y,
+            // A container never equals a scalar, nor a container of another
+            // kind (the arms above are the only equal-kind container pairs).
+            _ => false,
+        },
     }
 }
 
@@ -459,7 +502,7 @@ pub(crate) fn count_object_diff_leaves(
     b: &Object,
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> usize {
     if is_below_threshold_to_diff_deeper(a, b) {
         return item_length_of_map(b);
@@ -500,7 +543,7 @@ pub(crate) fn count_array_diff_leaves(
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> usize {
     let probe_opts = DiffOptions {
         max_depth: opts.max_depth.saturating_sub(depth),
@@ -575,7 +618,7 @@ pub(crate) fn rough_distance(
     cutoff: f64,
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> f64 {
     if let (Some(r), Some(a)) = (numeric_value(removed), numeric_value(added)) {
         return numeric_distance(r, a, cutoff);

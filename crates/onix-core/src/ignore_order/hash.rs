@@ -6,8 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::lcs::{ScalarKey, python_scalar_key};
 use crate::value::Value;
 
+use super::IgnoreOrderMemo;
 use super::fxhash::HashMap;
 
 /// A canonical hash-equivalence key for one JSON value, matching
@@ -60,16 +62,56 @@ pub(crate) enum ItemKey {
     /// A tuple, keyed exactly like [`ItemKey::List`] (order- and
     /// count-insensitive) but in its own bucket, so a tuple and a list
     /// holding the same items never hash-match — see this type's own doc.
+    /// A *hashable* tuple can also inherit an earlier Python-equal tuple's
+    /// key outright, which is `DeepHash`'s own cache behavior: see
+    /// [`item_key`] and `super::memo`'s "Tuple digests" section.
     Tuple(BTreeSet<ItemKey>),
     /// Key-sorted, recursively keyed values.
     Dict(BTreeMap<String, ItemKey>),
 }
 
-/// Computes `value`'s [`ItemKey`]. Recurses natively — safe only because
+/// Python's own dict-key identity for a **hashable** value — what `hash()`
+/// and `==` collapse together — or `None` for a value Python cannot hash.
+///
+/// This is the key `DeepHash`'s shared `hashes` dict is looked up by (see
+/// `super::memo`'s "Tuple digests" section for the source citations), so it
+/// mirrors Python exactly: scalars go through the crate's one definition of
+/// Python scalar equality ([`python_scalar_key`], which makes `1`, `1.0` and
+/// `True` one key), a tuple is its elements **positionally** (Python's tuple
+/// equality is order-sensitive, unlike the order-insensitive *content*
+/// digest [`item_key`] computes), and a list or dict is unhashable, which
+/// also makes any tuple containing one unhashable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum PyHashKey {
+    Scalar(ScalarKey),
+    Tuple(Box<[PyHashKey]>),
+}
+
+/// `value`'s [`PyHashKey`], or `None` if Python could not hash it.
+fn py_hash_key(value: &Value) -> Option<PyHashKey> {
+    match value {
+        Value::Tuple(items) => items
+            .iter()
+            .map(py_hash_key)
+            .collect::<Option<Box<[PyHashKey]>>>()
+            .map(PyHashKey::Tuple),
+        Value::Array(_) | Value::Object(_) => None,
+        scalar => python_scalar_key(scalar).map(PyHashKey::Scalar),
+    }
+}
+
+/// Computes `value`'s [`ItemKey`], consulting `memo` for every hashable
+/// tuple it walks — a tuple that is Python-equal to one hashed earlier in
+/// this diff inherits that tuple's key, exactly as `DeepHash`'s shared cache
+/// makes it inherit its digest (see `super::memo`'s "Tuple digests" section
+/// for the mechanism, the source citations, and why the ordering is
+/// observable).
+///
+/// Recurses natively — safe only because
 /// every caller in this module first proves `value`'s nesting is within the
 /// crate's shared depth budget via [`check_value_depth`] (see this module's
 /// "Depth safety" doc section).
-pub(crate) fn item_key(value: &Value) -> ItemKey {
+pub(crate) fn item_key(value: &Value, memo: &IgnoreOrderMemo) -> ItemKey {
     match value {
         Value::Null => ItemKey::Null,
         Value::Bool(b) => ItemKey::Bool(*b),
@@ -101,11 +143,17 @@ pub(crate) fn item_key(value: &Value) -> ItemKey {
                 ItemKey::Int(i128::from(u))
             }
         }
-        Value::Array(items) => ItemKey::List(items.iter().map(item_key).collect()),
-        Value::Tuple(items) => ItemKey::Tuple(items.iter().map(item_key).collect()),
+        Value::Array(items) => ItemKey::List(items.iter().map(|i| item_key(i, memo)).collect()),
+        Value::Tuple(items) => {
+            let content = || ItemKey::Tuple(items.iter().map(|i| item_key(i, memo)).collect());
+            match py_hash_key(value) {
+                Some(key) => memo.tuple_digest(key, content),
+                None => content(),
+            }
+        }
         Value::Object(map) => ItemKey::Dict(
             map.iter()
-                .map(|(k, v)| (k.to_string(), item_key(v)))
+                .map(|(k, v)| (k.to_string(), item_key(v, memo)))
                 .collect(),
         ),
     }
@@ -132,12 +180,17 @@ pub(crate) struct HashedList<'a> {
 }
 
 impl<'a> HashedList<'a> {
-    pub(crate) fn build(items: &'a [Value]) -> Self {
+    /// Hashes `items` in index order, threading the run's `memo` so a
+    /// hashable tuple's digest is shared with every Python-equal tuple hashed
+    /// earlier in this diff — including in the *other* list's table, which is
+    /// built by a second call with the same `memo`, exactly as `DeepDiff`
+    /// builds its two hashtables against one shared `hashes` dict.
+    pub(crate) fn build(items: &'a [Value], memo: &IgnoreOrderMemo) -> Self {
         let mut distinct_order = Vec::new();
         let mut info: HashMap<ItemKey, (usize, &'a Value)> = HashMap::default();
 
         for (idx, item) in items.iter().enumerate() {
-            let key = item_key(item);
+            let key = item_key(item, memo);
 
             if let std::collections::hash_map::Entry::Vacant(entry) = info.entry(key.clone()) {
                 distinct_order.push(key);

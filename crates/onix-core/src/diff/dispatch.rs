@@ -9,7 +9,7 @@
 use crate::value::{Object, Value};
 
 use crate::error::Error;
-use crate::ignore_order::DistanceMemo;
+use crate::ignore_order::IgnoreOrderMemo;
 use crate::path::{PathSegment, render_path};
 use crate::report::Report;
 
@@ -36,7 +36,7 @@ pub(crate) fn diff_at(
     b: &Value,
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     check_traversal_depth(path, depth, opts.max_depth)?;
 

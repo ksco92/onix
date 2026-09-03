@@ -410,6 +410,72 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
         [(2, 1)],
         {"ignore_order": True},
     ),
+    # DeepHash keys its shared cache by the object itself, so a *hashable*
+    # tuple inherits the digest of an earlier Python-equal one in the same
+    # run: `(1,)`, `(1.0,)` and `(True,)` are one key to a Python dict. These
+    # pin that collision (and its absence for an unhashable tuple) — see
+    # crates/onix-core/src/ignore_order/memo.rs's "Tuple digests" section.
+    "ignore_order_tuple_digest_collides_int_float": (
+        [(1,)],
+        [(1.0,)],
+        {"ignore_order": True},
+    ),
+    "ignore_order_tuple_digest_collides_bool_int": (
+        [(True,)],
+        [(1,)],
+        {"ignore_order": True},
+    ),
+    "ignore_order_tuple_digest_collides_nested_in_tuple": (
+        [((1,),)],
+        [((1.0,),)],
+        {"ignore_order": True},
+    ),
+    "ignore_order_tuple_digest_collides_as_dict_value": (
+        [{"k": (1,)}],
+        [{"k": (1.0,)}],
+        {"ignore_order": True},
+    ),
+    # Two items with one digest between them: removing the list reports a
+    # single removal, at the first index.
+    "ignore_order_tuple_digest_collision_dedupes_removal": (
+        [(1,), (1.0,)],
+        [],
+        {"ignore_order": True},
+    ),
+    # Control: a tuple holding a list is unhashable, misses the cache, and
+    # keeps its own type-strict digest.
+    "ignore_order_unhashable_tuple_never_collides": (
+        [(1, [1])],
+        [(1.0, [1])],
+        {"ignore_order": True},
+    ),
+    # Python's tuple equality is positional, so a reordered pair of the other
+    # numeric type inherits nothing.
+    "ignore_order_tuple_digest_collision_is_positional": (
+        [(1, 2)],
+        [(2.0, 1.0)],
+        {"ignore_order": True},
+    ),
+    # Which class member is hashed first is observable: `(1,)` matches the
+    # deduplicated `(1, 1)` content digest, `(1.0,)` does not.
+    "ignore_order_tuple_digest_first_hashed_member_wins": (
+        [(1.0,)],
+        [(1, 1)],
+        {"ignore_order": True},
+    ),
+    # `list((1,)) == [1.0]` in Python, so the delta view omits new_value and
+    # the pair stays within the pairing cutoff.
+    "ignore_order_tuple_vs_list_python_equal_items_pair": (
+        [(1,)],
+        [[1.0]],
+        {"ignore_order": True},
+    ),
+    # ...while a nested tuple never equals a nested list, so this one does not.
+    "ignore_order_tuple_vs_list_nested_kinds_differ": (
+        [(1, (2,))],
+        [[1, [2]]],
+        {"ignore_order": True},
+    ),
     # threshold_to_diff_deeper collapse surfacing through a matched pair
     # under ignore_order: "anchor" keeps this list's overlap high enough
     # that get_pairs engages and the low-overlap dicts land in the same

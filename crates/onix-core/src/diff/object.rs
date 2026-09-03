@@ -5,7 +5,7 @@
 use crate::value::{Object, Value};
 
 use crate::error::Error;
-use crate::ignore_order::DistanceMemo;
+use crate::ignore_order::IgnoreOrderMemo;
 use crate::path::PathSegment;
 use crate::report::{Report, ValuesChangedEntry};
 
@@ -67,7 +67,7 @@ pub(crate) fn object_diff(
     b: &Object,
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     // `threshold_to_diff_deeper` collapse — see this function's own doc.
     // The depth check runs against the borrowed maps, BEFORE either is

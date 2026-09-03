@@ -538,3 +538,37 @@ fn to_value_preserves_a_tuple_that_to_json_value_flattens_to_an_array() {
         })
     );
 }
+
+#[test]
+fn the_two_renderings_agree_on_every_category() {
+    use crate::test_support::ctup;
+
+    // One report touching every category, both entry shapes, `new_path`, and
+    // a tuple: `to_json_value`'s direct walk must land exactly where
+    // `to_value`'s compact rendering does once converted.
+    let mut report = Report::new();
+    report.insert_values_changed(
+        index_path(0),
+        ValuesChangedEntry {
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!(2)),
+            new_path: Some(index_path(3)),
+        },
+    );
+    report.insert_type_change(
+        key_path("t"),
+        TypeChangeEntry {
+            old_type: "tuple".to_string(),
+            new_type: "list".to_string(),
+            old_value: ctup(&[json!(1)]),
+            new_value: cv(&json!([1])),
+            new_path: Some(key_path("t2")),
+        },
+    );
+    report.insert_dictionary_item_added(key_path("a"), ctup(&[json!(1), json!("x")]));
+    report.insert_dictionary_item_removed(key_path("r"), cv(&json!({"k": [1, 2]})));
+    report.insert_iterable_item_added(index_path(7), cv(&json!(null)));
+    report.insert_iterable_item_removed(index_path(8), ctup(&[]));
+
+    assert_eq!(report.to_json_value(), report.to_value().to_serde_json());
+}

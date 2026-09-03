@@ -146,7 +146,7 @@ mod hash;
 mod memo;
 mod pairing;
 
-pub(crate) use memo::DistanceMemo;
+pub(crate) use memo::IgnoreOrderMemo;
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -183,7 +183,7 @@ pub(crate) fn ignore_order_array_diff(
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     // Every item will be structurally hashed (`item_key`, native recursion)
     // and, if left unpaired, cloned whole into the Report — both unbounded
@@ -202,8 +202,8 @@ pub(crate) fn ignore_order_array_diff(
         })?;
     }
 
-    let t1 = HashedList::build(a);
-    let t2 = HashedList::build(b);
+    let t1 = HashedList::build(a, memo);
+    let t2 = HashedList::build(b, memo);
 
     let hashes_added: Vec<ItemKey> = t2
         .distinct_order

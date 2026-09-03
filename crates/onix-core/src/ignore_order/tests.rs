@@ -1,3 +1,4 @@
+use super::IgnoreOrderMemo;
 use crate::diff::DiffOptions;
 use crate::test_support::{cobj, ctup, cv, cvec};
 use crate::value::Value as CValue;
@@ -30,7 +31,7 @@ fn count_diff_leaves(
     depth: usize,
     opts: &DiffOptions,
 ) -> usize {
-    super::distance::count_diff_leaves(&cv(a), &cv(b), depth, opts, &super::DistanceMemo::new())
+    super::distance::count_diff_leaves(&cv(a), &cv(b), depth, opts, &super::IgnoreOrderMemo::new())
 }
 fn count_object_diff_leaves(
     a: &serde_json::Map<String, serde_json::Value>,
@@ -43,7 +44,7 @@ fn count_object_diff_leaves(
         &cobj(b),
         depth,
         opts,
-        &super::DistanceMemo::new(),
+        &super::IgnoreOrderMemo::new(),
     )
 }
 fn count_array_diff_leaves(
@@ -57,14 +58,11 @@ fn count_array_diff_leaves(
         &cvec(b),
         depth,
         opts,
-        &super::DistanceMemo::new(),
+        &super::IgnoreOrderMemo::new(),
     )
 }
 fn item_key(value: &serde_json::Value) -> super::hash::ItemKey {
-    item_key_compact(&cv(value))
-}
-fn item_key_compact(value: &CValue) -> super::hash::ItemKey {
-    super::hash::item_key(value)
+    super::hash::item_key(&cv(value), &IgnoreOrderMemo::new())
 }
 
 fn ignore_order_diff(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
@@ -1125,7 +1123,7 @@ fn rough_distance_structural_formula_is_diff_length_over_summed_rough_lengths() 
         CUTOFF_DISTANCE_FOR_PAIRS,
         0,
         &opts,
-        &super::DistanceMemo::new(),
+        &super::IgnoreOrderMemo::new(),
     );
     assert!((d - 1.0 / 7.0).abs() < 1e-12, "expected 1/7, got {d}");
 }
@@ -1159,7 +1157,7 @@ fn rough_distance_depth_boundary_is_exact() {
         CUTOFF_DISTANCE_FOR_PAIRS,
         0,
         &opts,
-        &super::DistanceMemo::new(),
+        &super::IgnoreOrderMemo::new(),
     );
     assert_eq!(d, 0.0);
 }
@@ -1257,9 +1255,9 @@ proptest! {
             ignore_order: true,
             max_depth: 1_000,
         };
-        let with = crate::diff::diff_with_options_memo(&a, &b, &opts, &super::DistanceMemo::new());
+        let with = crate::diff::diff_with_options_memo(&a, &b, &opts, &super::IgnoreOrderMemo::new());
         let without =
-            crate::diff::diff_with_options_memo(&a, &b, &opts, &super::DistanceMemo::disabled());
+            crate::diff::diff_with_options_memo(&a, &b, &opts, &super::IgnoreOrderMemo::disabled());
         prop_assert_eq!(
             with.map(|report| report.to_json_value().to_string()),
             without.map(|report| report.to_json_value().to_string()),
@@ -1344,8 +1342,8 @@ fn a_tuple_and_a_list_with_the_same_items_never_hash_match() {
     // as equal: the two items pair by distance and the type change is
     // reported.
     assert_ne!(
-        item_key_compact(&ctup(&[json!(1), json!(2)])),
-        item_key_compact(&cv(&json!([1, 2]))),
+        super::hash::item_key(&ctup(&[json!(1), json!(2)]), &IgnoreOrderMemo::new()),
+        super::hash::item_key(&cv(&json!([1, 2])), &IgnoreOrderMemo::new()),
     );
     assert_eq!(
         ignore_order_diff_compact(
@@ -1416,20 +1414,263 @@ fn a_tuple_and_a_list_whose_items_differ_fall_back_to_raw_add_remove() {
     );
 }
 
+// --- DeepHash's shared cache: Python-equal hashable tuples collide ---------
+//
+// `DeepHash` keys its cache by the object itself and shares one cache across
+// both hashtables of a run, so a hashable tuple inherits the digest of an
+// earlier Python-equal one (see `super::memo`'s "Tuple digests" section for
+// the source citations). Every expected value below was confirmed against a
+// real `deepdiff==9.1.0` probe.
+
 #[test]
-fn tuple_and_list_leaf_lengths_follow_the_sequence_coercion_rule() {
-    // The rule directly: `list((1, 2)) == [1, 2]` omits `new_value` (leaf
-    // length 1), and it applies in both directions; differing items keep it.
+fn a_hashable_tuple_inherits_the_digest_of_an_earlier_python_equal_one() {
+    for (a, b) in [
+        (ctup(&[json!(1)]), ctup(&[json!(1.0)])),
+        (ctup(&[json!(1.0)]), ctup(&[json!(1)])),
+        (ctup(&[json!(true)]), ctup(&[json!(1)])),
+        (ctup(&[json!(0)]), ctup(&[json!(false)])),
+        (
+            ctup(&[json!("a"), json!(1)]),
+            ctup(&[json!("a"), json!(1.0)]),
+        ),
+    ] {
+        assert_eq!(
+            ignore_order_diff_compact(&carr(vec![a]), &carr(vec![b])),
+            json!({}),
+        );
+    }
+}
+
+#[test]
+fn the_digest_collision_reaches_tuples_nested_inside_other_containers() {
+    // The cache is consulted at every tuple node, so a tuple wrapped in
+    // another tuple, in a dict, or in a list collides just the same.
+    let wrapped = |item: CValue| {
+        (
+            carr(vec![CValue::Tuple(vec![item.clone()].into_boxed_slice())]),
+            carr(vec![cobj_of("k", item.clone())]),
+            carr(vec![carr(vec![item])]),
+        )
+    };
+    let (a_tuple, a_dict, a_list) = wrapped(ctup(&[json!(1)]));
+    let (b_tuple, b_dict, b_list) = wrapped(ctup(&[json!(1.0)]));
+
+    assert_eq!(ignore_order_diff_compact(&a_tuple, &b_tuple), json!({}));
+    assert_eq!(ignore_order_diff_compact(&a_dict, &b_dict), json!({}));
+    assert_eq!(ignore_order_diff_compact(&a_list, &b_list), json!({}));
+}
+
+#[test]
+fn colliding_tuples_in_one_list_collapse_to_a_single_distinct_item() {
+    // `[(1,), (1.0,)]` holds two items with one digest between them, so
+    // removing the whole list reports one removal, at the first index.
     assert_eq!(
-        super::distance::type_change_leaf_length(&ctup(&[json!(1), json!(2)]), &cv(&json!([1, 2])),),
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1)]), ctup(&[json!(1.0)])]),
+            &carr(vec![]),
+        ),
+        json!({"iterable_item_removed": {"root[0]": [1]}})
+    );
+}
+
+#[test]
+fn an_unhashable_tuple_never_collides() {
+    // A tuple holding a list or a dict cannot be a Python dict key, so it
+    // misses the cache entirely and keeps its own type-strict digest.
+    let list_inside = |first: serde_json::Value| {
+        carr(vec![CValue::Tuple(
+            vec![cv(&first), cv(&json!([1]))].into_boxed_slice(),
+        )])
+    };
+    assert_eq!(
+        ignore_order_diff_compact(&list_inside(json!(1)), &list_inside(json!(1.0))),
+        json!({"type_changes": {"root[0][0]": {
+            "old_type": "int", "new_type": "float",
+            "old_value": 1, "new_value": 1.0,
+        }}})
+    );
+
+    let dict_inside = |first: serde_json::Value| {
+        carr(vec![CValue::Tuple(
+            vec![cv(&first), cv(&json!({"k": 1}))].into_boxed_slice(),
+        )])
+    };
+    assert_eq!(
+        ignore_order_diff_compact(&dict_inside(json!(1)), &dict_inside(json!(1.0))),
+        json!({"type_changes": {"root[0][0]": {
+            "old_type": "int", "new_type": "float",
+            "old_value": 1, "new_value": 1.0,
+        }}})
+    );
+}
+
+#[test]
+fn the_collision_is_positional_not_the_order_insensitive_content_digest() {
+    // Python tuple equality is positional, so a reordered pair of the other
+    // numeric type does NOT inherit: `(1, 2)` and `(2.0, 1.0)` are neither
+    // Python-equal nor equal in content digest (int keys vs float keys).
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1), json!(2)])]),
+            &carr(vec![ctup(&[json!(2.0), json!(1.0)])]),
+        ),
+        json!({"values_changed": {"root[0]": {
+            "new_value": [2.0, 1.0], "old_value": [1, 2],
+        }}})
+    );
+}
+
+#[test]
+fn which_member_of_an_equality_class_is_hashed_first_is_observable() {
+    // The content digest deduplicates, so `(1, 1)` and `(1,)` share one. The
+    // float tuple is not Python-equal to `(1, 1)`, so when it is hashed first
+    // it fixes the class digest as the float one and the two no longer match
+    // — real DeepDiff behaves exactly this way round.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1)])]),
+            &carr(vec![ctup(&[json!(1), json!(1)])]),
+        ),
+        json!({})
+    );
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1.0)])]),
+            &carr(vec![ctup(&[json!(1), json!(1)])]),
+        ),
+        json!({"type_changes": {"root[0][0]": {
+            "old_type": "float", "new_type": "int",
+            "old_value": 1.0, "new_value": 1,
+        }}})
+    );
+}
+
+#[test]
+fn a_collided_element_drops_out_of_its_parents_own_comparison() {
+    // The tuples at index 0 of each paired item match on their inherited
+    // digest, so only the sibling difference is reported.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![CValue::Tuple(
+                vec![ctup(&[json!(1)]), cv(&json!("a"))].into_boxed_slice()
+            )]),
+            &carr(vec![CValue::Tuple(
+                vec![ctup(&[json!(1.0)]), cv(&json!("b"))].into_boxed_slice()
+            )]),
+        ),
+        json!({"values_changed": {"root[0][1]": {
+            "new_value": "b", "old_value": "a",
+        }}})
+    );
+}
+
+// --- the list(t1) == t2 coercion test uses Python equality ----------------
+
+#[test]
+fn a_tuple_and_a_list_whose_items_are_python_equal_still_pair() {
+    // `list((1,)) == [1.0]` in Python, so DeepDiff's delta view omits
+    // new_value and the pair stays inside the pairing cutoff.
+    for (a, b) in [
+        (ctup(&[json!(1)]), cv(&json!([1.0]))),
+        (ctup(&[json!(1), json!(2)]), cv(&json!([1.0, 2.0]))),
+        (ctup(&[json!(1)]), cv(&json!([true]))),
+        (ctup(&[json!(0)]), cv(&json!([false]))),
+    ] {
+        let expected_old = a.to_serde_json();
+        let expected_new = b.to_serde_json();
+        assert_eq!(
+            ignore_order_diff_compact(&carr(vec![a]), &carr(vec![b])),
+            json!({"type_changes": {"root[0]": {
+                "old_type": "tuple", "new_type": "list",
+                "old_value": expected_old, "new_value": expected_new,
+            }}})
+        );
+    }
+}
+
+#[test]
+fn python_equality_keeps_container_kinds_distinct_inside_the_coercion_test() {
+    // `list((1, (2,))) == [1, [2]]` is False in Python — a tuple never
+    // equals a list, at any depth — so this pair keeps new_value, misses the
+    // cutoff, and reports as a whole-value change instead of a type change.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![CValue::Tuple(
+                vec![cv(&json!(1)), ctup(&[json!(2)])].into_boxed_slice()
+            )]),
+            &cv(&json!([[1, [2]]])),
+        ),
+        json!({"values_changed": {"root[0]": {
+            "new_value": [1, [2]], "old_value": [1, [2]],
+        }}})
+    );
+
+    // With a real list in the same position it does equal, and pairs.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![CValue::Tuple(
+                vec![cv(&json!(1)), cv(&json!([2]))].into_boxed_slice()
+            )]),
+            &cv(&json!([[1, [2]]])),
+        ),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "tuple", "new_type": "list",
+            "old_value": [1, [2]], "new_value": [1, [2]],
+        }}})
+    );
+}
+
+#[test]
+fn tuple_and_list_leaf_lengths_follow_python_equality() {
+    // The rule directly, at its boundary: Python-equal items omit new_value
+    // (leaf length 1) in either direction; a differing item keeps it.
+    assert_eq!(
+        super::distance::type_change_leaf_length(&ctup(&[json!(1)]), &cv(&json!([1.0]))),
         1
     );
     assert_eq!(
-        super::distance::type_change_leaf_length(&cv(&json!([1, 2])), &ctup(&[json!(1), json!(2)]),),
+        super::distance::type_change_leaf_length(&cv(&json!([1.0])), &ctup(&[json!(1)])),
         1
     );
     assert_eq!(
-        super::distance::type_change_leaf_length(&ctup(&[json!(1), json!(2)]), &cv(&json!([1, 3])),),
+        super::distance::type_change_leaf_length(&ctup(&[json!(1)]), &cv(&json!([2]))),
+        2
+    );
+    assert_eq!(
+        super::distance::type_change_leaf_length(&ctup(&[json!(1), json!(2)]), &cv(&json!([1, 3]))),
         3
     );
+
+    // A dict element compares by keys and by Python-equal values, so an equal
+    // dict omits new_value while a changed value or a changed key keeps it.
+    assert_eq!(
+        super::distance::type_change_leaf_length(
+            &ctup(&[json!({"k": 1})]),
+            &cv(&json!([{"k": 1.0}]))
+        ),
+        1
+    );
+    assert_eq!(
+        super::distance::type_change_leaf_length(
+            &ctup(&[json!({"k": 1})]),
+            &cv(&json!([{"k": 2}]))
+        ),
+        2
+    );
+    assert_eq!(
+        super::distance::type_change_leaf_length(
+            &ctup(&[json!({"k": 1})]),
+            &cv(&json!([{"j": 1}]))
+        ),
+        2
+    );
+}
+
+/// A compact one-key object, for a test that needs a dict around a value a
+/// `serde_json` literal cannot express.
+fn cobj_of(key: &str, value: CValue) -> CValue {
+    CValue::Object(crate::value::Object::from_pairs(vec![(
+        std::sync::Arc::from(key),
+        value,
+    )]))
 }
