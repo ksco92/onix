@@ -236,3 +236,20 @@ fn invalid_json_input_exits_two() {
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr_str(&output).contains("failed to parse"));
 }
+
+#[test]
+fn a_tagged_object_is_diffed_as_the_ordinary_dict_it_is() {
+    // `$tuple` and its siblings are a convention of the golden corpus's
+    // fixture files (see tests/golden/README.md), never of the JSON the
+    // product reads: the CLI must diff this as a one-key dict.
+    let a = write_temp_file("tagged_a.json", r#"{"$tuple": [1]}"#);
+    let b = write_temp_file("tagged_b.json", r#"{"$tuple": [2]}"#);
+
+    let output = run_onix(&["diff", a.to_str().unwrap(), b.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout_str(&output).trim_end(),
+        r#"{"values_changed":{"root['$tuple'][0]":{"new_value":2,"old_value":1}}}"#
+    );
+}

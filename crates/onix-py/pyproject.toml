@@ -38,6 +38,12 @@ Repository = "https://github.com/ksco92/onix"
 # the abi3 wheel this crate builds works identically across all of them.
 test = ["pytest>=8", "deepdiff==9.1.0 ; python_version >= '3.10'"]
 
+[tool.pytest.ini_options]
+# `scripts/golden_tags.py` (repo root) defines the golden corpus's tagged
+# encoding for values JSON cannot express; tests/test_golden_parity.py decodes
+# fixtures with it rather than keeping a second copy of the same rule.
+pythonpath = ["../../scripts"]
+
 [tool.maturin]
 bindings = "pyo3"
 module-name = "deepdiff_rs"

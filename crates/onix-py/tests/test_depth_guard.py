@@ -58,6 +58,22 @@ def _nested_list(depth: int, leaf: JsonValue) -> JsonValue:
     return value
 
 
+def _nested_tuple(depth: int, leaf: JsonValue) -> JsonValue:
+    """
+    Build a tuple nested `depth` levels deep around `leaf`, iteratively.
+
+    :param depth: How many tuple layers to wrap `leaf` in.
+    :param leaf: The innermost value.
+    :return: `leaf` wrapped in `depth` single-item tuples.
+    """
+    value = leaf
+
+    for _ in range(depth):
+        value = (value,)
+
+    return value
+
+
 def test_deep_unequal_input_raises_max_depth_error_not_a_crash() -> None:
     """An adversarially deep, unequal pair raises MaxDepthError, never crashes."""
     a = _nested_list(100_000, leaf=1)
@@ -75,6 +91,24 @@ def test_input_deeper_than_max_depth_raises_at_conversion_time() -> None:
 
     with pytest.raises(MaxDepthError):
         DeepDiff(a, b, max_depth=max_depth)
+
+
+def test_deep_tuple_nesting_raises_max_depth_error_not_a_crash() -> None:
+    """Tuples nest through the same conversion walk as lists, so the guard covers them."""
+    a = _nested_tuple(DEFAULT_MAX_DEPTH + 1_000, leaf=1)
+    b = _nested_tuple(DEFAULT_MAX_DEPTH + 1_000, leaf=2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b)
+
+
+def test_deep_tuple_nesting_past_a_raised_max_depth_raises_at_conversion_time() -> None:
+    """A tuple nest past a raised (ceiling-level) max_depth still raises rather than crashing."""
+    a = _nested_tuple(MAX_DEPTH_CEILING + 1_000, leaf=1)
+    b = _nested_tuple(MAX_DEPTH_CEILING + 1_000, leaf=2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b, max_depth=MAX_DEPTH_CEILING)
 
 
 def test_max_depth_error_is_a_value_error_subclass() -> None:
@@ -186,6 +220,27 @@ def test_near_ceiling_lists_and_dicts_return_correct_diff() -> None:
     assert "OK" in result.stdout
 
 
+def test_near_ceiling_tuples_return_correct_diff() -> None:
+    """Unequal tuples nested near the ceiling diff correctly (no crash), like lists and dicts."""
+    result = _run_isolated(
+        f"""
+        import json
+        depth = {MAX_DEPTH_CEILING} - 1_000
+        a, b = 1, 2
+        for _ in range(depth):
+            a, b = (a,), (b,)
+
+        report = json.loads(DeepDiff(a, b, max_depth={MAX_DEPTH_CEILING}).to_json())
+        (path, delta), = report["values_changed"].items()
+        assert path.count("[") == depth, path.count("[")
+        assert delta == {{"new_value": 2, "old_value": 1}}, delta
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
 def test_deep_report_lifecycle_to_dict_then_del_does_not_crash() -> None:
     """A deep diff report survives to_dict() and del (its deep Value drops safely)."""
     result = _run_isolated(
@@ -243,7 +298,7 @@ def test_cross_arg_error_drops_deep_first_arg_without_crashing() -> None:
             return v
         t1 = deep({MAX_DEPTH_CEILING} - 1)
         try:
-            DeepDiff(t1, {{"x": (1, 2)}}, max_depth={MAX_DEPTH_CEILING})
+            DeepDiff(t1, {{"x": {{1, 2}}}}, max_depth={MAX_DEPTH_CEILING})
         except TypeError:
             print("OK")
         else:
@@ -255,7 +310,7 @@ def test_cross_arg_error_drops_deep_first_arg_without_crashing() -> None:
 
 
 def test_intra_arg_error_after_deep_sibling_does_not_crash() -> None:
-    """A dict with a deep legal sibling then an unsupported sibling raises cleanly."""
+    """A dict with a deep legal sibling then an unsupported sibling (a set) raises cleanly."""
     result = _run_isolated(
         f"""
         def deep(d):
@@ -263,7 +318,7 @@ def test_intra_arg_error_after_deep_sibling_does_not_crash() -> None:
             for _ in range(d):
                 v = {{"a": v, "b": 2}}
             return v
-        t1 = {{"deep": deep({MAX_DEPTH_CEILING} - 1), "bad": (1, 2)}}
+        t1 = {{"deep": deep({MAX_DEPTH_CEILING} - 1), "bad": {{1, 2}}}}
         try:
             DeepDiff(t1, {{}}, max_depth={MAX_DEPTH_CEILING})
         except TypeError:
@@ -293,7 +348,7 @@ def test_cross_arg_error_from_small_stack_thread_does_not_crash() -> None:
         # run ONLY the DeepDiff call and its exception handling, so t1 is passed
         # in by reference and kept alive here until after the thread joins.
         t1 = deep({MAX_DEPTH_CEILING} - 1)
-        bad = {{"x": (1, 2)}}
+        bad = {{"x": {{1, 2}}}}
         outcome = []
         def work():
             try:
