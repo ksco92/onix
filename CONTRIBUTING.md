@@ -206,12 +206,12 @@ cd crates/onix-py
 maturin build --release
 ```
 
-Publishing to PyPI is not yet set up (it needs the maintainer's PyPI
-credentials or trusted-publishing configuration). Once ready, the command is:
-
-```sh
-maturin publish --release
-```
+Publishing `deepdiff-rs` to PyPI is automated: merging a workspace version
+bump to `main` is the release action. `.github/workflows/publish.yml` builds
+the wheel matrix (Linux x86_64/aarch64, macOS arm64/x86_64, Windows x64, plus
+the sdist) and publishes via PyPI trusted publishing (OIDC, no stored token)
+whenever the `Cargo.toml` version isn't already on PyPI; otherwise it's a
+no-op. There is no separate tag or release step.
 
 The `onix-core`, `onix-cli`, and `onix-py` crates all set `publish = false` in
 their manifests; crates.io publishing is a later, deliberate decision.

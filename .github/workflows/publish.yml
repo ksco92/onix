@@ -1,0 +1,220 @@
+name: Publish to PyPI
+
+# Runs on every push to `main` (i.e. every PR merge) and on manual dispatch.
+# Publishes the `deepdiff-rs` wheels (and sdist) for the version currently in
+# the workspace `Cargo.toml` IF AND ONLY IF that exact version is not already
+# on PyPI. A PR that forgets to bump the version becomes a cheap no-op here
+# once the wheel matrix confirms nothing changed; catching a missing bump is
+# a review-time concern, not this workflow's.
+#
+# `deepdiff-rs` is a PyO3 extension module (crate `onix-py`) built with
+# maturin, published as a single abi3 wheel per platform (Python 3.9+, one
+# wheel covers every interpreter) plus an sdist. Publishing uses trusted
+# publishing (OIDC): pypa/gh-action-pypi-publish exchanges this workflow's
+# GitHub OIDC token for a short-lived PyPI credential. No `PYPI_TOKEN`
+# secret. Trust is configured at pypi.org -> deepdiff-rs -> Publishing,
+# scoped to repo ksco92/onix, workflow publish.yml, branch main, no
+# environment. Until that's configured, the publish job fails; the version
+# check and wheel builds still succeed and upload their artifacts.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege by default; the publish job alone elevates to id-token:
+# write for its OIDC exchange with PyPI.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Version check -- reads the workspace version once and checks whether
+  # PyPI already has it. Every other job is skip-conditional on this one,
+  # so a version that's already published costs one cheap HTTP call instead
+  # of a full wheel matrix.
+  # ---------------------------------------------------------------------
+  version_check:
+    name: Check PyPI for current version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Compare workspace version against the PyPI registry
+        id: check
+        run: |
+          set -euo pipefail
+
+          local_version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')
+          if [ -z "$local_version" ]; then
+            echo "::error::Could not read [workspace.package].version from Cargo.toml"
+            exit 1
+          fi
+          echo "version=$local_version" >> "$GITHUB_OUTPUT"
+
+          http_status=$(curl -s -o /tmp/pypi.json -w '%{http_code}' https://pypi.org/pypi/deepdiff-rs/json)
+
+          if [ "$http_status" = "404" ]; then
+            # Project doesn't exist on PyPI yet -- this is the first release.
+            registry_has_version=false
+          elif [ "$http_status" = "200" ]; then
+            registry_has_version=$(python3 -c "import json; data = json.load(open('/tmp/pypi.json')); print('true' if '$local_version' in data.get('releases', {}) else 'false')")
+          else
+            echo "::error::Unexpected PyPI response ($http_status) while checking deepdiff-rs"
+            exit 1
+          fi
+
+          if [ "$registry_has_version" = "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::deepdiff-rs $local_version is already on PyPI -- skipping publish."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::deepdiff-rs $local_version is not on PyPI -- building and publishing."
+          fi
+
+  # ---------------------------------------------------------------------
+  # Wheel matrix -- one abi3 wheel per platform. manylinux cross builds for
+  # both Linux architectures run on the default x86_64 runner: maturin-action
+  # picks a manylinux-cross Docker image (a cross-compiling toolchain, not a
+  # foreign-arch image) for aarch64, so no QEMU step is needed. macOS builds
+  # both Apple Silicon and Intel wheels by cross-compiling from one arm64
+  # runner, which Xcode's toolchain supports directly.
+  # ---------------------------------------------------------------------
+  linux:
+    name: Wheel (linux ${{ matrix.target }})
+    needs: version_check
+    if: needs.version_check.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: crates/onix-py
+          target: ${{ matrix.target }}
+          manylinux: 2_28
+          maturin-version: v1.15.0
+          args: --release --out dist --compatibility pypi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: crates/onix-py/dist/*.whl
+          if-no-files-found: error
+
+  macos:
+    name: Wheel (macos ${{ matrix.target }})
+    needs: version_check
+    if: needs.version_check.outputs.skip == 'false'
+    runs-on: macos-14
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch @ 2026-08-05
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: crates/onix-py
+          target: ${{ matrix.target }}
+          maturin-version: v1.15.0
+          args: --release --out dist --compatibility pypi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: crates/onix-py/dist/*.whl
+          if-no-files-found: error
+
+  windows:
+    name: Wheel (windows x64)
+    needs: version_check
+    if: needs.version_check.outputs.skip == 'false'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch @ 2026-08-05
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: crates/onix-py
+          target: x64
+          maturin-version: v1.15.0
+          args: --release --out dist --compatibility pypi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wheels-windows-x64
+          path: crates/onix-py/dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: Source distribution
+    needs: version_check
+    if: needs.version_check.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch @ 2026-08-05
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: crates/onix-py
+          command: sdist
+          maturin-version: v1.15.0
+          args: --out dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sdist
+          path: crates/onix-py/dist/*.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Publish -- depends on the version check AND every build job, so a single failed
+  # wheel blocks publishing an incomplete release.
+  # ---------------------------------------------------------------------
+  publish:
+    name: Publish to PyPI
+    needs: [version_check, linux, macos, windows, sdist]
+    if: needs.version_check.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Required for trusted publishing: PyPI mints a short-lived credential
+      # from this GitHub OIDC token, no PYPI_TOKEN secret involved.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: "wheels-*"
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sdist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
