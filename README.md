@@ -112,25 +112,31 @@ Pass `--ignore-order` to compare every list by value instead of by position, mir
 
 Two committed, regenerable reports back the numbers below; every figure here is copied verbatim from them.
 
-The Python bindings against real `deepdiff` on **live Python objects**, the number a real caller pays (source: [`crates/onix-py/benchmarks/bench_bindings.py`](crates/onix-py/benchmarks/bench_bindings.py), macOS 26.5.1, Apple M5 Max, median of 11 isolated subprocess runs per side):
+The Python bindings against real `deepdiff` on **live Python objects**, the number a real caller pays (source: [`crates/onix-py/benchmarks/bench_bindings.py`](crates/onix-py/benchmarks/bench_bindings.py), macOS 26.5.1, Apple M5 Max, median of 11 isolated subprocess runs per side, run on 2026-09-04):
 
 | Shape | deepdiff | deepdiff_rs | Speedup |
 | --- | --- | --- | --- |
-| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 3128.94ms | 82.57ms | **37.89x** |
-| &nbsp;&nbsp;peak RSS | 228.0 MB | 141.2 MB | **1.61x** |
-| &nbsp;&nbsp;CPU seconds | 3.128 s | 0.083 s | **37.88x** |
-| Heterogeneous API-payload records, n=20,000 (live objects) | 3466.52ms | 149.18ms | **23.24x** |
-| &nbsp;&nbsp;peak RSS | 117.5 MB | 148.3 MB | **0.79x** |
-| &nbsp;&nbsp;CPU seconds | 3.465 s | 0.149 s | **23.24x** |
-| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 3133.45ms | 83.16ms | **37.68x** |
-| &nbsp;&nbsp;peak RSS | 228.9 MB | 141.7 MB | **1.62x** |
-| &nbsp;&nbsp;CPU seconds | 3.131 s | 0.083 s | **37.68x** |
-| Same API-payload shape, via `diff_json` (JSON-string path) | 4568.33ms | 86.33ms | **52.92x** |
-| &nbsp;&nbsp;peak RSS | 139.0 MB | 141.7 MB | **0.98x** |
-| &nbsp;&nbsp;CPU seconds | 4.566 s | 0.086 s | **52.90x** |
-| Same API-payload shape, both tools reading two JSON files from disk | 4571.28ms | 85.35ms | **53.56x** |
-| &nbsp;&nbsp;peak RSS | 139.0 MB | 141.8 MB | **0.98x** |
-| &nbsp;&nbsp;CPU seconds | 4.569 s | 0.085 s | **53.54x** |
+| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 3164.29ms | 89.08ms | **35.52x** |
+| &nbsp;&nbsp;peak RSS | 228.4 MB | 141.5 MB | **1.61x** |
+| &nbsp;&nbsp;CPU seconds | 3.162 s | 0.089 s | **35.50x** |
+| Heterogeneous API-payload records, n=20,000 (live objects) | 3451.01ms | 151.84ms | **22.73x** |
+| &nbsp;&nbsp;peak RSS | 118.1 MB | 147.7 MB | **0.80x** |
+| &nbsp;&nbsp;CPU seconds | 3.449 s | 0.152 s | **22.73x** |
+| Typed records (datetime/tuple/set fields), n=10,000 (live objects) | 792.96ms | 47.87ms | **16.57x** |
+| &nbsp;&nbsp;peak RSS | 60.2 MB | 62.1 MB | **0.97x** |
+| &nbsp;&nbsp;CPU seconds | 0.792 s | 0.048 s | **16.56x** |
+| Same typed-records shape, `ignore_order` (live objects) | 60483.86ms | 1272.04ms | **47.55x** |
+| &nbsp;&nbsp;peak RSS | 112.1 MB | 1005.6 MB | **0.11x** |
+| &nbsp;&nbsp;CPU seconds | 60.452 s | 1.271 s | **47.55x** |
+| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 3168.05ms | 86.95ms | **36.44x** |
+| &nbsp;&nbsp;peak RSS | 228.7 MB | 142.3 MB | **1.61x** |
+| &nbsp;&nbsp;CPU seconds | 3.166 s | 0.087 s | **36.46x** |
+| Same API-payload shape, via `diff_json` (JSON-string path) | 4568.00ms | 85.37ms | **53.51x** |
+| &nbsp;&nbsp;peak RSS | 139.5 MB | 140.9 MB | **0.99x** |
+| &nbsp;&nbsp;CPU seconds | 4.566 s | 0.085 s | **53.50x** |
+| Same API-payload shape, both tools reading two JSON files from disk | 4565.46ms | 89.43ms | **51.05x** |
+| &nbsp;&nbsp;peak RSS | 139.5 MB | 141.0 MB | **0.99x** |
+| &nbsp;&nbsp;CPU seconds | 4.564 s | 0.089 s | **51.03x** |
 
 The engine's own diff-only time and peak resident memory against pinned `deepdiff` 9.1.0 (source: [`perf/RESULTS.md`](perf/RESULTS.md), same machine, median over tier-appropriate runs, diff time excluding process startup and JSON parsing on both sides):
 
