@@ -48,6 +48,30 @@ fn date_new_rejects_impossible_calendar_dates() {
 }
 
 #[test]
+fn date_new_accepts_every_months_real_last_day() {
+    // The rejection boundary above (day 31 in a 30-day month, day 29 in a
+    // non-leap February) is satisfied whether `days_in_month` returns its
+    // real value or 0 for that month, so it alone cannot tell a deleted
+    // match arm from a correct one; each month's real last day itself must
+    // be accepted.
+    for month in [4, 6, 9, 11] {
+        assert!(
+            Date::new(2024, month, 30).is_some(),
+            "month {month}, day 30"
+        );
+    }
+    for month in [1, 3, 5, 7, 8, 10, 12] {
+        assert!(
+            Date::new(2024, month, 31).is_some(),
+            "month {month}, day 31"
+        );
+    }
+    // The plain (non-leap-year) `2 => 28` arm, distinct from the
+    // `is_leap_year` guarded one just above it.
+    assert!(Date::new(2023, 2, 28).is_some());
+}
+
+#[test]
 fn date_accessors_return_the_constructed_fields() {
     let value = date(2024, 3, 17);
 
@@ -74,6 +98,25 @@ fn date_from_ordinal_inverts_ordinal_across_the_python_range() {
     }
     assert_eq!(Date::from_ordinal(738_886), Some(date(2024, 1, 1)));
     assert_eq!(Date::from_ordinal(1), Some(date(1, 1, 1)));
+}
+
+#[test]
+fn date_from_ordinal_inverts_every_ordinal_in_the_python_range() {
+    // The four hand-picked ordinals above all land in the first ~100 years
+    // of their 400-year "era" (Hinnant's `civil_from_days` correction
+    // terms), where the era's `/36_524`/`/146_096` century/era corrections
+    // are `0` regardless of whether they are added or subtracted -- mutation
+    // testing found this leaves an `+`/`-` flip on either correction term
+    // invisible. Exhaustive coverage catches it (and anything else) at
+    // every era position, including the one day in 400 years the
+    // `/146_096` term is actually non-zero.
+    for ordinal in 1_i64..=3_652_059 {
+        assert_eq!(
+            Date::from_ordinal(ordinal).expect("in range").ordinal(),
+            ordinal,
+            "ordinal {ordinal} did not round-trip"
+        );
+    }
 }
 
 #[test]

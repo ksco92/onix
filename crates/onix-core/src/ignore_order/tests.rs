@@ -999,6 +999,24 @@ fn signed_zero_floats_share_a_key_but_stay_distinct_from_the_integer_zero() {
 }
 
 #[test]
+fn signed_zero_floats_share_a_set_member_key_too() {
+    // The same normalization, but through `set_member_key`'s own
+    // `number_key` (a bare top-level number is special-cased there rather
+    // than routed through `item_key`): confirmed against `deepdiff==9.1.0`,
+    // `DeepDiff({0.0}, {-0.0})` is `{}` -- two otherwise-unrelated sets, each
+    // holding one signed zero, are the same set. A `+0.0` normalization
+    // mutated away (e.g. `f + 0.0` -> `f - 0.0`, the identity on every
+    // float) would keep the two bit patterns distinct here.
+    let key = super::set_member_key;
+    assert_eq!(key(&cv(&json!(0.0))), key(&cv(&json!(-0.0))));
+    assert_ne!(key(&cv(&json!(2.0))), key(&cv(&json!(2))));
+    // A `f + 0.0` -> `f * 0.0` mutant would collapse every float to `0.0`'s
+    // bit pattern regardless of its own value; two distinct nonzero floats
+    // must keep distinct keys.
+    assert_ne!(key(&cv(&json!(1.5))), key(&cv(&json!(2.5))));
+}
+
+#[test]
 fn signed_zero_floats_dedup_to_one_removal_under_ignore_order() {
     // Full-diff regression for the signed-zero item_key normalization (see
     // `super::hash::item_key`'s float branch for the deepdiff-9.1.0 provenance).
@@ -1160,6 +1178,51 @@ fn rough_distance_depth_boundary_is_exact() {
         &super::IgnoreOrderMemo::new(),
     );
     assert_eq!(d, 0.0);
+}
+
+/// Pins the exact scale `distance_family` measures a `datetime` pair by:
+/// its instant in *seconds* (microseconds divided by `1_000_000`), the same
+/// value `DeepDiff`'s own `_get_datetime_distance` reads from
+/// `datetime.timestamp()`. Compares `rough_distance`'s actual output
+/// against the identical formula computed independently from `instant()`
+/// here, bypassing `distance_family` entirely.
+///
+/// Catches a `/` mutated to `%` (a non-linear rescale, changing which
+/// candidates fall within the pairing cutoff). It does **not**, and
+/// provably cannot, catch a `/` mutated to `*`: `numeric_distance`'s own
+/// formula, `cutoff * (n1 - n2) / (n1 + n2)`, is invariant under scaling
+/// both operands by the same nonzero constant (the constant cancels in the
+/// ratio), and `timestamp` here is used nowhere else — so `/ 1_000_000.0`
+/// and `* 1_000_000.0` are provably equivalent for every input this
+/// function can receive, not merely untested.
+#[test]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "mirrors distance_family's own allow: Python's int-to-float timestamp() \
+              conversion is likewise inexact past 2^53"
+)]
+fn rough_distance_datetime_pair_measures_seconds_not_microseconds() {
+    let a = cdt_at(2024, 1, 1, 0, 0, 0, 0, None);
+    let b = cdt_at(2024, 1, 1, 0, 0, 10, 0, None);
+    let (CValue::DateTime(a_dt), CValue::DateTime(b_dt)) = (&a, &b) else {
+        panic!("cdt_at builds a DateTime")
+    };
+    let a_seconds = a_dt.instant() as f64 / 1_000_000.0;
+    let b_seconds = b_dt.instant() as f64 / 1_000_000.0;
+    let expected = numeric_distance(a_seconds, b_seconds, CUTOFF_DISTANCE_FOR_PAIRS);
+
+    let d = super::distance::rough_distance(
+        &a,
+        &b,
+        CUTOFF_DISTANCE_FOR_PAIRS,
+        0,
+        &DiffOptions::default(),
+        &super::IgnoreOrderMemo::new(),
+    );
+    assert!(
+        (d - expected).abs() < 1e-12,
+        "expected {expected} (seconds-scale), got {d}"
+    );
 }
 
 // --- rough_length / item_length -----------------------------------
@@ -1471,6 +1534,25 @@ fn colliding_tuples_in_one_list_collapse_to_a_single_distinct_item() {
         ),
         json!({"iterable_item_removed": {"root[0]": [1]}})
     );
+}
+
+#[test]
+fn a_tuple_digest_cache_hit_reads_its_own_index_not_the_first_ones() {
+    // Three hashable tuples share one run's cache: `(9,)` gets index 0
+    // (fresh), `(1,)` gets index 1 (fresh), and `(1.0,)` -- Python-equal to
+    // `(1,)` -- is a cache HIT reading `tuple_digests[id.index()]`. A
+    // `TupleId::index` mutant that always returns `0` would make every
+    // cache-hit read index 0's digest (`(9,)`'s) instead of its own tuple's
+    // -- invisible for a repeat of the FIRST tuple ever hashed (index 0
+    // already equals 0), so this needs a repeat of the SECOND one, on
+    // both sides of the diff (the shared memo spans the whole run).
+    let a = carr(vec![
+        ctup(&[json!(9)]),
+        ctup(&[json!(1)]),
+        ctup(&[json!(1.0)]),
+    ]);
+    let b = carr(vec![ctup(&[json!(9)]), ctup(&[json!(1)])]);
+    assert_eq!(ignore_order_diff_compact(&a, &b), json!({}));
 }
 
 #[test]
@@ -2176,6 +2258,13 @@ fn a_set_type_change_omits_its_new_value_when_the_constructor_reproduces_it() {
 
     // Not reproduced: the entry additionally costs `new_value`'s own length.
     assert_eq!(leaves(&cset(&items), &cfrozen(&[json!(1), json!(3)])), 3);
+
+    // A proper subset must not be "reproduced" either: `unordered_python_eq`
+    // requires membership BOTH ways, not either way. `{1}` (new) has every
+    // member in `{1, 2}` (old), but not the reverse, so the constructor does
+    // not reproduce `old` as `new` -- an `&&` -> `||` mutant would accept
+    // this one-directional match and wrongly cost it `1`.
+    assert_eq!(leaves(&cset(&items), &cfrozen(&[json!(1)])), 2);
 }
 
 /// Python's `bool(a_set)` is emptiness, so a `type_changes` from a
@@ -2190,6 +2279,34 @@ fn a_set_coerces_to_its_own_truthiness() {
     assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!(2))), 2);
     assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!(2.5))), 2);
     assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!("x"))), 2);
+}
+
+/// A nested-sequence element's `python_eq` must reject a length mismatch
+/// outright, not answer from however many elements the shorter side has.
+///
+/// `((1, 2, 3),)` vs `[[1, 2]]`: the outer tuple-vs-list pair is length-1 on
+/// both sides, so `sequences_python_eq`'s own top-level length check passes
+/// through to a per-element `python_eq` -- which is where the mismatched
+/// INNER lengths (3 vs 2) must be caught. An `&&` -> `||` mutant in
+/// `python_eq`'s array/tuple arm would let the two shorter, pairwise-equal
+/// elements ([1, 2] against the first two of [1, 2, 3]) pass regardless of
+/// the length check, wrongly reproducing `new_value`.
+#[test]
+fn python_eq_rejects_mismatched_nested_sequence_lengths() {
+    let leaves = super::distance::type_change_leaf_length;
+
+    assert_eq!(
+        leaves(&ctup(&[json!([1, 2, 3])]), &cv(&json!([[1, 2]]))),
+        1 + 2,
+        "not reproduced: the mismatched inner lengths must cost new_value's own length"
+    );
+    // The control: equal-length, equal-content inner sequences ARE
+    // reproduced, so the assertion above is testing the length check, not
+    // an unrelated content mismatch.
+    assert_eq!(
+        leaves(&ctup(&[json!([1, 2, 3])]), &cv(&json!([[1, 2, 3]]))),
+        1
+    );
 }
 
 /// A frozenset holding an unhashable value cannot exist in Python, but the
