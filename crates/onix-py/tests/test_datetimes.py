@@ -180,3 +180,43 @@ def test_a_tagged_datetime_object_is_ordinary_data_to_diff_json() -> None:
         '{"values_changed":{"root[\'$datetime\']":'
         '{"new_value":"2024-01-02","old_value":"2024-01-01T00:00:00"}}}'
     )
+
+
+# The `1..=9999` normalization boundary
+
+
+EXTREME = datetime.datetime(9999, 12, 31, 23, tzinfo=datetime.timezone(datetime.timedelta(hours=-1)))
+
+
+def test_comparing_two_datetimes_that_cannot_normalize_raises_naming_the_path() -> None:
+    """A pair whose UTC form leaves year 1..=9999 raises, as real DeepDiff does."""
+    with pytest.raises(ValueError, match=r"root\['t'\]"):
+        OnixDeepDiff({"t": EXTREME}, {"t": datetime.datetime(2024, 1, 1)})
+
+    with pytest.raises(OverflowError, match="date value out of range"):
+        RealDeepDiff({"t": EXTREME}, {"t": datetime.datetime(2024, 1, 1)}, verbose_level=2)
+
+
+def test_an_unnormalizable_datetime_is_fine_when_it_is_never_compared_to_another() -> None:
+    """DeepDiff normalizes only inside `_diff_datetime`, so these two report normally."""
+    added = {"t": EXTREME}
+
+    assert _normalize_types(OnixDeepDiff({}, added).to_dict()) == _normalize_types(
+        RealDeepDiff({}, added, verbose_level=2).to_dict()
+    )
+    assert _normalize_types(OnixDeepDiff(EXTREME, 5).to_dict()) == _normalize_types(
+        RealDeepDiff(EXTREME, 5, verbose_level=2).to_dict()
+    )
+
+
+def test_a_calendar_value_pairs_with_its_own_str_under_ignore_order() -> None:
+    """`str(datetime)`/`str(date)` are reproducible by coercion, so the pair pairs."""
+    for value in (datetime.datetime(2024, 1, 1), datetime.date(2024, 1, 1)):
+        a = [{"a": value}]
+        b = [{"a": str(value)}]
+        expected = _normalize_types(
+            RealDeepDiff(a, b, ignore_order=True, verbose_level=2).to_dict()
+        )
+
+        assert _normalize_types(OnixDeepDiff(a, b, ignore_order=True).to_dict()) == expected
+        assert "type_changes" in expected

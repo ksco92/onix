@@ -12,7 +12,8 @@ use crate::path::PathSegment;
 use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
 
 use super::{
-    DiffOptions, check_traversal_depth, check_value_depth, diff_at, python_type_name, scoped,
+    DiffOptions, check_traversal_depth, check_value_depth, diff_at, normalized_pair,
+    python_type_name, scoped,
 };
 
 /// Diffs two lists (JSON arrays) at `path`, `depth` levels deep.
@@ -178,7 +179,7 @@ fn insert_lcs_pair_finding(
         });
 
         if let (Value::DateTime(old_value), Value::DateTime(new_value)) = (old_value, new_value) {
-            let (old_value, new_value) = (old_value.to_utc(), new_value.to_utc());
+            let (old_value, new_value) = normalized_pair(path, *old_value, *new_value)?;
 
             if old_value != new_value {
                 report.insert_values_changed(

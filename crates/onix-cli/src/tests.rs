@@ -342,3 +342,24 @@ fn parse_max_depth_env_value_falls_back_to_default_when_unparseable() {
         onix_core::DEFAULT_MAX_DEPTH
     );
 }
+
+#[test]
+fn every_engine_error_maps_to_a_documented_exit_code() {
+    // `DateTimeOutOfRange` cannot arise from JSON input (see
+    // `exit_code_for`'s doc), so this is the only place its mapping is
+    // exercised — and the `match` is what makes a future variant fail to
+    // compile until it is mapped too.
+    assert_eq!(
+        super::run::exit_code_for(&onix_core::Error::MaxDepthExceeded {
+            path: "root".to_string(),
+            max_depth: 512,
+        }),
+        super::run::EXIT_MAX_DEPTH_EXCEEDED
+    );
+    assert_eq!(
+        super::run::exit_code_for(&onix_core::Error::DateTimeOutOfRange {
+            path: "root".to_string(),
+        }),
+        super::run::EXIT_IO_OR_PARSE_ERROR
+    );
+}

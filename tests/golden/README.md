@@ -155,17 +155,19 @@ digest.
 `ignore_order_date*`):** a datetime pair compares by *instant* with a naive
 value read as UTC, and a changed pair is reported **normalized to UTC** while
 every other category keeps the **raw** value (see "Normalized versus raw"
-below); the `isoformat()` rendering boundaries (microseconds only when
-non-zero, an offset suffix only when aware, widening to `+HH:MM:SS` for an
-offset that is not a whole number of minutes); a `date` compared by value,
-never equal to a `datetime` at the same midnight, and reported under the type
-name `date`; the difflib path a list of them takes (datetime and date are both
-in DeepDiff's `helper.basic_types`), including a naive/aware same-instant pair
-reaching a `'replace'` opcode and reporting nothing, an aware pair matching as
-`'equal'` outright, and `new_path` on an index-drifted pair; and, under
-`ignore_order`, a naive and an aware value at one instant hash-matching, a
-paired change carrying `new_path`, unpaired items reported raw, and a date and
-a datetime never hash-matching but still pairing by distance.
+below). The `isoformat()` rendering boundaries are pinned too: microseconds
+only when non-zero, an offset suffix only when aware, widening to `+HH:MM:SS`
+for an offset that is not a whole number of minutes. A `date` compares by
+value, is never equal to a `datetime` at the same midnight, and is reported
+under the type name `date`. A list of either takes the difflib path, since
+both are in DeepDiff's `helper.basic_types`; the cases cover a naive/aware
+same-instant pair reaching a `'replace'` opcode and reporting nothing, an
+aware pair matching as `'equal'` outright, and `new_path` on an index-drifted
+pair. Under `ignore_order`, they cover a naive and an aware value at one
+instant hash-matching, a paired change carrying `new_path`, unpaired items
+reported raw, a date and a datetime never hash-matching but still pairing by
+distance, and a calendar value pairing with a string of itself (which is what
+the `str()` coercion in the delta shape decides).
 
 **`ignore_order=True` (`ignore_order_*` cases):** pure shuffle, shuffle
 plus a changed/added/removed value, duplicate-multiplicity invisibility,
@@ -183,24 +185,20 @@ not part of this fixed corpus.
 
 ## Normalized versus raw datetimes
 
-`DeepDiff`'s `_diff_datetime` (diff.py) does not merely *compare* by instant:
-it assigns `helper.py::datetime_normalize`'s result back onto the level it then
-reports. So a `values_changed` produced by comparing two datetimes carries the
-pair **as UTC** — `10:00-05:00` is reported as `15:00+00:00`. Every other
-category is reached without passing through that function and therefore carries
-the **raw** value: `dictionary_item_added`/`removed`,
-`iterable_item_added`/`removed`, `type_changes`, and — the non-obvious one — the
-`values_changed` that `model.py`'s `mutual_add_removes_to_become_value_updates`
-post-pass folds a same-path add/remove pair into, which is what an
-`ignore_order` comparison produces whenever `cutoff_intersection_for_pairs`
-turns pairing off. `datetime_values_changed_normalized_to_utc` and
+A `values_changed` produced by *comparing two datetimes* carries the pair
+normalized to UTC, so `10:00-05:00` is reported as `15:00+00:00`. Every other
+category carries the raw value, including the `values_changed` that
+`model.py`'s `mutual_add_removes_to_become_value_changes` post-pass folds a
+same-path add/remove pair into. The mechanism, with its source citations,
+is documented once in `crate::diff::datetime_diff`
+(`crates/onix-core/src/diff/scalar.rs`).
+`datetime_values_changed_normalized_to_utc` and
 `datetime_dictionary_item_added_reports_raw_value` pin the two sides.
 
-`DeepHash` normalizes too (`_prep_datetime` runs `datetime_normalize` before
-formatting its digest string), which is why a naive and an aware value at one
-instant hash-match under `ignore_order`. `_prep_date` deliberately does **not**,
-and formats a bare `YYYY-MM-DD`, which can never collide with `_prep_datetime`'s
-`YYYY-MM-DD HH:MM:SS+00:00` — so a date and a datetime never hash-match.
+Hashing splits the same way: `DeepHash._prep_datetime` normalizes, so a naive
+and an aware value at one instant hash-match under `ignore_order`, while
+`_prep_date` does not and formats a bare `YYYY-MM-DD`, which can never collide
+with `_prep_datetime`'s `YYYY-MM-DD HH:MM:SS+00:00`.
 
 ## Known DeepDiff quirks
 
@@ -285,23 +283,28 @@ and formats a bare `YYYY-MM-DD`, which can never collide with `_prep_datetime`'s
   this bound).
 
 - **`ignore_order` pairing among naive datetimes depends on the process's
-  local timezone — in DeepDiff, not in onix.** `distance.py`'s
-  `_get_datetime_distance` ranks a candidate pair by
-  `_get_numbers_distance(date1.timestamp(), date2.timestamp(), ...)`, and
-  `datetime.timestamp()` reads a **naive** value in the local timezone. Real
-  DeepDiff's pairing choice for a list mixing naive and aware datetimes is
-  therefore machine-dependent: 24 of 600 seeded flat-calendar-list cases give a
-  different report under `TZ=America/Los_Angeles` than under `TZ=UTC`. onix has
-  no timezone database and reads a naive value as UTC everywhere, matching
-  `datetime_normalize` — the rule that decides every reported *value* — so it
-  is deterministic and agrees with DeepDiff exactly once the process timezone is
-  UTC. The approximation is confined to which unpaired items get matched; it can
-  never change a reported value, and it only bites when two candidates' distances
-  are within about `1e-5` of each other. `crates/onix-py/tests/
-  test_differential_fuzz.py`'s `utc_timezone` fixture pins the comparison, and
-  no golden case depends on it (regeneration is byte-stable under
-  `TZ=UTC`/`Asia/Kolkata`/`Europe/Berlin`). See
-  `crates/onix-core/src/ignore_order/distance.rs`'s `distance_family`.
+  local timezone in DeepDiff, but not in onix.** `distance.py`'s
+  `_get_datetime_distance` ranks a candidate pair through
+  `datetime.timestamp()`, which reads a *naive* value in the local timezone,
+  so real DeepDiff's pairing for a list mixing naive and aware datetimes is
+  machine-dependent. onix has no timezone database and reads a naive value as
+  UTC everywhere, matching `datetime_normalize`, the rule that decides every
+  reported *value*. The two agree exactly once the process timezone is UTC.
+  The full rationale lives in `distance_family`'s doc
+  (`crates/onix-core/src/ignore_order/distance.rs`); the fixture that pins the
+  comparison is `utc_timezone` in
+  `crates/onix-py/tests/test_differential_fuzz.py`. No golden case depends on
+  it: regeneration is byte-stable under any `TZ`.
+
+- **A datetime whose UTC form leaves year `1..=9999` cannot be compared to
+  another datetime.** Normalizing `9999-12-31T23:00-01:00` lands on year
+  10000, and real `astimezone(timezone.utc)` raises `OverflowError: date value
+  out of range` there, so DeepDiff raises rather than reporting. onix raises
+  too: `onix_core::Error::DateTimeOutOfRange`, surfaced to Python as a
+  `ValueError` naming the path. Both tools only normalize when two datetimes
+  are genuinely compared, so such a value added, removed, or type-changed
+  against a non-datetime still reports its raw rendering. No golden case can
+  hold one, since the corpus records reports rather than exceptions.
 
 `crate::diff::object_diff` (the ordinary dict-vs-dict diff, used
 identically whether or not `ignore_order` is set) implements `DeepDiff`'s

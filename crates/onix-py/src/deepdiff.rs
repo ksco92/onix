@@ -114,11 +114,12 @@ impl DeepDiff {
     /// with the Python types intact rather than their JSON renderings, so a
     /// value the diff found in a `tuple` comes back as a `tuple` and a
     /// datetime comes back as a real `datetime.datetime`, exactly as real
-    /// `DeepDiff`'s own `to_dict()` does. (Type *names* in a `type_changes`
-    /// entry stay strings here, where real `DeepDiff` returns the type
-    /// objects themselves; and an aware datetime carries a fixed-offset
-    /// `datetime.timezone` rather than whatever `tzinfo` class it went in
-    /// with — see `crate::convert`'s module doc.) Conversion back to Python objects is
+    /// `DeepDiff`'s own `to_dict()` does. Two documented differences: type
+    /// *names* in a `type_changes` entry stay strings here, where real
+    /// `DeepDiff` returns the type objects themselves, and an aware datetime
+    /// carries a fixed-offset `datetime.timezone` rather than whatever
+    /// `tzinfo` class it went in with. See `crate::convert`'s module doc for
+    /// the second. Conversion back to Python objects is
     /// iterative (see `crate::convert::value_to_pyobject`), so it is safe on
     /// the calling thread at any depth.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {

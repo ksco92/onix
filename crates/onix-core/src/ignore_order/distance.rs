@@ -86,14 +86,20 @@ enum DistanceFamily {
 ///
 /// A naive datetime is measured as if it were UTC. Real `DeepDiff` calls
 /// `datetime.timestamp()`, which reads a naive value in the *process's local
-/// timezone*, and there is no timezone database in this crate to reproduce
-/// that with. The approximation is confined to how candidate pairs are
-/// *ranked* under `ignore_order` — never to a reported value — and both
-/// sides of a comparison shift together, so it can only matter for two
-/// candidates whose distances are already within about `1e-5` of each other.
-/// Checked empirically: 400 seeded random `ignore_order` datetime-list pairs
-/// produce byte-identical `DeepDiff` reports under `TZ=UTC`,
-/// `TZ=America/Los_Angeles` and `TZ=Asia/Kolkata`.
+/// timezone*, so its own pairing for a list mixing naive and aware datetimes
+/// is machine-dependent; there is no timezone database in this crate to
+/// reproduce that with, and reading a naive value as UTC everywhere matches
+/// `datetime_normalize`, the rule that decides every reported *value*.
+///
+/// The approximation is confined to how candidate pairs are *ranked* under
+/// `ignore_order`, never to a reported value, and both sides of a comparison
+/// shift together, so it can only matter for two candidates whose distances
+/// are already within roughly `1e-5` of each other. The two tools agree
+/// exactly once the process timezone is UTC, which
+/// `crates/onix-py/tests/test_differential_fuzz.py`'s `utc_timezone` fixture
+/// pins; that fixture's own test turns red without it. This is the single
+/// home for this rationale: `tests/golden/README.md` and the fixture both
+/// point here.
 #[allow(
     clippy::cast_precision_loss,
     reason = "mirrors Python's own int-to-float `timestamp()`/`toordinal()` conversion, which \
@@ -271,8 +277,11 @@ pub(crate) fn count_diff_leaves(
         (Value::Bool(x), Value::Bool(y)) => usize::from(x != y),
         (Value::Str(x), Value::Str(y)) => usize::from(x != y),
         // By instant, and by value, mirroring `diff_at`'s own leaf dispatch
-        // for the two calendar types.
-        (Value::DateTime(x), Value::DateTime(y)) => usize::from(x.to_utc() != y.to_utc()),
+        // for the two calendar types. Instants rather than the normalized
+        // values, so a pair `DateTime::to_utc` cannot normalize still costs a
+        // distance rather than an error: an equal-instant pair is equal
+        // either way, and this is a pairing heuristic, not a report.
+        (Value::DateTime(x), Value::DateTime(y)) => usize::from(x.instant() != y.instant()),
         (Value::Date(x), Value::Date(y)) => usize::from(x != y),
         (Value::Number(x), Value::Number(y)) => {
             if x.is_f64() == y.is_f64() {
@@ -403,7 +412,10 @@ fn python_eq(a: &Value, b: &Value) -> bool {
 /// producing a `repr`-shaped string) — not attempted here (out of this
 /// fix's reviewed scope) and always falls through to `None`/"always
 /// include", which only ever measures a slightly larger `diff_length`
-/// than real `DeepDiff` would for that specific, uncommon pairing.
+/// than real `DeepDiff` would for that specific, uncommon pairing. A
+/// datetime or a date *is* covered for that target: `str()` of one is an
+/// ordinary string, and treating it as impossible made a calendar value
+/// paired against its own `str()` fail to pair at all.
 fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value> {
     match new_value {
         Value::Bool(_) => Some(Value::Bool(is_truthy(old_value))),
@@ -529,11 +541,12 @@ fn coerce_to_i64(value: &Value) -> Option<i64> {
 fn coerce_to_python_str(value: &Value) -> Option<String> {
     match value {
         Value::Null => Some("None".to_string()),
-        Value::DateTime(_)
-        | Value::Date(_)
-        | Value::Array(_)
-        | Value::Tuple(_)
-        | Value::Object(_) => None,
+        // `str(datetime)`/`str(date)` are ordinary strings Python produces
+        // happily, so this coercion really can reproduce a `type_changes`
+        // pair's new value — see `DateTime::python_str`.
+        Value::DateTime(value) => Some(value.python_str()),
+        Value::Date(value) => Some(value.python_str()),
+        Value::Array(_) | Value::Tuple(_) | Value::Object(_) => None,
         Value::Bool(b) => Some(if *b { "True" } else { "False" }.to_string()),
         Value::Number(n) => {
             if n.is_f64() {

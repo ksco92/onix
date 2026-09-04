@@ -4,18 +4,19 @@ Runs through the actual `deepdiff_rs.DeepDiff` class (not the fast JSON-string
 path), so this exercises the Python-object-to-`Value` conversion layer itself,
 not just the diff engine underneath it.
 
-Four batches, each of `SEED_COUNT` seeded cases run twice (ordered and
-`ignore_order=True`): one over the JSON-shaped types, one that also emits
-tuples (both as containers in their own right and as elements of lists, dicts
-and other tuples), one that also emits naive and aware datetimes and dates
-anywhere in a nested value, and one of *flat, tightly clustered* calendar lists
-— the shape that puts maximum pressure on difflib alignment and `ignore_order`
-pairing, where near-identical candidates make every tie-break observable. Every
-batch compares `to_json()` (canonically, i.e. parsed — neither tool promises a
-key order) *and* `to_dict()` by `==`, which is the comparison that can see a
+Five batches, each of `SEED_COUNT` seeded cases run twice (ordered and
+`ignore_order=True`): the JSON-shaped types; the same plus tuples, as
+containers in their own right and as elements of lists, dicts and other
+tuples; the same plus naive and aware datetimes and dates anywhere in a nested
+value; flat, tightly clustered calendar lists, which put maximum pressure on
+difflib alignment and `ignore_order` pairing because near-identical candidates
+make every tie-break observable; and dict-wrapped calendar values against
+strings of themselves, which is the shape the `str()` coercion decides. Every
+batch compares `to_json()` (canonically, i.e. parsed, since neither tool
+promises a key order) *and* `to_dict()` by `==`, the comparison that can see a
 tuple, a `datetime` or a `date` where the JSON one cannot.
 
-Both calendar batches run under a pinned `TZ=UTC` — see `utc_timezone`.
+The three calendar batches run under a pinned `TZ=UTC` — see `utc_timezone`.
 """
 
 import datetime
@@ -60,6 +61,7 @@ TUPLE_SEED_BASE: Final[int] = 1_000_000
 # ...and so do the two calendar batches.
 CALENDAR_SEED_BASE: Final[int] = 2_000_000
 CLUSTERED_SEED_BASE: Final[int] = 3_000_000
+STRINGIFIED_SEED_BASE: Final[int] = 4_000_000
 
 # The calendar batch's leaves: naive and aware datetimes across a bounded range,
 # plus bare dates. The offsets deliberately include one that is not a whole
@@ -91,6 +93,15 @@ RETYPE_PROBABILITY: Final[float] = 0.25
 # How often the calendar batch re-writes a datetime at another UTC offset,
 # keeping the instant (see `_calendar_edge_mutations`).
 OFFSET_SHIFT_PROBABILITY: Final[float] = 0.3
+
+# How often the calendar batch replaces a calendar leaf with a *string* of
+# itself. Half take `str()` (which `model.py`'s `new_t1 = new_type(change.t1)`
+# reproduces, so a `type_changes` delta omits its new value and the pair stays
+# within the pairing cutoff) and half take `isoformat()` (which it does not,
+# for a datetime). Without this, no generated case ever puts a calendar value
+# next to a string equal to its own `str()`, which is the exact shape a wrong
+# `coerce_to_python_str` gets wrong.
+STRINGIFY_PROBABILITY: Final[float] = 0.2
 
 # The clustered batch's own knobs: a two-day window (so every value is a close
 # candidate for every other), and a coin flip that makes an aware value the
@@ -194,8 +205,6 @@ def _mutate(
     :param calendar: Whether replacement values may be datetimes and dates.
     :return: A structurally related, partially mutated copy.
     """
-    # `datetime` is a `date` subclass and both are immutable leaves, so they
-    # must be tested before the container branches would never see them anyway.
     if isinstance(value, (list, tuple)):
         mutated = list(value)
         rng.shuffle(mutated)
@@ -247,14 +256,16 @@ def _generate_case(
 
 def _calendar_edge_mutations(rng: random.Random, value: JsonValue) -> JsonValue:
     """
-    Re-write some datetimes at a different UTC offset without moving the instant.
+    Apply the two calendar-specific edits: an offset shift and a stringify.
 
-    This is the shape ordinary mutation can never produce and the one this slice
-    turns on: two datetimes that are a *different* wall clock but the *same*
-    moment, which DeepDiff reports as no difference at all — and, when one side
-    is naive and the other aware, are not even Python-equal, so they reach the
-    difflib `'replace'` and `ignore_order` pairing paths rather than matching
-    outright.
+    Both make shapes ordinary mutation cannot. The offset shift produces two
+    datetimes that are a *different* wall clock but the *same* moment, which
+    DeepDiff reports as no difference at all — and, when one side is naive and
+    the other aware, are not even Python-equal, so they reach the difflib
+    `'replace'` and `ignore_order` pairing paths rather than matching outright.
+    The stringify (see `STRINGIFY_PROBABILITY`) puts a calendar value next to a
+    string of itself, which is what exercises the `str()` coercion the
+    `type_changes` delta shape depends on.
 
     :param rng: Seeded RNG.
     :param value: The value to edit.
@@ -267,6 +278,9 @@ def _calendar_edge_mutations(rng: random.Random, value: JsonValue) -> JsonValue:
 
     if isinstance(value, dict):
         return {key: _calendar_edge_mutations(rng, item) for key, item in value.items()}
+
+    if isinstance(value, datetime.date) and rng.random() < STRINGIFY_PROBABILITY:
+        return str(value) if rng.random() < 0.5 else value.isoformat()
 
     if isinstance(value, datetime.datetime) and rng.random() < OFFSET_SHIFT_PROBABILITY:
         offset = rng.choice(UTC_OFFSETS)
@@ -464,6 +478,44 @@ def _gen_clustered_calendar(rng: random.Random) -> JsonValue:
     return value.replace(tzinfo=datetime.timezone(datetime.timedelta(seconds=offset)))
 
 
+def _generate_stringified_calendar_case(seed: int) -> tuple[JsonValue, JsonValue]:
+    """
+    Generate one seeded case of dict-wrapped calendar values against strings of them.
+
+    Both halves of the shape matter. The **dict wrapper** is what makes a pair
+    close enough to pair at all: two bare scalars have a rough length of 2
+    between them, so even a `diff_length` of 1 lands on 0.5, over the 0.3
+    pairing cutoff, while inside a one-key dict the same difference is 1/6.
+    The **string** is `str()` of the value half the time (which `model.py`'s
+    `new_t1 = new_type(change.t1)` reproduces, so the delta omits its new
+    value and the pair qualifies) and `isoformat()` the other half (which for
+    a datetime it does not). Getting that coercion wrong flips a
+    `type_changes` into an unrelated add plus remove, and no other generator
+    here produces a string equal to a sibling calendar value's `str()`.
+
+    :param seed: The seed driving this case's RNG.
+    :return: A related-but-different pair of lists of one-key dicts.
+    """
+    rng = random.Random(seed)
+    values = [_gen_calendar(rng) for _ in range(rng.randint(1, 5))]
+    a: list[JsonValue] = [{rng.choice(DICT_KEYS): value} for value in values]
+    b: list[JsonValue] = []
+
+    for entry in a:
+        (key, value), = entry.items()
+
+        if not isinstance(value, datetime.date):
+            b.append({key: value})
+        elif rng.random() < 0.5:
+            b.append({key: str(value)})
+        else:
+            b.append({key: value.isoformat()})
+
+    rng.shuffle(b)
+
+    return a, b
+
+
 def _generate_clustered_case(seed: int) -> tuple[JsonValue, JsonValue]:
     """
     Generate one seeded flat-calendar-list `(a, b)` pair.
@@ -480,6 +532,8 @@ def _generate_clustered_case(seed: int) -> tuple[JsonValue, JsonValue]:
         if rng.random() < 0.4:
             b[index] = _gen_clustered_calendar(rng)
 
+    b = [_calendar_edge_mutations(rng, item) for item in b]
+
     if b and rng.random() < 0.3:
         b.pop(rng.randrange(len(b)))
 
@@ -494,16 +548,13 @@ def utc_timezone(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """
     Pin the process timezone to UTC for the duration of one test.
 
-    Real DeepDiff ranks `ignore_order` pairing candidates with
-    `distance.py::_get_datetime_distance`, which calls `datetime.timestamp()` —
-    and that reads a **naive** datetime in the *process's local timezone*. Its
-    pairing choice for a list mixing naive and aware datetimes is therefore
-    machine-dependent. onix has no timezone database and reads a naive value as
-    UTC everywhere, matching `datetime_normalize` (the rule that decides every
-    reported *value*); the two agree exactly once the process timezone is UTC,
-    which this fixture pins so the batch is a real comparison rather than a
-    comparison against whichever offset the machine happens to sit at. See
-    `crates/onix-core/src/ignore_order/distance.rs`'s `distance_family`.
+    Real DeepDiff ranks `ignore_order` pairing candidates with a call to
+    `datetime.timestamp()`, which reads a *naive* datetime in the process's
+    local timezone, so its pairing choice for a list mixing naive and aware
+    datetimes is machine-dependent. onix reads a naive value as UTC
+    everywhere; the two agree exactly once the process timezone is UTC. The
+    rationale in full lives in `distance_family`'s doc
+    (`crates/onix-core/src/ignore_order/distance.rs`).
 
     :param monkeypatch: pytest's environment patcher, which restores `TZ`.
     :return: Nothing; this is a setup/teardown fixture.
@@ -559,5 +610,31 @@ def test_differential_fuzz_with_clustered_calendar_lists_matches_real_deepdiff(
 
     assert not mismatches, (
         f"{len(mismatches)} of {SEED_COUNT * 2} clustered calendar fuzz cases diverged from "
+        f"real DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+def test_differential_fuzz_with_stringified_calendar_values_matches_real_deepdiff(
+    utc_timezone: None,
+) -> None:
+    """
+    Run a fifth batch pairing dict-wrapped calendar values against strings of them.
+
+    :param utc_timezone: Pins `TZ=UTC` — see that fixture.
+    """
+    mismatches = []
+
+    for seed in range(STRINGIFIED_SEED_BASE, STRINGIFIED_SEED_BASE + SEED_COUNT):
+        a, b = _generate_stringified_calendar_case(seed)
+
+        for ignore_order in (False, True):
+            divergence = _diverges(a, b, ignore_order)
+
+            if divergence is not None:
+                expected, actual = divergence
+                mismatches.append((seed, ignore_order, a, b, expected, actual))
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} stringified calendar fuzz cases diverged from "
         f"real DeepDiff (showing up to 3): {mismatches[:3]}"
     )

@@ -1863,3 +1863,137 @@ fn a_calendar_value_and_a_number_share_no_distance_family_and_never_pair() {
         })
     );
 }
+
+#[test]
+fn a_calendar_value_against_its_own_python_str_is_reproduced_by_coercion() {
+    // `str(datetime)` uses a space separator, not a `T`, so only the
+    // space-separated string is reproducible — confirmed against real
+    // `deepdiff==9.1.0` with `view="_delta"`, whose `_get_item_length` is
+    // `1` for the first two pairs (no `new_value` key) and `2` for the
+    // third.
+    let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
+
+    assert_eq!(
+        leaf(&cdt(2024, 1, 1, None), &cv(&json!("2024-01-01 00:00:00"))),
+        1
+    );
+    assert_eq!(leaf(&cdate(2024, 1, 1), &cv(&json!("2024-01-01"))), 1);
+    assert_eq!(
+        leaf(&cdt(2024, 1, 1, None), &cv(&json!("2024-01-01T00:00:00"))),
+        2
+    );
+    assert_eq!(
+        leaf(
+            &cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(1830)),
+            &cv(&json!("2024-01-01 10:00:00+00:30:30"))
+        ),
+        1
+    );
+}
+
+#[test]
+fn a_calendar_value_pairs_with_its_own_python_str_under_ignore_order() {
+    // The end-to-end consequence of the coercion above: because `str()`
+    // reproduces the new value, the delta omits it, the pair stays inside
+    // the pairing cutoff, and the result is a `type_changes` rather than an
+    // add plus a remove merged into an unrelated `values_changed`. The
+    // values sit inside a dict because that is what makes the distance small
+    // enough to pair: two bare scalars have a rough length of 2 between
+    // them, so even a `diff_length` of 1 lands on 0.5, over the 0.3 cutoff —
+    // real `DeepDiff` reports a plain `values_changed` for the bare pair
+    // too, which the sibling case below pins.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let wrapped = |value: CValue| {
+        let mut builder = crate::value::Builder::new();
+        CValue::Array(vec![builder.object(vec![("a".to_string(), value)])].into_boxed_slice())
+    };
+
+    assert_eq!(
+        crate::diff::diff_with_options(
+            &wrapped(cdt(2024, 1, 1, None)),
+            &wrapped(cv(&json!("2024-01-01 00:00:00"))),
+            &opts,
+        )
+        .unwrap()
+        .to_json_value(),
+        json!({"type_changes": {"root[0]['a']": {
+            "old_type": "datetime",
+            "new_type": "str",
+            "old_value": "2024-01-01T00:00:00",
+            "new_value": "2024-01-01 00:00:00",
+        }}})
+    );
+    assert_eq!(
+        crate::diff::diff_with_options(
+            &wrapped(cdate(2024, 1, 1)),
+            &wrapped(cv(&json!("2024-01-01"))),
+            &opts,
+        )
+        .unwrap()
+        .to_json_value(),
+        json!({"type_changes": {"root[0]['a']": {
+            "old_type": "date",
+            "new_type": "str",
+            "old_value": "2024-01-01",
+            "new_value": "2024-01-01",
+        }}})
+    );
+}
+
+#[test]
+fn two_bare_scalars_are_too_far_apart_to_pair_even_when_str_reproduces_one() {
+    // The control for the case above: same values, no surrounding dict, so
+    // the rough length is 2 and a `diff_length` of 1 gives 0.5 — over the
+    // cutoff. Real `DeepDiff` likewise reports a `values_changed` here (an
+    // add and a remove at one path, merged by
+    // `mutual_add_removes_to_become_value_changes`), not a `type_changes`.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = CValue::Array(vec![cdt(2024, 1, 1, None)].into_boxed_slice());
+    let b = CValue::Array(vec![cv(&json!("2024-01-01 00:00:00"))].into_boxed_slice());
+
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .to_json_value(),
+        json!({"values_changed": {"root[0]": {
+            "old_value": "2024-01-01T00:00:00",
+            "new_value": "2024-01-01 00:00:00",
+        }}})
+    );
+}
+
+#[test]
+fn a_pre_epoch_datetime_pairs_with_a_date_by_ordinal_not_by_timestamp() {
+    // The two measures disagree here, which is what makes this case able to
+    // notice a swap: the ordinal distance is ~0.003 (well inside the 0.3
+    // cutoff, so the pair forms), while the timestamp distance is exactly
+    // the cutoff — `_get_numbers_distance`'s divisor is `(n1 + n2) / max_`,
+    // and a negative timestamp against a positive one nearly cancels it, so
+    // the self-cancellation quirk that keeps same-sign numbers close does
+    // not apply. Measuring this pair by timestamp would reject it.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = CValue::Array(vec![cdt(1950, 1, 1, None), cv(&json!("anchor"))].into_boxed_slice());
+    let b = CValue::Array(vec![cv(&json!("anchor")), cdate(1990, 1, 1)].into_boxed_slice());
+
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .to_json_value(),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "datetime",
+            "new_type": "date",
+            "new_path": "root[1]",
+            "old_value": "1950-01-01T00:00:00",
+            "new_value": "1990-01-01",
+        }}})
+    );
+}

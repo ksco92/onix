@@ -8,10 +8,10 @@ For each hand-designed case in ``CASES`` this writes three files under
 ``tests/golden/<case_name>/``:
 
 - ``a.json`` / ``b.json``: the two inputs, exactly as fed to both DeepDiff and
-  (via the Rust golden test) onix. A value JSON cannot express — a tuple today,
-  sets and dates later — is written in the tagged encoding ``golden_tags``
-  defines, and every written file is read back and checked against the case it
-  came from before ``expected.json`` is generated.
+  (via the Rust golden test) onix. A value JSON cannot express is written in
+  the tagged encoding ``golden_tags`` defines, which marks each tag supported
+  or reserved, and every written file is read back and checked against the
+  case it came from before ``expected.json`` is generated.
 - ``expected.json``: ``json.loads(DeepDiff(a, b, verbose_level=2).to_json(
   default_mapping=golden_tags.JSON_DEFAULT_MAPPING))`` re-dumped with
   ``sort_keys=True`` — the canonical spec onix's own report must match. The
@@ -658,6 +658,27 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
     "ignore_order_datetime_and_number_never_pair": (
         [datetime(2024, 1, 1, 10), "anchor"],
         ["anchor", 5],
+        {"ignore_order": True},
+    ),
+    # `str(datetime)`/`str(date)` are real strings, so `model.py`'s
+    # `new_t1 = new_type(change.t1)` reproduces the new value, the delta
+    # omits it, and the pair stays inside the pairing cutoff — a
+    # `type_changes` rather than an add plus a remove. The dict wrapper is
+    # what makes the rough length large enough for the distance to qualify.
+    "ignore_order_datetime_pairs_with_its_own_str": (
+        [{"a": datetime(2024, 1, 1)}],
+        [{"a": "2024-01-01 00:00:00"}],
+        {"ignore_order": True},
+    ),
+    "ignore_order_date_pairs_with_its_own_str": (
+        [{"a": date(2024, 1, 1)}],
+        [{"a": "2024-01-01"}],
+        {"ignore_order": True},
+    ),
+    # The control: the same values unwrapped are too far apart to pair.
+    "ignore_order_bare_datetime_and_its_str_are_too_far_to_pair": (
+        [datetime(2024, 1, 1)],
+        ["2024-01-01 00:00:00"],
         {"ignore_order": True},
     ),
     "ignore_order_date_pairing": (

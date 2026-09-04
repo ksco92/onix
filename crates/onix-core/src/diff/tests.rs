@@ -2175,6 +2175,39 @@ fn a_list_of_datetimes_takes_the_difflib_path() {
 }
 
 #[test]
+fn a_naive_and_aware_pair_matched_by_difflib_replace_reports_nothing_at_a_drifted_index() {
+    // The sibling test below feeds two lists that are equal by this engine's
+    // own rules, so `diff_with_options`'s top-level fast path answers it
+    // before `array_diff` runs at all. Here an unmatched leading element
+    // keeps the lists genuinely unequal, so the difflib 'replace' opcode
+    // really is what decides the datetime pair — and the finding it must
+    // *not* record is the whole point.
+    let report = super::diff(
+        &CValue::Array(
+            vec![
+                cv(&json!("x")),
+                cv(&json!("y")),
+                cdt_at(2024, 1, 1, 10, 0, 0, 0, None),
+            ]
+            .into_boxed_slice(),
+        ),
+        &CValue::Array(
+            vec![
+                cv(&json!("y")),
+                cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600)),
+            ]
+            .into_boxed_slice(),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"iterable_item_removed": {"root[0]": "x"}})
+    );
+}
+
+#[test]
 fn a_naive_and_aware_pair_matched_by_difflib_replace_reports_nothing() {
     // Python's `==` (what difflib matches with) never equates a naive
     // datetime with an aware one, so this pair reaches a 'replace' opcode —
@@ -2229,5 +2262,50 @@ fn a_datetime_pair_matched_by_difflib_replace_is_normalized_and_keeps_new_path()
             }},
             "iterable_item_removed": {"root[0]": "x"},
         })
+    );
+}
+
+#[test]
+fn comparing_two_datetimes_that_cannot_normalize_to_utc_is_an_error_naming_the_path() {
+    // `9999-12-31T23:00-01:00` is a real Python datetime whose UTC wall
+    // clock is `10000-01-01T00:00`, outside the year range a datetime can
+    // hold. Real `DeepDiff` raises `OverflowError: date value out of range`
+    // on exactly this comparison, so there is no report to match.
+    let extreme = cdt_at(9999, 12, 31, 23, 0, 0, 0, Some(-3600));
+    let ordinary = cdt_at(2024, 1, 1, 10, 0, 0, 0, None);
+
+    let error = super::diff(&wrapped(extreme.clone()), &wrapped(ordinary))
+        .expect_err("an unnormalizable pair has no report");
+
+    assert_eq!(
+        error,
+        Error::DateTimeOutOfRange {
+            path: "root['t']".to_string(),
+        }
+    );
+}
+
+#[test]
+fn an_unnormalizable_datetime_still_diffs_when_it_is_never_compared_to_another_one() {
+    // Real `DeepDiff` normalizes only inside `_diff_datetime`, so the same
+    // value added, or type-changed against a non-datetime, reports its raw
+    // rendering rather than raising — verified live.
+    let extreme = cdt_at(9999, 12, 31, 23, 0, 0, 0, Some(-3600));
+
+    let added = super::diff(&cv(&json!({})), &wrapped(extreme.clone())).unwrap();
+    let retyped = super::diff(&extreme, &cv(&json!(5))).unwrap();
+
+    assert_eq!(
+        added.to_json_value(),
+        json!({"dictionary_item_added": {"root['t']": "9999-12-31T23:00:00-01:00"}})
+    );
+    assert_eq!(
+        retyped.to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "datetime",
+            "new_type": "int",
+            "old_value": "9999-12-31T23:00:00-01:00",
+            "new_value": 5,
+        }}})
     );
 }

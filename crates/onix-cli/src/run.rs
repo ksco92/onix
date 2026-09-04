@@ -12,7 +12,8 @@ use super::args::{USAGE, parse_args, resolve_default_max_depth};
 
 /// Exit code for a usage error (bad/missing arguments, unknown flag).
 pub(crate) const EXIT_USAGE_ERROR: u8 = 1;
-/// Exit code for an I/O error (missing file) or a JSON-parse error.
+/// Exit code for an I/O error (missing file), a JSON-parse error, or an
+/// input value the engine cannot compare (see [`exit_code_for`]).
 pub(crate) const EXIT_IO_OR_PARSE_ERROR: u8 = 2;
 /// Exit code for [`onix_core::Error::MaxDepthExceeded`].
 pub(crate) const EXIT_MAX_DEPTH_EXCEEDED: u8 = 3;
@@ -150,9 +151,23 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
             let _ = writeln!(stdout, "{serialized}");
             0
         }
-        Err(error @ onix_core::Error::MaxDepthExceeded { .. }) => {
+        Err(error) => {
             let _ = writeln!(stderr, "{error}");
-            EXIT_MAX_DEPTH_EXCEEDED
+            exit_code_for(&error)
         }
+    }
+}
+/// The exit code one engine error maps to.
+///
+/// [`onix_core::Error::DateTimeOutOfRange`] cannot arise here: this
+/// command's inputs are JSON files, and JSON has no datetime literal, so no
+/// value the CLI builds can be one. The arm exists because the `match` is
+/// exhaustive over the engine's error type — which is how a future variant
+/// gets noticed here rather than silently mapped — and it groups with the
+/// input-domain code rather than with the depth guard's.
+pub(crate) fn exit_code_for(error: &onix_core::Error) -> u8 {
+    match error {
+        onix_core::Error::MaxDepthExceeded { .. } => EXIT_MAX_DEPTH_EXCEEDED,
+        onix_core::Error::DateTimeOutOfRange { .. } => EXIT_IO_OR_PARSE_ERROR,
     }
 }

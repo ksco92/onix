@@ -7,7 +7,7 @@ use crate::datetime::DateTime;
 use crate::value::{Number, Value};
 
 use crate::error::Error;
-use crate::path::PathSegment;
+use crate::path::{PathSegment, render_path};
 use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
 
 use super::check_value_depth;
@@ -118,7 +118,7 @@ pub(crate) fn datetime_diff(
     depth: usize,
     max_depth: usize,
 ) -> Result<Report, Error> {
-    let (old, new) = (old.to_utc(), new.to_utc());
+    let (old, new) = normalized_pair(path, old, new)?;
 
     scalar_diff(
         path,
@@ -128,6 +128,29 @@ pub(crate) fn datetime_diff(
         depth,
         max_depth,
     )
+}
+/// Normalizes both sides of a datetime comparison to UTC, or reports
+/// [`Error::DateTimeOutOfRange`] at `path` when one of them has no
+/// normalized form — see [`DateTime::to_utc`] for the boundary and why real
+/// `DeepDiff` raises there too.
+///
+/// # Errors
+///
+/// Returns [`Error::DateTimeOutOfRange`] if either value's UTC wall clock
+/// leaves the `1..=9999` year range.
+pub(crate) fn normalized_pair(
+    path: &[PathSegment],
+    old: DateTime,
+    new: DateTime,
+) -> Result<(DateTime, DateTime), Error> {
+    let out_of_range = || Error::DateTimeOutOfRange {
+        path: render_path(path),
+    };
+
+    Ok((
+        old.to_utc().ok_or_else(out_of_range)?,
+        new.to_utc().ok_or_else(out_of_range)?,
+    ))
 }
 /// Diffs two same-JSON-variant numbers, first checking whether one is an int
 /// and the other a float (a `type_changes` finding, regardless of numeric

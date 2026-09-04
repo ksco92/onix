@@ -51,6 +51,14 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// Days from `0001-01-01` to the Unix epoch — the shift between Python's
 /// `date.toordinal()` origin and this module's civil-date arithmetic.
 const DAYS_FROM_YEAR_ONE_TO_EPOCH: i64 = 719_162;
+/// The first year Python's `date`/`datetime` can represent.
+const MIN_YEAR: i32 = 1;
+/// The last year Python's `date`/`datetime` can represent.
+const MAX_YEAR: i32 = 9999;
+/// `Date::new(MIN_YEAR, 1, 1).ordinal()`, i.e. Python's `date.min.toordinal()`.
+const MIN_ORDINAL: i64 = 1;
+/// `Date::new(MAX_YEAR, 12, 31).ordinal()`, i.e. Python's `date.max.toordinal()`.
+const MAX_ORDINAL: i64 = 3_652_059;
 
 /// A Python `datetime.date`: a proleptic-Gregorian year, month and day.
 ///
@@ -71,19 +79,19 @@ pub struct Date {
 }
 
 impl Date {
-    /// Builds a date, returning `None` if `month`/`day` are not a real
-    /// calendar date (leap years included). An out-of-range month has no days
-    /// at all (`days_in_month` returns `0` for one), so the single `day`
-    /// bound below rejects it too.
+    /// Builds a date, returning `None` unless `year`/`month`/`day` are a real
+    /// calendar date (leap years included) inside Python's own year range,
+    /// `1..=9999`. An out-of-range month has no days at all
+    /// (`days_in_month` returns `0` for one), so the `day` bound rejects it
+    /// without a separate month check.
     ///
-    /// `year` is not range-checked. Python's own `date` spans years `1`
-    /// through `9999`, and every date this crate sees comes from a real
-    /// Python object, so that bound is enforced upstream; normalizing an
-    /// extreme datetime to UTC can also legitimately land one day outside it
-    /// (see [`DateTime::to_utc`]).
+    /// Enforcing the year range here is what lets every other method on this
+    /// type be total: the ordinal arithmetic stays far inside [`i64`], and
+    /// the field widths in [`Date::from_ordinal`] are guaranteed.
     #[must_use]
     pub fn new(year: i32, month: u8, day: u8) -> Option<Self> {
-        (day >= 1 && day <= days_in_month(year, month)).then_some(Self { year, month, day })
+        ((MIN_YEAR..=MAX_YEAR).contains(&year) && day >= 1 && day <= days_in_month(year, month))
+            .then_some(Self { year, month, day })
     }
 
     /// The year.
@@ -112,17 +120,36 @@ impl Date {
         days_from_civil(self.year, self.month, self.day) + DAYS_FROM_YEAR_ONE_TO_EPOCH + 1
     }
 
-    /// The inverse of [`Date::ordinal`].
+    /// The inverse of [`Date::ordinal`], or `None` for an ordinal outside
+    /// the representable range (`1..=3_652_059`, Python's
+    /// `date.min`/`date.max`).
     #[must_use]
-    pub fn from_ordinal(ordinal: i64) -> Self {
+    pub fn from_ordinal(ordinal: i64) -> Option<Self> {
+        if !(MIN_ORDINAL..=MAX_ORDINAL).contains(&ordinal) {
+            return None;
+        }
         let (year, month, day) = civil_from_days(ordinal - DAYS_FROM_YEAR_ONE_TO_EPOCH - 1);
-        Self { year, month, day }
+
+        Some(Self { year, month, day })
     }
 
     /// Python's `date.isoformat()`: `YYYY-MM-DD`.
     #[must_use]
     pub fn isoformat(self) -> String {
         format!("{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+
+    /// Python's `str(date)`, which for a date is exactly its
+    /// [`isoformat`](Date::isoformat).
+    ///
+    /// Named separately because it is `str()`, not `isoformat()`, that
+    /// `DeepDiff` reproduces when it tests whether a `type_changes` pair's
+    /// new value is reachable by coercion (`model.py`'s `new_t1 =
+    /// new_type(change.t1)`), and that `DeepHash` embeds in a `frozenset`
+    /// member's digest.
+    #[must_use]
+    pub fn python_str(self) -> String {
+        self.isoformat()
     }
 }
 
@@ -250,13 +277,18 @@ impl DateTime {
     /// `DeepDiff` puts in a `values_changed` entry for a datetime pair.
     ///
     /// The result is always aware with offset `0`, so two normalized values
-    /// are equal exactly when the originals are the same instant. Converting
-    /// an extreme aware value can land the result outside Python's own
-    /// year `1..=9999` range by at most one day, where real `astimezone`
-    /// raises `OverflowError`; this returns the shifted value rather than
-    /// failing, since there is no `DeepDiff` behavior to match there.
+    /// are equal exactly when the originals are the same instant.
+    ///
+    /// Returns `None` for the one case that has no answer: an extreme aware
+    /// value whose UTC wall clock falls outside Python's own `1..=9999` year
+    /// range, by at most one day (`9999-12-31T23:00-01:00`, say). Real
+    /// `astimezone(timezone.utc)` raises `OverflowError: date value out of
+    /// range` there, and so `DeepDiff` raises rather than reporting anything
+    /// — verified live, including that it raises only when two datetimes are
+    /// actually compared, never when such a value is merely added, removed,
+    /// or type-changed against a non-datetime.
     #[must_use]
-    pub fn to_utc(self) -> Self {
+    pub fn to_utc(self) -> Option<Self> {
         let instant =
             self.instant() + DAYS_FROM_YEAR_ONE_TO_EPOCH * SECONDS_PER_DAY * MICROS_PER_SECOND;
         let (days, micros_of_day) = div_rem_euclid(instant, SECONDS_PER_DAY * MICROS_PER_SECOND);
@@ -268,14 +300,14 @@ impl DateTime {
             reason = "`div_rem_euclid` makes `micros_of_day` non-negative and strictly under one \
                       day, so every component below is non-negative and inside its own field"
         )]
-        Self {
-            date: Date::from_ordinal(days + 1),
+        Some(Self {
+            date: Date::from_ordinal(days + 1)?,
             hour: (seconds_of_day / 3600) as u8,
             minute: (seconds_of_day / 60 % 60) as u8,
             second: (seconds_of_day % 60) as u8,
             microsecond: (micros_of_day % MICROS_PER_SECOND) as u32,
             utc_offset_seconds: Some(0),
-        }
+        })
     }
 
     /// Python's `datetime.isoformat()`: `YYYY-MM-DDTHH:MM:SS`, plus
@@ -283,8 +315,29 @@ impl DateTime {
     /// the value is aware — see the [module documentation](self).
     #[must_use]
     pub fn isoformat(self) -> String {
+        self.rendered('T')
+    }
+
+    /// Python's `str(datetime)`, which is `isoformat(sep=" ")` — the same
+    /// rendering with a space where the `T` goes.
+    ///
+    /// Kept distinct from [`isoformat`](DateTime::isoformat) because the two
+    /// have different jobs: `isoformat()` is what `to_json()` prints, while
+    /// `str()` is what `DeepDiff` reproduces when it tests whether a
+    /// `type_changes` pair's new value is reachable by coercion
+    /// (`model.py`'s `new_t1 = new_type(change.t1)`), and what `DeepHash`
+    /// embeds in a `frozenset` member's digest.
+    #[must_use]
+    pub fn python_str(self) -> String {
+        self.rendered(' ')
+    }
+
+    /// The shared rendering behind [`isoformat`](DateTime::isoformat) and
+    /// [`python_str`](DateTime::python_str), which differ only in the
+    /// separator between the date and the time.
+    fn rendered(self, separator: char) -> String {
         let mut rendered = format!(
-            "{}T{:02}:{:02}:{:02}",
+            "{}{separator}{:02}:{:02}:{:02}",
             self.date.isoformat(),
             self.hour,
             self.minute,
