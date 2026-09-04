@@ -266,13 +266,16 @@ digest a class settles on never depends on process hash order. The two agree
 wherever `DeepDiff`'s winner is not order-sensitive — `{1}` vs `{1.0}` and
 `{True}` vs `{1}` are each a removal plus an addition (bare numbers stay
 type-distinct), `{(1,)}` vs `{(1.0,)}` and `{frozenset({1})}` vs
-`{frozenset({1.0})}` are empty — and differ only where `DeepDiff`'s answer
-depends on which member it iterated first. (A *separate*, deterministic
-divergence — `DeepHash`'s own digest *computation* for a tuple/frozenset
-member is itself order- and repetition-insensitive, so `onix`, which compares a
-tuple member positionally and a frozenset member by membership, tells apart
-values `DeepHash` folds together — is the "A tuple or a frozenset set member
-matches order- and repetition-insensitively" point below, not this one.)
+`{frozenset({1.0})}` are empty, and a naive/aware or `1`/`1.0` difference
+nested arbitrarily deep inside a member collapses the same way (the content
+digest is built through the shared cache at every node). They differ only in
+the two deterministic ways documented here: this point — where `DeepDiff`'s own
+answer depends on which member it iterated first — and the separate point
+below. (That *separate* divergence — `DeepHash`'s own digest *computation* for
+a tuple/frozenset member is itself order- and repetition-insensitive, so
+`onix`, which compares a tuple member positionally and a frozenset member by
+membership, tells apart values `DeepHash` folds together — is the "A tuple or a
+frozenset set member matches order- and repetition-insensitively" point below.)
 
 ```text
 DeepDiff({((1.0,),), ((1,), 0)}, {((1, 1),)})

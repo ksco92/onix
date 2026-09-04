@@ -135,8 +135,11 @@ each lives at its pointer, not restated here:
   order-/repetition-insensitively — `tests/golden/README.md`'s "Set iteration
   order" section, its "A tuple or a frozenset set member matches order- and
   repetition-insensitively" point.
-- **`frozenset` and `date` supersets** — `tests/golden/README.md`'s "The `date`
-  superset" section.
+- **`frozenset` JSON superset** (a `frozenset` in a finding serializes as an
+  array, where `DeepDiff`'s own `to_json()` raises) — `tests/golden/README.md`'s
+  "Set iteration order" section, its "`frozenset` values are a superset" point.
+- **`date` JSON superset** — `tests/golden/README.md`'s "The `date` superset"
+  section.
 - **Naive datetimes read as UTC**, including for `ignore_order` pairing —
   [`crates/onix-core/src/ignore_order/distance.rs`](crates/onix-core/src/ignore_order/distance.rs)'s
   `distance_family` doc.
@@ -241,8 +244,8 @@ cargo install cargo-mutants --locked
 make mutants
 ```
 
-**Standing result.** `make mutants` enumerates a deterministic **989** mutants
-(20 in `onix-cli`, 969 in `onix-core`). Every viable mutant is caught except
+**Standing result.** `make mutants` enumerates a deterministic **990** mutants
+(20 in `onix-cli`, 970 in `onix-core`). Every viable mutant is caught except
 equivalent mutants confined to five documented spots (`onix-core/src/lcs.rs`;
 the `> 1` threshold in `onix-core/src/diff/array.rs`, provably output-neutral;
 `onix-core/src/path.rs`'s `python_float_repr`, an unreachable branch
