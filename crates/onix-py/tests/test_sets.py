@@ -468,3 +468,68 @@ def test_an_unhashable_container_anywhere_inside_a_set_member_is_refused() -> No
             diff = DeepDiff({member}, {"sentinel"})
             diff.to_dict()
             diff.to_json()
+
+
+def test_a_naive_and_aware_datetime_set_member_is_two_members_in_onix_one_in_deepdiff() -> None:
+    """Documented difference 4: DeepDiff's hasher can report only one of two Python members.
+
+    A real Python set never merges a naive and an aware datetime at one
+    instant -- ``naive == aware`` is `False`, so ``{naive, aware}`` is a
+    genuine two-member set -- but `_diff_set` groups members by `DeepHash`
+    digest, and `_prep_datetime` normalizes every datetime to its UTC instant
+    before hashing, so the two land in the same digest bucket; only one
+    survives to be reported. onix's *matching* identity across two different
+    sets is the same instant-based rule (a naive and an aware value at one
+    instant match each other), but a single set's own members are still
+    stored and reported individually, so a set holding both reports both.
+    """
+    naive = datetime.datetime(2024, 1, 1)
+    aware = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+    other = datetime.datetime(2024, 6, 1)
+
+    onix = DeepDiff({naive, aware, "z"}, {other, "y"}).to_dict()
+    real = RealDeepDiff({naive, aware, "z"}, {other, "y"}, verbose_level=2).to_dict()
+
+    assert onix == {
+        "set_item_removed": ["root['z']", "root[2024-01-01 00:00:00+00:00]", "root[2024-01-01 00:00:00]"],
+        "set_item_added": ["root['y']", "root[2024-06-01 00:00:00]"],
+    }
+    # DeepDiff's own answer collapses the naive/aware pair to whichever one
+    # its hasher kept -- one removal short of onix's three, shown for
+    # comparison rather than asserted (order-of-collapse is process-specific).
+    assert len(real["set_item_removed"]) == 2
+    assert len(onix["set_item_removed"]) == 3
+
+
+def test_a_tuple_set_member_matches_by_position_where_deepdiff_ignores_order_and_repetition() -> None:
+    """Documented difference 5: a tuple/frozenset set member is Python `==`-strict in onix only.
+
+    `DeepHash._prep_iterable` runs with `ignore_iterable_order`/
+    `ignore_repetition` for *every* iterable it hashes, tuples included, not
+    only the list-nested-in-an-ignore_order-list case that motivates the
+    default -- so `(1, 2)` and `(2, 1)` share one digest in `_diff_set`
+    despite not being Python-equal (`(1, 2) != (2, 1)`), and so do `(1, 1,
+    2)` and `(1, 2, 2)` (same *distinct* members, different repetition
+    counts). onix's tuple identity is positional Python `==`, matching what
+    `tuple.__eq__` actually says, so it tells the two apart.
+    """
+    assert (1, 2) != (2, 1)
+
+    onix_order = DeepDiff({(1, 2), "z"}, {(2, 1), "y"}).to_dict()
+    real_order = RealDeepDiff({(1, 2), "z"}, {(2, 1), "y"}, verbose_level=2).to_dict()
+    assert onix_order == {
+        "set_item_removed": ["root['z']", "root[(1, 2)]"],
+        "set_item_added": ["root['y']", "root[(2, 1)]"],
+    }
+    assert real_order == {
+        "set_item_removed": ["root['z']"],
+        "set_item_added": ["root['y']"],
+    }
+
+    onix_repeat = DeepDiff({(1, 1, 2)}, {(1, 2, 2)}).to_dict()
+    real_repeat = RealDeepDiff({(1, 1, 2)}, {(1, 2, 2)}, verbose_level=2).to_dict()
+    assert onix_repeat == {
+        "set_item_removed": ["root[(1, 1, 2)]"],
+        "set_item_added": ["root[(1, 2, 2)]"],
+    }
+    assert real_repeat == {}
