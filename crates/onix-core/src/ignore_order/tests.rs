@@ -999,15 +999,16 @@ fn signed_zero_floats_share_a_key_but_stay_distinct_from_the_integer_zero() {
 }
 
 #[test]
-fn signed_zero_floats_share_a_set_member_key_too() {
-    // The same normalization, but through `set_member_key`'s own
-    // `number_key` (a bare top-level number is special-cased there rather
-    // than routed through `item_key`): confirmed against `deepdiff==9.1.0`,
-    // `DeepDiff({0.0}, {-0.0})` is `{}` -- two otherwise-unrelated sets, each
-    // holding one signed zero, are the same set. A `+0.0` normalization
-    // mutated away (e.g. `f + 0.0` -> `f - 0.0`, the identity on every
-    // float) would keep the two bit patterns distinct here.
-    let key = super::set_member_key;
+fn signed_zero_floats_share_a_set_member_digest_too() {
+    // The same normalization, but through `set_member_digest`'s own
+    // `number_key` (its scalar content path): confirmed against
+    // `deepdiff==9.1.0`, `DeepDiff({0.0}, {-0.0})` is `{}` -- two
+    // otherwise-unrelated sets, each holding one signed zero, are the same
+    // set. A `+0.0` normalization mutated away (e.g. `f + 0.0` -> `f - 0.0`,
+    // the identity on every float) would keep the two bit patterns distinct
+    // here.
+    let memo = IgnoreOrderMemo::new();
+    let key = |value: &CValue| super::set_member_digest(value, &memo);
     assert_eq!(key(&cv(&json!(0.0))), key(&cv(&json!(-0.0))));
     assert_ne!(key(&cv(&json!(2.0))), key(&cv(&json!(2))));
     // A `f + 0.0` -> `f * 0.0` mutant would collapse every float to `0.0`'s
@@ -1543,8 +1544,8 @@ fn colliding_tuples_in_one_list_collapse_to_a_single_distinct_item() {
 fn a_tuple_digest_cache_hit_reads_its_own_index_not_the_first_ones() {
     // Three hashable tuples share one run's cache: `(9,)` gets index 0
     // (fresh), `(1,)` gets index 1 (fresh), and `(1.0,)` -- Python-equal to
-    // `(1,)` -- is a cache HIT reading `tuple_digests[id.index()]`. A
-    // `TupleId::index` mutant that always returns `0` would make every
+    // `(1,)` -- is a cache HIT reading `node_digests[id.index()]`. A
+    // `NodeId::index` mutant that always returns `0` would make every
     // cache-hit read index 0's digest (`(9,)`'s) instead of its own tuple's
     // -- invisible for a repeat of the FIRST tuple ever hashed (index 0
     // already equals 0), so this needs a repeat of the SECOND one, on
@@ -2332,7 +2333,8 @@ fn a_frozenset_holding_an_unhashable_value_keeps_its_own_digest() {
 /// value can carry one.
 #[test]
 fn an_unhashable_set_member_keys_structurally() {
-    let key = super::set_member_key;
+    let memo = IgnoreOrderMemo::new();
+    let key = |value: &CValue| super::set_member_digest(value, &memo);
     let mut builder = crate::value::Builder::new();
     let object = builder.object(vec![("a".to_string(), cv(&json!(1)))]);
     let other_object = builder.object(vec![("a".to_string(), cv(&json!(2)))]);
@@ -2362,7 +2364,8 @@ fn an_unhashable_set_member_keys_structurally() {
 /// must not share one identity even though neither can be hashed.
 #[test]
 fn unhashable_set_members_of_different_kinds_stay_distinct() {
-    let key = super::set_member_key;
+    let memo = IgnoreOrderMemo::new();
+    let key = |value: &CValue| super::set_member_digest(value, &memo);
     let listed = |value: CValue| CValue::Tuple(Box::new([value]));
 
     assert_ne!(

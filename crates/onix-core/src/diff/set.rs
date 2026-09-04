@@ -3,7 +3,7 @@
 //! path-keyed values.
 
 use crate::error::Error;
-use crate::ignore_order::set_difference;
+use crate::ignore_order::{IgnoreOrderMemo, set_difference};
 use crate::path::{PathSegment, set_item_repr};
 use crate::report::Report;
 use crate::value::SetItems;
@@ -40,8 +40,9 @@ pub(crate) fn set_diff(
     b: &SetItems,
     depth: usize,
     opts: &DiffOptions,
+    memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
-    let (removed, added) = set_difference(a, b);
+    let (removed, added) = set_difference(a, b, memo);
     let mut report = Report::new();
 
     for item in removed {
