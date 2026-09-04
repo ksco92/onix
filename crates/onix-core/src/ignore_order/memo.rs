@@ -101,14 +101,32 @@
 //! break Python-equality of a wrapping tuple still collapses, at the root or
 //! arbitrarily deep. A member is compared by its `RepId` — an `O(1)`,
 //! stack-safe comparison, which matters because a set member's nesting is not
-//! depth-guarded before this runs. A tuple stays positional and a frozenset by
-//! membership (onix's one deliberate divergence from `DeepHash`'s
-//! order-insensitive iterable hashing — see
-//! [`super::hash::set_member_digest`]'s doc). Members are hashed a-side in
+//! depth-guarded before this runs.
+//!
+//! **Both set-member tables are [`BTreeMap`]s, not `FxHash` maps** — a
+//! deliberate, security-motivated exception to the rest of the crate. They are
+//! keyed by *attacker-controlled member content* and reached for **every**
+//! set/frozenset comparison, including with the default `ignore_order=false`.
+//! `FxHash` uses a fixed, public seed and an invertible step, so collisions can
+//! be crafted in closed form (see `super::fxhash`'s hash-flooding note); an
+//! `FxHash` table here would let a crafted set drive interning to `O(n^2)` — a
+//! denial-of-service vector. A `BTreeMap` has no hash to attack: lookups are
+//! `O(log n)` in the worst case regardless of input, so the walk is
+//! `O(n log n)`. The `FxHash` tables the crate keeps (`HashedList`, the tuple
+//! digests, the distance memo) are only reached under `ignore_order=true` and
+//! are the pairing hot path, so they stay on `FxHash`; their float-carrying keys
+//! are protected from the *non-adversarial* bit-pattern collision of integral
+//! and half-integer floats by mixing (see `crate::lcs::mix_float_bits`), but a
+//! deterministic adversary is out of scope there.
+//!
+//! A tuple stays positional and a frozenset by membership (onix's one
+//! deliberate divergence from `DeepHash`'s order-insensitive iterable hashing —
+//! see [`super::hash::set_member_digest`]'s doc). Members are hashed a-side in
 //! canonical order, then b-side, so the id each equality class settles on is
 //! deterministic.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use super::fxhash::HashMap;
 use super::hash::{ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId};
@@ -135,12 +153,16 @@ pub(crate) struct IgnoreOrderMemo {
     /// section): each distinct [`MemberHashKey`] gets a fresh [`NodeId`]
     /// (its Python-equality class) paired with its content [`RepId`], so a
     /// container Python-equal to one hashed earlier wins both — collapsing
-    /// `1`/`1.0` — while a naive/aware difference keeps distinct `NodeId`s.
-    node_table: RefCell<HashMap<MemberHashKey, (NodeId, RepId)>>,
+    /// `1`/`1.0` — while a naive/aware difference keeps distinct `NodeId`s. A
+    /// [`BTreeMap`], not an `FxHash` map: it is keyed by attacker-controlled
+    /// content and reached with default options, so it must be
+    /// collision-immune (module doc, "Set-member digests").
+    node_table: RefCell<BTreeMap<MemberHashKey, (NodeId, RepId)>>,
     /// Set-member content interning: each distinct [`MemberContent`] gets one
     /// [`RepId`] (its `usize` index), so content-equal members — a naive and an
-    /// aware datetime at one instant included — collapse to one id.
-    member_content: RefCell<HashMap<MemberContent, RepId>>,
+    /// aware datetime at one instant included — collapse to one id. A
+    /// [`BTreeMap`] for the same collision-immunity reason as `node_table`.
+    member_content: RefCell<BTreeMap<MemberContent, RepId>>,
     enabled: bool,
 }
 
@@ -151,8 +173,8 @@ impl IgnoreOrderMemo {
             cache: RefCell::new(HashMap::default()),
             tuple_ids: RefCell::new(HashMap::default()),
             tuple_digests: RefCell::new(Vec::new()),
-            node_table: RefCell::new(HashMap::default()),
-            member_content: RefCell::new(HashMap::default()),
+            node_table: RefCell::new(BTreeMap::new()),
+            member_content: RefCell::new(BTreeMap::new()),
             enabled: true,
         }
     }
@@ -166,8 +188,8 @@ impl IgnoreOrderMemo {
             cache: RefCell::new(HashMap::default()),
             tuple_ids: RefCell::new(HashMap::default()),
             tuple_digests: RefCell::new(Vec::new()),
-            node_table: RefCell::new(HashMap::default()),
-            member_content: RefCell::new(HashMap::default()),
+            node_table: RefCell::new(BTreeMap::new()),
+            member_content: RefCell::new(BTreeMap::new()),
             enabled: false,
         }
     }

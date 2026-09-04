@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use crate::lcs::{ScalarKey, python_scalar_key};
+use crate::lcs::{ScalarKey, mix_float_bits, python_scalar_key};
 use crate::value::Value;
 
 use super::IgnoreOrderMemo;
@@ -41,7 +41,7 @@ use super::fxhash::HashMap;
 ///   same way — dict *comparison* itself is never affected by
 ///   `ignore_order`, but a dict nested as a list *element* still
 ///   needs a canonical, insertion-order-independent key to be hashed at all.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ItemKey {
     Null,
     /// `true`/`false` — tagged distinctly from any integer of the same
@@ -106,6 +106,31 @@ pub(crate) enum ItemKey {
     FrozenSet(BTreeSet<ItemKey>),
     /// Key-sorted, recursively keyed values.
     Dict(BTreeMap<String, ItemKey>),
+}
+
+/// Hand-written to run the `Float` arm through [`mix_float_bits`] before
+/// hashing: an integral or half-integer float's raw bit pattern has ~50
+/// trailing zero bits, which would collide in the crate's `FxHash`-backed
+/// tables (see that function's doc). Every other arm hashes as the derived
+/// impl would (discriminant plus fields), and nested keys recurse through this
+/// same impl, so the mixing reaches a float at any depth. Consistent with the
+/// derived `Eq`: equal keys still hash equal.
+impl std::hash::Hash for ItemKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Self::Null => {}
+            Self::Bool(b) => b.hash(state),
+            Self::Int(i) => i.hash(state),
+            Self::Float(bits) => mix_float_bits(*bits).hash(state),
+            Self::Str(s) => s.hash(state),
+            Self::DateTime(instant) => instant.hash(state),
+            Self::Date(ordinal) => ordinal.hash(state),
+            Self::List(items) | Self::Set(items) | Self::FrozenSet(items) => items.hash(state),
+            Self::Tuple(items) => items.hash(state),
+            Self::Dict(map) => map.hash(state),
+        }
+    }
 }
 
 /// One element of a hashable tuple's Python identity: a scalar by value, or
@@ -210,7 +235,7 @@ pub(crate) enum MemberPart {
 /// is looked up by, so a Python-equal container hashed earlier in the run wins
 /// the digest (`1`/`1.0` collapse). A tuple is positional; a frozenset is by
 /// membership.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum MemberHashKey {
     Tuple(Box<[MemberPart]>),
     FrozenSet(BTreeSet<MemberPart>),
@@ -223,7 +248,7 @@ pub(crate) enum MemberHashKey {
 /// content id even though their [`MemberPart`]s differ; a tuple stays
 /// positional and a frozenset by membership, onix's one deliberate divergence
 /// from `DeepHash`'s order- and repetition-insensitive iterable hashing.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum MemberContent {
     /// A scalar leaf, by its content [`ItemKey`]: numbers type-distinct
     /// (`1`/`1.0`/`True` apart), a calendar value by its instant/ordinal.

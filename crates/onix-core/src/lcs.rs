@@ -66,12 +66,13 @@ use crate::value::Value;
 /// limitation for numbers whose magnitude exceeds `2^53` (real Python
 /// itself does exact big-int/float comparison here, which this port does
 /// not replicate; see [`MAX_EXACT_F64_INT`]).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ScalarKey {
     Null,
     Str(String),
     Int(i128),
-    /// Bit pattern of a non-integral (or too-large-to-be-exact) float.
+    /// Bit pattern of a non-integral (or too-large-to-be-exact) float —
+    /// hashed through [`mix_float_bits`]; see this type's hand-written `Hash`.
     Float(u64),
     /// A `datetime`, keyed by whether it is aware and by its instant —
     /// Python's own `datetime.__eq__`/`__hash__` pair, which compares two
@@ -87,6 +88,40 @@ pub(crate) enum ScalarKey {
     /// A `date`, keyed by its ordinal. Its own bucket, because a `date` and
     /// a `datetime` are never Python-equal in either direction.
     Date(i64),
+}
+
+/// Avalanche a raw `f64` bit pattern before it is hashed. A float carrying an
+/// integer value (`1.0`, `2.0`, …) or a half-integer (`0.5`, `1.5`, …) has ~50
+/// trailing zero bits, and `onix`'s hash tables use a fast, weakly-finalising
+/// `FxHash`; hashbrown then picks the bucket from the low bits, so a run of
+/// such floats would all land in one bucket and every lookup would degrade to a
+/// linear scan (`O(n^2)` overall). Folding the high half into the low half and
+/// multiplying by a 64-bit odd constant spreads those distinguishing high bits
+/// down into the low bits the bucket index reads. Deterministic and injective
+/// enough for a hash (equal bit patterns still map to one value, so it stays
+/// consistent with `Eq`); it never leaves this module's `Hash` impls.
+pub(crate) fn mix_float_bits(bits: u64) -> u64 {
+    let mut x = bits ^ (bits >> 32);
+    x = x.wrapping_mul(0xd6e8_feb8_6659_fd93);
+    x ^= x >> 32;
+    x
+}
+
+impl std::hash::Hash for ScalarKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Self::Null => {}
+            Self::Str(s) => s.hash(state),
+            Self::Int(i) => i.hash(state),
+            Self::Float(bits) => mix_float_bits(*bits).hash(state),
+            Self::DateTime { aware, instant } => {
+                aware.hash(state);
+                instant.hash(state);
+            }
+            Self::Date(ordinal) => ordinal.hash(state),
+        }
+    }
 }
 
 /// The largest magnitude an `f64` can represent every integer up to,
