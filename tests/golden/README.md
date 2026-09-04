@@ -256,18 +256,23 @@ in a different order — the only one of these five that is order-only.
 by `_make_hash_key(obj)`, which type-wraps a *number* (`(type(obj), obj)`) and
 returns every other object (a `tuple` or `frozenset` included) as itself for the
 *cache lookup* — so a Python-equal tuple hashed earlier in the run wins the
-cache and fixes the digest for every later Python-equal one. `onix` reads the
-rule rather than the cache: a set member's identity is Python's `==` for a
-bare scalar or a tuple (bare numbers kept type-distinct, tuples positional),
-computed per member and never inherited. The two agree wherever `DeepDiff`'s
-cache is not order-sensitive — `{1}` vs `{1.0}` and `{True}` vs `{1}` are each
-a removal plus an addition, `{(1,)}` vs `{(1.0,)}` and `{frozenset({1})}` vs
-`{frozenset({1.0})}` are empty — and differ where it is. (A *separate*,
-deterministic, not order-dependent divergence — `DeepHash`'s own digest
-*computation* for a tuple/frozenset member is itself order- and
-repetition-insensitive, independent of this cache — is the "A tuple or a
-frozenset set member matches order- and repetition-insensitively" point
-below, not this one.)
+cache and fixes the digest for every later Python-equal one, and *which* one
+that is follows the process's own set iteration order. `onix` reproduces the
+same first-Python-equal-wins cache (a member's digest is built through it at
+every node, so a Python-equal tuple or frozenset does inherit an earlier one's
+digest), but hashes members in a **deterministic** order — each side's members
+in `onix`'s canonical set order, the `a` side before the `b` side — so the
+digest a class settles on never depends on process hash order. The two agree
+wherever `DeepDiff`'s winner is not order-sensitive — `{1}` vs `{1.0}` and
+`{True}` vs `{1}` are each a removal plus an addition (bare numbers stay
+type-distinct), `{(1,)}` vs `{(1.0,)}` and `{frozenset({1})}` vs
+`{frozenset({1.0})}` are empty — and differ only where `DeepDiff`'s answer
+depends on which member it iterated first. (A *separate*, deterministic
+divergence — `DeepHash`'s own digest *computation* for a tuple/frozenset
+member is itself order- and repetition-insensitive, so `onix`, which compares a
+tuple member positionally and a frozenset member by membership, tells apart
+values `DeepHash` folds together — is the "A tuple or a frozenset set member
+matches order- and repetition-insensitively" point below, not this one.)
 
 ```text
 DeepDiff({((1.0,),), ((1,), 0)}, {((1, 1),)})
@@ -436,7 +441,7 @@ generated — so it is pinned in `test_sets.py` instead.
   one cache across a whole run: a tuple that is Python-equal to one hashed earlier
   inherits its digest, while a tuple holding a list or a dict is unhashable and keeps
   its own. Which member of an equality class is hashed first is therefore observable,
-  and reproduced — see the `ignore_order_tuple_digest_*` cases and the "Tuple digests"
+  and reproduced — see the `ignore_order_tuple_digest_*` cases and the "Hashable digests"
   section of `crates/onix-core/src/ignore_order/memo.rs` for the full mechanism.
   **`frozenset` is hashable too, and `DeepDiff` caches one the same way** —
   `[frozenset({1}), frozenset({1.0})]` vs `[]` reports a *single* removal there,

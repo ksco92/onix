@@ -18,8 +18,8 @@ make mutants        # cargo mutants --package onix-core --package onix-cli
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **986** mutants (20 in `onix-cli`,
-966 in `onix-core`). Its classification of each mutant into
+`make mutants` enumerates a deterministic **989** mutants (20 in `onix-cli`,
+969 in `onix-core`). Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
 depends on wall-clock time (a slow mutant is a "timeout" on one machine and
 "missed"/"caught" on another) and, in this workspace, on build caching (a
@@ -88,46 +88,60 @@ mutant is caught.
 
 ## A representative run (serial `make mutants`, this tree)
 
-The full PR #21 (type-parity integration) run, before the identity-layering
-fix that added `IdentityMode` to `hash.rs`: 979 mutants tested — 873 caught,
-74 unviable, 13 missed, 19 timeout. `cargo-mutants`' own parallel workers
-contending with each other (and, in that run, with a concurrent `make check`)
-produced false timeouts outside the genuinely non-terminating `lcs.rs` spots;
-every one was reproduced by hand, standalone, and is either fixed (a real
-gap, now caught — see the PR body for the list) or one of the equivalent
-kinds documented above.
+The set-member identity in `hash.rs` was later rebuilt on the crate's own
+digest cache: a single positional `MemberDigest` per member, computed through
+the shared `memo` at every hashable node (the earlier two-key
+`IdentityMode::Loose`/`Content` layering, which matched on *either* of two
+whole-member keys, could not model `DeepHash`'s per-*node* cache decision and
+under-reported some naive/aware-in-tuple members). That rebuild replaced
+several `hash.rs` functions and added the set-member interning table to
+`memo.rs`, so the mutant enumeration shifted from **986** to **989** total
+(20 `onix-cli`, 969 `onix-core`).
 
-The `IdentityMode` fix added 7 mutants to `hash.rs` (979 → **986** total: 20
-`onix-cli`, 966 `onix-core`). A scoped re-run of the 5 touched files after
-that fix, on an otherwise-idle machine (no contention, no false timeouts),
-shows the expected signature cleanly: 560 tested — 535 caught, 23 unviable,
-2 missed (`path.rs`'s and `distance.rs`'s equivalent mutants above), **0
-timeout**. One further mutant this scoped run first reported as a timeout
-(`hash.rs`'s `python_identity`, "delete match arm `Value::Bool(b)`") was
-reproduced standalone in 3s — a false timeout from contention with other
-`cargo` commands running in parallel that run, not a hang — and, reproduced
-alone, was a genuine miss: no case put a `bool` inside a `tuple`/`frozenset`
-set member, the only way to reach that arm (a bare `bool` short-circuits
-before `python_identity` is ever called). Fixed with a golden case and a
-pinned Python test pairing a naive/aware datetime with a `bool` sibling; the
-mutant is caught on re-check.
+A scoped re-run of the two rebuilt files, on an otherwise-idle machine (no
+contention, no false timeouts), shows the expected signature cleanly:
 
-A fresh full run should therefore land close to: 986 tested, 75 unviable,
-and the survivors confined to the same two kinds documented above — 8 in
-`lcs.rs`'s `get_matching_blocks` plus one in `diff/array.rs`'s
-`lcs_or_positional_array_diff` (missed), 6 in `lcs.rs`'s
-`find_longest_match`/`get_matching_blocks` (genuine timeouts,
-non-terminating), `path.rs`'s `python_float_repr` mutant (missed),
-`distance.rs`'s `* 1_000_000.0` mutant (missed), and `memo.rs`'s four
-caching-gate mutants (missed) — 15 missed + 6 timeout + 75 unviable + 890
-caught = 986.
+```
+cargo mutants --package onix-core \
+  -f crates/onix-core/src/ignore_order/hash.rs \
+  -f crates/onix-core/src/ignore_order/memo.rs
+```
 
-- **Unviable (75):** the `Default`-substitution (and `HashMap::new()`)
-  mutants of kind (2), including `args.rs:32`/`args.rs:76` and
-  `distance.rs:32`/`distance.rs:38`; none compiles, so no test can exercise
-  it. `hash.rs` alone now carries 15 of these (`set_difference`,
-  `set_member_key`, `set_member_key_loose`, `python_identity`, `number_key`,
-  `item_key`, `keyed`, `tuple_keyed`, `HashedList::build`, `HashedList::get`).
+49 tested — **26 caught, 19 unviable, 4 missed, 0 timeout**. All four misses
+are `memo.rs`'s pre-existing caching-gate equivalents (`should_cache`,
+`is_container` — kind (1) above, provably result-neutral); every viable mutant
+in the new set-member code (`set_member_digest`, `build_container`,
+`child_refs`, `unhashable`, `scalar_content_key`, `set_difference`,
+`intern_member`) is caught. In particular the content-path bool arm
+(`scalar_content_key`'s `Value::Bool(b) => ItemKey::Bool(*b)`) is caught by the
+`set_tuple_datetime_and_bool_sibling_differs_via_content_path` golden, which
+differs the bool across sides so a `Bool(*b) -> Bool(true)` mutant flips the
+result — confirmed by applying that mutant by hand and watching
+`cargo test --test golden` fail.
+
+The full `make mutants` enumeration is deterministic at **989** mutants
+(`cargo mutants --list`; hash.rs 36, memo.rs 13 of them). The last full
+representative run classified the previous 986-mutant enumeration as **890
+caught, 75 unviable, 15 missed, 6 timeout** — the survivors confined to the
+documented equivalent/uncompilable kinds: the `lcs.rs` LCS spots (missed plus
+genuine non-terminating timeouts), `diff/array.rs`'s
+`lcs_or_positional_array_diff`, `path.rs`'s `python_float_repr`, `distance.rs`'s
+`* 1_000_000.0`, and `memo.rs`'s four caching-gate mutants, plus the
+`Default`-substitution mutants that do not compile (classification is noisy run
+to run, per the caveat above; the survivor *set* is not). The set-member
+rebuild adds a net **+3** mutants, all caught or unviable per the scoped run
+above (which covers both rebuilt files directly); it introduces no new missed
+or timeout survivor, so the 15/6 survivor set is unchanged. Its caller-threading
+elsewhere (`diff/set.rs`, `diff/dispatch.rs`, `distance.rs`'s
+`count_set_diff_leaves`) is exercised by the existing set/`ignore_order` tests.
+
+- **Unviable:** the `Default`-substitution (and `HashMap::new()`) mutants of
+  kind (2), including `args.rs:32`/`args.rs:76` and `distance.rs:32`/
+  `distance.rs:38`; none compiles, so no test can exercise it. `hash.rs` alone
+  carries these for `set_difference`, `set_member_digest`, `child_refs`,
+  `unhashable`, `build_container`, `scalar_content_key`, `number_key`,
+  `item_key`, `keyed`, `tuple_keyed`, `HashedList::build`, `HashedList::get`,
+  and `memo.rs` for `intern_hashable`/`intern_member`.
 
 Future work that touches this logic should re-run `make mutants` and confirm
 that no *viable* mutant survives outside the five documented equivalent spots.
