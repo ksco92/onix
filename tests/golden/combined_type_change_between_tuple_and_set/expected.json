@@ -1,0 +1,16 @@
+{
+  "type_changes": {
+    "root['x']": {
+      "new_type": "set",
+      "new_value": [
+        1,
+        2
+      ],
+      "old_type": "tuple",
+      "old_value": [
+        1,
+        "2024-01-01T00:00:00"
+      ]
+    }
+  }
+}

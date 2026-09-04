@@ -101,6 +101,57 @@ The code is best read in this order, each step building on the last:
    ([`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)) before
    calling the same core the CLI does.
 
+## Compatibility policy
+
+Parity with real DeepDiff is byte-for-byte for real semantics. Where DeepDiff's own
+result depends on something outside the diff itself — Python's set hash order,
+`PYTHONHASHSEED`, the process timezone — or would make DeepDiff crash, onix instead
+picks the simpler, deterministic behavior and documents the difference in
+[`tests/golden/README.md`](tests/golden/README.md) plus one sentence in this
+repository's `README.md`. No machinery is added solely to reproduce such a nuance.
+
+The differences shipped as of 0.4.0 — name and pointer only; the rationale for
+each lives at its pointer, not restated here:
+
+- **Entry order** — the order of `set_item_added`/`set_item_removed` entries
+  is onix's canonical order, not DeepDiff's hash order —
+  `tests/golden/README.md`'s "Set iteration order" section, its "Entry
+  order" point.
+- **Canonical set order** — a different mechanism (member order *inside* a
+  serialized set/frozenset array, not the finding-entry order above) —
+  `tests/golden/README.md`'s "Set iteration order" section, its "Canonical
+  set order" point;
+  [`onix_core::value::SetItems`](crates/onix-core/src/value.rs)'s own doc.
+- **Order-independent tuple/frozenset digest-cache winner** — `tests/golden/README.md`'s
+  "Set iteration order" section, its "Which member of an equality class wins"
+  point.
+- **Set-versus-sequence coercion never folds into `values_changed`** —
+  `tests/golden/README.md`'s "Set iteration order" section, its
+  `` `list(a_set) == some_list` `` point.
+- **A naive/aware calendar set-member pair is reported as every distinct
+  Python member it is** — `tests/golden/README.md`'s "Set iteration order"
+  section, its "A naive and an aware datetime" point.
+- **A tuple/frozenset set member matches positionally** (`tuple.__eq__`), not
+  order-/repetition-insensitively — `tests/golden/README.md`'s "Set iteration
+  order" section, its "A tuple or a frozenset set member matches order- and
+  repetition-insensitively" point.
+- **`frozenset` JSON superset** (a `frozenset` in a finding serializes as an
+  array, where `DeepDiff`'s own `to_json()` raises) — `tests/golden/README.md`'s
+  "Set iteration order" section, its "`frozenset` values are a superset" point.
+- **`date` JSON superset** — `tests/golden/README.md`'s "The `date` superset"
+  section.
+- **Naive datetimes read as UTC**, including for `ignore_order` pairing —
+  [`crates/onix-core/src/ignore_order/distance.rs`](crates/onix-core/src/ignore_order/distance.rs)'s
+  `distance_family` doc.
+- **Year-boundary rejection** — `tests/golden/README.md`'s "Known DeepDiff
+  quirks" section.
+- **Tuple/set/frozenset-subclass and namedtuple refusal** —
+  [`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)'s module doc.
+- **Fixed-offset `tzinfo` round-trip** — a `zoneinfo`/`pytz` zone comes back as
+  a plain `datetime.timezone`, not the original zone object —
+  [`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)'s module doc;
+  `tests/golden/README.md`'s "Normalized versus raw datetimes" section.
+
 ## Golden corpus
 
 `crates/onix-core/tests/golden.rs` (part of `make test`) proves onix's report
@@ -193,17 +244,20 @@ cargo install cargo-mutants --locked
 make mutants
 ```
 
-**Standing result.** `make mutants` enumerates a deterministic **443** mutants
-(18 in `onix-cli`, 425 in `onix-core`). Every viable mutant is caught except
-two documented, harmless kinds: equivalent mutants confined to
-`onix-core/src/lcs.rs` and the `> 1` threshold in
-`onix-core/src/diff/array.rs` (where `>= 1` is provably output-neutral), and
-`Default`-substitution mutants that do not compile. The exact classification of
-each mutant (caught/missed/timeout/unviable) is noisy run to run, but those two
-kinds never change; [`perf/MUTANTS.md`](perf/MUTANTS.md) carries the tool
-version, the reproduce command, and the full argument for why no reported
-survivor is a real test gap. Work that touches this logic should re-run
-`make mutants` and confirm no viable mutant survives outside those two spots.
+**Standing result.** `make mutants` enumerates a deterministic **1000** mutants
+(20 in `onix-cli`, 980 in `onix-core`). Every viable mutant is caught except
+equivalent mutants confined to five documented spots (`onix-core/src/lcs.rs`;
+the `> 1` threshold in `onix-core/src/diff/array.rs`, provably output-neutral;
+`onix-core/src/path.rs`'s `python_float_repr`, an unreachable branch
+condition; `onix-core/src/ignore_order/distance.rs`'s datetime-scale mutant,
+an empirical `f64`-rounding finding; and `onix-core/src/ignore_order/memo.rs`'s
+caching-gate mutants) plus `Default`-substitution mutants that do not compile.
+The exact classification of each mutant (caught/missed/timeout/unviable) is
+noisy run to run, but neither the five spots nor the `Default`-substitution
+kind changes; [`perf/MUTANTS.md`](perf/MUTANTS.md) carries the tool version,
+the reproduce command, and the full argument for why no reported survivor is
+a real test gap. Work that touches this logic should re-run `make mutants`
+and confirm no viable mutant survives outside those five spots.
 
 ## Wheels and publishing
 

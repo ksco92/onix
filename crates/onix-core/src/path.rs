@@ -150,16 +150,27 @@ pub fn quote_key(key: &str) -> String {
 /// "{}[{}]".format(path, str(item))
 /// ```
 ///
-/// So the rule has two halves, and neither is [`quote_key`]'s:
+/// So the rule has three halves, and none is [`quote_key`]'s:
 ///
 /// - A `str` item is wrapped in **single quotes, unconditionally, with no
 ///   escaping of any kind** — `{"it's"}` renders `root['it's']`, where the
 ///   *dict key* `"it's"` renders `root["it's"]`. The two rules genuinely
 ///   differ; confirmed against `deepdiff==9.1.0`.
-/// - Every other item is rendered by Python's `str()`, which for the types
-///   a set can hold is `repr()` ([`python_repr`]) — so a `str` *nested
-///   inside* a tuple or frozenset item **is** escaped, unlike a top-level
-///   one: `{("it's",)}` renders `root[("it's",)]`.
+/// - A `datetime`/`date` item renders via Python's own `str()` for that
+///   type — [`crate::datetime::DateTime::python_str`]/
+///   [`crate::datetime::Date::python_str`], e.g. `{datetime(2024, 1, 1)}`
+///   renders `root[2024-01-01 00:00:00]` and `{date(2024, 1, 1)}` renders
+///   `root[2024-01-01]` — **not** `repr()`, unlike every other item kind:
+///   Python's `str()` and `repr()` agree for `None`/`bool`/number/`tuple`/
+///   `frozenset`, but a calendar value is the one type this model holds
+///   where they genuinely differ. Confirmed against `deepdiff==9.1.0`.
+/// - Every other item is rendered by Python's `str()`, which for the
+///   remaining types a set can hold is `repr()` ([`python_repr`]) — so a
+///   `str` *or a calendar value* nested **inside** a tuple or frozenset item
+///   **is** rendered by `repr()`, unlike a top-level one:
+///   `{("it's",)}` renders `root[("it's",)]` and
+///   `{(datetime(2024, 1, 1),)}` renders
+///   `root[(datetime.datetime(2024, 1, 1, 0, 0),)]`.
 ///
 /// # Examples
 ///
@@ -174,6 +185,8 @@ pub fn quote_key(key: &str) -> String {
 pub fn set_item_repr(item: &Value) -> String {
     match item {
         Value::Str(s) => format!("'{s}'"),
+        Value::DateTime(value) => value.python_str(),
+        Value::Date(value) => value.python_str(),
         other => python_repr(other),
     }
 }
@@ -279,14 +292,11 @@ fn write_repr_head<'a>(out: &mut String, stack: &mut Vec<Work<'a>>, value: &'a V
 }
 
 /// Python's `repr()` for a `datetime`, which is what `str()` of a container
-/// holding one shows — the form a calendar value takes *inside* a set item.
-///
-/// The conversion refuses a calendar value anywhere inside a set member
-/// today (that combination is issue #21), so nothing in the bindings reaches
-/// this; a caller building a [`Value`] directly can, and when #21 lifts the
-/// refusal it is this form — not `str()`'s `2024-01-01 00:00:00` — that a
-/// nested datetime must render as. Python omits the trailing zero fields:
-/// seconds appear only when the second or the microsecond is non-zero, and
+/// holding one shows — the form a calendar value takes *inside* a set item
+/// (a bare top-level set item uses [`crate::datetime::DateTime::python_str`]
+/// instead — see [`set_item_repr`]'s doc for both halves of the rule).
+/// Python omits the trailing zero fields: seconds appear only when the
+/// second or the microsecond is non-zero, and
 /// microseconds only when non-zero.
 fn datetime_repr(value: crate::datetime::DateTime) -> String {
     let date = value.date();

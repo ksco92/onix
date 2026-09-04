@@ -27,34 +27,46 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 ///
 /// # `DoS` trade-off (this hasher is *not* collision-resistant)
 ///
-/// `FxHash` uses a fixed, public seed ([`FX_SEED`]) and no keying, so an
-/// adversary who controls the hashed values can compute keys that all fall
-/// in one bucket and degrade any of this module's `HashMap`/`HashSet`s from
-/// `O(1)` to `O(n)` per operation — worst case pushing
+/// `FxHash` uses a fixed, public seed ([`FX_SEED`]) and an invertible step, so
+/// an adversary who controls the hashed values can compute keys that all fall
+/// in one bucket and degrade any `FxHash` `HashMap`/`HashSet` from `O(1)` to
+/// `O(n)` per operation — worst case pushing
 /// [`HashedList::build`](super::hash::HashedList::build) from `O(n)` to
 /// `O(n²)` on a crafted all-colliding list, on top of the module's already
-/// `O(N²)` pairing (see the parent module doc's complexity note). This
-/// **is** reachable: under the Python binding and the CLI the diffed data is
-/// attacker-controlled, and an [`ItemKey`](super::hash::ItemKey) wraps raw
-/// input strings/structure used directly as a map key. Upstream `DeepDiff`
-/// does not have this exposure — `CPython` hashes `str`/`bytes` with a
-/// per-process-random `SipHash` seed (`PYTHONHASHSEED`) — so this port trades
-/// away a protection the original has.
+/// `O(N²)` pairing (see the parent module doc's complexity note).
 ///
-/// The trade is deliberate and measured, not an oversight. Re-keying the
-/// input-derived maps to the standard DoS-resistant `SipHash`
-/// (`RandomState`) added a material, measured double-digit-percentage
-/// per-call cost on the pairing-heavy `ignore_order` benchmark shapes
-/// (`change_n` ≈500 on each side → ~250,000 candidate pairs, each touching
-/// several of these maps) — a permanent cost on the module's
-/// common case to defend a worst case that (a) mirrors upstream `DeepDiff`'s
-/// own un-bounded `O(N²)` behavior and (b) only matters for callers feeding
-/// untrusted input, who must already bound input *size* against that `O(N²)`
-/// pairing regardless of hasher. `FxHash` is therefore kept, and the
-/// residual hash-flooding risk is accepted and documented rather than paid
-/// for on every ordinary diff. A caller processing untrusted JSON should
-/// cap input size before enabling `ignore_order` (the size bound that tames
-/// the `O(N²)` pairing also tames this).
+/// **Scope: which tables are collision-immune, and why.** The set-member
+/// interning tables in [`IgnoreOrderMemo`](super::memo::IgnoreOrderMemo)
+/// (`node_table`, `member_content`) are deliberately **not** `FxHash` — they are
+/// [`BTreeMap`](std::collections::BTreeMap)s. They are keyed by
+/// attacker-controlled member content *and* reached for every set/frozenset
+/// comparison, **including with the default `ignore_order=false`**, so an
+/// `FxHash` table there would be a crafted-collision `DoS` on the ordinary
+/// path; a `BTreeMap` has no hash to attack (`O(log n)` worst case, always). See
+/// that module's "Set-member digests" section. Every remaining `FxHash` table
+/// in this module — `HashedList`, [`AddedCandidates`](super::pairing::AddedCandidates),
+/// the pairing/`used` sets, and the distance memo — is reached **only** under
+/// `ignore_order=true`, the pairing hot path already bounded by the `O(N²)`
+/// caveat below; those keep `FxHash`, and their float-carrying keys
+/// ([`ItemKey`](super::hash::ItemKey)/[`ScalarKey`](super::hash::ScalarKey)) mix
+/// their bits first ([`mix_float_bits`](crate::lcs::mix_float_bits)) so a
+/// *non-adversarial* run of integral/half-integer floats — whose raw bit
+/// patterns share ~50 trailing zeros — does not accidentally collide.
+///
+/// For those remaining `ignore_order`-only tables the trade is deliberate and
+/// measured. Re-keying them to `SipHash` (`RandomState`) added a material,
+/// measured double-digit-percentage per-call cost on the pairing-heavy
+/// `ignore_order` benchmark shapes (`change_n` ≈500 on each side → ~250,000
+/// candidate pairs, each touching several of these maps) — a permanent cost on
+/// the module's common case to defend a worst case that (a) mirrors upstream
+/// `DeepDiff`'s own un-bounded `O(N²)` behavior and (b) only matters for callers
+/// feeding untrusted input, who must already bound input *size* against that
+/// `O(N²)` pairing regardless of hasher. A caller processing untrusted JSON
+/// should cap input size before enabling `ignore_order` (the size bound that
+/// tames the `O(N²)` pairing also tames this). Upstream `DeepDiff` hashes
+/// `str`/`bytes` with a per-process-random `SipHash` seed (`PYTHONHASHSEED`);
+/// the default-reachable set-member path now matches that resistance via
+/// `BTreeMap`.
 #[derive(Default)]
 pub(crate) struct FxHasher {
     pub(crate) hash: u64,

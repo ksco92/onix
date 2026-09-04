@@ -64,7 +64,7 @@ pub(crate) fn diff_at(
             array_diff(path, old, new, depth, opts, memo)
         }
         (Value::Set(old), Value::Set(new)) | (Value::FrozenSet(old), Value::FrozenSet(new)) => {
-            set_diff(path, old, new, depth, opts)
+            set_diff(path, old, new, depth, opts, memo)
         }
         (Value::Object(old), Value::Object(new)) => object_diff(path, old, new, depth, opts, memo),
         _ => type_change_report(path, a, b, depth, opts.max_depth),

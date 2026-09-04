@@ -3,7 +3,7 @@
 //! path-keyed values.
 
 use crate::error::Error;
-use crate::ignore_order::set_difference;
+use crate::ignore_order::{IgnoreOrderMemo, set_difference};
 use crate::path::{PathSegment, set_item_repr};
 use crate::report::Report;
 use crate::value::SetItems;
@@ -17,12 +17,11 @@ use super::{DiffOptions, check_value_depth, scoped};
 /// what makes it look unlike every other comparison here:
 ///
 /// - **Membership is an identity, not structural equality.** `_diff_set`
-///   builds a hashtable per side and compares the two *key sets*; the key is
-///   [`set_member_key`], Python's own `==` with bare numbers kept
-///   type-distinct — so `{1}` vs `{1.0}` is a removal plus an addition while
-///   `{(1,)}` vs `{(1.0,)}` is empty. That function's doc has the rule and
-///   the one place `onix` is deliberately more deterministic than
-///   `DeepDiff` here.
+///   builds a hashtable per side and compares the two *key sets* — so `{1}`
+///   vs `{1.0}` is a removal plus an addition while `{(1,)}` vs `{(1.0,)}`
+///   is empty. [`set_difference`]'s own doc has the full matching rule this
+///   reproduces, and the one place `onix` is deliberately more
+///   deterministic than `DeepDiff` here.
 /// - **`ignore_order` changes nothing.** A set has no order to ignore, and
 ///   `DeepDiff` dispatches to this same `_diff_set` either way; confirmed
 ///   against `deepdiff==9.1.0`.
@@ -41,8 +40,9 @@ pub(crate) fn set_diff(
     b: &SetItems,
     depth: usize,
     opts: &DiffOptions,
+    memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
-    let (removed, added) = set_difference(a, b);
+    let (removed, added) = set_difference(a, b, memo);
     let mut report = Report::new();
 
     for item in removed {

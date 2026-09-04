@@ -666,6 +666,27 @@ fn deeper_than_counts_object_nesting_the_same_way_as_array_nesting() {
 }
 
 #[test]
+fn deeper_than_counts_frozenset_nesting_the_same_way_as_array_nesting() {
+    // A set/frozenset member has no JSON literal, so this builds the
+    // compact `Value` directly instead of going through the `cv`-based
+    // local `deeper_than` wrapper. Mutation-found (mirrors the object case
+    // above): a `depth + 1` -> `depth * 1` mutant in this arm would count
+    // every level of set/frozenset nesting as depth `0`, never past the
+    // limit.
+    let mut value = cv(&json!(1));
+    for _ in 0..4 {
+        value = CValue::FrozenSet(SetItems::new(vec![value]));
+    }
+    assert!(super::dispatch::deeper_than(&value, 3));
+
+    let mut value = cv(&json!(1));
+    for _ in 0..3 {
+        value = CValue::FrozenSet(SetItems::new(vec![value]));
+    }
+    assert!(!super::dispatch::deeper_than(&value, 3));
+}
+
+#[test]
 fn deeper_than_false_for_a_scalar_regardless_of_limit() {
     assert!(!deeper_than(&json!(1), 0));
     assert!(!deeper_than(&json!("s"), 0));

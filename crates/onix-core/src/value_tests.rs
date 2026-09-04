@@ -820,13 +820,12 @@ fn set_items_drop_an_equal_container_member() {
     assert_eq!(items.len(), 3);
 }
 
-/// A calendar value cannot reach a set through the Python bindings — the
-/// conversion refuses one anywhere inside a set member until issue #21
-/// defines the rule — but the value model can hold one, so its canonical
-/// order and rendering are pinned rather than left to chance: both kinds
-/// sort after every other, datetimes by instant and dates by ordinal, and
-/// each renders as Python's own `repr()` (the form a container holding one
-/// shows), which is what #21 will need.
+/// A calendar value's canonical order and top-level set-item rendering are
+/// pinned here: both kinds sort after every other, datetimes by instant and
+/// dates by ordinal, and each renders with Python's own `str()`
+/// ([`crate::path::set_item_repr`]'s rule for a bare set item — `repr()` is
+/// what a container holding one shows instead, pinned by `python_repr`'s own
+/// `calendar_values_render_as_python_repr` test in `path.rs`).
 #[test]
 fn canonical_order_ranks_calendar_values_last() {
     let items = SetItems::new(vec![
@@ -842,10 +841,10 @@ fn canonical_order_ranks_calendar_values_last() {
         rendered,
         [
             "'z'",
-            "datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600)))",
-            "datetime.datetime(2024, 1, 1, 0, 0)",
-            "datetime.date(2024, 1, 1)",
-            "datetime.date(2024, 1, 2)",
+            "2024-01-01 00:00:00+01:00",
+            "2024-01-01 00:00:00",
+            "2024-01-01",
+            "2024-01-02",
         ]
     );
 }

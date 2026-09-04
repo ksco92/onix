@@ -306,7 +306,7 @@ pub(crate) fn count_diff_leaves(
             count_array_diff_leaves(x, y, depth, opts, memo)
         }
         (Value::Set(x), Value::Set(y)) | (Value::FrozenSet(x), Value::FrozenSet(y)) => {
-            count_set_diff_leaves(x, y)
+            count_set_diff_leaves(x, y, memo)
         }
         (Value::Object(x), Value::Object(y)) => count_object_diff_leaves(x, y, depth, opts, memo),
         _ => type_change_leaf_length(a, b),
@@ -720,9 +720,11 @@ pub(crate) fn count_object_diff_leaves(
 /// `{1, 2, 3, 4, 5}` measures `3`).
 ///
 /// Membership goes through the same [`super::set_difference`] the real set
-/// diff uses, so this count can never drift from what it mirrors.
-fn count_set_diff_leaves(a: &[Value], b: &[Value]) -> usize {
-    let (removed, added) = super::set_difference(a, b);
+/// diff uses (threading the run's shared `memo` so member digests are computed
+/// against the one cache the whole diff shares), so this count can never drift
+/// from what it mirrors.
+fn count_set_diff_leaves(a: &[Value], b: &[Value], memo: &IgnoreOrderMemo) -> usize {
+    let (removed, added) = super::set_difference(a, b, memo);
 
     removed.into_iter().chain(added).map(item_length).sum()
 }

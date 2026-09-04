@@ -999,6 +999,25 @@ fn signed_zero_floats_share_a_key_but_stay_distinct_from_the_integer_zero() {
 }
 
 #[test]
+fn signed_zero_floats_share_a_set_member_digest_too() {
+    // The same normalization, but through `set_member_digest`'s own
+    // `number_key` (its scalar content path): confirmed against
+    // `deepdiff==9.1.0`, `DeepDiff({0.0}, {-0.0})` is `{}` -- two
+    // otherwise-unrelated sets, each holding one signed zero, are the same
+    // set. A `+0.0` normalization mutated away (e.g. `f + 0.0` -> `f - 0.0`,
+    // the identity on every float) would keep the two bit patterns distinct
+    // here.
+    let memo = IgnoreOrderMemo::new();
+    let key = |value: &CValue| super::set_member_digest(value, &memo);
+    assert_eq!(key(&cv(&json!(0.0))), key(&cv(&json!(-0.0))));
+    assert_ne!(key(&cv(&json!(2.0))), key(&cv(&json!(2))));
+    // A `f + 0.0` -> `f * 0.0` mutant would collapse every float to `0.0`'s
+    // bit pattern regardless of its own value; two distinct nonzero floats
+    // must keep distinct keys.
+    assert_ne!(key(&cv(&json!(1.5))), key(&cv(&json!(2.5))));
+}
+
+#[test]
 fn signed_zero_floats_dedup_to_one_removal_under_ignore_order() {
     // Full-diff regression for the signed-zero item_key normalization (see
     // `super::hash::item_key`'s float branch for the deepdiff-9.1.0 provenance).
@@ -1160,6 +1179,54 @@ fn rough_distance_depth_boundary_is_exact() {
         &super::IgnoreOrderMemo::new(),
     );
     assert_eq!(d, 0.0);
+}
+
+/// Pins the exact scale `distance_family` measures a `datetime` pair by:
+/// its instant in *seconds* (microseconds divided by `1_000_000`), the same
+/// value `DeepDiff`'s own `_get_datetime_distance` reads from
+/// `datetime.timestamp()`. Compares `rough_distance`'s actual output
+/// against the identical formula computed independently from `instant()`
+/// here, bypassing `distance_family` entirely.
+///
+/// Catches a `/` mutated to `%` (a non-linear rescale, changing which
+/// candidates fall within the pairing cutoff). It does **not** catch a `/`
+/// mutated to `*`: `numeric_distance`'s own formula, `cutoff * (n1 - n2) /
+/// (n1 + n2)`, is a ratio that is invariant *in the reals* under scaling
+/// both operands by the same nonzero constant, and `timestamp` here is used
+/// nowhere else — but that is an argument about real-number algebra, not
+/// `f64`: exact-integer `/` and `*` are not bit-exact inverses in floating
+/// point in general, so this is an empirical finding (no reachable input
+/// has been observed to distinguish `/ 1_000_000.0` from `* 1_000_000.0`
+/// here, i.e. the two agree up to `f64` rounding for every case this suite
+/// exercises), not an algebraic proof of equivalence.
+#[test]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "mirrors distance_family's own allow: Python's int-to-float timestamp() \
+              conversion is likewise inexact past 2^53"
+)]
+fn rough_distance_datetime_pair_measures_seconds_not_microseconds() {
+    let a = cdt_at(2024, 1, 1, 0, 0, 0, 0, None);
+    let b = cdt_at(2024, 1, 1, 0, 0, 10, 0, None);
+    let (CValue::DateTime(a_dt), CValue::DateTime(b_dt)) = (&a, &b) else {
+        panic!("cdt_at builds a DateTime")
+    };
+    let a_seconds = a_dt.instant() as f64 / 1_000_000.0;
+    let b_seconds = b_dt.instant() as f64 / 1_000_000.0;
+    let expected = numeric_distance(a_seconds, b_seconds, CUTOFF_DISTANCE_FOR_PAIRS);
+
+    let d = super::distance::rough_distance(
+        &a,
+        &b,
+        CUTOFF_DISTANCE_FOR_PAIRS,
+        0,
+        &DiffOptions::default(),
+        &super::IgnoreOrderMemo::new(),
+    );
+    assert!(
+        (d - expected).abs() < 1e-12,
+        "expected {expected} (seconds-scale), got {d}"
+    );
 }
 
 // --- rough_length / item_length -----------------------------------
@@ -1471,6 +1538,25 @@ fn colliding_tuples_in_one_list_collapse_to_a_single_distinct_item() {
         ),
         json!({"iterable_item_removed": {"root[0]": [1]}})
     );
+}
+
+#[test]
+fn a_tuple_digest_cache_hit_reads_its_own_index_not_the_first_ones() {
+    // Three hashable tuples share one run's cache: `(9,)` gets index 0
+    // (fresh), `(1,)` gets index 1 (fresh), and `(1.0,)` -- Python-equal to
+    // `(1,)` -- is a cache HIT reading `node_digests[id.index()]`. A
+    // `NodeId::index` mutant that always returns `0` would make every
+    // cache-hit read index 0's digest (`(9,)`'s) instead of its own tuple's
+    // -- invisible for a repeat of the FIRST tuple ever hashed (index 0
+    // already equals 0), so this needs a repeat of the SECOND one, on
+    // both sides of the diff (the shared memo spans the whole run).
+    let a = carr(vec![
+        ctup(&[json!(9)]),
+        ctup(&[json!(1)]),
+        ctup(&[json!(1.0)]),
+    ]);
+    let b = carr(vec![ctup(&[json!(9)]), ctup(&[json!(1)])]);
+    assert_eq!(ignore_order_diff_compact(&a, &b), json!({}));
 }
 
 #[test]
@@ -2176,6 +2262,13 @@ fn a_set_type_change_omits_its_new_value_when_the_constructor_reproduces_it() {
 
     // Not reproduced: the entry additionally costs `new_value`'s own length.
     assert_eq!(leaves(&cset(&items), &cfrozen(&[json!(1), json!(3)])), 3);
+
+    // A proper subset must not be "reproduced" either: `unordered_python_eq`
+    // requires membership BOTH ways, not either way. `{1}` (new) has every
+    // member in `{1, 2}` (old), but not the reverse, so the constructor does
+    // not reproduce `old` as `new` -- an `&&` -> `||` mutant would accept
+    // this one-directional match and wrongly cost it `1`.
+    assert_eq!(leaves(&cset(&items), &cfrozen(&[json!(1)])), 2);
 }
 
 /// Python's `bool(a_set)` is emptiness, so a `type_changes` from a
@@ -2190,6 +2283,34 @@ fn a_set_coerces_to_its_own_truthiness() {
     assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!(2))), 2);
     assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!(2.5))), 2);
     assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!("x"))), 2);
+}
+
+/// A nested-sequence element's `python_eq` must reject a length mismatch
+/// outright, not answer from however many elements the shorter side has.
+///
+/// `((1, 2, 3),)` vs `[[1, 2]]`: the outer tuple-vs-list pair is length-1 on
+/// both sides, so `sequences_python_eq`'s own top-level length check passes
+/// through to a per-element `python_eq` -- which is where the mismatched
+/// INNER lengths (3 vs 2) must be caught. An `&&` -> `||` mutant in
+/// `python_eq`'s array/tuple arm would let the two shorter, pairwise-equal
+/// elements ([1, 2] against the first two of [1, 2, 3]) pass regardless of
+/// the length check, wrongly reproducing `new_value`.
+#[test]
+fn python_eq_rejects_mismatched_nested_sequence_lengths() {
+    let leaves = super::distance::type_change_leaf_length;
+
+    assert_eq!(
+        leaves(&ctup(&[json!([1, 2, 3])]), &cv(&json!([[1, 2]]))),
+        1 + 2,
+        "not reproduced: the mismatched inner lengths must cost new_value's own length"
+    );
+    // The control: equal-length, equal-content inner sequences ARE
+    // reproduced, so the assertion above is testing the length check, not
+    // an unrelated content mismatch.
+    assert_eq!(
+        leaves(&ctup(&[json!([1, 2, 3])]), &cv(&json!([[1, 2, 3]]))),
+        1
+    );
 }
 
 /// A frozenset holding an unhashable value cannot exist in Python, but the
@@ -2212,7 +2333,8 @@ fn a_frozenset_holding_an_unhashable_value_keeps_its_own_digest() {
 /// value can carry one.
 #[test]
 fn an_unhashable_set_member_keys_structurally() {
-    let key = super::set_member_key;
+    let memo = IgnoreOrderMemo::new();
+    let key = |value: &CValue| super::set_member_digest(value, &memo);
     let mut builder = crate::value::Builder::new();
     let object = builder.object(vec![("a".to_string(), cv(&json!(1)))]);
     let other_object = builder.object(vec![("a".to_string(), cv(&json!(2)))]);
@@ -2242,7 +2364,8 @@ fn an_unhashable_set_member_keys_structurally() {
 /// must not share one identity even though neither can be hashed.
 #[test]
 fn unhashable_set_members_of_different_kinds_stay_distinct() {
-    let key = super::set_member_key;
+    let memo = IgnoreOrderMemo::new();
+    let key = |value: &CValue| super::set_member_digest(value, &memo);
     let listed = |value: CValue| CValue::Tuple(Box::new([value]));
 
     assert_ne!(
@@ -2267,4 +2390,196 @@ fn unhashable_set_members_of_different_kinds_stay_distinct() {
             "set_item_removed": ["root[({1},)]"],
         })
     );
+}
+
+/// The per-node cache decision has to hold whether a naive/aware (or int/float)
+/// difference sits at the member's own root or nested below it. A member's
+/// digest is built through the shared cache at every node, so both families
+/// collapse. Pins the root-level rows (a control the below-root rows are read
+/// against) and the below-root rows in one place; every pairing but the
+/// bare-number sibling is `{}` in real `deepdiff==9.1.0`.
+#[test]
+fn a_set_member_collapses_a_calendar_difference_at_the_root_and_below_it() {
+    let n = || cdt(2024, 1, 1, None);
+    let a = || cdt(2024, 1, 1, Some(0));
+    let i = |x: i64| cv(&json!(x));
+    let f = |x: f64| cv(&json!(x));
+    let tup = |items: Vec<CValue>| CValue::Tuple(items.into_boxed_slice());
+    let fz = |items: Vec<CValue>| CValue::FrozenSet(SetItems::new(items));
+    let set = |items: Vec<CValue>| CValue::Set(SetItems::new(items));
+    let empty = |x: CValue, y: CValue| {
+        crate::diff::diff(&x, &y)
+            .expect("shallow sets diff cleanly")
+            .is_empty()
+    };
+
+    // Root level: the difference is a direct element of the member.
+    assert!(empty(
+        set(vec![tup(vec![n(), tup(vec![i(1)])])]),
+        set(vec![tup(vec![a(), tup(vec![f(1.0)])])]),
+    ));
+    assert!(
+        !empty(
+            set(vec![tup(vec![n(), i(1)])]),
+            set(vec![tup(vec![a(), f(1.0)])]),
+        ),
+        "a bare-number sibling is type-distinct with no shared cache entry"
+    );
+
+    // Below the root: `((N,),)` vs `((A,),)`, one level deeper than the rows above.
+    assert!(empty(
+        set(vec![tup(vec![tup(vec![n()])])]),
+        set(vec![tup(vec![tup(vec![a()])])]),
+    ));
+    // Deeper still: `(((N,),),)` vs `(((A,),),)`.
+    assert!(empty(
+        set(vec![tup(vec![tup(vec![tup(vec![n()])])])]),
+        set(vec![tup(vec![tup(vec![tup(vec![a()])])])]),
+    ));
+    // Through a frozenset: `fs({(N,)})` vs `fs({(A,)})`.
+    assert!(empty(
+        set(vec![fz(vec![tup(vec![n()])])]),
+        set(vec![fz(vec![tup(vec![a()])])]),
+    ));
+    // A twin naive/aware, one at the root and one below it, both collapsing.
+    assert!(empty(
+        set(vec![tup(vec![n(), tup(vec![n(), i(1)])])]),
+        set(vec![tup(vec![a(), tup(vec![a(), i(1)])])]),
+    ));
+}
+
+/// A set member's digest walk is iterative and its result compares in `O(1)`
+/// (a `RepId`), so a deeply nested member neither overflows the native stack
+/// while it is hashed nor while two members are compared — a naive structural
+/// digest with a derived comparison would overflow this small stack. The two
+/// members share one deep chain and differ only naive/aware at the outer tuple,
+/// so they match: the walk runs and the comparison genuinely fires (the two
+/// sets are unequal as wholes, so no fast path short-circuits).
+#[test]
+fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            const DEPTH: usize = 200_000;
+            let chain = |leaf: CValue| {
+                let mut value = leaf;
+                for _ in 0..DEPTH {
+                    value = CValue::FrozenSet(SetItems::new(vec![value]));
+                }
+                value
+            };
+            let member = |dt: CValue| {
+                CValue::Set(SetItems::new(vec![CValue::Tuple(
+                    vec![dt, chain(cv(&json!(0)))].into_boxed_slice(),
+                )]))
+            };
+            let a = member(cdt(2024, 1, 1, None));
+            let b = member(cdt(2024, 1, 1, Some(0)));
+            assert!(
+                crate::diff::diff(&a, &b)
+                    .expect("deep set members diff cleanly")
+                    .is_empty()
+            );
+        })
+        .expect("probe thread spawns");
+    handle
+        .join()
+        .expect("set-member hashing and comparison complete on a small stack");
+}
+
+/// Interning `K` set members must stay near linear in `K`, never quadratic.
+///
+/// - **Float bit-pattern collision (`SetFloat*`, `ListFloat`) — the runtime
+///   guard.** A float carrying an integer or half-integer has ~50 trailing zero
+///   bits; on the `FxHash` tables the crate keeps (e.g. `HashedList` for an
+///   `ignore_order` list), a run of them collides unless the float bits are
+///   mixed first ([`crate::lcs::mix_float_bits`]). Reverting the mixing turns
+///   the float rows here red, so they genuinely guard it.
+/// - **Benign near-linearity (`SetIntPair`).** A run of plain int 2-tuples
+///   exercises the set-member tables on the *shape* of the crafted
+///   hash-flooding attack, but does **not** stand in for the attack: sequential
+///   ints do not collide under `FxHash`, so this row stays green even if the
+///   tables were reverted to `FxHash`. The adversarial hazard — the tables are
+///   keyed by attacker-controlled content and reached with the default
+///   `ignore_order=false` — is guarded at the **type level** instead: the tables
+///   are [`BTreeMap`]s, and [`super::hash::MemberHashKey`]/
+///   [`super::hash::MemberContent`] no longer derive `Hash`, so putting them
+///   back on an `FxHash` map fails to compile (`E0599`). This row is a plain
+///   regression check that the `BTreeMap` path itself scales.
+///
+/// Each asserts the `K -> 2K` diff-time ratio stays under `3.0` — a linear (or
+/// `n log n`) pass is `~2x`, a quadratic one `~4x`. Sized to run well under a
+/// second.
+#[test]
+fn set_and_list_member_interning_scales_near_linearly() {
+    use crate::value::Number;
+
+    #[derive(Clone, Copy)]
+    enum Shape {
+        SetIntFloat,
+        SetHalfFloat,
+        SetIntPair,
+        ListFloat,
+    }
+
+    let f = |x: f64| CValue::Number(Number::from_f64(x).expect("finite"));
+    let i = |n: i64| CValue::Number(Number::from_i64(n));
+
+    let build = |k: usize, shape: Shape| -> (CValue, CValue, DiffOptions) {
+        #[allow(clippy::cast_precision_loss)]
+        let member = |n: usize| -> CValue {
+            let n_i = i64::try_from(n).expect("test sizes fit i64");
+            match shape {
+                Shape::SetIntFloat => CValue::Tuple(vec![f(n as f64)].into_boxed_slice()),
+                Shape::SetHalfFloat => CValue::Tuple(vec![f(n as f64 + 0.5)].into_boxed_slice()),
+                Shape::SetIntPair => CValue::Tuple(vec![i(n_i), i(n_i)].into_boxed_slice()),
+                Shape::ListFloat => f(n as f64),
+            }
+        };
+        let side = |extra: bool| {
+            let mut items: Vec<CValue> = (0..k).map(member).collect();
+            if extra {
+                items.push(CValue::Str("sentinel".to_string().into_boxed_str()));
+            }
+            match shape {
+                Shape::ListFloat => CValue::Array(items.into_boxed_slice()),
+                _ => CValue::Set(SetItems::new(items)),
+            }
+        };
+        let opts = DiffOptions {
+            ignore_order: matches!(shape, Shape::ListFloat),
+            ..DiffOptions::default()
+        };
+        // Differ by one member so the whole-value fast path can't short-circuit.
+        (side(false), side(true), opts)
+    };
+
+    let best_diff = |k: usize, shape: Shape| -> f64 {
+        let (a, b, opts) = build(k, shape);
+        let _ = crate::diff::diff_with_options(&a, &b, &opts).expect("diffs cleanly"); // warm
+        (0..5)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                let _ = crate::diff::diff_with_options(&a, &b, &opts).expect("diffs cleanly");
+                start.elapsed().as_secs_f64()
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+
+    for (name, shape) in [
+        ("set int-float", Shape::SetIntFloat),
+        ("set half-float", Shape::SetHalfFloat),
+        ("set int-pair", Shape::SetIntPair),
+        ("ignore_order list float", Shape::ListFloat),
+    ] {
+        let k = 10_000;
+        let t1 = best_diff(k, shape);
+        let t2 = best_diff(2 * k, shape);
+        let ratio = t2 / t1;
+        assert!(
+            ratio < 3.0,
+            "{name}: K->2K ratio {ratio:.2} (t1={t1:.4}s t2={t2:.4}s) is super-linear — \
+             keys are colliding in their interning table"
+        );
+    }
 }

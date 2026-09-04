@@ -428,6 +428,122 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
         {"d": date(2024, 1, 2), "t": datetime(2024, 1, 2, 10)},
     ),
     "date_leap_day": (date(2024, 2, 29), date(2024, 3, 1)),
+    # --- datetime and date as set members (issue #21) -------------------
+    # A set item is rendered with str() (space separator), unlike every
+    # other item kind (rendered with repr()) -- and a calendar value is the
+    # one item kind whose str() and repr() genuinely differ.
+    "set_datetime_naive_item": ({datetime(2024, 1, 1)}, {"sentinel"}),
+    "set_datetime_aware_item": ({datetime(2024, 1, 1, tzinfo=UTC)}, {"sentinel"}),
+    "set_datetime_microsecond_item": (
+        {datetime(2024, 1, 1, 10, 0, 0, 123456)},
+        {"sentinel"},
+    ),
+    "set_date_item": ({date(2024, 1, 1)}, {"sentinel"}),
+    # _diff_set hashes through DeepHash, whose _prep_datetime normalizes to
+    # UTC before hashing -- so a naive and an aware value at one instant are
+    # a single set member, unlike plain Python `==` (which never equates
+    # the two). See tests/golden/README.md's "Set iteration order" section.
+    "set_datetime_naive_and_aware_same_instant_are_one_member": (
+        {datetime(2024, 1, 1, 10)},
+        {datetime(2024, 1, 1, 10, tzinfo=UTC)},
+    ),
+    # The same pairing, but with an unrelated second member on each side so
+    # the two sets are not equal as wholes: a single-member pair that
+    # hash-matches makes the two SETS themselves structurally equal, which
+    # short-circuits before _diff_set's per-member identity comparison ever
+    # runs at all -- this case forces that comparison to genuinely execute.
+    "set_datetime_naive_and_aware_same_instant_alongside_a_change": (
+        {datetime(2024, 1, 1, 10), 1},
+        {datetime(2024, 1, 1, 10, tzinfo=UTC), 2},
+    ),
+    # ...while _prep_date deliberately skips normalization, so a date and a
+    # datetime at the same midnight never share a digest.
+    "set_date_and_datetime_never_share_a_digest": (
+        {date(2024, 1, 1)},
+        {datetime(2024, 1, 1)},
+    ),
+    # A tuple pairing a naive/aware datetime with a bool: the naive/aware
+    # pair blocks DeepHash's whole-tuple equality cache, so the tuple's
+    # content digest is what has to agree instead, and that digest's own
+    # bool element has its own ItemKey variant, not one that folds into a
+    # plain int/float. The bool DIFFERS across sides (True vs False), so the
+    # two tuples must NOT match: pinning the bool's own value here is what a
+    # `Bool(b) -> Bool(true)` mutation of the content path fails (it would make
+    # False read as True and the tuples spuriously match). An unrelated second
+    # member on each side keeps the two sets unequal as wholes regardless,
+    # forcing the per-member comparison to run rather than short-circuiting on
+    # whole-set equality.
+    "set_tuple_datetime_and_bool_sibling_differs_via_content_path": (
+        {(datetime(2024, 1, 1, 10), True), 1},
+        {(datetime(2024, 1, 1, 10, tzinfo=UTC), False), 2},
+    ),
+    # DeepHash decides cache-versus-content at EVERY node, not once per whole
+    # member: hashing a node first tries a run-scoped cache keyed by the Python
+    # object (so a Python-equal nested tuple/frozenset shares one digest, but a
+    # naive datetime never shares with an aware one), and only on a miss builds
+    # a content digest from the children's (already-cached) digests. So a member
+    # can miss the cache at its outer tuple (a naive/aware sibling blocks it)
+    # yet its inner container still hits the cache, and the two outer content
+    # digests coincide once the datetimes normalize to one instant. Each of
+    # these five is `{}` in real deepdiff==9.1.0 (TZ=UTC, verbose_level=2) and
+    # was a spurious removal+addition before the per-node model; the bare-number
+    # sibling counterpart (set_tuple_datetime_and_bool_sibling_differs...) stays
+    # a genuine change, because a bare number is type-distinct with no shared
+    # cache entry.
+    "set_tuple_datetime_and_nested_tuple_share_inner_cache": (
+        {(datetime(2024, 1, 1), (1,))},
+        {(datetime(2024, 1, 1, tzinfo=UTC), (1.0,))},
+    ),
+    "set_tuple_datetime_and_nested_tuple_bool_share_inner_cache": (
+        {(datetime(2024, 1, 1), (True,))},
+        {(datetime(2024, 1, 1, tzinfo=UTC), (1,))},
+    ),
+    "set_tuple_datetime_and_nested_frozenset_bool_share_inner_cache": (
+        {(datetime(2024, 1, 1), frozenset({True}))},
+        {(datetime(2024, 1, 1, tzinfo=UTC), frozenset({1}))},
+    ),
+    "set_tuple_datetime_and_nested_frozenset_float_share_inner_cache": (
+        {(datetime(2024, 1, 1), frozenset({1}))},
+        {(datetime(2024, 1, 1, tzinfo=UTC), frozenset({1.0}))},
+    ),
+    "set_tuple_datetime_and_doubly_nested_tuple_share_inner_cache": (
+        {(datetime(2024, 1, 1), ((1,),))},
+        {(datetime(2024, 1, 1, tzinfo=UTC), ((1.0,),))},
+    ),
+    # The naive/aware difference is BELOW the member's own root -- the member is
+    # `((datetime,),)`, and the datetimes sit one tuple deeper. The content
+    # digest is built through the shared cache at every node, so the inner
+    # `(naive,)` and `(aware,)` normalize to one instant and collapse, and the
+    # two outer members match; only the `x`/`y` distractors (added so the two
+    # sets are not equal as wholes) are reported. `{}` for the members in real
+    # deepdiff==9.1.0; a regression that named a nested container by a
+    # Python-identity id rather than its content digest reported these members
+    # as a spurious removal+addition.
+    "set_nested_tuple_naive_aware_collapses_below_the_member_root": (
+        {((datetime(2024, 1, 1),),), "x"},
+        {((datetime(2024, 1, 1, tzinfo=UTC),),), "y"},
+    ),
+    # Nested one level inside a tuple or a frozenset item, a calendar value
+    # renders with repr() instead -- the same rule a nested str() follows.
+    "set_datetime_nested_in_tuple_item": ({(datetime(2024, 1, 1),)}, {"sentinel"}),
+    "set_date_nested_in_frozenset_item": (
+        {frozenset({date(2024, 1, 1)})},
+        {"sentinel"},
+    ),
+    # --- combined goldens: tuple + set/frozenset + datetime/date in one input
+    # (issue #21) --------------------------------------------------------
+    "combined_tuple_of_sets_of_tuples": (
+        ({(1, 2)}, {(3, 4)}),
+        ({(1, 2)}, {(3, 5)}),
+    ),
+    "combined_set_of_frozensets_of_tuples": (
+        {frozenset({(1, 2)}), frozenset({(3, 4)})},
+        {frozenset({(1, 2)}), frozenset({(3, 5)})},
+    ),
+    "combined_type_change_between_tuple_and_set": (
+        {"x": (1, datetime(2024, 1, 1))},
+        {"x": {1, 2}},
+    ),
 }
 
 
@@ -775,6 +891,27 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
     "ignore_order_date_pairing": (
         [date(2024, 1, 1), date(2024, 1, 2)],
         [date(2024, 1, 2), date(2024, 1, 3)],
+        {"ignore_order": True},
+    ),
+    # A set containing a datetime, paired by distance like any other list
+    # item: the values_changed carries the two RAW sets (a set-vs-set
+    # comparison, not a datetime-vs-datetime one, so no UTC normalization
+    # applies here).
+    "ignore_order_set_containing_datetime_changes": (
+        [{datetime(2024, 1, 1)}],
+        [{datetime(2024, 1, 2)}],
+        {"ignore_order": True},
+    ),
+    # --- combined goldens: tuple + set/frozenset + datetime/date in one
+    # input, under ignore_order (issue #21) ------------------------------
+    "combined_dict_with_datetime_and_set_values_under_ignore_order": (
+        {"when": datetime(2024, 1, 1), "tags": {1, 2, 3}},
+        {"when": datetime(2024, 1, 2), "tags": {2, 3, 4}},
+        {"ignore_order": True},
+    ),
+    "combined_list_of_tuples_containing_datetimes_under_ignore_order": (
+        [(datetime(2024, 1, 1), 1), (datetime(2024, 1, 2), 2)],
+        [(datetime(2024, 1, 2), 2), (datetime(2024, 1, 3), 3)],
         {"ignore_order": True},
     ),
 }

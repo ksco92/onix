@@ -18,8 +18,8 @@ make mutants        # cargo mutants --package onix-core --package onix-cli
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **443** mutants (18 in `onix-cli`,
-425 in `onix-core`). Its classification of each mutant into
+`make mutants` enumerates a deterministic **1000** mutants (20 in `onix-cli`,
+980 in `onix-core`). Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
 depends on wall-clock time (a slow mutant is a "timeout" on one machine and
 "missed"/"caught" on another) and, in this workspace, on build caching (a
@@ -30,8 +30,8 @@ independently of any single run's labels.
 ### Kinds of mutant that survive, and why none is a real test gap
 
 1. **Equivalent viable mutants** — a mutation that compiles and runs but
-   cannot change any output, so no test can kill it. All are confined to two
-   spots, each with the argument written at the source:
+   cannot change any output, so no test can kill it. Confined to these spots,
+   each with the argument written at the source:
    - `onix-core/src/lcs.rs`'s `find_longest_match` / `get_matching_blocks`:
      these either force a non-terminating loop (reported as a timeout) or
      produce a wrong-but-terminating result the surrounding comments prove is
@@ -44,6 +44,26 @@ independently of any single run's labels.
      and `<` mutants caught (the expected signature of an equivalent mutant
      beside non-equivalent ones). The argument for why is at the comment on
      that line.
+   - `onix-core/src/path.rs`'s `python_float_repr`: `exponent < 0` → `<=`
+     only runs inside the scientific-notation branch, where `exponent == 0`
+     is structurally unreachable (`decimal_point <= -4 || decimal_point >
+     16` already excludes it) — `<` and `<=` compute the same result for
+     every value that branch can see.
+   - `onix-core/src/ignore_order/distance.rs`'s `distance_family`: the
+     datetime `timestamp` field's `/ 1_000_000.0` → `* 1_000_000.0`.
+     `numeric_distance`'s own formula, `cutoff * (n1 - n2) / (n1 + n2)`, is a
+     ratio, invariant in the reals under scaling both operands by the same
+     nonzero constant — no reachable input has been observed to distinguish
+     `/` from `*` here, though `f64` rounding means this is an empirical, not
+     an algebraic, guarantee (unlike the `array.rs` case above, exact-integer
+     `/` versus `*` on `f64` is not bit-exact in general). The sibling `%`
+     mutant on the same line *is* a genuine, non-equivalent rescale and is
+     caught.
+   - `onix-core/src/ignore_order/memo.rs`'s `IgnoreOrderMemo::should_cache`/
+     `is_container`, mutated to always return `true`: both only gate whether
+     a candidate pair's distance is *cached*, never what value is computed —
+     caching unconditionally costs extra cycles (a scalar pair now pays a
+     clone + hashmap round trip it used to skip) but cannot change a result.
 
 2. **`Default`-substitution mutants that cannot compile.** cargo-mutants tries
    replacing a function body with `Default::default()` (and similar). Most fail
@@ -68,16 +88,73 @@ mutant is caught.
 
 ## A representative run (serial `make mutants`, this tree)
 
-443 mutants tested: 416 caught, 9 missed, 6 timeouts, 12 unviable.
+The set-member identity in `hash.rs` was later rebuilt on the crate's own
+digest cache: each member is reduced to one content id (`RepId`) computed
+through the shared `memo` at every hashable node, with a separate Python-equality
+id (`NodeId`) keying the cache (the earlier two-key `IdentityMode::Loose`/
+`Content` layering, which matched on *either* of two whole-member keys, could
+not model `DeepHash`'s per-*node* cache decision and under-reported some
+naive/aware-in-tuple members). That rebuild replaced several `hash.rs`
+functions and added the set-member interning tables to `memo.rs`, so the mutant
+enumeration shifted from **986** to **1000** total (20 `onix-cli`, 980
+`onix-core`).
 
-- **Missed (9):** eight in `lcs.rs`'s `get_matching_blocks` and one in
-  `diff/array.rs`'s `lcs_or_positional_array_diff` (`> 1` → `>= 1`) — all
-  equivalent, per kind (1).
-- **Timeouts (6):** all in `lcs.rs` (`find_longest_match` /
-  `get_matching_blocks`), per kind (1).
-- **Unviable (12):** the `Default`-substitution (and one `HashMap::new()`)
-  mutants of kind (2), including `args.rs:32`/`args.rs:76` and
-  `distance.rs:32`/`distance.rs:38`; none compiles, so no test can exercise it.
+A scoped re-run of the two rebuilt files, on an otherwise-idle machine (no
+contention, no false timeouts), shows the expected signature cleanly:
+
+```
+cargo mutants --package onix-core \
+  -f crates/onix-core/src/ignore_order/hash.rs \
+  -f crates/onix-core/src/ignore_order/memo.rs
+```
+
+51 tested — **26 caught, 20 unviable, 4 missed, 1 timeout**. All four misses
+are `memo.rs`'s pre-existing caching-gate equivalents (`should_cache`,
+`is_container` — kind (1) above, provably result-neutral); every viable mutant
+in the new set-member code (`set_member_digest`, `build_container`,
+`child_reps`, `scalar_content_key`, `set_difference`, `content_rep`,
+`member_rep`) is caught. In particular the content-path bool arm
+(`scalar_content_key`'s `Value::Bool(b) => ItemKey::Bool(*b)`) is caught by the
+`set_tuple_datetime_and_bool_sibling_differs_via_content_path` golden, which
+differs the bool across sides so a `Bool(*b) -> Bool(true)` mutant flips the
+result — confirmed by applying that mutant by hand and watching
+`cargo test --test golden` fail.
+
+The one timeout — replacing `<impl Hash for ItemKey>::hash` with `()` (a
+no-op hasher) — is genuine, not a false timeout from worker contention:
+reproduced standalone it does not complete in 90 s where the suite normally
+runs in seconds. A no-op `ItemKey` hash sends every `FxHash`-backed table
+(`HashedList`, tuple digests) to one bucket, i.e. `O(n^2)`; the
+`set_and_list_member_interning_scales_near_linearly` test is exactly what
+detects that (it would fail its `K -> 2K` ratio bound), but the suite-wide
+slowdown trips `cargo-mutants`' per-mutant test timeout first, so the tool
+records it as a timeout rather than a caught. Detected, not a survivor.
+
+The full `make mutants` enumeration is deterministic at **1000** mutants
+(`cargo mutants --list`; hash.rs 37, memo.rs 14, lcs.rs 111 of them). The last full
+representative run classified the previous 986-mutant enumeration as **890
+caught, 75 unviable, 15 missed, 6 timeout** — the survivors confined to the
+documented equivalent/uncompilable kinds: the `lcs.rs` LCS spots (missed plus
+genuine non-terminating timeouts), `diff/array.rs`'s
+`lcs_or_positional_array_diff`, `path.rs`'s `python_float_repr`, `distance.rs`'s
+`* 1_000_000.0`, and `memo.rs`'s four caching-gate mutants, plus the
+`Default`-substitution mutants that do not compile (classification is noisy run
+to run, per the caveat above; the survivor *set* is not). The set-member
+rebuild plus the hash-flooding/float-mixing hardening add a net **+14** mutants
+(986 -> 1000), mostly in `lcs.rs` (`mix_float_bits` and the hand-written
+`Hash` impls) and `hash.rs`; per the scoped run above every one is caught or
+unviable except the single genuine `ItemKey::hash`-no-op timeout documented
+there. No new *missed* survivor. Its caller-threading elsewhere (`diff/set.rs`,
+`diff/dispatch.rs`, `distance.rs`'s `count_set_diff_leaves`) is exercised by the
+existing set/`ignore_order` tests.
+
+- **Unviable:** the `Default`-substitution (and `HashMap::new()`) mutants of
+  kind (2), including `args.rs:32`/`args.rs:76` and `distance.rs:32`/
+  `distance.rs:38`; none compiles, so no test can exercise it. `hash.rs` alone
+  carries these for `set_difference`, `set_member_digest`, `child_reps`,
+  `build_container`, `scalar_content_key`, `number_key`, `item_key`, `keyed`,
+  `tuple_keyed`, `HashedList::build`, `HashedList::get`, and `memo.rs` for
+  `tuple_digest`, `content_rep`, `member_rep`.
 
 Future work that touches this logic should re-run `make mutants` and confirm
-that no *viable* mutant survives outside the two documented equivalent spots.
+that no *viable* mutant survives outside the five documented equivalent spots.

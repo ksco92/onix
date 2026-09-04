@@ -1,0 +1,8 @@
+{
+  "set_item_added": [
+    "root['sentinel']"
+  ],
+  "set_item_removed": [
+    "root[frozenset({datetime.date(2024, 1, 1)})]"
+  ]
+}

@@ -226,33 +226,56 @@ and an aware value at one instant hash-match under `ignore_order`, while
 `_prep_date` does not and formats a bare `YYYY-MM-DD`, which can never collide
 with `_prep_datetime`'s `YYYY-MM-DD HH:MM:SS+00:00`.
 
+**Fixed-offset `tzinfo` round-trip.** `to_dict()` returns an aware `datetime`
+carrying a plain `datetime.timezone(timedelta(...))`, built from the offset a
+`zoneinfo`/`pytz` (or any other) `tzinfo` reported *at the moment converted* —
+never the original zone object. This changes nothing about the diff itself
+(`DeepDiff` compares by instant and reports `values_changed` normalized to UTC
+regardless — see above), only what a caller sees if they inspect
+`to_dict()`'s value directly. See `crates/onix-py/src/convert.rs`'s module
+doc.
+
 ## Set iteration order: where onix is deliberately different
 
 This is the one place `onix` does not chase `DeepDiff`, and the reason is that
 there is nothing stable to chase. `DeepDiff`'s answers for sets depend on the
 order the *running process* happens to iterate a Python set in — hash order,
 and for `str` members `PYTHONHASHSEED`-dependent, so it varies between runs of
-the same program. `onix` is deterministic and order-independent instead
-(owner-approved, 2026-09-03). Three consequences, each verified against
-`deepdiff==9.1.0`:
+the same program — or, for a `datetime`/`date`/tuple/frozenset set member, on
+how `DeepHash` computes or caches a digest independently of Python's own
+`==`. `onix` is deterministic throughout instead (owner-approved,
+2026-09-03). Five consequences, each verified against `deepdiff==9.1.0`:
 
-**1. Entry order.** `_diff_set` builds its findings from
+**Entry order.** `_diff_set` builds its findings from
 `t2_hashes - t1_hashes`, a Python set of SHA-256 hex *strings*, so the order of
 the `set_item_added`/`set_item_removed` entries follows those strings' hashes.
 `onix` sorts the entries by their rendered path string. Same findings, listed
-in a different order — the only one of the three that is order-only.
+in a different order — the only one of these five that is order-only.
 
-**2. Which member of an equality class wins.** `DeepHash` keys its shared cache
+**Which member of an equality class wins.** `DeepHash` keys its shared cache
 by `_make_hash_key(obj)`, which type-wraps a *number* (`(type(obj), obj)`) and
-returns every other object as itself — so a `tuple` or `frozenset` member is
-looked up under Python's own `==`, and the first member of an equality class
-hashed in the run fixes the digest for all of them. `onix` reads the rule
-rather than the cache: a set member's identity *is* Python's `==`, with bare
-numbers kept type-distinct, computed per member and never inherited. The two
-agree wherever `DeepDiff`'s cache is not order-sensitive — `{1}` vs `{1.0}` and
-`{True}` vs `{1}` are each a removal plus an addition, `{(1,)}` vs `{(1.0,)}`
-and `{frozenset({1})}` vs `{frozenset({1.0})}` are empty — and differ where it
-is:
+returns every other object (a `tuple` or `frozenset` included) as itself for the
+*cache lookup* — so a Python-equal tuple hashed earlier in the run wins the
+cache and fixes the digest for every later Python-equal one, and *which* one
+that is follows the process's own set iteration order. `onix` reproduces the
+same first-Python-equal-wins cache (a member's digest is built through it at
+every node, so a Python-equal tuple or frozenset does inherit an earlier one's
+digest), but hashes members in a **deterministic** order — each side's members
+in `onix`'s canonical set order, the `a` side before the `b` side — so the
+digest a class settles on never depends on process hash order. The two agree
+wherever `DeepDiff`'s winner is not order-sensitive — `{1}` vs `{1.0}` and
+`{True}` vs `{1}` are each a removal plus an addition (bare numbers stay
+type-distinct), `{(1,)}` vs `{(1.0,)}` and `{frozenset({1})}` vs
+`{frozenset({1.0})}` are empty, and a naive/aware or `1`/`1.0` difference
+nested arbitrarily deep inside a member collapses the same way (the content
+digest is built through the shared cache at every node). They differ only in
+the two deterministic ways documented here: this point — where `DeepDiff`'s own
+answer depends on which member it iterated first — and the separate point
+below. (That *separate* divergence — `DeepHash`'s own digest *computation* for
+a tuple/frozenset member is itself order- and repetition-insensitive, so
+`onix`, which compares a tuple member positionally and a frozenset member by
+membership, tells apart values `DeepHash` folds together — is the "A tuple or a
+frozenset set member matches order- and repetition-insensitively" point below.)
 
 ```text
 DeepDiff({((1.0,),), ((1,), 0)}, {((1, 1),)})
@@ -268,7 +291,7 @@ A `frozenset` is hashable, so `DeepDiff` caches it like a tuple; `onix` keys it
 by its own membership under `ignore_order` too. A `set` is unhashable, so
 neither tool ever caches one.
 
-**3. `list(a_set) == some_list`.** `DeepDiff`'s distance computation asks
+**`list(a_set) == some_list`.** `DeepDiff`'s distance computation asks
 whether applying the new side's type to the old value reproduces it
 (`_from_tree_type_changes`'s `include_values`), and for a set against a
 sequence that is `list(the_set) == the_list` — answered in the set's own
@@ -280,6 +303,48 @@ DeepDiff([{75, 47}], [[75, 47]], ignore_order=True) -> values_changed
 DeepDiff([{75, 47}], [[47, 75]], ignore_order=True) -> type_changes
 onix -> type_changes for both: it compares the two by membership
 ```
+
+**A naive and an aware datetime at one instant are two Python set members, but
+`DeepDiff` can report only one of them.** A real Python set never merges the
+pair — `naive == aware` is `False`, so `{naive, aware}` is a genuine
+two-member set — but `_diff_set` groups members by `DeepHash` digest, and
+`_prep_datetime` normalizes every datetime to its UTC instant before hashing,
+so the two land in the *same* digest bucket; `_create_hashtable` then keeps
+only one `{item, indexes}` entry per bucket, and which member that is follows
+the set's own iteration order:
+
+```text
+DeepDiff({naive, aware}, {"x"}) -> one set_item_removed (whichever the
+  process iterated to first), one set_item_added
+onix -> two set_item_removed entries (both members; identity for matching
+  is by instant, but SetItems stores every structurally distinct member)
+```
+
+The same split applies one level down, inside a tuple:
+`{(naive,), (aware,)}` vs `{(1,)}` is one removal in `DeepDiff`, two in onix.
+`test_a_naive_and_aware_datetime_set_member_is_two_members_in_onix_one_in_deepdiff`
+in `test_sets.py` pins both shapes.
+
+**A tuple or a frozenset set member matches order- and
+repetition-insensitively in real `DeepDiff`, not by Python `==`.**
+`DeepHash._prep_iterable` runs with `ignore_iterable_order`/
+`ignore_repetition` for *every* iterable it hashes — not only the
+list-nested-in-an-`ignore_order`-list case documented above and in "Known
+DeepDiff quirks" below — so a tuple set member is affected too, predating
+this PR (#18's own gap, not a calendar-value nuance):
+
+```text
+DeepDiff({(1, 2), "z"}, {(2, 1), "y"}) -> only "z"/"y" reported: (1, 2)
+  and (2, 1) share one digest despite (1, 2) != (2, 1)
+DeepDiff({(1, 1, 2)}, {(1, 2, 2)}) -> {} : same distinct members,
+  different repetition counts, one digest either way
+onix -> both tuples reported as distinct members in both cases: identity
+  is positional Python `==` (`tuple.__eq__`), the honest reading of what
+  the tuples themselves say
+```
+
+`test_a_tuple_set_member_matches_by_position_where_deepdiff_ignores_order_and_repetition`
+in `test_sets.py` pins both shapes.
 
 **Canonical set order.** Everywhere a set's members become output — the JSON
 array a set serializes to, and the members of a `frozenset` rendered inside a
@@ -303,8 +368,17 @@ byte-identical between runs without pinning `PYTHONHASHSEED`. Everything else
 — categories, path strings, values, and list and tuple order — is compared
 byte for byte.
 
-**No case whose `DeepDiff` answer is order-dependent is a golden.** The three
-examples above are pinned in `crates/onix-py/tests/test_sets.py` as `onix`'s
+**No case whose `DeepDiff` answer is order-dependent is a golden.** Of the
+consequences above, only "Entry order", "Which member of an equality class
+wins" and `` `list(a_set) == some_list` `` are genuinely order-dependent
+(hash-order/`PYTHONHASHSEED`-sensitive in `DeepDiff` itself) — the naive/aware
+and tuple-positional-matching ones are deterministic-but-different, not
+order-dependent, so they need no such allowance for the reason a golden
+excludes the first three: they are excluded from the corpus by the same
+policy that decided them (`DeepDiff`'s answer is genuinely reachable and
+reproducible, but it is not the answer onix deliberately gives), not because
+regenerating one would be nondeterministic. The three order-dependent
+examples are pinned in `crates/onix-py/tests/test_sets.py` as `onix`'s
 own output, with `DeepDiff`'s shown alongside rather than asserted; a golden
 for them could not be regenerated reproducibly. The bindings' set fuzz batch
 detects the class mechanically: it re-diffs each pair with every set rebuilt
@@ -376,7 +450,8 @@ generated — so it is pinned in `test_sets.py` instead.
   `[frozenset({1}), frozenset({1.0})]` vs `[]` reports a *single* removal there,
   of whichever one it hashed first. `onix` deliberately does not reproduce that:
   it reports both, because the survivor depends on the process's own set
-  iteration order (see "Set iteration order" §2 above, which shows both tools'
+  iteration order (see "Set iteration order"'s "Which member of an equality
+  class wins" point above, which shows both tools'
   output, and `ignore_order_unhashable_set_never_collides` for the `set` case
   where the two agree because a `set` is unhashable in Python too). What `onix`
   does match is the *rule* the cache implements — Python `==` with bare numbers
