@@ -104,9 +104,9 @@ _TAG_POOL: Final[tuple[str, ...]] = ("alpha", "beta", "gamma", "delta", "epsilon
 
 def _mutation_indices(count: int, rng: random.Random) -> list[int]:
     """
-    Sample the record indices to mutate for a `VALUE_CHANGE_RATE` batch.
+    Sample the indices to mutate for a `VALUE_CHANGE_RATE` batch.
 
-    :param count: Total record count to sample from.
+    :param count: Total element count to sample from.
     :param rng: Seeded random source.
     :return: The indices to mutate.
     """
