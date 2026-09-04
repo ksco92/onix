@@ -235,8 +235,8 @@ cargo install cargo-mutants --locked
 make mutants
 ```
 
-**Standing result.** `make mutants` enumerates a deterministic **979** mutants
-(20 in `onix-cli`, 959 in `onix-core`). Every viable mutant is caught except
+**Standing result.** `make mutants` enumerates a deterministic **986** mutants
+(20 in `onix-cli`, 966 in `onix-core`). Every viable mutant is caught except
 equivalent mutants confined to five documented spots (`onix-core/src/lcs.rs`;
 the `> 1` threshold in `onix-core/src/diff/array.rs`, provably output-neutral;
 `onix-core/src/path.rs`'s `python_float_repr`, an unreachable branch

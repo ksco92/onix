@@ -18,8 +18,8 @@ make mutants        # cargo mutants --package onix-core --package onix-cli
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **979** mutants (20 in `onix-cli`,
-959 in `onix-core`). Its classification of each mutant into
+`make mutants` enumerates a deterministic **986** mutants (20 in `onix-cli`,
+966 in `onix-core`). Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
 depends on wall-clock time (a slow mutant is a "timeout" on one machine and
 "missed"/"caught" on another) and, in this workspace, on build caching (a
@@ -88,29 +88,46 @@ mutant is caught.
 
 ## A representative run (serial `make mutants`, this tree)
 
-The full PR #21 (type-parity integration) run: 979 mutants tested — 873
-caught, 74 unviable, 13 missed, 19 timeout. `cargo-mutants`' own parallel
-workers contending with each other (and, in that run, with a concurrent
-`make check`) produced false timeouts outside the genuinely non-terminating
-`lcs.rs` spots; every one was reproduced by hand, standalone, and is either
-fixed (a real gap, now caught — see the PR body for the list) or one of the
-equivalent kinds documented above. A scoped re-run of just the touched files,
-after the fixes and on an otherwise-idle machine, shows the expected
-signature cleanly: 553 tested — 528 caught, 22 unviable, 2 missed (`path.rs`'s
-and `distance.rs`'s equivalent mutants above), **0 timeout**.
+The full PR #21 (type-parity integration) run, before the identity-layering
+fix that added `IdentityMode` to `hash.rs`: 979 mutants tested — 873 caught,
+74 unviable, 13 missed, 19 timeout. `cargo-mutants`' own parallel workers
+contending with each other (and, in that run, with a concurrent `make check`)
+produced false timeouts outside the genuinely non-terminating `lcs.rs` spots;
+every one was reproduced by hand, standalone, and is either fixed (a real
+gap, now caught — see the PR body for the list) or one of the equivalent
+kinds documented above.
 
-A fresh full run should therefore land close to: 979 tested, 74 unviable, and
-the survivors confined to the two kinds documented above — 8 in `lcs.rs`'s
-`get_matching_blocks` plus one in `diff/array.rs`'s `lcs_or_positional_array_diff`
-(missed), 6 in `lcs.rs`'s `find_longest_match`/`get_matching_blocks` (genuine
-timeouts, non-terminating), `path.rs`'s `python_float_repr` mutant (missed),
+The `IdentityMode` fix added 7 mutants to `hash.rs` (979 → **986** total: 20
+`onix-cli`, 966 `onix-core`). A scoped re-run of the 5 touched files after
+that fix, on an otherwise-idle machine (no contention, no false timeouts),
+shows the expected signature cleanly: 560 tested — 535 caught, 23 unviable,
+2 missed (`path.rs`'s and `distance.rs`'s equivalent mutants above), **0
+timeout**. One further mutant this scoped run first reported as a timeout
+(`hash.rs`'s `python_identity`, "delete match arm `Value::Bool(b)`") was
+reproduced standalone in 3s — a false timeout from contention with other
+`cargo` commands running in parallel that run, not a hang — and, reproduced
+alone, was a genuine miss: no case put a `bool` inside a `tuple`/`frozenset`
+set member, the only way to reach that arm (a bare `bool` short-circuits
+before `python_identity` is ever called). Fixed with a golden case and a
+pinned Python test pairing a naive/aware datetime with a `bool` sibling; the
+mutant is caught on re-check.
+
+A fresh full run should therefore land close to: 986 tested, 75 unviable,
+and the survivors confined to the same two kinds documented above — 8 in
+`lcs.rs`'s `get_matching_blocks` plus one in `diff/array.rs`'s
+`lcs_or_positional_array_diff` (missed), 6 in `lcs.rs`'s
+`find_longest_match`/`get_matching_blocks` (genuine timeouts,
+non-terminating), `path.rs`'s `python_float_repr` mutant (missed),
 `distance.rs`'s `* 1_000_000.0` mutant (missed), and `memo.rs`'s four
-caching-gate mutants (missed) — 15 missed + 6 timeout + 74 unviable + 884
-caught = 979.
+caching-gate mutants (missed) — 15 missed + 6 timeout + 75 unviable + 890
+caught = 986.
 
-- **Unviable (74):** the `Default`-substitution (and `HashMap::new()`)
+- **Unviable (75):** the `Default`-substitution (and `HashMap::new()`)
   mutants of kind (2), including `args.rs:32`/`args.rs:76` and
-  `distance.rs:32`/`distance.rs:38`; none compiles, so no test can exercise it.
+  `distance.rs:32`/`distance.rs:38`; none compiles, so no test can exercise
+  it. `hash.rs` alone now carries 15 of these (`set_difference`,
+  `set_member_key`, `set_member_key_loose`, `python_identity`, `number_key`,
+  `item_key`, `keyed`, `tuple_keyed`, `HashedList::build`, `HashedList::get`).
 
 Future work that touches this logic should re-run `make mutants` and confirm
 that no *viable* mutant survives outside the five documented equivalent spots.
