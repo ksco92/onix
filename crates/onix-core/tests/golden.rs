@@ -10,6 +10,13 @@
 //! versions and the regeneration command. This test never edits or
 //! regenerates those files; it only reads them.
 //!
+//! The two input files carry Python values JSON cannot express (a tuple
+//! today) in the tagged encoding `tests/golden/README.md` documents, decoded
+//! here by [`decode_tagged`] — the Rust half of the same rule
+//! `scripts/golden_tags.py` implements for the corpus's Python readers. This
+//! decoding is test-only: the engine's own parse paths never interpret a tag
+//! (see the `tagged_objects_are_ordinary_data_to_the_parser` test below).
+//!
 //! "Byte-for-byte" here means *canonical* JSON equality: both sides are
 //! parsed into [`serde_json::Value`] and compared with `PartialEq`, which
 //! for `serde_json`'s `Object` variant is a `BTreeMap`/order-insensitive
@@ -80,6 +87,69 @@ fn case_options(case_dir: &Path) -> onix_core::DiffOptions {
     }
 }
 
+/// Every tag name the corpus's encoding reserves, mirroring
+/// `scripts/golden_tags.py`'s `RESERVED_TAGS`. Only `$tuple` decodes today;
+/// the rest are claimed so a fixture cannot quietly use one as an ordinary
+/// dict key before the type behind it is supported.
+const RESERVED_TAGS: &[&str] = &["$tuple", "$set", "$frozenset", "$datetime", "$date"];
+
+/// Decodes one parsed fixture value into the engine's own value model,
+/// turning a tagged object — a JSON object with exactly one key, that key one
+/// of [`RESERVED_TAGS`] — into the Python value it stands for. Every other
+/// object is plain data.
+///
+/// Panics on a tag with no decoder yet: a corpus using one before its slice
+/// lands is a corpus bug, not a recoverable test outcome.
+fn decode_tagged(value: &Value, builder: &mut onix_core::value::Builder) -> onix_core::Value {
+    match value {
+        Value::Array(items) => onix_core::Value::Array(
+            items
+                .iter()
+                .map(|item| decode_tagged(item, builder))
+                .collect(),
+        ),
+        Value::Object(map) => match sole_tag(map) {
+            Some("$tuple") => onix_core::Value::Tuple(decode_tagged_items(map, "$tuple", builder)),
+            Some(tag) => {
+                panic!("golden fixture uses the reserved tag {tag:?}, which has no decoder yet")
+            }
+            None => {
+                let entries: Vec<(String, onix_core::Value)> = map
+                    .iter()
+                    .map(|(key, item)| (key.clone(), decode_tagged(item, builder)))
+                    .collect();
+                builder.object(entries)
+            }
+        },
+        scalar => onix_core::Value::from(scalar.clone()),
+    }
+}
+
+/// The reserved tag `map` is an encoding of, or `None` if it is plain data.
+fn sole_tag(map: &serde_json::Map<String, Value>) -> Option<&'static str> {
+    if map.len() != 1 {
+        return None;
+    }
+    let key = map.keys().next().expect("a one-entry map has a key");
+    RESERVED_TAGS.iter().copied().find(|tag| *tag == key)
+}
+
+/// The decoded items of a tagged sequence, panicking if the tag's payload is
+/// not an array (again: a corpus bug).
+fn decode_tagged_items(
+    map: &serde_json::Map<String, Value>,
+    tag: &str,
+    builder: &mut onix_core::value::Builder,
+) -> Box<[onix_core::Value]> {
+    let Some(Value::Array(items)) = map.get(tag) else {
+        panic!("the {tag:?} tag's payload must be an array");
+    };
+    items
+        .iter()
+        .map(|item| decode_tagged(item, builder))
+        .collect()
+}
+
 /// Runs `onix_core::diff_with_options` on a case's `a.json`/`b.json` (per
 /// its own `options.json`), panicking (rather than returning `Result`) if
 /// diffing itself errors — every case here is small and well within
@@ -87,15 +157,12 @@ fn case_options(case_dir: &Path) -> onix_core::DiffOptions {
 /// an expected outcome.
 fn diff_case(name: &str) -> Value {
     let case_dir = golden_root().join(name);
-    let a = read_json(&case_dir.join("a.json"));
-    let b = read_json(&case_dir.join("b.json"));
+    let mut builder = onix_core::value::Builder::new();
+    let a = decode_tagged(&read_json(&case_dir.join("a.json")), &mut builder);
+    let b = decode_tagged(&read_json(&case_dir.join("b.json")), &mut builder);
     let opts = case_options(&case_dir);
-    let report = onix_core::diff_with_options(
-        &onix_core::Value::from(a),
-        &onix_core::Value::from(b),
-        &opts,
-    )
-    .unwrap_or_else(|err| panic!("golden case {name:?}: diff returned an error: {err}"));
+    let report = onix_core::diff_with_options(&a, &b, &opts)
+        .unwrap_or_else(|err| panic!("golden case {name:?}: diff returned an error: {err}"));
     report.to_json_value()
 }
 
@@ -206,4 +273,32 @@ fn ignore_order_nested_low_overlap_dict_pairing_matches_deepdiff_exactly() {
         },
     });
     assert_eq!(actual, expected);
+}
+
+/// The tagged encoding is a property of the *corpus*, not of the engine: the
+/// crate's own parse path must read a tagged object as the ordinary dict it
+/// literally is, so a real payload that happens to contain one diffs as data.
+#[test]
+fn tagged_objects_are_ordinary_data_to_the_parser() {
+    let a: onix_core::Value = serde_json::from_str(r#"{"$tuple": [1]}"#).expect("valid JSON");
+    let b: onix_core::Value = serde_json::from_str(r#"{"$tuple": [2]}"#).expect("valid JSON");
+    let report = onix_core::diff(&a, &b).expect("shallow values diff cleanly");
+
+    assert_eq!(
+        report.to_json_value(),
+        serde_json::json!({"values_changed": {"root['$tuple'][0]": {
+            "new_value": 2, "old_value": 1,
+        }}})
+    );
+
+    // The test-only decoder, on the same input, gives the tuple instead.
+    let mut builder = onix_core::value::Builder::new();
+    let decoded = decode_tagged(&read_json_str(r#"{"$tuple": [1]}"#), &mut builder);
+    assert!(matches!(decoded, onix_core::Value::Tuple(_)));
+}
+
+/// Parses JSON text for a test that needs a `serde_json::Value` without a
+/// fixture file behind it.
+fn read_json_str(text: &str) -> Value {
+    serde_json::from_str(text).expect("valid JSON")
 }

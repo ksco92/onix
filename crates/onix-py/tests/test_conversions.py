@@ -6,6 +6,7 @@ conversion table this pins) and `deepdiff_rs.diff_json`'s JSON-parse error
 path.
 """
 
+import collections
 import datetime
 import math
 
@@ -77,10 +78,18 @@ def test_non_str_dict_key_raises_type_error() -> None:
         DeepDiff({1: "a"}, {1: "b"})
 
 
-def test_tuple_raises_type_error() -> None:
-    """A tuple (unsupported in this MVP) raises TypeError naming `tuple`."""
-    with pytest.raises(TypeError, match="tuple"):
-        DeepDiff((1, 2), (1, 3))
+def test_tuple_is_accepted_and_diffed_positionally() -> None:
+    """A tuple converts and diffs element by element, like real DeepDiff."""
+    diff = DeepDiff((1, 2, 3), (1, 2, 4))
+    assert diff.to_dict() == {"values_changed": {"root[2]": {"new_value": 4, "old_value": 3}}}
+
+
+def test_namedtuple_raises_type_error_naming_the_class() -> None:
+    """A namedtuple is not a plain tuple to DeepDiff (it walks fields), so it is refused."""
+    point = collections.namedtuple("Point", "x y")
+
+    with pytest.raises(TypeError, match="Point"):
+        DeepDiff((point(1, 2),), (point(1, 3),))
 
 
 def test_set_raises_type_error() -> None:
@@ -113,14 +122,20 @@ def test_custom_object_raises_type_error() -> None:
 
 def test_unsupported_type_is_reported_even_when_nested() -> None:
     """An unsupported type nested inside an otherwise-supported dict raises with its exact path."""
-    with pytest.raises(TypeError, match=r"tuple at root\['a'\]\['b'\]\[1\]"):
-        DeepDiff({"a": {"b": [1, (1, 2)]}}, {"a": {"b": [1, (1, 3)]}})
+    with pytest.raises(TypeError, match=r"set at root\['a'\]\['b'\]\[1\]"):
+        DeepDiff({"a": {"b": [1, {1, 2}]}}, {"a": {"b": [1, {1, 3}]}})
+
+
+def test_unsupported_type_nested_in_a_tuple_reports_its_path() -> None:
+    """A tuple is walked like a list, so an unsupported element inside one reports its index."""
+    with pytest.raises(TypeError, match=r"set at root\['a'\]\[1\]"):
+        DeepDiff({"a": (1, {1, 2})}, {"a": (1, {1, 3})})
 
 
 def test_unsupported_type_at_root_reports_bare_root_path() -> None:
     """A top-level unsupported value reports the bare `root` path."""
-    with pytest.raises(TypeError, match=r"tuple at root;"):
-        DeepDiff((1, 2), (1, 3))
+    with pytest.raises(TypeError, match=r"set at root;"):
+        DeepDiff({1, 2}, {1, 3})
 
 
 def test_non_str_dict_key_error_reports_path_to_the_dict() -> None:

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::diff::DiffOptions;
 
-use super::DistanceMemo;
+use super::IgnoreOrderMemo;
 use super::distance::{Distance, rough_distance};
 use super::fxhash::{HashMap, HashSet};
 use super::hash::{HashedList, ItemKey};
@@ -90,7 +90,7 @@ pub(crate) fn compute_pairs(
     t2: &HashedList<'_>,
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> HashMap<ItemKey, ItemKey> {
     let mut most_in_common_pairs: HashMap<ItemKey, AddedCandidates> = HashMap::default();
     let mut distances_to_from_hashes: BTreeMap<Distance, Vec<ItemKey>> = BTreeMap::new();
@@ -102,7 +102,7 @@ pub(crate) fn compute_pairs(
             // Memoize the distance for container-vs-container candidates —
             // the pairs whose distance is a recursive trial diff and so the
             // ones that re-compute exponentially without a cache. Scalar
-            // pairs skip the cache entirely (see `DistanceMemo::should_cache`).
+            // pairs skip the cache entirely (see `IgnoreOrderMemo::should_cache`).
             // `rough_distance` is a pure function of the two subtrees'
             // content on this path, so a cached value is identical to a fresh
             // one — see the `super::memo` module doc for the proof.

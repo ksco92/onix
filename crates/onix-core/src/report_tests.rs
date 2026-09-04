@@ -484,3 +484,91 @@ fn two_structural_paths_rendering_identically_collapse_without_panicking() {
     assert_eq!(category.len(), 1);
     assert!(category.contains_key("root[\"p'\"][\"q'\"]"));
 }
+
+#[test]
+fn to_value_preserves_a_tuple_that_to_json_value_flattens_to_an_array() {
+    use crate::test_support::ctup;
+    use crate::value::Value as CValue;
+
+    let mut report = Report::new();
+    report.insert_dictionary_item_added(key_path("s"), ctup(&[json!(1), json!(2)]));
+    report.insert_values_changed(
+        index_path(0),
+        ValuesChangedEntry {
+            old_value: ctup(&[json!(1)]),
+            new_value: cv(&json!([1])),
+            new_path: None,
+        },
+    );
+
+    // The type-preserving rendering keeps both tuples...
+    let rendered = report.to_value();
+    let CValue::Object(root) = &rendered else {
+        panic!("a report renders to an object");
+    };
+    let CValue::Object(added) = root.get("dictionary_item_added").expect("category present") else {
+        panic!("a category renders to an object");
+    };
+    assert!(matches!(
+        added.get("root['s']").expect("path present"),
+        CValue::Tuple(_)
+    ));
+    let CValue::Object(changed) = root.get("values_changed").expect("category present") else {
+        panic!("a category renders to an object");
+    };
+    let CValue::Object(entry) = changed.get("root[0]").expect("path present") else {
+        panic!("an entry renders to an object");
+    };
+    assert!(matches!(
+        entry.get("old_value").expect("old_value present"),
+        CValue::Tuple(_)
+    ));
+    assert!(matches!(
+        entry.get("new_value").expect("new_value present"),
+        CValue::Array(_)
+    ));
+
+    // ...while the JSON rendering shows both as arrays, as DeepDiff's own
+    // to_json() does.
+    assert_eq!(
+        report.to_json_value(),
+        json!({
+            "dictionary_item_added": {"root['s']": [1, 2]},
+            "values_changed": {"root[0]": {"new_value": [1], "old_value": [1]}},
+        })
+    );
+}
+
+#[test]
+fn the_two_renderings_agree_on_every_category() {
+    use crate::test_support::ctup;
+
+    // One report touching every category, both entry shapes, `new_path`, and
+    // a tuple: `to_json_value`'s direct walk must land exactly where
+    // `to_value`'s compact rendering does once converted.
+    let mut report = Report::new();
+    report.insert_values_changed(
+        index_path(0),
+        ValuesChangedEntry {
+            old_value: cv(&json!(1)),
+            new_value: cv(&json!(2)),
+            new_path: Some(index_path(3)),
+        },
+    );
+    report.insert_type_change(
+        key_path("t"),
+        TypeChangeEntry {
+            old_type: "tuple".to_string(),
+            new_type: "list".to_string(),
+            old_value: ctup(&[json!(1)]),
+            new_value: cv(&json!([1])),
+            new_path: Some(key_path("t2")),
+        },
+    );
+    report.insert_dictionary_item_added(key_path("a"), ctup(&[json!(1), json!("x")]));
+    report.insert_dictionary_item_removed(key_path("r"), cv(&json!({"k": [1, 2]})));
+    report.insert_iterable_item_added(index_path(7), cv(&json!(null)));
+    report.insert_iterable_item_removed(index_path(8), ctup(&[]));
+
+    assert_eq!(report.to_json_value(), report.to_value().to_serde_json());
+}

@@ -18,6 +18,12 @@ pub(crate) fn cvec(items: &[serde_json::Value]) -> Vec<Value> {
     items.iter().map(cv).collect()
 }
 
+/// Compact tuple value from a slice of `serde_json` values — the one shape
+/// a JSON literal cannot express, so tests that need a tuple build it here.
+pub(crate) fn ctup(items: &[serde_json::Value]) -> Value {
+    Value::Tuple(cvec(items).into_boxed_slice())
+}
+
 /// Compact [`Object`] from a `serde_json` map, built through the same
 /// sort/dedup/intern path [`Value::from`] uses for objects.
 pub(crate) fn cobj(map: &serde_json::Map<String, serde_json::Value>) -> Object {

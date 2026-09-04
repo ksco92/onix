@@ -26,6 +26,7 @@ pub(crate) fn python_type_name(value: &Value) -> &'static str {
         Value::Number(_) => "int",
         Value::Str(_) => "str",
         Value::Array(_) => "list",
+        Value::Tuple(_) => "tuple",
         Value::Object(_) => "dict",
     }
 }

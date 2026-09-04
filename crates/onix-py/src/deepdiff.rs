@@ -3,11 +3,11 @@
 //! the result as `.to_json()`/`.to_dict()` — see this module's `DeepDiff`
 //! doc for the full, documented MVP surface.
 
+use onix_core::Value;
 use pyo3::prelude::*;
-use serde_json::Value;
 
 use crate::convert::{to_value, value_to_pyobject};
-use crate::guard::{diff_to_value, drop_value_safely, is_deep, resolve_options, serialize_value};
+use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 
 /// A drop-in subset of `deepdiff.DeepDiff`.
 ///
@@ -24,7 +24,8 @@ use crate::guard::{diff_to_value, drop_value_safely, is_deep, resolve_options, s
 /// `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`:
 ///
 /// - `t1`/`t2`: any of `None`, `bool`, `int`, `float`, `str`, `dict` (`str`
-///   keys), or `list`, arbitrarily nested. Converted to `onix_core`'s value
+///   keys), `list`, or `tuple`, arbitrarily nested (a `tuple` subclass,
+///   `namedtuple` included, is not supported). Converted to `onix_core`'s value
 ///   model exactly once, up front — see `crate::convert`'s module doc for
 ///   the full conversion table and every unsupported-type error this can
 ///   raise (`TypeError` for an unsupported type, `ValueError` for an
@@ -51,9 +52,9 @@ use crate::guard::{diff_to_value, drop_value_safely, is_deep, resolve_options, s
 pub(crate) struct DeepDiff {
     report_value: Value,
     /// Whether `report_value` is nested past the inline-depth threshold, and
-    /// so must be serialized and dropped on the sized worker thread rather
-    /// than the calling thread. Computed once in `new`, so `to_json` and
-    /// `Drop` do not each re-walk the report. See `crate::guard::is_deep`.
+    /// so must be rendered to JSON on the sized worker thread rather than the
+    /// calling thread. Computed once in `new`, so repeated `to_json` calls do
+    /// not each re-walk the report. See `crate::guard::is_deep`.
     report_is_deep: bool,
 }
 
@@ -79,8 +80,9 @@ impl DeepDiff {
         let a = to_value(t1, opts.max_depth)?;
         let b = to_value(t2, opts.max_depth)?;
         // The diff is natively recursive: it runs inline when both inputs are
-        // shallow, else on the stack-sized worker (GIL released). The rendered
-        // report comes back as a `serde_json::Value`.
+        // shallow, else on the stack-sized worker (GIL released). The report
+        // comes back in the same compact value model the inputs use, so it can
+        // carry a tuple all the way out to `to_dict`.
         let report_value = diff_to_value(py, a, b, opts)?;
         let report_is_deep = is_deep(&report_value);
 
@@ -91,20 +93,25 @@ impl DeepDiff {
     }
 
     /// Byte-compatible with real `DeepDiff(...).to_json()` at
-    /// `verbose_level=2` — the whole point of this crate.
+    /// `verbose_level=2` — the whole point of this crate. A tuple renders as
+    /// the JSON array `DeepDiff`'s own `to_json()` shows for one.
     ///
-    /// `serde_json`'s serialization of a `Value` is itself natively
-    /// recursive, so a report deep enough to matter is serialized on the
-    /// sized worker thread; a shallow one (the overwhelmingly common case)
-    /// serializes inline. See `crate::guard::serialize_value`.
+    /// Rendering a report to JSON is natively recursive, so a report deep
+    /// enough to matter is rendered on the sized worker thread; a shallow one
+    /// (the overwhelmingly common case) renders inline. See
+    /// `crate::guard::serialize_value`.
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
         serialize_value(py, &self.report_value, self.report_is_deep)
     }
 
-    /// The parsed form of [`Self::to_json`] — a native Python `dict`.
-    /// Conversion back to Python objects is iterative (see
-    /// `crate::convert::value_to_pyobject`), so it is safe on the calling
-    /// thread at any depth.
+    /// The report as a native Python `dict` — [`Self::to_json`]'s content
+    /// with the Python types intact rather than their JSON renderings, so a
+    /// value the diff found in a `tuple` comes back as a `tuple`, exactly as
+    /// real `DeepDiff`'s own `to_dict()` does. (Type *names* in a
+    /// `type_changes` entry stay strings here, where real `DeepDiff` returns
+    /// the type objects themselves.) Conversion back to Python objects is
+    /// iterative (see `crate::convert::value_to_pyobject`), so it is safe on
+    /// the calling thread at any depth.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         value_to_pyobject(py, &self.report_value)
     }
@@ -120,22 +127,9 @@ impl DeepDiff {
     }
 }
 
-impl Drop for DeepDiff {
-    fn drop(&mut self) {
-        // `serde_json::Value`'s derived `Drop` is natively recursive, so a
-        // report nested past the inline threshold would overflow the calling
-        // thread's stack if dropped here. `drop_value_safely` drops a deep
-        // report on the sized worker thread and a shallow one inline.
-        drop_value_safely(
-            std::mem::replace(&mut self.report_value, Value::Null),
-            self.report_is_deep,
-        );
-    }
-}
-
-/// A [`DeepDiff`] report renders to `{}` (an empty JSON object) via
-/// [`onix_core::Report::to_json_value`] when there are no findings — see
-/// that function's own doc.
+/// A [`DeepDiff`] report renders to an empty object via
+/// [`onix_core::Report::to_value`] when there are no findings — see that
+/// function's own doc.
 fn is_empty_report(value: &Value) -> bool {
     matches!(value, Value::Object(map) if map.is_empty())
 }

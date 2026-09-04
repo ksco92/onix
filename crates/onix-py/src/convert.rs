@@ -16,6 +16,7 @@
 //! | `str` | `Str` | |
 //! | `dict` (`str` keys only) | `Object` | keys interned across the whole walk |
 //! | `list` | `Array` | |
+//! | `tuple` | `Tuple` | exactly `tuple`; every subclass is rejected, see below |
 //!
 //! Every other type raises a Python exception instead of converting:
 //!
@@ -26,10 +27,24 @@
 //!   representation for either).
 //! - A `dict` key that is not a `str` raises [`PyTypeError`] naming the
 //!   key's type and the path to the dict containing it.
-//! - Any other unrecognized type (`tuple`, `set`, `frozenset`, dates,
-//!   custom objects, …) raises [`PyTypeError`] naming the type and the
-//!   exact path it was found at (e.g. `"unsupported type for diffing:
-//!   tuple at root['a'][2]"`).
+//! - Any other unrecognized type (`set`, `frozenset`, dates, custom
+//!   objects, …) raises [`PyTypeError`] naming the type and the exact path
+//!   it was found at (e.g. `"unsupported type for diffing: set at
+//!   root['a'][2]"`).
+//!
+//! A `tuple` converts to [`onix_core::Value::Tuple`], which the engine
+//! diffs positionally exactly like a list while still reporting a
+//! tuple-vs-list pairing as a `type_changes` — matching `DeepDiff`.
+//!
+//! A `tuple` **subclass** is not converted, and raises [`PyTypeError`] naming
+//! the class like any other unsupported type. `DeepDiff` reports a value's
+//! `type(obj).__name__`, so a subclass never compares as a plain `tuple`
+//! there: `DeepDiff(Pair((1, 2)), (1, 2))` is a `type_changes` from `Pair` to
+//! `tuple`, where converting the subclass as a tuple would report no
+//! difference at all. A `namedtuple` diverges further still — `DeepDiff`
+//! walks its *fields* (`deephash.py`'s `_prep_tuple`), reporting `root.y`
+//! rather than `root[1]` — and is refused by the same rule, needing no check
+//! of its own.
 //!
 //! # Key interning
 //!
@@ -63,29 +78,64 @@
 //! guarantee that two *equal* inputs of any depth always diff cleanly,
 //! because equality can't be known yet at conversion time.
 use onix_core::path::{PathSegment, render_path};
-use onix_core::value::Builder;
+use onix_core::value::{Builder, Entries};
 use onix_core::{Number as CNumber, Value as CValue};
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::iter::{BoundDictIterator, BoundListIterator};
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
-use serde_json::{Number, Value};
+use pyo3::types::iter::{BoundDictIterator, BoundListIterator, BoundTupleIterator};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
 use crate::errors::MaxDepthError;
 
+/// A Python sequence being walked: a `list` or a `tuple`. The two differ
+/// only in their iterator type and in which [`CValue`] the finished items
+/// become, so every other step of the walk treats them identically — the
+/// same way the diff engine does.
+enum SeqIter<'py> {
+    List(BoundListIterator<'py>),
+    Tuple(BoundTupleIterator<'py>),
+}
+
+impl<'py> SeqIter<'py> {
+    fn next(&mut self) -> Option<Bound<'py, PyAny>> {
+        match self {
+            SeqIter::List(iter) => iter.next(),
+            SeqIter::Tuple(iter) => iter.next(),
+        }
+    }
+
+    /// How many elements are still to come (both iterators are
+    /// `ExactSizeIterator`), so a frame can pre-size its buffer.
+    fn len(&self) -> usize {
+        match self {
+            SeqIter::List(iter) => iter.len(),
+            SeqIter::Tuple(iter) => iter.len(),
+        }
+    }
+
+    /// Wraps this sequence's finished items in the matching value shape.
+    fn build(&self, items: Vec<CValue>) -> CValue {
+        let items = items.into_boxed_slice();
+        match self {
+            SeqIter::List(_) => CValue::Array(items),
+            SeqIter::Tuple(_) => CValue::Tuple(items),
+        }
+    }
+}
+
 /// One in-progress container on [`to_value`]'s explicit work-stack: either a
-/// list or a dict whose *n*th child has been dispatched for conversion and
-/// whose remaining children (plus everything converted so far) are parked
+/// sequence or a dict whose *n*th child has been dispatched for conversion
+/// and whose remaining children (plus everything converted so far) are parked
 /// here until that child's result comes back.
 ///
-/// The next child's index (for a list) and every child's depth are derivable
-/// at the one place they are read, in [`advance_frame`] — the next index is
-/// `built.len()` once the finished child has been pushed, and the child depth
-/// is `path.len()` once its path segment has been pushed.
+/// The next child's index (for a sequence) and every child's depth are
+/// derivable at the one place they are read, in [`advance_frame`] — the next
+/// index is `built.len()` once the finished child has been pushed, and the
+/// child depth is `path.len()` once its path segment has been pushed.
 enum Frame<'py> {
-    List {
-        remaining: BoundListIterator<'py>,
+    Seq {
+        remaining: SeqIter<'py>,
         built: Vec<CValue>,
     },
     Dict {
@@ -96,13 +146,13 @@ enum Frame<'py> {
 }
 
 /// What happens when converting a single object: either it produced a
-/// finished [`CValue`] outright (a scalar, or an empty list/dict), or it's a
-/// non-empty container — [`to_value`]'s loop pushes a [`Frame`] and descends
-/// into the returned first child.
+/// finished [`CValue`] outright (a scalar, or an empty sequence/dict), or
+/// it's a non-empty container — [`to_value`]'s loop pushes a [`Frame`] and
+/// descends into the returned first child.
 enum Step<'py> {
     Done(CValue),
-    List {
-        iter: BoundListIterator<'py>,
+    Seq {
+        iter: SeqIter<'py>,
         first: Bound<'py, PyAny>,
     },
     Dict {
@@ -149,12 +199,14 @@ fn classify<'py>(
     }
 
     if let Ok(list) = current.cast::<PyList>() {
-        let mut iter = list.iter();
+        return Ok(seq_step(SeqIter::List(list.iter())));
+    }
 
-        return Ok(match iter.next() {
-            None => Step::Done(CValue::Array(Box::default())),
-            Some(first) => Step::List { iter, first },
-        });
+    // Exact, unlike the casts above: a tuple subclass is reported under its
+    // own type name by `DeepDiff` and so is refused here (see the module
+    // doc), which the fall-through to `unsupported_type_error` below does.
+    if let Ok(tuple) = current.cast_exact::<PyTuple>() {
+        return Ok(seq_step(SeqIter::Tuple(tuple.iter())));
     }
 
     if let Ok(dict) = current.cast::<PyDict>() {
@@ -171,6 +223,16 @@ fn classify<'py>(
     }
 
     Err(unsupported_type_error(current, path))
+}
+
+/// Starts one sequence: an empty one is finished outright, a non-empty one
+/// hands its first element back for conversion with the rest parked in the
+/// returned iterator.
+fn seq_step(mut iter: SeqIter<'_>) -> Step<'_> {
+    match iter.next() {
+        None => Step::Done(iter.build(Vec::new())),
+        Some(first) => Step::Seq { iter, first },
+    }
 }
 
 /// What [`advance_frame`] returns: either the frame needs its next child
@@ -201,7 +263,7 @@ fn advance_frame<'py>(
     builder: &mut Builder,
 ) -> PyResult<Advance<'py>> {
     match frame {
-        Frame::List {
+        Frame::Seq {
             mut remaining,
             mut built,
         } => {
@@ -215,10 +277,10 @@ fn advance_frame<'py>(
                     path.push(PathSegment::Index(built.len()));
                     Advance::NeedsChild {
                         pending: (next_item, path.len()),
-                        frame: Frame::List { remaining, built },
+                        frame: Frame::Seq { remaining, built },
                     }
                 }
-                None => Advance::Done(CValue::Array(built.into_boxed_slice())),
+                None => Advance::Done(remaining.build(built)),
             })
         }
         Frame::Dict {
@@ -275,14 +337,15 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
 
             match classify(&current, &path, &mut builder)? {
                 Step::Done(value) => finished = Some(value),
-                Step::List { iter, first } => {
+                Step::Seq { iter, first } => {
                     let child_depth = depth + 1;
                     path.push(PathSegment::Index(0));
-                    // `iter` has already yielded `first`, so the finished list
-                    // will hold `iter.len() + 1` elements — pre-size for
-                    // exactly that (`BoundListIterator` is `ExactSizeIterator`).
+                    // `iter` has already yielded `first`, so the finished
+                    // sequence will hold `iter.len() + 1` elements — pre-size
+                    // for exactly that (both sequence iterators are
+                    // `ExactSizeIterator`).
                     let capacity = iter.len().saturating_add(1);
-                    stack.push(Frame::List {
+                    stack.push(Frame::Seq {
                         remaining: iter,
                         built: Vec::with_capacity(capacity),
                     });
@@ -394,8 +457,9 @@ fn max_depth_error(max_depth: usize, path: &[PathSegment]) -> PyErr {
 
 fn unsupported_type_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
     PyTypeError::new_err(format!(
-        "unsupported type for diffing: {} at {}; only None/bool/int/float/str/dict[str, ...]/list \
-         are supported in this MVP (tuples, sets, dates, and custom objects are not)",
+        "unsupported type for diffing: {} at {}; only \
+         None/bool/int/float/str/dict[str, ...]/list/tuple are supported in this MVP (sets, \
+         dates, tuple subclasses including namedtuples, and custom objects are not)",
         type_name(obj),
         render_path(path),
     ))
@@ -407,56 +471,82 @@ fn type_name(obj: &Bound<'_, PyAny>) -> String {
         .map_or_else(|_| "<unknown type>".to_string(), |name| name.to_string())
 }
 
+/// Which Python sequence [`value_to_pyobject`] rebuilds a run of items into
+/// — the report side of [`SeqIter`], where both shapes carry the same
+/// `&[CValue]` and only the finished object differs.
+#[derive(Clone, Copy)]
+enum SeqKind {
+    List,
+    Tuple,
+}
+
+impl SeqKind {
+    fn build(self, py: Python<'_>, items: Vec<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        match self {
+            SeqKind::List => items.into_py_any(py),
+            SeqKind::Tuple => PyTuple::new(py, items)?.into_py_any(py),
+        }
+    }
+}
+
 /// One in-progress container on [`value_to_pyobject`]'s explicit work-stack —
 /// the same technique as [`Frame`]/[`to_value`], applied in the opposite
 /// direction (report `Value` -> Python object) so this direction is equally
 /// immune to the native-stack-overflow class on a `Value` tree deep enough to
 /// matter.
 enum RenderFrame<'py, 'v> {
-    Array {
-        remaining: std::slice::Iter<'v, Value>,
+    Seq {
+        kind: SeqKind,
+        remaining: std::slice::Iter<'v, CValue>,
         built: Vec<Py<PyAny>>,
     },
     Object {
-        remaining: serde_json::map::Iter<'v>,
+        remaining: Entries<'v>,
         built: Bound<'py, PyDict>,
-        current_key: String,
+        current_key: &'v str,
     },
 }
 
-/// Converts a rendered report [`serde_json::Value`] (a
+/// Converts a rendered report [`onix_core::Value`] (a
 /// [`crate::deepdiff::DeepDiff`] report, or one of its nested values) into a
 /// native Python object — the parsed form
 /// [`crate::deepdiff::DeepDiff::to_dict`] returns.
 ///
-/// The report stays a `serde_json::Value` on this output boundary: it holds
-/// only the diff's changed subtrees (a small fraction of either input), so
-/// keeping the proven byte-compatible render path here costs negligible
-/// memory, while the large input trees are the compact model. Unlike
-/// [`to_value`], this never fails: every report value has a lossless Python
-/// equivalent. It walks via an explicit stack (see [`RenderFrame`]), not
-/// native recursion, so a deep report can never overflow the native stack
+/// The report is rendered as the crate's own value model
+/// ([`onix_core::Report::to_value`]) rather than as JSON, which is what lets
+/// this hand back a real `tuple` wherever the diff found one: JSON has no
+/// tuple, so a report round-tripped through `serde_json` could only ever
+/// produce the list `to_json()` shows. The only failure this can report is a
+/// Python-side allocation failure building the objects themselves.
+/// It walks via an explicit stack (see [`RenderFrame`]), not native
+/// recursion, so a deep report can never overflow the native stack
 /// converting it back.
-pub(crate) fn value_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
+pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<PyAny>> {
     let mut stack: Vec<RenderFrame<'_, '_>> = Vec::new();
-    let mut pending: Option<&Value> = Some(value);
+    let mut pending: Option<&CValue> = Some(value);
     let mut finished: Option<Py<PyAny>> = None;
 
     loop {
         if let Some(current) = pending.take() {
             finished = Some(match current {
-                Value::Null => py.None(),
-                Value::Bool(b) => b.into_py_any(py)?,
-                Value::Number(n) => number_to_pyobject(py, n)?,
-                Value::String(s) => s.into_py_any(py)?,
-                Value::Array(items) => {
+                CValue::Null => py.None(),
+                CValue::Bool(b) => b.into_py_any(py)?,
+                CValue::Number(n) => number_to_pyobject(py, n)?,
+                CValue::Str(s) => s.as_ref().into_py_any(py)?,
+                CValue::Array(items) | CValue::Tuple(items) => {
+                    let kind = if matches!(current, CValue::Tuple(_)) {
+                        SeqKind::Tuple
+                    } else {
+                        SeqKind::List
+                    };
                     let mut iter = items.iter();
 
                     match iter.next() {
-                        None => Vec::<Py<PyAny>>::new().into_py_any(py)?,
+                        None => kind.build(py, Vec::new())?,
                         Some(first) => {
                             let capacity = iter.len().saturating_add(1);
-                            stack.push(RenderFrame::Array {
+                            stack.push(RenderFrame::Seq {
+                                kind,
                                 remaining: iter,
                                 built: Vec::with_capacity(capacity),
                             });
@@ -465,7 +555,7 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<Py<Py
                         }
                     }
                 }
-                Value::Object(map) => {
+                CValue::Object(map) => {
                     let mut iter = map.iter();
 
                     match iter.next() {
@@ -474,7 +564,7 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<Py<Py
                             stack.push(RenderFrame::Object {
                                 remaining: iter,
                                 built: PyDict::new(py),
-                                current_key: key.clone(),
+                                current_key: key,
                             });
                             pending = Some(first_value);
                             continue;
@@ -490,7 +580,8 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<Py<Py
 
         match stack.pop() {
             None => return Ok(rendered),
-            Some(RenderFrame::Array {
+            Some(RenderFrame::Seq {
+                kind,
                 mut remaining,
                 mut built,
             }) => {
@@ -499,9 +590,13 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<Py<Py
                 match remaining.next() {
                     Some(next_item) => {
                         pending = Some(next_item);
-                        stack.push(RenderFrame::Array { remaining, built });
+                        stack.push(RenderFrame::Seq {
+                            kind,
+                            remaining,
+                            built,
+                        });
                     }
-                    None => finished = Some(built.into_py_any(py)?),
+                    None => finished = Some(kind.build(py, built)?),
                 }
             }
             Some(RenderFrame::Object {
@@ -509,7 +604,7 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<Py<Py
                 built,
                 current_key,
             }) => {
-                built.set_item(&current_key, rendered)?;
+                built.set_item(current_key, rendered)?;
 
                 match remaining.next() {
                     Some((key, next_value)) => {
@@ -517,7 +612,7 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<Py<Py
                         stack.push(RenderFrame::Object {
                             remaining,
                             built,
-                            current_key: key.clone(),
+                            current_key: key,
                         });
                     }
                     None => finished = Some(built.into_py_any(py)?),
@@ -527,19 +622,20 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &Value) -> PyResult<Py<Py
     }
 }
 
-fn number_to_pyobject(py: Python<'_>, n: &Number) -> PyResult<Py<PyAny>> {
-    if let Some(v) = n.as_i64() {
-        return v.into_py_any(py);
+fn number_to_pyobject(py: Python<'_>, n: &CNumber) -> PyResult<Py<PyAny>> {
+    if !n.is_f64() {
+        if let Some(v) = n.as_i64() {
+            return v.into_py_any(py);
+        }
+
+        // A non-float that does not fit an i64 is by construction a u64
+        // above i64::MAX.
+        if let Some(v) = n.as_u64() {
+            return v.into_py_any(py);
+        }
     }
 
-    if let Some(v) = n.as_u64() {
-        return v.into_py_any(py);
-    }
-
-    // Every Number here came through a report's to_json_value(), which only
-    // ever produces i64/u64/finite-f64 — so reaching here is always the f64
-    // case.
     n.as_f64()
-        .expect("serde_json::Number is always i64, u64, or f64")
+        .expect("a Number is always an i64, a u64, or an f64")
         .into_py_any(py)
 }

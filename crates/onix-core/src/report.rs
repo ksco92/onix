@@ -39,7 +39,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::value::Value;
+use crate::value::{Builder, Value};
 
 use crate::path::{PathSegment, render_path};
 
@@ -88,6 +88,17 @@ impl ValuesChangedEntry {
         }
         serde_json::Value::Object(map)
     }
+
+    fn to_value(&self, builder: &mut Builder) -> Value {
+        let mut entries = vec![
+            ("new_value".to_string(), self.new_value.clone()),
+            ("old_value".to_string(), self.old_value.clone()),
+        ];
+        if let Some(new_path) = &self.new_path {
+            entries.push(("new_path".to_string(), rendered(new_path)));
+        }
+        builder.object(entries)
+    }
 }
 
 /// A single `type_changes` entry: the Python type itself changed between the
@@ -128,6 +139,31 @@ impl TypeChangeEntry {
         }
         serde_json::Value::Object(map)
     }
+
+    fn to_value(&self, builder: &mut Builder) -> Value {
+        let mut entries = vec![
+            (
+                "old_type".to_string(),
+                Value::Str(self.old_type.clone().into_boxed_str()),
+            ),
+            (
+                "new_type".to_string(),
+                Value::Str(self.new_type.clone().into_boxed_str()),
+            ),
+            ("old_value".to_string(), self.old_value.clone()),
+            ("new_value".to_string(), self.new_value.clone()),
+        ];
+        if let Some(new_path) = &self.new_path {
+            entries.push(("new_path".to_string(), rendered(new_path)));
+        }
+        builder.object(entries)
+    }
+}
+
+/// A structural path rendered into the string [`Value`] a report entry
+/// carries it as (`new_path`).
+fn rendered(path: &[PathSegment]) -> Value {
+    Value::Str(render_path(path).into_boxed_str())
 }
 
 /// A DeepDiff-compatible diff result, grouped into categories.
@@ -176,30 +212,11 @@ fn merge_map(dst: &mut BTreeMap<Vec<PathSegment>, Value>, src: BTreeMap<Vec<Path
     }
 }
 
-/// Renders `map`'s structural keys and inserts each into `category`,
-/// **collapsing any rendered-string collision** (two structural paths whose
-/// [`render_path`] output is identical — see this module's doc) into a
-/// single JSON entry: `Map::insert` overwrites on a repeated string key, so
-/// the survivor is whichever structural path is greatest, i.e. the *last*
-/// one visited in `map`'s ascending structural order. This is the one place
-/// that tie-break happens; everywhere else in this file treats `map`'s
-/// structural keys as already-unique (which, structurally, they always are
-/// — see [`insert_checked`]).
-fn render_category(
-    category: &mut serde_json::Map<String, serde_json::Value>,
-    map: &BTreeMap<Vec<PathSegment>, Value>,
-) {
-    for (path, value) in map {
-        category.insert(render_path(path), value.to_serde_json());
-    }
-}
-
-/// Serializes `map` into `root` under `name`, skipping it entirely when
-/// `map` is empty (matching `DeepDiff`'s own `to_json()` behavior of
-/// omitting empty categories). Shared by [`Report::to_json_value`]'s four
-/// raw-`Value` categories (`dictionary_item_added`/`removed`,
-/// `iterable_item_added`/`removed`), which otherwise differ only in `name`
-/// and which field they read.
+/// [`push_raw_category`]'s [`Report::to_json_value`] twin: serializes `map`
+/// into `root` under `name`, skipping an empty category, and collapsing a
+/// rendered-string collision the same way — here through
+/// `serde_json::Map::insert`, which likewise overwrites on a repeated key,
+/// so the survivor is again the last structural path visited.
 fn serialize_raw_category(
     root: &mut serde_json::Map<String, serde_json::Value>,
     name: &str,
@@ -209,8 +226,42 @@ fn serialize_raw_category(
         return;
     }
     let mut category = serde_json::Map::new();
-    render_category(&mut category, map);
+    for (path, value) in map {
+        category.insert(render_path(path), value.to_serde_json());
+    }
     root.insert(name.to_string(), serde_json::Value::Object(category));
+}
+
+/// Pushes `map` onto `root` under `name` as one rendered category, skipping
+/// it entirely when `map` is empty (matching `DeepDiff`'s own `to_json()`
+/// behavior of omitting empty categories). Shared by [`Report::to_value`]'s
+/// four raw-`Value` categories (`dictionary_item_added`/`removed`,
+/// `iterable_item_added`/`removed`), which otherwise differ only in `name`
+/// and which field they read.
+///
+/// Rendering the structural keys **collapses any rendered-string collision**
+/// (two structural paths whose [`render_path`] output is identical — see
+/// this module's doc) into a single entry: [`Builder::object`] keeps the
+/// last value seen for a repeated key, so the survivor is whichever
+/// structural path is greatest, i.e. the *last* one visited in `map`'s
+/// ascending structural order. This is the one place that tie-break happens;
+/// everywhere else in this file treats `map`'s structural keys as
+/// already-unique (which, structurally, they always are — see
+/// [`insert_checked`]).
+fn push_raw_category(
+    root: &mut Vec<(String, Value)>,
+    builder: &mut Builder,
+    name: &str,
+    map: &BTreeMap<Vec<PathSegment>, Value>,
+) {
+    if map.is_empty() {
+        return;
+    }
+    let entries: Vec<(String, Value)> = map
+        .iter()
+        .map(|(path, value)| (render_path(path), value.clone()))
+        .collect();
+    root.push((name.to_string(), builder.object(entries)));
 }
 
 impl Report {
@@ -494,13 +545,88 @@ impl Report {
             + self.iterable_item_removed.len()
     }
 
-    /// Serializes the report to the `DeepDiff` `to_json()` shape at
-    /// `verbose_level=2`.
+    /// Renders the report into the `DeepDiff` `to_json()` shape at
+    /// `verbose_level=2`, as the crate's own [`Value`] model.
     ///
-    /// Empty categories are omitted entirely (an empty report serializes to
-    /// `{}`), matching `DeepDiff`'s own behavior. Rendering each category's
-    /// structural keys can collapse two entries into one on adversarial
-    /// input (see this module's doc and `render_category`).
+    /// This is the type-preserving rendering: a finding whose value is a
+    /// [`Value::Tuple`] still carries a tuple here, where
+    /// [`Self::to_json_value`] (and any JSON text rendered from it) can only
+    /// show the array a tuple serializes as. A consumer that reconstructs
+    /// native values from a report — the Python bindings' `to_dict()` —
+    /// reads this; a consumer that only needs JSON reads
+    /// [`Self::to_json_value`], which does its own direct walk (see its doc
+    /// for why the two exist).
+    ///
+    /// Empty categories are omitted entirely (an empty report renders to an
+    /// empty object), matching `DeepDiff`'s own behavior. Rendering each
+    /// category's structural keys can collapse two entries into one on
+    /// adversarial input — see this module's doc, and the crate-private
+    /// `push_raw_category` for the mechanics.
+    #[must_use]
+    pub fn to_value(&self) -> Value {
+        let mut builder = Builder::new();
+        let mut root: Vec<(String, Value)> = Vec::new();
+
+        if !self.type_changes.is_empty() {
+            let entries: Vec<(String, Value)> = self
+                .type_changes
+                .iter()
+                .map(|(path, entry)| (render_path(path), entry.to_value(&mut builder)))
+                .collect();
+            root.push(("type_changes".to_string(), builder.object(entries)));
+        }
+
+        if !self.values_changed.is_empty() {
+            let entries: Vec<(String, Value)> = self
+                .values_changed
+                .iter()
+                .map(|(path, entry)| (render_path(path), entry.to_value(&mut builder)))
+                .collect();
+            root.push(("values_changed".to_string(), builder.object(entries)));
+        }
+
+        push_raw_category(
+            &mut root,
+            &mut builder,
+            "dictionary_item_added",
+            &self.dictionary_item_added,
+        );
+        push_raw_category(
+            &mut root,
+            &mut builder,
+            "dictionary_item_removed",
+            &self.dictionary_item_removed,
+        );
+        push_raw_category(
+            &mut root,
+            &mut builder,
+            "iterable_item_added",
+            &self.iterable_item_added,
+        );
+        push_raw_category(
+            &mut root,
+            &mut builder,
+            "iterable_item_removed",
+            &self.iterable_item_removed,
+        );
+
+        builder.object(root)
+    }
+
+    /// Serializes the report to the `DeepDiff` `to_json()` shape at
+    /// `verbose_level=2` as a [`serde_json::Value`], where a
+    /// [`Value::Tuple`] becomes the JSON array `DeepDiff`'s own `to_json()`
+    /// shows for a tuple.
+    ///
+    /// This walks the findings directly rather than going through
+    /// [`Self::to_value`]: routing it through the compact rendering first
+    /// would deep-copy every finding into an intermediate tree before
+    /// converting it, which measured about twice as slow on the only output
+    /// path the CLI and the JSON entry point have (0.52 ms against 1.01 ms on
+    /// a 0.76 MB report; 0.92 ms against 1.58 ms on a 1.52 MB one). The two
+    /// renderings are deliberately parallel — same category order, same key
+    /// names, same collision collapse — and
+    /// `the_two_renderings_agree_on_every_category` pins them to each other.
     #[must_use]
     pub fn to_json_value(&self) -> serde_json::Value {
         let mut root = serde_json::Map::new();

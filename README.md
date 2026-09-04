@@ -98,7 +98,8 @@ Pass `--ignore-order` to compare every list by value instead of by position, mir
 ## Known limitations
 
 - Only the core diff is implemented: `exclude_paths`, `significant_digits`, custom operators, `verbose_level != 2`, and delta/patch are not (yet) supported.
-- Supported value types are `None`, `bool`, `int`, `float`, `str`, `dict` (with `str` keys), and `list`; `int`s must fit in `i64`/`u64`, `float`s must be finite, and anything else (tuple, set, date, custom object, non-`str` dict key) raises `TypeError` or `ValueError` naming the exact path it was found at. See [`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs).
+- Supported value types are `None`, `bool`, `int`, `float`, `str`, `dict` (with `str` keys), `list`, and `tuple`; `int`s must fit in `i64`/`u64`, `float`s must be finite, and anything else (set, date, custom object, non-`str` dict key) raises `TypeError` or `ValueError` naming the exact path it was found at. See [`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs).
+- A `tuple` subclass (`namedtuple` included) raises `TypeError` rather than being diffed as a plain tuple, because DeepDiff reports each value's own type name and walks a namedtuple's fields. A `type_changes` entry's `old_type`/`new_type` are type *names* in `to_dict()`, where DeepDiff returns the type objects. Both are described in [`tests/golden/README.md`](tests/golden/README.md).
 - Adversarially deep input raises `MaxDepthError` instead of crashing: the default `max_depth` is 512 and the hard ceiling is `MAX_DEPTH_CEILING` (20,000). See [`crates/onix-py/src/guard.rs`](crates/onix-py/src/guard.rs).
 - `ignore_order` pairing is `O(N^2)` in unpaired elements per side and carries a polynomial cost in both time and memory with input depth; it has no `max_passes`/`max_diffs` cutoff, so bound the size and depth of untrusted input yourself. See [`crates/onix-core/src/ignore_order/mod.rs`](crates/onix-core/src/ignore_order/mod.rs).
 - Output is byte-identical to DeepDiff except for one boundary case: integers past `2^53` (the limit of exact `f64` representation) inside ordered scalar lists. See [`tests/golden/README.md`](tests/golden/README.md).
@@ -148,14 +149,14 @@ Both reports carry their full methodology, fairness rules, and the reproduce com
 
 **Python API.** The public surface is `DeepDiff`, `diff_json`, `MaxDepthError`, and `MAX_DEPTH_CEILING`.
 
-- `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`: diffs two live Python objects; `.to_json()` returns the DeepDiff-compatible JSON string, `.to_dict()` the same report as a dict, and the instance is falsy when there is no difference.
+- `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`: diffs two live Python objects; `.to_json()` returns the DeepDiff-compatible JSON string, `.to_dict()` the same report as a dict — with Python types preserved, so a value the diff found in a `tuple` comes back as a `tuple` — and the instance is falsy when there is no difference.
 - `diff_json(a, b, ignore_order=False, max_depth=None) -> str`: diffs two JSON strings entirely in Rust and returns the report as a JSON string.
 - `MaxDepthError` (a `ValueError` subclass) is raised when input exceeds `max_depth`; `MAX_DEPTH_CEILING` (20,000) is the hard upper bound on `max_depth`.
 
 **CLI.** `onix diff <a.json> <b.json> [--max-depth N] [--ignore-order] [--timing]` reads both files as JSON and prints a compact, single-line DeepDiff-compatible report to stdout (`{}` when there is no difference).
 
 - `--max-depth N` overrides the recursion-depth bound (default: the `ONIX_MAX_DEPTH` environment variable if set, else 512).
-- `--ignore-order` compares every list/tuple by hash-based matching instead of by position, mirroring `DeepDiff(..., ignore_order=True)`.
+- `--ignore-order` compares every list by hash-based matching instead of by position, mirroring `DeepDiff(..., ignore_order=True)`.
 - `--timing` prints one line of JSON (`{"parse_ns": N, "diff_ns": N}`) to stderr.
 
 Exit codes:

@@ -1,0 +1,10 @@
+{
+  "type_changes": {
+    "root[0][0]": {
+      "new_type": "float",
+      "new_value": 1.0,
+      "old_type": "int",
+      "old_value": 1
+    }
+  }
+}

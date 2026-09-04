@@ -6,6 +6,11 @@ against pinned ``deepdiff==9.1.0``) rather than maintaining a second,
 Python-only case list — every case directory holds ``a.json``/``b.json``/
 ``expected.json``/``options.json``, exactly as the Rust golden test
 (``crates/onix-core/tests/golden.rs``) reads them.
+
+The two input files are decoded through ``scripts/golden_tags.py`` (on the
+path via this package's pytest configuration), which turns the corpus's tagged
+objects back into the Python values they stand for — a tuple today. Both
+engines then see the same live objects.
 """
 
 import json
@@ -13,10 +18,9 @@ from pathlib import Path
 
 import pytest
 from deepdiff import DeepDiff as RealDeepDiff
+from golden_tags import TaggedValue, decode_tags
 
 from deepdiff_rs import DeepDiff as OnixDeepDiff
-
-type JsonValue = dict[str, "JsonValue"] | list["JsonValue"] | str | int | float | bool | None
 
 GOLDEN_ROOT = Path(__file__).resolve().parents[3] / "tests" / "golden"
 
@@ -36,7 +40,7 @@ def _case_names() -> list[str]:
     return sorted(entry.name for entry in GOLDEN_ROOT.iterdir() if entry.is_dir())
 
 
-def _read_json(path: Path) -> JsonValue:
+def _read_json(path: Path) -> TaggedValue:
     """
     Read and parse a JSON fixture file.
 
@@ -46,7 +50,17 @@ def _read_json(path: Path) -> JsonValue:
     return json.loads(path.read_text())
 
 
-def _case_options(case_dir: Path) -> dict[str, JsonValue]:
+def _read_case_input(path: Path) -> TaggedValue:
+    """
+    Read one of a case's two input files as the Python value it stands for.
+
+    :param path: Path to ``a.json`` or ``b.json``.
+    :return: The decoded value, with tagged objects turned back into Python objects.
+    """
+    return decode_tags(_read_json(path))
+
+
+def _case_options(case_dir: Path) -> dict[str, TaggedValue]:
     """
     Read a case's ``options.json``, defaulting to ``{}`` if absent.
 
@@ -73,8 +87,8 @@ def test_golden_case_matches_real_deepdiff(case_name: str) -> None:
         whole corpus, minus :data:`KNOWN_DIVERGENT_CASES`).
     """
     case_dir = GOLDEN_ROOT / case_name
-    a = _read_json(case_dir / "a.json")
-    b = _read_json(case_dir / "b.json")
+    a = _read_case_input(case_dir / "a.json")
+    b = _read_case_input(case_dir / "b.json")
     ignore_order = bool(_case_options(case_dir).get("ignore_order", False))
 
     expected = json.loads(RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2).to_json())

@@ -9,7 +9,7 @@ use crate::value::{Number, Object, Value};
 
 use crate::diff::DiffOptions;
 
-use super::DistanceMemo;
+use super::IgnoreOrderMemo;
 
 use super::fxhash::HashSet;
 
@@ -96,7 +96,9 @@ pub(crate) fn numeric_distance(n1: f64, n2: f64, cutoff: f64) -> f64 {
 pub(crate) fn rough_length(value: &Value) -> usize {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_) => 1,
-        Value::Array(items) => 1 + items.iter().map(rough_length).sum::<usize>(),
+        Value::Array(items) | Value::Tuple(items) => {
+            1 + items.iter().map(rough_length).sum::<usize>()
+        }
         Value::Object(map) => 1 + map.values().map(|v| 1 + rough_length(v)).sum::<usize>(),
     }
 }
@@ -121,7 +123,7 @@ pub(crate) fn item_length(value: &Value) -> usize {
     match value {
         Value::Null => 0,
         Value::Bool(_) | Value::Number(_) | Value::Str(_) => 1,
-        Value::Array(items) => items.iter().map(item_length).sum(),
+        Value::Array(items) | Value::Tuple(items) => items.iter().map(item_length).sum(),
         Value::Object(map) => item_length_of_map(map),
     }
 }
@@ -175,7 +177,7 @@ pub(crate) fn count_diff_leaves(
     b: &Value,
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> usize {
     match (a, b) {
         (Value::Null, Value::Null) => 0,
@@ -188,7 +190,9 @@ pub(crate) fn count_diff_leaves(
                 type_change_leaf_length(a, b)
             }
         }
-        (Value::Array(x), Value::Array(y)) => count_array_diff_leaves(x, y, depth, opts, memo),
+        (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+            count_array_diff_leaves(x, y, depth, opts, memo)
+        }
         (Value::Object(x), Value::Object(y)) => count_object_diff_leaves(x, y, depth, opts, memo),
         _ => type_change_leaf_length(a, b),
     }
@@ -211,12 +215,75 @@ pub(crate) fn count_diff_leaves(
 /// doc for the exact coercion matrix implemented and its documented,
 /// narrow scope.
 pub(crate) fn type_change_leaf_length(old_value: &Value, new_value: &Value) -> usize {
-    let new_value_omitted =
-        coerce_for_type_change(old_value, new_value).is_some_and(|coerced| coerced == *new_value);
-    if new_value_omitted {
+    if new_value_reproduced_by_coercion(old_value, new_value) {
         1
     } else {
         1 + item_length(new_value)
+    }
+}
+
+/// Whether `new_type(old_value)` reproduces `new_value` exactly — the
+/// `include_values` test [`type_change_leaf_length`]'s doc cites.
+///
+/// The sequence pair (`list(a_tuple)` / `tuple(a_list)`) is answered
+/// directly from the two item slices rather than through
+/// [`coerce_for_type_change`]: the coerced value would be an allocation-heavy
+/// deep copy of `old_value`, built on the pairing hot path only to be
+/// compared and thrown away, and the two constructors reproduce the other
+/// sequence exactly when its items are equal *the way Python's `==` is*
+/// ([`python_eq`]), not the way this engine's own type-aware equality is.
+/// Confirmed against real `deepdiff==9.1.0`: `DeepDiff((1,), [1.0],
+/// view="_delta")` omits `new_value` (so the pair stays within the pairing
+/// cutoff and reports as a `type_changes`), while `DeepDiff((1, 2), [1, 3],
+/// view="_delta")` keeps it.
+fn new_value_reproduced_by_coercion(old_value: &Value, new_value: &Value) -> bool {
+    match (old_value, new_value) {
+        (Value::Tuple(old_items), Value::Array(new_items))
+        | (Value::Array(old_items), Value::Tuple(new_items)) => {
+            old_items.len() == new_items.len()
+                && old_items
+                    .iter()
+                    .zip(new_items.iter())
+                    .all(|(a, b)| python_eq(a, b))
+        }
+        _ => coerce_for_type_change(old_value, new_value)
+            .is_some_and(|coerced| coerced == *new_value),
+    }
+}
+
+/// Python's `==` between two values: a scalar pair compares by the crate's
+/// one definition of that rule ([`crate::lcs::python_scalar_key`], which
+/// collapses `1`, `1.0` and `True`), and a container pair compares
+/// element-wise but stays **kind-distinct** — a list never equals a tuple,
+/// and neither equals a dict, exactly as in Python. Confirmed against real
+/// `deepdiff==9.1.0` at the boundary this exists for: `[(1, (2,))]` vs
+/// `[[1, [2]]]` is a whole-value change (the nested `(2,)` does not equal
+/// `[2]`), while `[(1, [2])]` vs `[[1, [2]]]` is a `type_changes`.
+///
+/// Recurses natively, like every other function in this module — safe for
+/// the same reason (see this module's "Depth safety" doc section).
+fn python_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| python_eq(a, b))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|((x_key, x_value), (y_key, y_value))| {
+                        x_key == y_key && python_eq(x_value, y_value)
+                    })
+        }
+        _ => match (
+            crate::lcs::python_scalar_key(a),
+            crate::lcs::python_scalar_key(b),
+        ) {
+            (Some(x), Some(y)) => x == y,
+            // A container never equals a scalar, nor a container of another
+            // kind (the arms above are the only equal-kind container pairs).
+            _ => false,
+        },
     }
 }
 
@@ -232,7 +299,9 @@ pub(crate) fn type_change_leaf_length(old_value: &Value, new_value: &Value) -> u
 /// Scoped to the coercions confirmed against real `deepdiff==9.1.0` for
 /// this fix (numeric family `bool`/`int`/`float` in every direction,
 /// `str` <-> number, and `None`/`list`/`dict` -> `bool`, all via direct
-/// `DeepDiff(..., view=DELTA_VIEW)._to_delta_dict(...)` probes). Coercions
+/// `DeepDiff(..., view=DELTA_VIEW)._to_delta_dict(...)` probes) — plus the
+/// `list`/`tuple` pair, which [`new_value_reproduced_by_coercion`] answers
+/// before ever calling this. Coercions
 /// *into* a container or `None` (i.e. `new_value` is `Null`/an
 /// array/object) are deliberately **not** attempted and always return
 /// `None`: every such coercion this domain could reach (e.g. `dict(5)`,
@@ -252,7 +321,7 @@ fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value>
         }
         Value::Number(_) => coerce_to_i64(old_value).map(|i| Value::Number(Number::from_i64(i))),
         Value::Str(_) => coerce_to_python_str(old_value).map(|s| Value::Str(s.into_boxed_str())),
-        Value::Null | Value::Array(_) | Value::Object(_) => None,
+        Value::Null | Value::Array(_) | Value::Tuple(_) | Value::Object(_) => None,
     }
 }
 
@@ -271,7 +340,7 @@ fn is_truthy(value: &Value) -> bool {
         Value::Bool(b) => *b,
         Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
         Value::Str(s) => !s.is_empty(),
-        Value::Array(items) => !items.is_empty(),
+        Value::Array(items) | Value::Tuple(items) => !items.is_empty(),
         Value::Object(map) => !map.is_empty(),
     }
 }
@@ -283,7 +352,7 @@ fn is_truthy(value: &Value) -> bool {
 /// real Python).
 fn coerce_to_f64(value: &Value) -> Option<f64> {
     match value {
-        Value::Null | Value::Array(_) | Value::Object(_) => None,
+        Value::Null | Value::Array(_) | Value::Tuple(_) | Value::Object(_) => None,
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         Value::Number(n) => n.as_f64(),
         Value::Str(s) => s.trim().parse::<f64>().ok(),
@@ -313,7 +382,7 @@ const I64_MAX_AS_F64: f64 = i64::MAX as f64;
 
 fn coerce_to_i64(value: &Value) -> Option<i64> {
     match value {
-        Value::Null | Value::Array(_) | Value::Object(_) => None,
+        Value::Null | Value::Array(_) | Value::Tuple(_) | Value::Object(_) => None,
         Value::Bool(b) => Some(i64::from(*b)),
         Value::Number(n) => {
             if n.is_f64() {
@@ -352,7 +421,7 @@ fn coerce_to_i64(value: &Value) -> Option<i64> {
 fn coerce_to_python_str(value: &Value) -> Option<String> {
     match value {
         Value::Null => Some("None".to_string()),
-        Value::Array(_) | Value::Object(_) => None,
+        Value::Array(_) | Value::Tuple(_) | Value::Object(_) => None,
         Value::Bool(b) => Some(if *b { "True" } else { "False" }.to_string()),
         Value::Number(n) => {
             if n.is_f64() {
@@ -433,7 +502,7 @@ pub(crate) fn count_object_diff_leaves(
     b: &Object,
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> usize {
     if is_below_threshold_to_diff_deeper(a, b) {
         return item_length_of_map(b);
@@ -474,7 +543,7 @@ pub(crate) fn count_array_diff_leaves(
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> usize {
     let probe_opts = DiffOptions {
         max_depth: opts.max_depth.saturating_sub(depth),
@@ -549,7 +618,7 @@ pub(crate) fn rough_distance(
     cutoff: f64,
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> f64 {
     if let (Some(r), Some(a)) = (numeric_value(removed), numeric_value(added)) {
         return numeric_distance(r, a, cutoff);

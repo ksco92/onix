@@ -21,17 +21,19 @@
 //!    cannot overflow it even at the ceiling ([`diff_to_value`]), with the
 //!    GIL released while it runs. Shallow diffs run inline on the calling
 //!    thread to avoid the fixed cost of spawning a thread.
-//! 3. The rendered report stays a `serde_json::Value`, whose JSON
-//!    serialization ([`serialize_value`]) and `Drop` ([`drop_value_safely`])
-//!    are natively recursive, so a deep report routes those two operations to
-//!    the sized worker too.
+//! 3. The rendered report is a compact [`onix_core::Value`] too, so its
+//!    teardown is iterative and safe anywhere; but rendering it to JSON text
+//!    ([`serialize_value`]) still builds and drops a transient
+//!    `serde_json::Value` through natively recursive code, so a deep report
+//!    routes that one operation to the sized worker.
 //!
-//! The inputs no longer need any of this for their *own* teardown:
+//! Nothing else needs any of this for its *own* teardown:
 //! [`crate::convert`] builds the compact [`onix_core::Value`] directly with an
-//! iterative walk, and that type's `Drop` is iterative, so converting and
-//! dropping an input is stack-safe on any thread at any depth. Only the
-//! natively-recursive diff engine itself (mechanism 2) and the serde report
-//! (mechanism 3) still touch the worker.
+//! iterative walk, that type's `Drop` and `PartialEq` are iterative, and the
+//! report — being the same type — inherits all of it, including the tuples it
+//! can carry that JSON cannot. Only the natively-recursive diff engine itself
+//! (mechanism 2) and the JSON rendering of a deep report (mechanism 3) still
+//! touch the worker.
 //!
 //! # Where the sizes come from
 //!
@@ -41,10 +43,9 @@
 //! example, and how to reproduce it. The two thresholds size their margins
 //! against that one constant.
 
-use onix_core::{DEFAULT_MAX_DEPTH, DiffOptions};
+use onix_core::{DEFAULT_MAX_DEPTH, DiffOptions, Value};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use serde_json::Value;
 
 use crate::errors::map_diff_error;
 
@@ -127,7 +128,8 @@ pub(crate) fn resolve_options(
     })
 }
 
-/// Diffs `a` and `b` and renders the report to a [`Value`], choosing where
+/// Diffs `a` and `b` and renders the report to a [`Value`] (the
+/// type-preserving rendering — see [`onix_core::Report::to_value`]), choosing where
 /// the natively-recursive diff runs: inline on the calling thread when both
 /// inputs are shallow (no thread-spawn cost), or on the sized worker thread
 /// (GIL released) when either is nested past [`MAX_INLINE_DEPTH`]. In the
@@ -140,18 +142,18 @@ pub(crate) fn resolve_options(
 /// `deepdiff_rs.MaxDepthError` if the diff would exceed `opts.max_depth`.
 pub(crate) fn diff_to_value(
     py: Python<'_>,
-    a: onix_core::Value,
-    b: onix_core::Value,
+    a: Value,
+    b: Value,
     opts: DiffOptions,
 ) -> PyResult<Value> {
-    if input_is_deep(&a) || input_is_deep(&b) {
+    if is_deep(&a) || is_deep(&b) {
         // Only the natively-recursive diff needs the sized worker now: the
         // inputs were already built (iteratively, stack-safely) by
         // `crate::convert`, and their compact `Value` `Drop` is iterative too,
         // so they are moved in and dropped on the worker purely because that
         // is where they were last used, not for stack safety.
         run_on_worker(py, move || {
-            onix_core::diff_with_options(&a, &b, &opts).map(|report| report.to_json_value())
+            onix_core::diff_with_options(&a, &b, &opts).map(|report| report.to_value())
         })?
         .map_err(|error| map_diff_error(&error))
     } else {
@@ -159,73 +161,37 @@ pub(crate) fn diff_to_value(
         // afterwards — their iterative `Drop` cannot overflow the calling
         // thread regardless.
         onix_core::diff_with_options(&a, &b, &opts)
-            .map(|report| report.to_json_value())
+            .map(|report| report.to_value())
             .map_err(|error| map_diff_error(&error))
     }
 }
 
-/// Whether a converted input [`onix_core::Value`] is nested past
-/// [`MAX_INLINE_DEPTH`], so the natively-recursive diff over it must run on
-/// the sized worker rather than the calling thread.
-///
-/// Delegates to [`onix_core::exceeds_depth`] — the same iterative,
-/// stack-safe depth check the diff engine uses internally to bound its own
-/// native recursion — so both crates agree on what "too deep" means by
-/// construction rather than via two copies of the walk. (The direct compact
-/// build makes this delegation possible again: before it, the input was still
-/// a `serde_json::Value` at the routing decision, so this reimplemented the
-/// walk locally to avoid a recursive conversion just to measure depth.)
-#[must_use]
-fn input_is_deep(value: &onix_core::Value) -> bool {
-    onix_core::exceeds_depth(value, MAX_INLINE_DEPTH)
-}
-
 /// Serializes `value` to a JSON string, on the sized worker thread when
 /// `deep` (the caller's [`is_deep`] verdict for `value`) is set, because
-/// `serde_json`'s natively recursive serialization could then overflow the
-/// calling thread; inline otherwise. The caller passes the verdict in so it
-/// is computed once per value rather than re-walked here.
+/// rendering it goes through natively recursive code that could then
+/// overflow the calling thread; inline otherwise. The caller passes the
+/// verdict in so it is computed once per value rather than re-walked here.
 ///
 /// # Errors
 ///
-/// `ValueError` if serialization fails (which, for a `Value`, does not happen
+/// `ValueError` if serialization fails (which, for a report, does not happen
 /// in practice) or the worker thread cannot be run.
 pub(crate) fn serialize_value(py: Python<'_>, value: &Value, deep: bool) -> PyResult<String> {
     let serialized = if deep {
-        run_on_worker(py, || serde_json::to_string(value))?
+        run_on_worker(py, || to_json_string(value))?
     } else {
-        serde_json::to_string(value)
+        to_json_string(value)
     };
     serialized.map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
-/// Drops `value` safely regardless of nesting: on the sized worker thread
-/// when `deep` (the caller's [`is_deep`] verdict for `value`) is set, because
-/// `serde_json::Value`'s natively recursive `Drop` could then overflow the
-/// calling thread's stack; inline otherwise. Callers with no `Python` token
-/// (e.g. [`crate::deepdiff::DeepDiff`]'s `Drop`, and the bindings' error
-/// paths) use this to hand a possibly-deep value off for destruction; it
-/// spawns a plain owned thread (the value is moved into it) rather than
-/// releasing the GIL. The caller passes the verdict in so it is computed once
-/// per value rather than re-walked here.
-pub(crate) fn drop_value_safely(value: Value, deep: bool) {
-    if !deep {
-        // Shallow: dropping here cannot overflow, and skips all thread
-        // overhead — the overwhelmingly common case.
-        return;
-    }
-
-    // If the spawn fails (resource exhaustion), the closure — and with it
-    // `value` — is dropped inline by the failed spawn. That reintroduces the
-    // overflow risk, but only in the extreme corner where the OS cannot
-    // create a thread at all; nothing better is possible there.
-    if let Ok(handle) = std::thread::Builder::new()
-        .stack_size(WORKER_STACK_BYTES)
-        .name("deepdiff-rs-drop".to_string())
-        .spawn(move || drop(value))
-    {
-        let _ = handle.join();
-    }
+/// Renders one compact [`Value`] to JSON text. Every natively recursive step
+/// this needs — building the transient `serde_json::Value`, serializing it,
+/// and dropping it again — happens inside this one call, so routing this
+/// function to the sized worker is enough to keep a deep report off the
+/// calling thread's stack entirely.
+fn to_json_string(value: &Value) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&value.to_serde_json())
 }
 
 /// Runs `f` on a dedicated worker thread whose stack is large enough for the
@@ -282,31 +248,18 @@ enum WorkerFailure {
     Panicked,
 }
 
-/// Whether the rendered report `value` (a `serde_json::Value`) is nested past
-/// [`MAX_INLINE_DEPTH`], so the natively-recursive operations on it — its
-/// JSON serialization ([`serialize_value`]) and its `Drop`
-/// ([`drop_value_safely`]) — must run on the sized worker rather than the
-/// calling thread.
+/// Whether `value` is nested past [`MAX_INLINE_DEPTH`], so the natively
+/// recursive work over it must run on the sized worker rather than the
+/// calling thread — asked of both a converted *input* (whose diff is the
+/// recursive part) and a rendered *report* (whose JSON rendering is, see
+/// [`serialize_value`]).
 ///
-/// The report stays a `serde_json::Value` on the output boundary (see
-/// [`crate::convert::value_to_pyobject`]), and `serde_json`'s serialization
-/// and `Drop` of it are natively recursive, so a deep report still needs the
-/// worker for those two operations even though the input trees no longer do.
-///
-/// Iterative itself (explicit work-stack, no native recursion), so it is safe
-/// to run on any report depth on the calling thread.
+/// Delegates to [`onix_core::exceeds_depth`] — the same iterative,
+/// stack-safe depth check the diff engine uses internally to bound its own
+/// native recursion — so both crates agree on what "too deep" means by
+/// construction rather than via two copies of the walk, and so it is itself
+/// safe to run on any depth on the calling thread.
 #[must_use]
 pub(crate) fn is_deep(value: &Value) -> bool {
-    let mut stack: Vec<(&Value, usize)> = vec![(value, 0)];
-    while let Some((node, depth)) = stack.pop() {
-        if depth > MAX_INLINE_DEPTH {
-            return true;
-        }
-        match node {
-            Value::Array(items) => stack.extend(items.iter().map(|item| (item, depth + 1))),
-            Value::Object(map) => stack.extend(map.values().map(|item| (item, depth + 1))),
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-        }
-    }
-    false
+    onix_core::exceeds_depth(value, MAX_INLINE_DEPTH)
 }

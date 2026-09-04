@@ -422,3 +422,73 @@ fn builder_default_matches_new() {
     let value = from_default.object(vec![("k".to_owned(), Value::Null)]);
     assert_eq!(value.to_serde_json().to_string(), r#"{"k":null}"#);
 }
+
+// --- tuples --------------------------------------------------------------
+
+#[test]
+fn a_tuple_renders_as_a_json_array_but_is_never_equal_to_one() {
+    let tuple =
+        Value::Tuple(vec![Value::from(serde_json::json!(1)), Value::Null].into_boxed_slice());
+
+    assert_eq!(tuple.to_serde_json(), serde_json::json!([1, null]));
+    assert_ne!(tuple, cv(&serde_json::json!([1, null])));
+    assert_eq!(
+        tuple,
+        Value::Tuple(vec![Value::from(serde_json::json!(1)), Value::Null].into_boxed_slice())
+    );
+    // Same length, different item: the tuple arm's own inequality path.
+    assert_ne!(
+        tuple,
+        Value::Tuple(vec![Value::from(serde_json::json!(1)), Value::Bool(true)].into_boxed_slice())
+    );
+    assert!(format!("{tuple:?}").contains("Tuple"));
+}
+
+#[test]
+fn json_parsing_never_produces_a_tuple() {
+    // The tagged encoding the golden corpus uses to express a tuple in a
+    // JSON file is decoded by test-only code; the product parse paths must
+    // treat it as the ordinary dict it literally is.
+    let parsed: Value = serde_json::from_str(r#"{"$tuple": [1, 2]}"#).expect("valid JSON");
+    let converted = Value::from(serde_json::json!({"$tuple": [1, 2]}));
+
+    assert!(matches!(parsed, Value::Object(_)));
+    assert_eq!(parsed, converted);
+    assert_eq!(
+        parsed.to_serde_json(),
+        serde_json::json!({"$tuple": [1, 2]})
+    );
+}
+
+#[test]
+fn deeply_nested_tuples_compare_and_drop_without_native_recursion() {
+    // Tuples nest through the same `Box<[Value]>` arrays do, so the
+    // iterative `Drop` and `PartialEq` must cover them: a derived
+    // implementation would overflow this small stack.
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            const DEPTH: usize = 200_000;
+            let build = |leaf: Value| {
+                let mut value = leaf;
+                for _ in 0..DEPTH {
+                    value = Value::Tuple(vec![value].into_boxed_slice());
+                }
+                value
+            };
+
+            let a = build(Value::Null);
+            let b = build(Value::Null);
+            assert!(a == b, "equal deep tuples compare equal");
+            assert!(
+                a != build(Value::Bool(true)),
+                "deep tuples differing at the leaf are unequal"
+            );
+            drop(a);
+            drop(b);
+        })
+        .expect("probe thread spawns");
+    handle
+        .join()
+        .expect("iterative equality and Drop complete on a small stack");
+}

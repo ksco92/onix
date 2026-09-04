@@ -6,7 +6,7 @@
 use crate::value::Value;
 
 use crate::error::Error;
-use crate::ignore_order::{self, DistanceMemo};
+use crate::ignore_order::{self, IgnoreOrderMemo};
 use crate::lcs;
 use crate::path::PathSegment;
 use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
@@ -56,7 +56,7 @@ pub(crate) fn array_diff(
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     if opts.ignore_order {
         return ignore_order::ignore_order_array_diff(path, a, b, depth, opts, memo);
@@ -77,7 +77,7 @@ fn lcs_or_positional_array_diff(
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     let lcs_report = lcs_array_diff(path, a, b, depth, opts.max_depth)?;
     // The `> 1` here is a verified-equivalent boundary: replacing it with
@@ -323,7 +323,7 @@ fn positional_array_diff(
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
-    memo: &DistanceMemo,
+    memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     let mut report = Report::new();
     let min_len = a.len().min(b.len());

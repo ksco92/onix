@@ -8,7 +8,10 @@ For each hand-designed case in ``CASES`` this writes three files under
 ``tests/golden/<case_name>/``:
 
 - ``a.json`` / ``b.json``: the two inputs, exactly as fed to both DeepDiff and
-  (via the Rust golden test) onix.
+  (via the Rust golden test) onix. A value JSON cannot express — a tuple today,
+  sets and dates later — is written in the tagged encoding ``golden_tags``
+  defines, and every written file is read back and checked against the case it
+  came from before ``expected.json`` is generated.
 - ``expected.json``: ``json.loads(DeepDiff(a, b, verbose_level=2).to_json())``
   re-dumped with ``sort_keys=True`` — the canonical spec onix's own report
   must match.
@@ -31,18 +34,14 @@ from pathlib import Path
 from typing import Final
 
 from deepdiff import DeepDiff
-
-# A JSON-shaped value: exactly the recursive shape onix and DeepDiff both
-# diff. Named instead of `typing.Any` per the python-coding-guide's ban on
-# `Any` (JSON payloads are its named exception case).
-type JsonValue = dict[str, "JsonValue"] | list["JsonValue"] | str | int | float | bool | None
+from golden_tags import TaggedValue, decode_tags, encode_tags
 
 GOLDEN_ROOT = Path(__file__).resolve().parent.parent / "tests" / "golden"
 
 # Each case is a small, hand-designed (t1, t2) pair. Keep cases SMALL and
 # focused on one behavior each — this is the correctness corpus, not a
 # performance fixture (see perf/ for those).
-CASES: dict[str, tuple[JsonValue, JsonValue]] = {
+CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
     # Scalars: values_changed vs type_changes, and DeepDiff's numeric
     # semantics (int/float/bool are distinct Python types; ints compare by
     # value regardless of magnitude).
@@ -215,6 +214,26 @@ CASES: dict[str, tuple[JsonValue, JsonValue]] = {
         ["x"] * 5 + ["distinct_a"] + ["x"] * 204,
         ["x"] * 204 + ["distinct_b"] + ["x"] * 5,
     ),
+    # Tuples. DeepDiff diffs a tuple positionally exactly like a list — the
+    # same difflib match for all-scalar contents, the same surplus-tail
+    # add/remove, the same recursion into elements — but a tuple and a list
+    # are different Python *types*, so pairing the two is a type_changes at
+    # the container itself, never an element-wise diff. Tuples reach these
+    # fixtures through the tagged encoding (see tests/golden/README.md).
+    "tuple_values_changed": ((1, 2, 3), (1, 2, 4)),
+    "tuple_length_change": ((1, 2), (1, 2, 3)),
+    "tuple_of_dicts": (({"a": 1},), ({"a": 2},)),
+    "tuple_nested_in_tuple": (((1, 2),), ((1, 3),)),
+    "tuple_added_as_dict_value": ({}, {"s": (1, 2)}),
+    "tuple_vs_list_at_root": ((1, 2), [1, 2]),
+    "tuple_vs_list_nested_in_dict": ({"a": [1, 2]}, {"a": (1, 2)}),
+    "tuple_empty_vs_empty_list": ((), []),
+    # The same pair as list_lcs_new_path_after_index_drift, as tuples: the
+    # difflib match (and its new_path) applies inside a tuple too.
+    "tuple_of_scalars_uses_lcs_match": ((0, 0, 3, 3, 0, 1, 0), (4, 3, 0, 4)),
+    # A tuple element is not basic-hashable, so it disqualifies its list from
+    # the difflib match exactly as a nested list or dict element does.
+    "tuple_element_disqualifies_list_lcs": ([(1, 2), 3], [3]),
     # DeepDiff's global, whole-tree
     # mutual_add_removes_to_become_value_changes() post-pass (model.py) —
     # runs once, after the entire diff, and merges any iterable_item_added
@@ -236,19 +255,19 @@ CASES: dict[str, tuple[JsonValue, JsonValue]] = {
 # every other case here.
 _FUZZ_SEED = 0xF0F0_C0DE
 _FUZZ_CASE_COUNT = 20
-_FUZZ_ALPHABET: Final[list[JsonValue]] = [
+_FUZZ_ALPHABET: Final[list[TaggedValue]] = [
     None, True, False, 0, 1, 2, 3, -3, 0.0, 1.0, 2.0, 3.8, "a", "b",
 ]
 
 
-def _generate_fuzz_cases() -> dict[str, tuple[JsonValue, JsonValue]]:
+def _generate_fuzz_cases() -> dict[str, tuple[TaggedValue, TaggedValue]]:
     """
     Generate the seeded-random scalar-list golden cases.
 
     :return: A mapping of case name to `(a, b)`, deterministic across runs.
     """
     rng = random.Random(_FUZZ_SEED)
-    cases: dict[str, tuple[JsonValue, JsonValue]] = {}
+    cases: dict[str, tuple[TaggedValue, TaggedValue]] = {}
 
     for i in range(_FUZZ_CASE_COUNT):
         len_a = rng.randint(0, 9)
@@ -265,7 +284,7 @@ def _generate_fuzz_cases() -> dict[str, tuple[JsonValue, JsonValue]]:
 # source-cited spec these pin down. Each entry carries an
 # explicit {"ignore_order": True} kwargs dict (the third tuple element),
 # distinguishing it from the ordered-path CASES above.
-IGNORE_ORDER_CASES: dict[str, tuple[JsonValue, JsonValue, dict[str, bool]]] = {
+IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {
     "ignore_order_pure_shuffle_is_empty": ([1, 2, 3], [3, 2, 1], {"ignore_order": True}),
     "ignore_order_shuffle_plus_one_changed": (
         [10, 20, 30, 40, 50],
@@ -374,6 +393,89 @@ IGNORE_ORDER_CASES: dict[str, tuple[JsonValue, JsonValue, dict[str, bool]]] = {
         ["y", 0.0, 2, [{}]],
         {"ignore_order": True},
     ),
+    # Tuples under ignore_order: the tuple itself is hash-paired like a list
+    # (including new_path on a drifted pairing), a tuple nested as an element
+    # hashes order-insensitively like a nested list, and a tuple never
+    # hash-matches a list with the same items (DeepHash carries the type), so
+    # that pairing reports a type_changes instead of nothing.
+    "ignore_order_tuple_pairs_with_new_path": ((1, 2, 3), (3, 2, 5), {"ignore_order": True}),
+    "ignore_order_tuple_inside_list": (
+        ["anchor", (1, 2)],
+        [(1, 3), "anchor"],
+        {"ignore_order": True},
+    ),
+    "ignore_order_tuple_vs_list_never_hash_match": ([(1, 2)], [[1, 2]], {"ignore_order": True}),
+    "ignore_order_tuple_items_hash_order_insensitively": (
+        [(1, 2)],
+        [(2, 1)],
+        {"ignore_order": True},
+    ),
+    # DeepHash keys its shared cache by the object itself, so a *hashable*
+    # tuple inherits the digest of an earlier Python-equal one in the same
+    # run: `(1,)`, `(1.0,)` and `(True,)` are one key to a Python dict. These
+    # pin that collision (and its absence for an unhashable tuple) — see
+    # crates/onix-core/src/ignore_order/memo.rs's "Tuple digests" section.
+    "ignore_order_tuple_digest_collides_int_float": (
+        [(1,)],
+        [(1.0,)],
+        {"ignore_order": True},
+    ),
+    "ignore_order_tuple_digest_collides_bool_int": (
+        [(True,)],
+        [(1,)],
+        {"ignore_order": True},
+    ),
+    "ignore_order_tuple_digest_collides_nested_in_tuple": (
+        [((1,),)],
+        [((1.0,),)],
+        {"ignore_order": True},
+    ),
+    "ignore_order_tuple_digest_collides_as_dict_value": (
+        [{"k": (1,)}],
+        [{"k": (1.0,)}],
+        {"ignore_order": True},
+    ),
+    # Two items with one digest between them: removing the list reports a
+    # single removal, at the first index.
+    "ignore_order_tuple_digest_collision_dedupes_removal": (
+        [(1,), (1.0,)],
+        [],
+        {"ignore_order": True},
+    ),
+    # Control: a tuple holding a list is unhashable, misses the cache, and
+    # keeps its own type-strict digest.
+    "ignore_order_unhashable_tuple_never_collides": (
+        [(1, [1])],
+        [(1.0, [1])],
+        {"ignore_order": True},
+    ),
+    # Python's tuple equality is positional, so a reordered pair of the other
+    # numeric type inherits nothing.
+    "ignore_order_tuple_digest_collision_is_positional": (
+        [(1, 2)],
+        [(2.0, 1.0)],
+        {"ignore_order": True},
+    ),
+    # Which class member is hashed first is observable: `(1,)` matches the
+    # deduplicated `(1, 1)` content digest, `(1.0,)` does not.
+    "ignore_order_tuple_digest_first_hashed_member_wins": (
+        [(1.0,)],
+        [(1, 1)],
+        {"ignore_order": True},
+    ),
+    # `list((1,)) == [1.0]` in Python, so the delta view omits new_value and
+    # the pair stays within the pairing cutoff.
+    "ignore_order_tuple_vs_list_python_equal_items_pair": (
+        [(1,)],
+        [[1.0]],
+        {"ignore_order": True},
+    ),
+    # ...while a nested tuple never equals a nested list, so this one does not.
+    "ignore_order_tuple_vs_list_nested_kinds_differ": (
+        [(1, (2,))],
+        [[1, [2]]],
+        {"ignore_order": True},
+    ),
     # threshold_to_diff_deeper collapse surfacing through a matched pair
     # under ignore_order: "anchor" keeps this list's overlap high enough
     # that get_pairs engages and the low-overlap dicts land in the same
@@ -396,14 +498,14 @@ _IGNORE_ORDER_FUZZ_SEED = 0xC0FF_EE01
 _IGNORE_ORDER_FUZZ_CASE_COUNT = 20
 
 
-def _generate_ignore_order_fuzz_cases() -> dict[str, tuple[JsonValue, JsonValue, dict[str, bool]]]:
+def _generate_ignore_order_fuzz_cases() -> dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]]:
     """
     Generate the seeded-random ignore_order golden cases.
 
     :return: A mapping of case name to `(a, b, {"ignore_order": True})`, deterministic across runs.
     """
     rng = random.Random(_IGNORE_ORDER_FUZZ_SEED)
-    cases: dict[str, tuple[JsonValue, JsonValue, dict[str, bool]]] = {}
+    cases: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {}
 
     for i in range(_IGNORE_ORDER_FUZZ_CASE_COUNT):
         size = rng.randint(0, 12)
@@ -418,24 +520,35 @@ def _generate_ignore_order_fuzz_cases() -> dict[str, tuple[JsonValue, JsonValue,
     return cases
 
 
-def write_json(path: Path, value: JsonValue) -> None:
+def write_json(path: Path, value: TaggedValue) -> None:
     """
     Write `value` as pretty-printed, sorted-key, deterministic JSON.
 
     :param path: File to write.
-    :param value: The JSON-serializable value to write.
+    :param value: The value to write; tuples are tagged on the way out.
     """
     with path.open("w", encoding="utf-8") as f:
-        json.dump(value, f, indent=2, sort_keys=True, ensure_ascii=False)
+        json.dump(encode_tags(value), f, indent=2, sort_keys=True, ensure_ascii=False)
         f.write("\n")
+
+
+def read_case_input(path: Path) -> TaggedValue:
+    """
+    Read a just-written input fixture back as the Python value it stands for.
+
+    :param path: The ``a.json``/``b.json`` file to read.
+    :return: The decoded value, with tagged objects turned back into Python objects.
+    """
+    with path.open(encoding="utf-8") as f:
+        return decode_tags(json.load(f))
 
 
 def main() -> None:
     """Regenerate every case directory under tests/golden/ from every case dict above."""
-    ordered_cases: dict[str, tuple[JsonValue, JsonValue, dict[str, bool]]] = {
+    ordered_cases: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {
         name: (a, b, {}) for name, (a, b) in {**CASES, **_generate_fuzz_cases()}.items()
     }
-    all_cases: dict[str, tuple[JsonValue, JsonValue, dict[str, bool]]] = {
+    all_cases: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {
         **ordered_cases,
         **IGNORE_ORDER_CASES,
         **_generate_ignore_order_fuzz_cases(),
@@ -448,6 +561,15 @@ def main() -> None:
         write_json(case_dir / "a.json", a)
         write_json(case_dir / "b.json", b)
         write_json(case_dir / "options.json", {"ignore_order": bool(kwargs.get("ignore_order", False))})
+
+        # The committed bytes must stand for exactly the case defined above,
+        # so every fixture is read back and checked before it is used as a
+        # spec. DeepDiff is then run on the original objects rather than the
+        # round-tripped ones: writing sorts dict keys, and one documented case
+        # (path_rendering_collision) has an outcome that depends on a dict's
+        # own insertion order.
+        for path, value in ((case_dir / "a.json", a), (case_dir / "b.json", b)):
+            assert read_case_input(path) == value, f"{path} does not decode back to its case value"
 
         expected = json.loads(DeepDiff(a, b, verbose_level=2, **kwargs).to_json())
         write_json(case_dir / "expected.json", expected)

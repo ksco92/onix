@@ -111,11 +111,11 @@ pub fn diff_with_options(a: &Value, b: &Value, opts: &DiffOptions) -> Result<Rep
     // when this returns — no cross-call state. It only ever caches
     // `ignore_order` container-pair distances (see `crate::ignore_order`'s
     // `memo` module); for an ordered diff it is threaded but never consulted.
-    diff_with_options_memo(a, b, opts, &crate::ignore_order::DistanceMemo::new())
+    diff_with_options_memo(a, b, opts, &crate::ignore_order::IgnoreOrderMemo::new())
 }
 
 /// The shared body of [`diff_with_options`], taking an explicit
-/// [`crate::ignore_order::DistanceMemo`] so the decision-equivalence
+/// [`crate::ignore_order::IgnoreOrderMemo`] so the decision-equivalence
 /// differential test can run the exact same code path with the cache
 /// disabled. Production always calls it via [`diff_with_options`] with a live
 /// memo.
@@ -127,7 +127,7 @@ pub(crate) fn diff_with_options_memo(
     a: &Value,
     b: &Value,
     opts: &DiffOptions,
-    memo: &crate::ignore_order::DistanceMemo,
+    memo: &crate::ignore_order::IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     if values_equal(a, b) {
         return Ok(Report::new());

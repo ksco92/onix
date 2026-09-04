@@ -8,7 +8,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::guard::{diff_to_value, drop_value_safely, is_deep, resolve_options, serialize_value};
+use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 
 /// Diffs two JSON documents and returns a `DeepDiff`-compatible JSON report
 /// string (`verbose_level=2` shape) — see [`crate::deepdiff::DeepDiff`] for
@@ -47,13 +47,9 @@ pub(crate) fn diff_json(
     let b_value = parse_json(b, "b")?;
     // Runs the diff inline or on the sized worker depending on input depth.
     let report_value = diff_to_value(py, a_value, b_value, opts)?;
-    let report_is_deep = is_deep(&report_value);
-    // Serialize (on the worker if the report is deep), then drop the report
-    // through the same safe path — its recursive `Drop` must not run inline on
-    // a small caller stack.
-    let json = serialize_value(py, &report_value, report_is_deep);
-    drop_value_safely(report_value, report_is_deep);
-    json
+    // Renders to JSON on the worker if the report is deep. The report itself
+    // drops here iteratively, at any depth, on the calling thread.
+    serialize_value(py, &report_value, is_deep(&report_value))
 }
 
 fn parse_json(text: &str, argument_name: &str) -> PyResult<onix_core::Value> {

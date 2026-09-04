@@ -66,8 +66,8 @@ use crate::value::Value;
 /// limitation for numbers whose magnitude exceeds `2^53` (real Python
 /// itself does exact big-int/float comparison here, which this port does
 /// not replicate; see [`MAX_EXACT_F64_INT`]).
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum ScalarKey {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum ScalarKey {
     Null,
     Str(String),
     Int(i128),
@@ -97,17 +97,32 @@ pub(crate) fn all_basic_scalars(items: &[Value]) -> bool {
     })
 }
 
-/// Computes `value`'s [`ScalarKey`].
+/// Computes `value`'s [`ScalarKey`], for a value already known to be a
+/// scalar.
 ///
 /// # Panics
 ///
-/// Panics if `value` is an array or object. Every caller in this module
+/// Panics if `value` is a container. Every caller in this module
 /// only ever reaches this after [`all_basic_scalars`] has confirmed the
 /// whole slice is scalar-only, so this can never actually fire — see
 /// `crate::diff::array_diff`'s dispatch, which gates the entire LCS path on
-/// that check.
+/// that check. A caller outside that dispatch uses [`python_scalar_key`].
 fn scalar_key(value: &Value) -> ScalarKey {
-    match value {
+    python_scalar_key(value)
+        .expect("scalar_key called on a non-scalar; caller must check all_basic_scalars")
+}
+
+/// `value`'s [`ScalarKey`] if it is a scalar, `None` if it is a container.
+///
+/// This is the crate's single definition of **Python's own `==` on
+/// scalars** — the rule that collapses `1`, `1.0` and `True` into one value
+/// (see [`ScalarKey`]'s doc for the exact normalization and its `2^53`
+/// bound). The ordered-list matcher needs it because `difflib` compares with
+/// `==`; `crate::ignore_order` needs the same rule twice more, for
+/// `DeepHash`'s cache identity and for the `list(t1) == t2` coercion test,
+/// and shares this one rather than restating it.
+pub(crate) fn python_scalar_key(value: &Value) -> Option<ScalarKey> {
+    Some(match value {
         Value::Null => ScalarKey::Null,
         Value::Str(s) => ScalarKey::Str(s.to_string()),
         Value::Bool(b) => ScalarKey::Int(i128::from(*b)),
@@ -117,7 +132,7 @@ fn scalar_key(value: &Value) -> ScalarKey {
                 .map(i128::from)
                 .or_else(|| n.as_u64().map(i128::from))
             {
-                return ScalarKey::Int(i);
+                return Some(ScalarKey::Int(i));
             }
             let f = n.as_f64().expect("a serde_json Number is i64, u64, or f64");
             if f.fract() == 0.0 && f.abs() <= MAX_EXACT_F64_INT {
@@ -135,10 +150,8 @@ fn scalar_key(value: &Value) -> ScalarKey {
                 ScalarKey::Float(f.to_bits())
             }
         }
-        Value::Array(_) | Value::Object(_) => {
-            unreachable!("scalar_key called on a non-scalar; caller must check all_basic_scalars")
-        }
-    }
+        Value::Array(_) | Value::Tuple(_) | Value::Object(_) => return None,
+    })
 }
 
 /// One `difflib`-style edit opcode over `a`/`b` index ranges (half-open,

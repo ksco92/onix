@@ -5,9 +5,12 @@
 //! how this fits into the algorithm end to end.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
+use crate::lcs::{ScalarKey, python_scalar_key};
 use crate::value::Value;
 
+use super::IgnoreOrderMemo;
 use super::fxhash::HashMap;
 
 /// A canonical hash-equivalence key for one JSON value, matching
@@ -57,21 +60,107 @@ pub(crate) enum ItemKey {
     Str(String),
     /// Order- and count-insensitive: see this type's own doc.
     List(BTreeSet<ItemKey>),
+    /// A tuple, keyed exactly like [`ItemKey::List`] (order- and
+    /// count-insensitive) but in its own bucket, so a tuple and a list
+    /// holding the same items never hash-match — see this type's own doc.
+    /// A *hashable* tuple can also inherit an earlier Python-equal tuple's
+    /// key outright, which is `DeepHash`'s own cache behavior: see
+    /// [`item_key`] and `super::memo`'s "Tuple digests" section.
+    ///
+    /// The entries sit behind an [`Rc`] so that a nested tuple's key is
+    /// *shared* between the parent key that contains it and the digest cache
+    /// that keeps it, instead of being deep-copied into each: a `D`-deep
+    /// tuple nest costs `O(D)` keys in total rather than `O(D^2)`, and every
+    /// clone of a tuple key — into a parent, into the cache, into a hash
+    /// table — is a refcount bump. `Rc` derives the same `Eq`/`Ord`/`Hash`
+    /// as the set it points at, so the key's *semantics* are exactly what
+    /// holding the set inline gave. Only this variant needs the sharing;
+    /// lists and dicts are never cached, so theirs stay inline.
+    Tuple(Rc<BTreeSet<ItemKey>>),
     /// Key-sorted, recursively keyed values.
     Dict(BTreeMap<String, ItemKey>),
 }
 
-/// Computes `value`'s [`ItemKey`]. Recurses natively — safe only because
+/// One element of a hashable tuple's Python identity: a scalar by value, or
+/// a nested tuple by the id its own identity was interned to.
+///
+/// Referring to a nested tuple by id rather than by its whole identity is
+/// what keeps this `O(arity)` per node: `((((1,),),),)` is four one-element
+/// identities, not four identities of size 1, 2, 3 and 4.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum PyHashPart {
+    Scalar(ScalarKey),
+    Tuple(TupleId),
+}
+
+/// A hashable tuple's Python identity: its elements, **positionally**
+/// (Python's tuple equality is order-sensitive, unlike the
+/// order-insensitive *content* digest [`item_key`] computes).
+///
+/// This is the key `DeepHash`'s shared `hashes` dict is looked up by (see
+/// `super::memo`'s "Tuple digests" section), so it mirrors Python exactly:
+/// scalars go through the crate's one definition of Python scalar equality
+/// ([`python_scalar_key`], which makes `1`, `1.0` and `True` one key), and a
+/// list or dict is unhashable, which also makes any tuple containing one
+/// unhashable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PyHashKey(Box<[PyHashPart]>);
+
+/// A hashable tuple identity's place in the run's interning table — see
+/// [`super::IgnoreOrderMemo::tuple_digest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TupleId(usize);
+
+impl TupleId {
+    /// The id for the entry at `index` (the interner's only constructor).
+    pub(crate) fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    /// This id's index into the digest table.
+    pub(crate) fn index(self) -> usize {
+        self.0
+    }
+}
+
+/// Computes `value`'s [`ItemKey`], consulting `memo` for every hashable
+/// tuple it walks — a tuple that is Python-equal to one hashed earlier in
+/// this diff inherits that tuple's key, exactly as `DeepHash`'s shared cache
+/// makes it inherit its digest (see `super::memo`'s "Tuple digests" section
+/// for the mechanism, the source citations, and why the ordering is
+/// observable).
+///
+/// Recurses natively — safe only because
 /// every caller in this module first proves `value`'s nesting is within the
 /// crate's shared depth budget via [`check_value_depth`] (see this module's
 /// "Depth safety" doc section).
-pub(crate) fn item_key(value: &Value) -> ItemKey {
+pub(crate) fn item_key(value: &Value, memo: &IgnoreOrderMemo) -> ItemKey {
+    keyed(value, memo, false).0
+}
+
+/// [`item_key`]'s recursion, additionally returning `value`'s Python
+/// identity as one [`PyHashPart`] when the caller is a tuple that needs it
+/// (`want_part`) and `value` is hashable.
+///
+/// The two are computed in one walk rather than two: a nested tuple's
+/// identity is only knowable once it has been interned, which happens in the
+/// same step that assigns its digest, so a second pass would re-walk (and
+/// re-intern) every level. `want_part` is `false` everywhere except a
+/// tuple's own elements, so a scalar sitting in a list or a dict never pays
+/// for the Python-identity key it would not be asked for.
+fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Option<PyHashPart>) {
+    let part = || {
+        want_part
+            .then(|| python_scalar_key(value).map(PyHashPart::Scalar))
+            .flatten()
+    };
+
     match value {
-        Value::Null => ItemKey::Null,
-        Value::Bool(b) => ItemKey::Bool(*b),
-        Value::Str(s) => ItemKey::Str(s.to_string()),
+        Value::Null => (ItemKey::Null, part()),
+        Value::Bool(b) => (ItemKey::Bool(*b), part()),
+        Value::Str(s) => (ItemKey::Str(s.to_string()), part()),
         Value::Number(n) => {
-            if n.is_f64() {
+            let number = if n.is_f64() {
                 let f = n
                     .as_f64()
                     .expect("Number::is_f64 guarantees as_f64 succeeds");
@@ -95,15 +184,52 @@ pub(crate) fn item_key(value: &Value) -> ItemKey {
                     .as_u64()
                     .expect("a non-f64 serde_json::Number always has an i64 or u64 repr");
                 ItemKey::Int(i128::from(u))
-            }
+            };
+            (number, part())
         }
-        Value::Array(items) => ItemKey::List(items.iter().map(item_key).collect()),
-        Value::Object(map) => ItemKey::Dict(
-            map.iter()
-                .map(|(k, v)| (k.to_string(), item_key(v)))
-                .collect(),
+        Value::Array(items) => (
+            ItemKey::List(items.iter().map(|i| item_key(i, memo)).collect()),
+            None,
+        ),
+        Value::Tuple(items) => tuple_keyed(items, memo),
+        Value::Object(map) => (
+            ItemKey::Dict(
+                map.iter()
+                    .map(|(k, v)| (k.to_string(), item_key(v, memo)))
+                    .collect(),
+            ),
+            None,
         ),
     }
+}
+
+/// [`keyed`]'s tuple case: keys every element first (bottom-up, so a nested
+/// tuple is interned before this one asks for its id), then either hands the
+/// assembled identity to the run's digest cache — where an earlier
+/// Python-equal tuple's key wins — or, if any element was unhashable, keeps
+/// the content key it just built.
+fn tuple_keyed(items: &[Value], memo: &IgnoreOrderMemo) -> (ItemKey, Option<PyHashPart>) {
+    let mut children = BTreeSet::new();
+    let mut parts = Vec::with_capacity(items.len());
+    let mut hashable = true;
+
+    for item in items {
+        let (child_key, child_part) = keyed(item, memo, hashable);
+        children.insert(child_key);
+        match child_part {
+            Some(child_part) => parts.push(child_part),
+            None => hashable = false,
+        }
+    }
+
+    if !hashable {
+        return (ItemKey::Tuple(Rc::new(children)), None);
+    }
+
+    let (id, digest) = memo.tuple_digest(PyHashKey(parts.into_boxed_slice()), || {
+        ItemKey::Tuple(Rc::new(children))
+    });
+    (digest, Some(PyHashPart::Tuple(id)))
 }
 
 // ---------------------------------------------------------------------
@@ -127,12 +253,17 @@ pub(crate) struct HashedList<'a> {
 }
 
 impl<'a> HashedList<'a> {
-    pub(crate) fn build(items: &'a [Value]) -> Self {
+    /// Hashes `items` in index order, threading the run's `memo` so a
+    /// hashable tuple's digest is shared with every Python-equal tuple hashed
+    /// earlier in this diff — including in the *other* list's table, which is
+    /// built by a second call with the same `memo`, exactly as `DeepDiff`
+    /// builds its two hashtables against one shared `hashes` dict.
+    pub(crate) fn build(items: &'a [Value], memo: &IgnoreOrderMemo) -> Self {
         let mut distinct_order = Vec::new();
         let mut info: HashMap<ItemKey, (usize, &'a Value)> = HashMap::default();
 
         for (idx, item) in items.iter().enumerate() {
-            let key = item_key(item);
+            let key = item_key(item, memo);
 
             if let std::collections::hash_map::Entry::Vacant(entry) = info.entry(key.clone()) {
                 distinct_order.push(key);
