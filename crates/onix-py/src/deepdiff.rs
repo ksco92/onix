@@ -28,13 +28,12 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 ///   `datetime.date`, arbitrarily nested. A *subclass* of any of these is
 ///   not supported (a `namedtuple`, a `set` subclass, a pandas
 ///   `Timestamp`), because `DeepDiff` reports every value under its own type
-///   name. A `set`/`frozenset` member is restricted further, to `None`,
-///   `bool`, `int`, `float`, `str`, `tuple` and `frozenset`, and the
-///   restriction is transitive: a `list`, `dict`, `set`, `datetime` or
-///   `date` anywhere inside a set member is refused (calendar values there
-///   land with issue #21). Converted to `onix_core`'s value
-///   model exactly once, up front — see `crate::convert`'s module doc for
-///   the full conversion table and every unsupported-type error this can
+///   name. A `set`/`frozenset` member is restricted further, to whichever of
+///   the above are hashable in Python — every type except `list`, `dict` and
+///   `set` — and the restriction is transitive: a `list`, `dict` or `set`
+///   anywhere inside a set member is refused. Converted to `onix_core`'s
+///   value model exactly once, up front — see `crate::convert`'s module doc
+///   for the full conversion table and every unsupported-type error this can
 ///   raise (`TypeError` for an unsupported type, `ValueError` for an
 ///   out-of-range int, a non-finite float, or a sub-second UTC offset).
 /// - `ignore_order`: mirrors `DeepDiff(..., ignore_order=True)`.

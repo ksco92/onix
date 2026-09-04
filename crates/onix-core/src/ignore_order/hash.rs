@@ -168,6 +168,17 @@ impl TupleId {
 /// `{1}` are each a removal plus an addition (bare numbers, type-wrapped),
 /// while `{(1,)}` vs `{(1.0,)}` and `{frozenset({1})}` vs
 /// `{frozenset({1.0})}` are empty (containers, compared by Python `==`).
+///
+/// A `datetime`/`date` is the one type where `_diff_set` does **not**
+/// compare by plain Python `==`: `_create_hashtable` builds each side's
+/// table through the same `DeepHash` this crate's `ignore_order` item
+/// matching already reproduces (see [`ItemKey::DateTime`]/[`ItemKey::Date`]),
+/// whose `_prep_datetime` normalizes to UTC before hashing — so a naive and
+/// an aware value at one instant are one set member, at any nesting depth,
+/// and a `date` never joins a `datetime`'s equivalence class. Confirmed
+/// against `deepdiff==9.1.0`: `{datetime(2024,1,1)}` vs
+/// `{datetime(2024,1,1,tzinfo=timezone.utc)}` is `{}`, and so is the same
+/// pair nested one level inside a tuple or a frozenset set member.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SetMemberKey {
     /// A bare `bool`, `int` or `float`, in its own type's bucket.
@@ -175,6 +186,9 @@ pub(crate) enum SetMemberKey {
     /// `None` or a `str`, and every number *nested* inside a container,
     /// where Python's `==` does collapse `1`, `1.0` and `True`.
     Scalar(ScalarKey),
+    /// A `datetime` or `date`, at any nesting depth — see this type's own
+    /// doc for why it is not a plain [`Self::Scalar`].
+    Calendar(ItemKey),
     /// A tuple, positionally (Python's tuple equality is order-sensitive).
     Tuple(Vec<SetMemberKey>),
     /// A frozenset, by membership (Python's frozenset equality is not
@@ -270,14 +284,16 @@ fn python_identity(root: &Value) -> SetMemberKey {
         let mut children = |count: usize| built.split_off(built.len() - count);
 
         let key = match value {
-            Value::Null
-            | Value::Bool(_)
-            | Value::Number(_)
-            | Value::Str(_)
-            | Value::DateTime(_)
-            | Value::Date(_) => SetMemberKey::Scalar(
-                python_scalar_key(value).expect("python_scalar_key covers every scalar"),
-            ),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_) => {
+                SetMemberKey::Scalar(
+                    python_scalar_key(value).expect("python_scalar_key covers every scalar"),
+                )
+            }
+            // Not `python_scalar_key`: `_diff_set` hashes through `DeepHash`,
+            // whose `_prep_datetime` normalizes to UTC — see
+            // [`SetMemberKey::Calendar`]'s doc.
+            Value::DateTime(dt) => SetMemberKey::Calendar(ItemKey::DateTime(dt.instant())),
+            Value::Date(date) => SetMemberKey::Calendar(ItemKey::Date(date.ordinal())),
             Value::Tuple(items) => SetMemberKey::Tuple(children(items.len())),
             Value::FrozenSet(items) => {
                 SetMemberKey::FrozenSet(children(items.len()).into_iter().collect())

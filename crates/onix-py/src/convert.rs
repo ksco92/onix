@@ -35,14 +35,13 @@
 //!   [`PyValueError`]: the value model carries an offset in seconds.
 //! - A `set`/`frozenset` member that is not one of the types this MVP allows
 //!   a set to hold (`None`, `bool`, `int`, `float`, `str`, `tuple`,
-//!   `frozenset`) raises [`PyTypeError`] naming the member's type and its
-//!   path. A `list` or `dict` is only ever reachable there via a subclass
-//!   that defines `__hash__`, which real `DeepDiff` would report under that
-//!   subclass's own name — the same reason a `tuple` subclass is refused
-//!   below. A `datetime` or `date` is refused there for now as well — it
-//!   needs the rendering rule that lands with issue #21 — and the refusal is
-//!   transitive, so `{(datetime(2024, 1, 1),)}` is refused too rather than
-//!   rendering its path with `str()` where `DeepDiff` uses `repr()`.
+//!   `frozenset`, `datetime`, `date`) raises [`PyTypeError`] naming the
+//!   member's type and its path. A `list` or `dict` is only ever reachable
+//!   there via a subclass that defines `__hash__`, which real `DeepDiff`
+//!   would report under that subclass's own name — the same reason a
+//!   `tuple` subclass is refused below — and stays refused, including
+//!   nested inside an otherwise-allowed container: `{(datetime(2024, 1,
+//!   1),)}` converts, but `{([1],)}` does not.
 //! - Any other unrecognized type (`datetime.time`, `datetime.timedelta`,
 //!   custom objects, …) raises [`PyTypeError`] naming the type and the exact
 //!   path it was found at (e.g. `"unsupported type for diffing: complex at
@@ -245,10 +244,11 @@ enum Step<'py> {
 /// `set_member` restricts the accepted types to the ones this MVP allows
 /// inside a set: a `list` or `dict` reaching a set member (only possible
 /// through a subclass defining `__hash__`) is refused with the same error any
-/// other unsupported type gets, and so is a `datetime`/`date` (issue #21).
-/// The flag is *transitive* — it is set for a set's own members and for
-/// everything nested inside one — so a calendar value cannot slip in one
-/// level down, as `{(datetime(2024, 1, 1),)}`.
+/// other unsupported type gets. The flag is *transitive* — it is set for a
+/// set's own members and for everything nested inside one — so `{([1],)}`
+/// is refused for its nested `list` the same way `{[1]}` would be. A
+/// `datetime`/`date` is accepted either way: [`onix_core::path::set_item_repr`]
+/// defines how one renders as a set item, top-level or nested.
 fn classify<'py>(
     current: &Bound<'py, PyAny>,
     path: &[PathSegment],
@@ -278,13 +278,15 @@ fn classify<'py>(
     }
 
     // Exact, and `datetime` before `date`: see the module doc. A `date` cast
-    // that was not exact would swallow every `datetime` too. Both are
-    // refused inside a set until issue #21 defines how one renders there.
-    if !set_member && current.cast_exact::<PyDateTime>().is_ok() {
+    // that was not exact would swallow every `datetime` too. Both convert
+    // the same way whether or not they sit inside a set member — the
+    // rendering rule that decides is entirely `onix_core::path`'s, not this
+    // conversion's.
+    if current.cast_exact::<PyDateTime>().is_ok() {
         return Ok(Step::Done(datetime_to_value(current, path)?));
     }
 
-    if !set_member && current.cast_exact::<PyDate>().is_ok() {
+    if current.cast_exact::<PyDate>().is_ok() {
         return Ok(Step::Done(CValue::Date(date_fields(current, path)?)));
     }
 
@@ -678,8 +680,7 @@ fn unsupported_type_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr
 fn unhashable_member_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
     PyTypeError::new_err(format!(
         "unsupported type for a set member: {} at {}; a set member must be \
-         None/bool/int/float/str/tuple/frozenset (a datetime or date member lands with \
-         set support for calendar types)",
+         None/bool/int/float/str/tuple/frozenset/datetime/date",
         type_name(obj),
         render_path(path),
     ))
