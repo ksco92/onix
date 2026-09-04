@@ -72,7 +72,9 @@ pub struct Date {
 
 impl Date {
     /// Builds a date, returning `None` if `month`/`day` are not a real
-    /// calendar date (leap years included).
+    /// calendar date (leap years included). An out-of-range month has no days
+    /// at all ([`days_in_month`] returns `0` for one), so the single `day`
+    /// bound below rejects it too.
     ///
     /// `year` is not range-checked. Python's own `date` spans years `1`
     /// through `9999`, and every date this crate sees comes from a real
@@ -81,8 +83,7 @@ impl Date {
     /// (see [`DateTime::to_utc`]).
     #[must_use]
     pub fn new(year: i32, month: u8, day: u8) -> Option<Self> {
-        ((1..=12).contains(&month) && day >= 1 && day <= days_in_month(year, month))
-            .then_some(Self { year, month, day })
+        (day >= 1 && day <= days_in_month(year, month)).then_some(Self { year, month, day })
     }
 
     /// The year.
@@ -359,7 +360,8 @@ fn civil_from_days(days: i64) -> (i32, u8, u8) {
     )
 }
 
-/// The number of days in `month` of `year`.
+/// The number of days in `month` of `year`, or `0` if `month` is not a real
+/// month — which is what makes it [`Date::new`]'s only bound.
 fn days_in_month(year: i32, month: u8) -> u8 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,

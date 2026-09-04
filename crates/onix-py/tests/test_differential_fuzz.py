@@ -4,15 +4,18 @@ Runs through the actual `deepdiff_rs.DeepDiff` class (not the fast JSON-string
 path), so this exercises the Python-object-to-`Value` conversion layer itself,
 not just the diff engine underneath it.
 
-Three batches, each of `SEED_COUNT` seeded cases run twice (ordered and
+Four batches, each of `SEED_COUNT` seeded cases run twice (ordered and
 `ignore_order=True`): one over the JSON-shaped types, one that also emits
 tuples (both as containers in their own right and as elements of lists, dicts
-and other tuples), and one that also emits naive and aware datetimes and dates.
-Every batch compares `to_json()` (canonically, i.e. parsed — neither tool
-promises a key order) *and* `to_dict()` by `==`, which is the comparison that
-can see a tuple, a `datetime` or a `date` where the JSON one cannot.
+and other tuples), one that also emits naive and aware datetimes and dates
+anywhere in a nested value, and one of *flat, tightly clustered* calendar lists
+— the shape that puts maximum pressure on difflib alignment and `ignore_order`
+pairing, where near-identical candidates make every tie-break observable. Every
+batch compares `to_json()` (canonically, i.e. parsed — neither tool promises a
+key order) *and* `to_dict()` by `==`, which is the comparison that can see a
+tuple, a `datetime` or a `date` where the JSON one cannot.
 
-The calendar batch runs under a pinned `TZ=UTC` — see `utc_timezone`.
+Both calendar batches run under a pinned `TZ=UTC` — see `utc_timezone`.
 """
 
 import datetime
@@ -54,8 +57,9 @@ SEED_COUNT: Final[int] = 300
 # independent corpora rather than the same shapes with tuples sprinkled in.
 TUPLE_SEED_BASE: Final[int] = 1_000_000
 
-# ...and so does the calendar batch.
+# ...and so do the two calendar batches.
 CALENDAR_SEED_BASE: Final[int] = 2_000_000
+CLUSTERED_SEED_BASE: Final[int] = 3_000_000
 
 # The calendar batch's leaves: naive and aware datetimes across a bounded range,
 # plus bare dates. The offsets deliberately include one that is not a whole
@@ -87,6 +91,13 @@ RETYPE_PROBABILITY: Final[float] = 0.25
 # How often the calendar batch re-writes a datetime at another UTC offset,
 # keeping the instant (see `_calendar_edge_mutations`).
 OFFSET_SHIFT_PROBABILITY: Final[float] = 0.3
+
+# The clustered batch's own knobs: a two-day window (so every value is a close
+# candidate for every other), and a coin flip that makes an aware value the
+# exact same instant as the naive one it was drawn from.
+CLUSTER_EPOCH: Final[datetime.datetime] = datetime.datetime(2024, 1, 1)
+CLUSTER_SPAN_HOURS: Final[int] = 48
+SAME_INSTANT_TWIN_PROBABILITY: Final[float] = 0.5
 
 
 def _gen_scalar(rng: random.Random, scalars: list[JsonValue] | None = None) -> JsonValue:
@@ -426,6 +437,58 @@ def test_differential_fuzz_with_tuples_matches_real_deepdiff() -> None:
     )
 
 
+def _gen_clustered_calendar(rng: random.Random) -> JsonValue:
+    """
+    Pick one calendar value from a deliberately tiny window.
+
+    :param rng: Seeded RNG.
+    :return: A `date`, or a naive or aware `datetime` within `CLUSTER_SPAN_HOURS`.
+    """
+    if rng.random() < DATE_PROBABILITY:
+        return (CLUSTER_EPOCH + datetime.timedelta(days=rng.randrange(6))).date()
+
+    value = CLUSTER_EPOCH + datetime.timedelta(
+        hours=rng.randrange(CLUSTER_SPAN_HOURS), microseconds=rng.choice([0, 1])
+    )
+
+    if rng.random() < NAIVE_PROBABILITY:
+        return value
+
+    offset = rng.choice(UTC_OFFSETS)
+
+    if rng.random() < SAME_INSTANT_TWIN_PROBABILITY:
+        # The same moment as the naive value above, written at `offset` — a
+        # pair Python's `==` rejects but DeepDiff's comparison accepts.
+        value += datetime.timedelta(seconds=offset)
+
+    return value.replace(tzinfo=datetime.timezone(datetime.timedelta(seconds=offset)))
+
+
+def _generate_clustered_case(seed: int) -> tuple[JsonValue, JsonValue]:
+    """
+    Generate one seeded flat-calendar-list `(a, b)` pair.
+
+    :param seed: The seed driving this case's RNG.
+    :return: A related-but-different pair of flat lists.
+    """
+    rng = random.Random(seed)
+    a = [_gen_clustered_calendar(rng) for _ in range(rng.randint(0, 7))]
+    b = list(a)
+    rng.shuffle(b)
+
+    for index in range(len(b)):
+        if rng.random() < 0.4:
+            b[index] = _gen_clustered_calendar(rng)
+
+    if b and rng.random() < 0.3:
+        b.pop(rng.randrange(len(b)))
+
+    if rng.random() < 0.3:
+        b.append(_gen_clustered_calendar(rng))
+
+    return a, b
+
+
 @pytest.fixture
 def utc_timezone(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """
@@ -469,4 +532,32 @@ def test_differential_fuzz_with_calendar_values_matches_real_deepdiff(
     assert not mismatches, (
         f"{len(mismatches)} of {SEED_COUNT * 2} calendar fuzz cases diverged from real "
         f"DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+def test_differential_fuzz_with_clustered_calendar_lists_matches_real_deepdiff(
+    utc_timezone: None,
+) -> None:
+    """
+    Run a fourth batch of flat, tightly clustered calendar lists.
+
+    :param utc_timezone: Pins `TZ=UTC` — see that fixture for why it is needed.
+        This batch is the one that actually depends on it: near-identical
+        candidates make DeepDiff's own naive-`timestamp()` reading observable.
+    """
+    mismatches = []
+
+    for seed in range(CLUSTERED_SEED_BASE, CLUSTERED_SEED_BASE + SEED_COUNT):
+        a, b = _generate_clustered_case(seed)
+
+        for ignore_order in (False, True):
+            divergence = _diverges(a, b, ignore_order)
+
+            if divergence is not None:
+                expected, actual = divergence
+                mismatches.append((seed, ignore_order, a, b, expected, actual))
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} clustered calendar fuzz cases diverged from "
+        f"real DeepDiff (showing up to 3): {mismatches[:3]}"
     )

@@ -651,6 +651,15 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
         ["anchor", datetime(2024, 1, 1)],
         {"ignore_order": True},
     ),
+    # A datetime shares no distance family with a number
+    # (`get_numeric_types_distance` finds no entry both are an isinstance of),
+    # so the structural fallback measures the pair as maximally far and the
+    # two stay unpaired.
+    "ignore_order_datetime_and_number_never_pair": (
+        [datetime(2024, 1, 1, 10), "anchor"],
+        ["anchor", 5],
+        {"ignore_order": True},
+    ),
     "ignore_order_date_pairing": (
         [date(2024, 1, 1), date(2024, 1, 2)],
         [date(2024, 1, 2), date(2024, 1, 3)],

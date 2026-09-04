@@ -1785,3 +1785,81 @@ fn a_datetime_leaf_counts_as_changed_only_when_the_instants_differ() {
     assert_eq!(count(&cdate(2024, 1, 1), &cdate(2024, 1, 1)), 0);
     assert_eq!(count(&cdate(2024, 1, 1), &cdate(2024, 1, 2)), 1);
 }
+
+#[test]
+fn a_date_and_a_datetime_pair_by_ordinal_distance_in_either_direction() {
+    // `get_numeric_types_distance` walks `TYPES_TO_DIST_FUNC` in order and
+    // matches the mixed pair on its `datetime.date` entry, because `datetime`
+    // is a `date` subclass — so the pair is measured in ordinals and lands
+    // well inside the pairing cutoff whichever side each type is on.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let date_side = CValue::Array(vec![cdate(2024, 1, 1)].into_boxed_slice());
+    let datetime_side = CValue::Array(vec![cdt(2024, 3, 5, None)].into_boxed_slice());
+
+    let forward = crate::diff::diff_with_options(&date_side, &datetime_side, &opts).unwrap();
+    let backward = crate::diff::diff_with_options(&datetime_side, &date_side, &opts).unwrap();
+
+    assert_eq!(
+        forward.to_json_value(),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "date",
+            "new_type": "datetime",
+            "old_value": "2024-01-01",
+            "new_value": "2024-03-05T00:00:00",
+        }}})
+    );
+    assert_eq!(
+        backward.to_json_value(),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "datetime",
+            "new_type": "date",
+            "old_value": "2024-03-05T00:00:00",
+            "new_value": "2024-01-01",
+        }}})
+    );
+}
+
+#[test]
+fn a_calendar_value_is_truthy_when_a_type_change_coerces_it_to_bool() {
+    // `_from_tree_type_changes` omits `new_value` when `new_type(old_value)`
+    // reproduces it, and `bool(datetime(...))`/`bool(date(...))` is always
+    // True — confirmed against real `deepdiff==9.1.0`:
+    // `DeepDiff(datetime(2024, 1, 1), True, view="_delta")` has no
+    // `new_value` (length 1), while the same pair against `False` does
+    // (length 2).
+    let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
+
+    assert_eq!(leaf(&cdt(2024, 1, 1, None), &cv(&json!(true))), 1);
+    assert_eq!(leaf(&cdate(2024, 1, 1), &cv(&json!(true))), 1);
+    assert_eq!(leaf(&cdt(2024, 1, 1, None), &cv(&json!(false))), 2);
+    assert_eq!(leaf(&cdt(2024, 1, 1, None), &cv(&json!("x"))), 2);
+}
+
+#[test]
+fn a_calendar_value_and_a_number_share_no_distance_family_and_never_pair() {
+    // `get_numeric_types_distance` returns `not_found` unless both values are
+    // an `isinstance` of the *same* entry, so this pair takes the structural
+    // fallback, measures as maximally far, and is reported as an add plus a
+    // remove rather than a type change.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = CValue::Array(
+        vec![cdt_at(2024, 1, 1, 10, 0, 0, 0, None), cv(&json!("anchor"))].into_boxed_slice(),
+    );
+    let b = CValue::Array(vec![cv(&json!("anchor")), cv(&json!(5))].into_boxed_slice());
+
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .to_json_value(),
+        json!({
+            "iterable_item_added": {"root[1]": 5},
+            "iterable_item_removed": {"root[0]": "2024-01-01T10:00:00"},
+        })
+    );
+}

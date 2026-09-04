@@ -117,18 +117,27 @@ fn distance_family(value: &Value) -> Option<DistanceFamily> {
 fn family_distance(removed: &Value, added: &Value, cutoff: f64) -> Option<f64> {
     let (removed, added) = (distance_family(removed)?, distance_family(added)?);
 
-    match (removed, added) {
-        (DistanceFamily::Number(r), DistanceFamily::Number(a))
-        | (
+    // One arm per reachable combination, each spelled out rather than folded
+    // into an or-pattern: two datetimes are measured by timestamp, and every
+    // pairing that mixes a date in is measured by ordinal.
+    #[allow(
+        clippy::match_same_arms,
+        reason = "the arms differ in which field they read, not in what they return, and \
+                  keeping them separate gives each combination its own coverage region"
+    )]
+    let (removed, added) = match (removed, added) {
+        (DistanceFamily::Number(r), DistanceFamily::Number(a)) => (r, a),
+        (
             DistanceFamily::DateTime { timestamp: r, .. },
             DistanceFamily::DateTime { timestamp: a, .. },
-        )
-        | (
-            DistanceFamily::DateTime { ordinal: r, .. } | DistanceFamily::Date(r),
-            DistanceFamily::DateTime { ordinal: a, .. } | DistanceFamily::Date(a),
-        ) => Some(numeric_distance(r, a, cutoff)),
-        _ => None,
-    }
+        ) => (r, a),
+        (DistanceFamily::DateTime { ordinal: r, .. }, DistanceFamily::Date(a)) => (r, a),
+        (DistanceFamily::Date(r), DistanceFamily::DateTime { ordinal: a, .. }) => (r, a),
+        (DistanceFamily::Date(r), DistanceFamily::Date(a)) => (r, a),
+        _ => return None,
+    };
+
+    Some(numeric_distance(removed, added, cutoff))
 }
 
 /// `DeepDiff`'s `_get_numbers_distance` (distance.py), including the

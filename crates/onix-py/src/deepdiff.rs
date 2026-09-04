@@ -24,12 +24,14 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 /// `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`:
 ///
 /// - `t1`/`t2`: any of `None`, `bool`, `int`, `float`, `str`, `dict` (`str`
-///   keys), `list`, or `tuple`, arbitrarily nested (a `tuple` subclass,
-///   `namedtuple` included, is not supported). Converted to `onix_core`'s value
+///   keys), `list`, `tuple`, `datetime.datetime`, or `datetime.date`,
+///   arbitrarily nested. A *subclass* of any of these is not supported (a
+///   `namedtuple`, a pandas `Timestamp`), because `DeepDiff` reports every
+///   value under its own type name. Converted to `onix_core`'s value
 ///   model exactly once, up front — see `crate::convert`'s module doc for
 ///   the full conversion table and every unsupported-type error this can
 ///   raise (`TypeError` for an unsupported type, `ValueError` for an
-///   out-of-range int or a non-finite float).
+///   out-of-range int, a non-finite float, or a sub-second UTC offset).
 /// - `ignore_order`: mirrors `DeepDiff(..., ignore_order=True)`.
 /// - `max_depth`: caller-chosen recursion-depth bound; defaults to
 ///   `onix_core::DEFAULT_MAX_DEPTH` (512) when omitted. Exceeding it —
@@ -94,7 +96,11 @@ impl DeepDiff {
 
     /// Byte-compatible with real `DeepDiff(...).to_json()` at
     /// `verbose_level=2` — the whole point of this crate. A tuple renders as
-    /// the JSON array `DeepDiff`'s own `to_json()` shows for one.
+    /// the JSON array `DeepDiff`'s own `to_json()` shows for one, and a
+    /// datetime as the `isoformat()` string it shows for one. The single
+    /// documented superset is `datetime.date`, rendered as `YYYY-MM-DD`
+    /// where real `DeepDiff`'s `to_json()` raises `TypeError` — see
+    /// `tests/golden/README.md`.
     ///
     /// Rendering a report to JSON is natively recursive, so a report deep
     /// enough to matter is rendered on the sized worker thread; a shallow one
@@ -106,10 +112,13 @@ impl DeepDiff {
 
     /// The report as a native Python `dict` — [`Self::to_json`]'s content
     /// with the Python types intact rather than their JSON renderings, so a
-    /// value the diff found in a `tuple` comes back as a `tuple`, exactly as
-    /// real `DeepDiff`'s own `to_dict()` does. (Type *names* in a
-    /// `type_changes` entry stay strings here, where real `DeepDiff` returns
-    /// the type objects themselves.) Conversion back to Python objects is
+    /// value the diff found in a `tuple` comes back as a `tuple` and a
+    /// datetime comes back as a real `datetime.datetime`, exactly as real
+    /// `DeepDiff`'s own `to_dict()` does. (Type *names* in a `type_changes`
+    /// entry stay strings here, where real `DeepDiff` returns the type
+    /// objects themselves; and an aware datetime carries a fixed-offset
+    /// `datetime.timezone` rather than whatever `tzinfo` class it went in
+    /// with — see `crate::convert`'s module doc.) Conversion back to Python objects is
     /// iterative (see `crate::convert::value_to_pyobject`), so it is safe on
     /// the calling thread at any depth.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
