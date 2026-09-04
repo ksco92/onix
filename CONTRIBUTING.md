@@ -113,20 +113,22 @@ repository's `README.md`. No machinery is added solely to reproduce such a nuanc
 The differences shipped as of 0.4.0 — name and pointer only; the rationale for
 each lives at its pointer, not restated here:
 
-- **Canonical set order** — `tests/golden/README.md`'s "Set iteration order" §1;
+- **Canonical set order** — `tests/golden/README.md`'s "Set iteration order"
+  section, its "Canonical set order" point;
   [`onix_core::value::SetItems`](crates/onix-core/src/value.rs)'s own doc.
 - **Order-independent tuple/frozenset digest-cache winner** — `tests/golden/README.md`'s
-  "Set iteration order" §2.
+  "Set iteration order" section, its "Which member of an equality class wins"
+  point.
 - **Set-versus-sequence coercion never folds into `values_changed`** —
-  `tests/golden/README.md`'s "Set iteration order" §3.
-- **A naive/aware calendar set-member pair is reported as every distinct Python
-  member it is** — `tests/golden/README.md`'s "Set iteration order" §4.
-- **A calendar-normalization difference does not inherit the tuple-digest
-  cache's number-type collapsing** — `tests/golden/README.md`'s "Set iteration
-  order" §5.
+  `tests/golden/README.md`'s "Set iteration order" section, its
+  `` `list(a_set) == some_list` `` point.
+- **A naive/aware calendar set-member pair is reported as every distinct
+  Python member it is** — `tests/golden/README.md`'s "Set iteration order"
+  section, its "A naive and an aware datetime" point.
 - **A tuple/frozenset set member matches positionally** (`tuple.__eq__`), not
   order-/repetition-insensitively — `tests/golden/README.md`'s "Set iteration
-  order" §6.
+  order" section, its "A tuple or a frozenset set member matches order- and
+  repetition-insensitively" point.
 - **`frozenset` and `date` supersets** — `tests/golden/README.md`'s "The `date`
   superset" section.
 - **Naive datetimes read as UTC**, including for `ignore_order` pairing —
@@ -235,15 +237,18 @@ make mutants
 
 **Standing result.** `make mutants` enumerates a deterministic **979** mutants
 (20 in `onix-cli`, 959 in `onix-core`). Every viable mutant is caught except
-two documented, harmless kinds: equivalent mutants confined to
-`onix-core/src/lcs.rs` and the `> 1` threshold in
-`onix-core/src/diff/array.rs` (where `>= 1` is provably output-neutral), and
-`Default`-substitution mutants that do not compile. The exact classification of
-each mutant (caught/missed/timeout/unviable) is noisy run to run, but those two
-kinds never change; [`perf/MUTANTS.md`](perf/MUTANTS.md) carries the tool
-version, the reproduce command, and the full argument for why no reported
-survivor is a real test gap. Work that touches this logic should re-run
-`make mutants` and confirm no viable mutant survives outside those two spots.
+equivalent mutants confined to five documented spots (`onix-core/src/lcs.rs`;
+the `> 1` threshold in `onix-core/src/diff/array.rs`, provably output-neutral;
+`onix-core/src/path.rs`'s `python_float_repr`, an unreachable branch
+condition; `onix-core/src/ignore_order/distance.rs`'s datetime-scale mutant,
+an empirical `f64`-rounding finding; and `onix-core/src/ignore_order/memo.rs`'s
+caching-gate mutants) plus `Default`-substitution mutants that do not compile.
+The exact classification of each mutant (caught/missed/timeout/unviable) is
+noisy run to run, but neither the five spots nor the `Default`-substitution
+kind changes; [`perf/MUTANTS.md`](perf/MUTANTS.md) carries the tool version,
+the reproduce command, and the full argument for why no reported survivor is
+a real test gap. Work that touches this logic should re-run `make mutants`
+and confirm no viable mutant survives outside those five spots.
 
 ## Wheels and publishing
 
