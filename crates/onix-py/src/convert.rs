@@ -17,6 +17,8 @@
 //! | `dict` (`str` keys only) | `Object` | keys interned across the whole walk |
 //! | `list` | `Array` | |
 //! | `tuple` | `Tuple` | exactly `tuple`; every subclass is rejected, see below |
+//! | `datetime.datetime` | `DateTime` | exactly `datetime`; naive or any `tzinfo`, see below |
+//! | `datetime.date` | `Date` | exactly `date` |
 //!
 //! Every other type raises a Python exception instead of converting:
 //!
@@ -27,10 +29,30 @@
 //!   representation for either).
 //! - A `dict` key that is not a `str` raises [`PyTypeError`] naming the
 //!   key's type and the path to the dict containing it.
-//! - Any other unrecognized type (`set`, `frozenset`, dates, custom
-//!   objects, …) raises [`PyTypeError`] naming the type and the exact path
-//!   it was found at (e.g. `"unsupported type for diffing: set at
-//!   root['a'][2]"`).
+//! - A `tzinfo` whose `utcoffset()` is not a whole number of seconds raises
+//!   [`PyValueError`]: the value model carries an offset in seconds.
+//! - Any other unrecognized type (`set`, `frozenset`, `datetime.time`,
+//!   `datetime.timedelta`, custom objects, …) raises [`PyTypeError`] naming
+//!   the type and the exact path it was found at (e.g. `"unsupported type
+//!   for diffing: set at root['a'][2]"`).
+//!
+//! # Datetimes and dates
+//!
+//! A `datetime` converts with its wall-clock fields and, when it is aware,
+//! the *fixed* offset its `tzinfo.utcoffset()` reports at that moment. A
+//! `zoneinfo`/`pytz` zone therefore round-trips through
+//! [`crate::deepdiff::DeepDiff::to_dict`] as a plain
+//! `datetime.timezone(timedelta(...))` carrying the same offset, not as the
+//! original zone object — which changes nothing about the diff, since
+//! `DeepDiff` compares datetimes by instant and reports a `values_changed`
+//! pair normalized to UTC regardless.
+//!
+//! Both casts are **exact**: `datetime` is itself a `date` subclass, so an
+//! inexact check in either direction would misread one as the other, and
+//! `DeepDiff` reports every value under its own `type(obj).__name__` — a
+//! subclass such as `pandas.Timestamp` is never a plain `datetime` there, so
+//! it is refused like any other unsupported type rather than silently
+//! diffed as one.
 //!
 //! A `tuple` converts to [`onix_core::Value::Tuple`], which the engine
 //! diffs positionally exactly like a list while still reporting a
@@ -77,6 +99,7 @@
 //! intentionally a little stricter than `onix_core::diff_with_max_depth`'s
 //! guarantee that two *equal* inputs of any depth always diff cleanly,
 //! because equality can't be known yet at conversion time.
+use onix_core::datetime::{Date as CDate, DateTime as CDateTime};
 use onix_core::path::{PathSegment, render_path};
 use onix_core::value::{Builder, Entries};
 use onix_core::{Number as CNumber, Value as CValue};
@@ -84,7 +107,10 @@ use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::iter::{BoundDictIterator, BoundListIterator, BoundTupleIterator};
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{
+    PyBool, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
+    PyTzInfo,
+};
 
 use crate::errors::MaxDepthError;
 
@@ -196,6 +222,16 @@ fn classify<'py>(
 
     if let Ok(s) = current.cast::<PyString>() {
         return Ok(Step::Done(CValue::Str(s.to_string().into_boxed_str())));
+    }
+
+    // Exact, and `datetime` before `date`: see the module doc. A `date` cast
+    // that was not exact would swallow every `datetime` too.
+    if current.cast_exact::<PyDateTime>().is_ok() {
+        return Ok(Step::Done(datetime_to_value(current, path)?));
+    }
+
+    if current.cast_exact::<PyDate>().is_ok() {
+        return Ok(Step::Done(CValue::Date(date_fields(current, path)?)));
     }
 
     if let Ok(list) = current.cast::<PyList>() {
@@ -423,6 +459,77 @@ fn next_dict_entry<'py>(
     Ok(Some((key.to_string(), value)))
 }
 
+/// Reads a `date`'s (or a `datetime`'s) `year`/`month`/`day` attributes.
+///
+/// Attributes rather than `PyO3`'s `PyDateAccess` trait: that trait wraps the
+/// `PyDateTime_GET_*` C macros, which the limited API this extension builds
+/// against (`abi3-py39`) does not expose, so it is not compiled at all under
+/// that feature.
+fn date_fields(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<CDate> {
+    let year: i32 = obj.getattr("year")?.extract()?;
+    let month: u8 = obj.getattr("month")?.extract()?;
+    let day: u8 = obj.getattr("day")?.extract()?;
+
+    CDate::new(year, month, day).ok_or_else(|| out_of_range_error("date", path))
+}
+
+/// Converts an exact `datetime.datetime` — see [`date_fields`] for why the
+/// fields are read as attributes.
+fn datetime_to_value(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<CValue> {
+    let date = date_fields(obj, path)?;
+    let hour: u8 = obj.getattr("hour")?.extract()?;
+    let minute: u8 = obj.getattr("minute")?.extract()?;
+    let second: u8 = obj.getattr("second")?.extract()?;
+    let microsecond: u32 = obj.getattr("microsecond")?.extract()?;
+    let offset = utc_offset_seconds(obj, path)?;
+
+    CDateTime::new(date, hour, minute, second, microsecond, offset)
+        .map(CValue::DateTime)
+        .ok_or_else(|| out_of_range_error("datetime", path))
+}
+
+/// The datetime's fixed UTC offset in whole seconds, or `None` when it is
+/// naive.
+///
+/// Asks the object itself (`utcoffset()`) rather than inspecting `tzinfo`,
+/// so any `tzinfo` implementation — `timezone`, `zoneinfo`, `pytz` — reports
+/// the offset in force at *this* moment, which is what
+/// `datetime_normalize`'s own `astimezone` would use.
+fn utc_offset_seconds(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<Option<i32>> {
+    let offset = obj.call_method0("utcoffset")?;
+
+    if offset.is_none() {
+        return Ok(None);
+    }
+
+    let days: i64 = offset.getattr("days")?.extract()?;
+    let seconds: i64 = offset.getattr("seconds")?.extract()?;
+    let microseconds: i64 = offset.getattr("microseconds")?.extract()?;
+
+    if microseconds != 0 {
+        return Err(PyValueError::new_err(format!(
+            "a tzinfo whose utcoffset() is not a whole number of seconds is not supported \
+             (at {}); onix stores a datetime's UTC offset in seconds",
+            render_path(path),
+        )));
+    }
+
+    i32::try_from(days * 86_400 + seconds)
+        .map(Some)
+        .map_err(|_| out_of_range_error("datetime", path))
+}
+
+/// A `date`/`datetime` whose fields the compact value model rejects. Python
+/// itself enforces every one of those bounds on a real `datetime` object, so
+/// this is reachable only through a custom `tzinfo` returning an out-of-range
+/// offset.
+fn out_of_range_error(type_name: &str, path: &[PathSegment]) -> PyErr {
+    PyValueError::new_err(format!(
+        "{type_name} at {} is out of range for onix's internal value model",
+        render_path(path),
+    ))
+}
+
 fn int_to_value(i: &Bound<'_, PyInt>) -> PyResult<CValue> {
     if let Ok(v) = i.extract::<i64>() {
         return Ok(CValue::Number(CNumber::from_i64(v)));
@@ -458,8 +565,9 @@ fn max_depth_error(max_depth: usize, path: &[PathSegment]) -> PyErr {
 fn unsupported_type_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
     PyTypeError::new_err(format!(
         "unsupported type for diffing: {} at {}; only \
-         None/bool/int/float/str/dict[str, ...]/list/tuple are supported in this MVP (sets, \
-         dates, tuple subclasses including namedtuples, and custom objects are not)",
+         None/bool/int/float/str/dict[str, ...]/list/tuple/datetime/date are supported in this \
+         MVP (sets, time, timedelta, tuple subclasses including namedtuples, datetime and date \
+         subclasses, and custom objects are not)",
         type_name(obj),
         render_path(path),
     ))
@@ -533,6 +641,8 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                 CValue::Bool(b) => b.into_py_any(py)?,
                 CValue::Number(n) => number_to_pyobject(py, n)?,
                 CValue::Str(s) => s.as_ref().into_py_any(py)?,
+                CValue::DateTime(value) => datetime_to_pyobject(py, *value)?,
+                CValue::Date(value) => date_to_pyobject(py, *value)?,
                 CValue::Array(items) | CValue::Tuple(items) => {
                     let kind = if matches!(current, CValue::Tuple(_)) {
                         SeqKind::Tuple
@@ -620,6 +730,35 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
             }
         }
     }
+}
+
+/// Rebuilds a `datetime.date`.
+fn date_to_pyobject(py: Python<'_>, value: CDate) -> PyResult<Py<PyAny>> {
+    PyDate::new(py, value.year(), value.month(), value.day())?.into_py_any(py)
+}
+
+/// Rebuilds a `datetime.datetime`, aware values carrying a fixed-offset
+/// `datetime.timezone` (a zero offset is Python's own `timezone.utc`
+/// singleton) — see the module doc's note on the `zoneinfo` round trip.
+fn datetime_to_pyobject(py: Python<'_>, value: CDateTime) -> PyResult<Py<PyAny>> {
+    let tzinfo = value
+        .utc_offset_seconds()
+        .map(|offset| PyTzInfo::fixed_offset(py, PyDelta::new(py, 0, offset, 0, true)?))
+        .transpose()?;
+    let date = value.date();
+
+    PyDateTime::new(
+        py,
+        date.year(),
+        date.month(),
+        date.day(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+        value.microsecond(),
+        tzinfo.as_ref(),
+    )?
+    .into_py_any(py)
 }
 
 fn number_to_pyobject(py: Python<'_>, n: &CNumber) -> PyResult<Py<PyAny>> {

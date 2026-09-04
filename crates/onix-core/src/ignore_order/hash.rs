@@ -58,6 +58,16 @@ pub(crate) enum ItemKey {
     /// never collides with `Int(5)`; see this type's own doc).
     Float(u64),
     Str(String),
+    /// A `datetime`, keyed by its instant with a naive value read as UTC —
+    /// `DeepHash._prep_datetime` runs `datetime_normalize` before formatting
+    /// its digest string, so a naive and an aware value at the same moment
+    /// hash identically and pair under `ignore_order`.
+    DateTime(i64),
+    /// A `date`, keyed by its ordinal, in its own bucket: `_prep_date`
+    /// deliberately skips normalization and formats a bare `YYYY-MM-DD`,
+    /// which can never collide with `_prep_datetime`'s
+    /// `YYYY-MM-DD HH:MM:SS+00:00`, so a date and a datetime never pair.
+    Date(i64),
     /// Order- and count-insensitive: see this type's own doc.
     List(BTreeSet<ItemKey>),
     /// A tuple, keyed exactly like [`ItemKey::List`] (order- and
@@ -159,6 +169,8 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
         Value::Null => (ItemKey::Null, part()),
         Value::Bool(b) => (ItemKey::Bool(*b), part()),
         Value::Str(s) => (ItemKey::Str(s.to_string()), part()),
+        Value::DateTime(value) => (ItemKey::DateTime(value.instant()), part()),
+        Value::Date(value) => (ItemKey::Date(value.ordinal()), part()),
         Value::Number(n) => {
             let number = if n.is_f64() {
                 let f = n

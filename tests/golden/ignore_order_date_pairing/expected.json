@@ -1,0 +1,9 @@
+{
+  "values_changed": {
+    "root[0]": {
+      "new_path": "root[1]",
+      "new_value": "2024-01-03",
+      "old_value": "2024-01-01"
+    }
+  }
+}

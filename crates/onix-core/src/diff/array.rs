@@ -118,14 +118,21 @@ struct LcsPair<'a> {
 /// `old_idx`, attaching [`ValuesChangedEntry::new_path`] whenever `new_idx`
 /// differs from `old_idx`.
 ///
-/// Never needs an "equal" branch: a `Replace` opcode's two index ranges
-/// never share a [`crate::lcs`]-equal (Python-`==`-equal) element pair (see
-/// `crate::lcs::compute_opcodes`'s doc), and this engine's own scalar
-/// equality is always at least as strict as Python's (it additionally
-/// distinguishes int/float and bool/int, which Python's `==` does not) — so
-/// `old_value`/`new_value` are always different by *this engine's* equality
-/// too, and this always records exactly one finding once past the guard
-/// below.
+/// A `Replace` opcode's two index ranges never share a [`crate::lcs`]-equal
+/// (Python-`==`-equal) element pair (see `crate::lcs::compute_opcodes`'s
+/// doc), and for every scalar kind but one this engine's own equality is at
+/// least as strict as Python's (it additionally distinguishes int/float and
+/// bool/int, which Python's `==` does not), so the pair is always different
+/// by *this engine's* equality too and exactly one finding is recorded.
+///
+/// **Datetimes are the one kind where Python's `==` is the stricter of the
+/// two**: it never equates a naive value with an aware one, while this
+/// engine (like `_diff_datetime`) reads a naive value as UTC and compares by
+/// instant. So a naive/aware pair at the same moment does reach this
+/// function, and must record *nothing* — which is also what keeps
+/// [`lcs_or_positional_array_diff`]'s finding-count comparison matching
+/// `DeepDiff`'s. That branch is also where the pair picks up the
+/// UTC-normalized rendering [`datetime_diff`] documents.
 ///
 /// Checks [`check_traversal_depth`] at `depth + 1` (this pair's own path
 /// depth) before recording anything — the same bound
@@ -169,6 +176,23 @@ fn insert_lcs_pair_finding(
                 .expect("scoped just pushed the old_idx segment") = PathSegment::Index(new_idx);
             new_segments
         });
+
+        if let (Value::DateTime(old_value), Value::DateTime(new_value)) = (old_value, new_value) {
+            let (old_value, new_value) = (old_value.to_utc(), new_value.to_utc());
+
+            if old_value != new_value {
+                report.insert_values_changed(
+                    path.clone(),
+                    ValuesChangedEntry {
+                        old_value: Value::DateTime(old_value),
+                        new_value: Value::DateTime(new_value),
+                        new_path,
+                    },
+                );
+            }
+
+            return Ok(());
+        }
 
         if python_type_name(old_value) == python_type_name(new_value) {
             report.insert_values_changed(

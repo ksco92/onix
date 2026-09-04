@@ -2,7 +2,7 @@ use super::DEFAULT_MAX_DEPTH;
 use crate::error::Error;
 use crate::path::PathSegment;
 use crate::report::Report;
-use crate::test_support::{cnum, cobj, ctup, cv};
+use crate::test_support::{cdate, cdt, cdt_at, cnum, cobj, ctup, cv};
 use crate::value::{Object as CObject, Value as CValue};
 use serde_json::{Map, Number, Value, json};
 
@@ -2033,4 +2033,201 @@ fn a_dict_value_that_is_a_too_deep_tuple_errors_instead_of_being_cloned() {
     let b = CValue::Object(CObject::from_pairs(vec![(std::sync::Arc::from("a"), deep)]));
     let error = super::diff_with_max_depth(&cv(&json!({})), &b, 4).unwrap_err();
     assert!(matches!(error, Error::MaxDepthExceeded { .. }));
+}
+
+// --- datetimes and dates -------------------------------------------------
+
+/// A one-key dict wrapping `value`, so a datetime case can be exercised at
+/// depth as well as at the root.
+fn wrapped(value: CValue) -> CValue {
+    let mut builder = crate::value::Builder::new();
+    builder.object(vec![("t".to_string(), value)])
+}
+
+#[test]
+fn changed_datetimes_report_the_pair_normalized_to_utc() {
+    let report = super::diff(
+        &cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(-5 * 3600)),
+        &cdt_at(2024, 1, 2, 10, 0, 0, 0, Some(-5 * 3600)),
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"values_changed": {"root": {
+            "new_value": "2024-01-02T15:00:00+00:00",
+            "old_value": "2024-01-01T15:00:00+00:00",
+        }}})
+    );
+}
+
+#[test]
+fn datetimes_at_the_same_instant_report_nothing_however_they_are_written() {
+    for new in [
+        cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(0)),
+        cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600)),
+        cdt_at(2024, 1, 1, 5, 0, 0, 0, Some(-5 * 3600)),
+    ] {
+        let old = cdt_at(2024, 1, 1, 10, 0, 0, 0, None);
+
+        assert!(super::diff(&old, &new).unwrap().is_empty());
+        assert!(
+            super::diff(&wrapped(old), &wrapped(new))
+                .unwrap()
+                .is_empty(),
+            "the same rule must hold one level down"
+        );
+    }
+}
+
+#[test]
+fn a_datetime_outside_values_changed_keeps_its_raw_rendering() {
+    let added = super::diff(
+        &cv(&json!({})),
+        &wrapped(cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(1830))),
+    )
+    .unwrap();
+    let type_changed = super::diff(
+        &cdt_at(2024, 1, 1, 0, 0, 0, 0, None),
+        &cv(&json!("2024-01-01")),
+    )
+    .unwrap();
+
+    assert_eq!(
+        added.to_json_value(),
+        json!({"dictionary_item_added": {"root['t']": "2024-01-01T10:00:00+00:30:30"}})
+    );
+    assert_eq!(
+        type_changed.to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "datetime",
+            "new_type": "str",
+            "old_value": "2024-01-01T00:00:00",
+            "new_value": "2024-01-01",
+        }}})
+    );
+}
+
+#[test]
+fn dates_compare_by_value_and_are_never_a_datetime() {
+    let changed = super::diff(&cdate(2024, 1, 1), &cdate(2024, 1, 2)).unwrap();
+    let retyped = super::diff(&cdate(2024, 1, 1), &cdt(2024, 1, 1, None)).unwrap();
+
+    assert_eq!(
+        changed.to_json_value(),
+        json!({"values_changed": {"root": {
+            "new_value": "2024-01-02", "old_value": "2024-01-01",
+        }}})
+    );
+    assert_eq!(
+        retyped.to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "date",
+            "new_type": "datetime",
+            "old_value": "2024-01-01",
+            "new_value": "2024-01-01T00:00:00",
+        }}})
+    );
+    assert!(
+        super::diff(&cdate(2024, 1, 1), &cdate(2024, 1, 1))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn calendar_type_names_are_datetime_and_date() {
+    assert_eq!(super::python_type_name(&cdt(2024, 1, 1, None)), "datetime");
+    assert_eq!(super::python_type_name(&cdate(2024, 1, 1)), "date");
+}
+
+#[test]
+fn a_list_of_datetimes_takes_the_difflib_path() {
+    // `datetime` is in DeepDiff's `basic_types`, so a shifted list of them
+    // aligns by LCS: one delete plus one insert, not three values_changed.
+    let report = super::diff(
+        &CValue::Array(
+            vec![
+                cdt(2024, 1, 1, None),
+                cdt(2024, 1, 2, None),
+                cdt(2024, 1, 3, None),
+            ]
+            .into_boxed_slice(),
+        ),
+        &CValue::Array(
+            vec![
+                cdt(2024, 1, 2, None),
+                cdt(2024, 1, 3, None),
+                cdt(2024, 1, 4, None),
+            ]
+            .into_boxed_slice(),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({
+            "iterable_item_removed": {"root[0]": "2024-01-01T00:00:00"},
+            "iterable_item_added": {"root[2]": "2024-01-04T00:00:00"},
+        })
+    );
+}
+
+#[test]
+fn a_naive_and_aware_pair_matched_by_difflib_replace_reports_nothing() {
+    // Python's `==` (what difflib matches with) never equates a naive
+    // datetime with an aware one, so this pair reaches a 'replace' opcode —
+    // where the engine's own instant comparison then finds them equal.
+    let report = super::diff(
+        &CValue::Array(
+            vec![cdt_at(2024, 1, 1, 10, 0, 0, 0, None), cv(&json!("anchor"))].into_boxed_slice(),
+        ),
+        &CValue::Array(
+            vec![
+                cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(0)),
+                cv(&json!("anchor")),
+            ]
+            .into_boxed_slice(),
+        ),
+    )
+    .unwrap();
+
+    assert!(report.is_empty());
+}
+
+#[test]
+fn a_datetime_pair_matched_by_difflib_replace_is_normalized_and_keeps_new_path() {
+    // Same 'replace' path, with the instants genuinely different and an
+    // earlier delete drifting the new-side index, which attaches `new_path`.
+    let report = super::diff(
+        &CValue::Array(
+            vec![
+                cv(&json!("x")),
+                cv(&json!("y")),
+                cdt_at(2024, 1, 1, 10, 0, 0, 0, None),
+            ]
+            .into_boxed_slice(),
+        ),
+        &CValue::Array(
+            vec![
+                cv(&json!("y")),
+                cdt_at(2024, 1, 2, 12, 0, 0, 0, Some(2 * 3600)),
+            ]
+            .into_boxed_slice(),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({
+            "values_changed": {"root[2]": {
+                "new_value": "2024-01-02T10:00:00+00:00",
+                "old_value": "2024-01-01T10:00:00+00:00",
+                "new_path": "root[1]",
+            }},
+            "iterable_item_removed": {"root[0]": "x"},
+        })
+    );
 }

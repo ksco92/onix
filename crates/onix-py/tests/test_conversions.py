@@ -104,10 +104,69 @@ def test_frozenset_raises_type_error() -> None:
         DeepDiff(frozenset({1, 2}), frozenset({1, 3}))
 
 
-def test_datetime_raises_type_error() -> None:
-    """A datetime (unsupported in this MVP) raises TypeError naming the type."""
-    with pytest.raises(TypeError, match="datetime"):
-        DeepDiff(datetime.datetime(2024, 1, 1), datetime.datetime(2024, 1, 2))
+def test_datetime_is_accepted_and_compared_by_instant() -> None:
+    """A datetime converts and diffs, reporting the pair normalized to UTC."""
+    diff = DeepDiff(datetime.datetime(2024, 1, 1, 10), datetime.datetime(2024, 1, 2, 10))
+
+    assert diff.to_dict() == {
+        "values_changed": {
+            "root": {
+                "old_value": datetime.datetime(2024, 1, 1, 10, tzinfo=datetime.timezone.utc),
+                "new_value": datetime.datetime(2024, 1, 2, 10, tzinfo=datetime.timezone.utc),
+            }
+        }
+    }
+
+
+def test_date_is_accepted_and_compared_by_value() -> None:
+    """A date converts and diffs, reporting real date objects."""
+    diff = DeepDiff(datetime.date(2024, 1, 1), datetime.date(2024, 1, 2))
+
+    assert diff.to_dict() == {
+        "values_changed": {
+            "root": {"old_value": datetime.date(2024, 1, 1), "new_value": datetime.date(2024, 1, 2)}
+        }
+    }
+
+
+def test_time_raises_type_error() -> None:
+    """A time (unsupported in this MVP) raises TypeError naming the type."""
+    with pytest.raises(TypeError, match=r"diffing: time at root"):
+        DeepDiff(datetime.time(10), datetime.time(11))
+
+
+def test_timedelta_raises_type_error() -> None:
+    """A timedelta (unsupported in this MVP) raises TypeError naming the type."""
+    with pytest.raises(TypeError, match=r"diffing: timedelta at root"):
+        DeepDiff(datetime.timedelta(days=1), datetime.timedelta(days=2))
+
+
+def test_datetime_subclass_raises_type_error_naming_the_class() -> None:
+    """DeepDiff reports a value under its own type name, so a subclass is refused."""
+
+    class Stamp(datetime.datetime):
+        pass
+
+    with pytest.raises(TypeError, match="Stamp"):
+        DeepDiff(Stamp(2024, 1, 1), datetime.datetime(2024, 1, 1))
+
+
+def test_date_subclass_raises_type_error_naming_the_class() -> None:
+    """The same rule for a `date` subclass, which the exact cast also refuses."""
+
+    class Day(datetime.date):
+        pass
+
+    with pytest.raises(TypeError, match="Day"):
+        DeepDiff(Day(2024, 1, 1), datetime.date(2024, 1, 1))
+
+
+def test_sub_second_utc_offset_raises_value_error() -> None:
+    """A tzinfo whose utcoffset() carries microseconds is out of the value model."""
+    tz = datetime.timezone(datetime.timedelta(seconds=1800, microseconds=5))
+
+    with pytest.raises(ValueError, match="whole number of seconds"):
+        DeepDiff(datetime.datetime(2024, 1, 1, tzinfo=tz), datetime.datetime(2024, 1, 2))
 
 
 def test_custom_object_raises_type_error() -> None:

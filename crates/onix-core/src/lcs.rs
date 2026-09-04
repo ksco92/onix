@@ -73,6 +73,20 @@ pub(crate) enum ScalarKey {
     Int(i128),
     /// Bit pattern of a non-integral (or too-large-to-be-exact) float.
     Float(u64),
+    /// A `datetime`, keyed by whether it is aware and by its instant —
+    /// Python's own `datetime.__eq__`/`__hash__` pair, which compares two
+    /// aware values by instant (so `10:00+00:00 == 12:00+02:00`) but never
+    /// equates a naive value with an aware one, whatever its wall clock.
+    /// Deliberately *stricter* than the engine's own datetime comparison,
+    /// which reads a naive value as UTC: this key is Python's `==`, which is
+    /// what `difflib` matches with.
+    DateTime {
+        aware: bool,
+        instant: i64,
+    },
+    /// A `date`, keyed by its ordinal. Its own bucket, because a `date` and
+    /// a `datetime` are never Python-equal in either direction.
+    Date(i64),
 }
 
 /// The largest magnitude an `f64` can represent every integer up to,
@@ -82,9 +96,12 @@ pub(crate) enum ScalarKey {
 const MAX_EXACT_F64_INT: f64 = 9_007_199_254_740_992.0;
 
 /// Returns `true` if every element of `items` is a JSON scalar (null, bool,
-/// number, or string) — `DeepDiff`'s `_all_values_basic_hashable` check.
+/// number, or string) or a calendar value (datetime, date) —
+/// `DeepDiff`'s `_all_values_basic_hashable` check, whose `helper.basic_types`
+/// tuple lists `datetime.datetime` and `datetime.date` alongside the numeric
+/// and string types.
 ///
-/// A dict or list anywhere in `items` returns `false`. An empty slice
+/// A dict, list or tuple anywhere in `items` returns `false`. An empty slice
 /// returns `true` (vacuously — matches `DeepDiff`, whose equivalent check is
 /// also vacuously true over an empty iterable).
 #[must_use]
@@ -92,7 +109,12 @@ pub(crate) fn all_basic_scalars(items: &[Value]) -> bool {
     items.iter().all(|item| {
         matches!(
             item,
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_)
+            Value::Null
+                | Value::Bool(_)
+                | Value::Number(_)
+                | Value::Str(_)
+                | Value::DateTime(_)
+                | Value::Date(_)
         )
     })
 }
@@ -150,6 +172,11 @@ pub(crate) fn python_scalar_key(value: &Value) -> Option<ScalarKey> {
                 ScalarKey::Float(f.to_bits())
             }
         }
+        Value::DateTime(value) => ScalarKey::DateTime {
+            aware: value.utc_offset_seconds().is_some(),
+            instant: value.instant(),
+        },
+        Value::Date(value) => ScalarKey::Date(value.ordinal()),
         Value::Array(_) | Value::Tuple(_) | Value::Object(_) => return None,
     })
 }

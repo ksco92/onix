@@ -1,5 +1,5 @@
 use super::Tag;
-use crate::test_support::{cv, cvec};
+use crate::test_support::{cdate, cdt, cdt_at, cv, cvec};
 use serde_json::json;
 
 // Thin wrappers routing each `serde_json`-literal-based test through the real
@@ -490,4 +490,39 @@ fn collapse_check_needs_pending_b_plus_pending_size_not_times() {
             },
         ]
     );
+}
+
+// --- datetimes and dates -------------------------------------------------
+
+#[test]
+fn calendar_values_are_basic_scalars() {
+    // DeepDiff's `helper.basic_types` lists `datetime.datetime` and
+    // `datetime.date`, so a list of them takes the difflib path.
+    assert!(super::all_basic_scalars(&[
+        cdt(2024, 1, 1, None),
+        cdate(2024, 1, 1),
+        cv(&json!(1)),
+    ]));
+}
+
+#[test]
+fn datetime_scalar_keys_follow_pythons_own_equality_not_the_engines() {
+    let naive = super::python_scalar_key(&cdt_at(2024, 1, 1, 10, 0, 0, 0, None));
+    let utc = super::python_scalar_key(&cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(0)));
+    let plus_two = super::python_scalar_key(&cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600)));
+
+    // Two aware values at one instant are Python-equal...
+    assert_eq!(utc, plus_two);
+    // ...but a naive value never equals an aware one, however the engine's
+    // own instant comparison reads it.
+    assert_ne!(naive, utc);
+}
+
+#[test]
+fn a_date_key_never_equals_a_datetime_key_or_another_dates() {
+    let date = super::python_scalar_key(&cdate(2024, 1, 1));
+
+    assert_ne!(date, super::python_scalar_key(&cdt(2024, 1, 1, None)));
+    assert_ne!(date, super::python_scalar_key(&cdate(2024, 1, 2)));
+    assert_eq!(date, super::python_scalar_key(&cdate(2024, 1, 1)));
 }

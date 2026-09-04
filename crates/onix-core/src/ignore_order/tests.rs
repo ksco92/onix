@@ -1,6 +1,6 @@
 use super::IgnoreOrderMemo;
 use crate::diff::DiffOptions;
-use crate::test_support::{cobj, ctup, cv, cvec};
+use crate::test_support::{cdate, cdt, cdt_at, cobj, ctup, cv, cvec};
 use crate::value::Value as CValue;
 use serde_json::json;
 
@@ -1673,4 +1673,115 @@ fn cobj_of(key: &str, value: CValue) -> CValue {
         std::sync::Arc::from(key),
         value,
     )]))
+}
+
+// --- datetimes and dates -------------------------------------------------
+
+#[test]
+fn a_naive_and_an_aware_datetime_at_one_instant_hash_match() {
+    // `DeepHash._prep_datetime` normalizes to UTC before formatting its
+    // digest, so these pair with no finding at all.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = CValue::Array(vec![cdt_at(2024, 1, 1, 10, 0, 0, 0, None)].into_boxed_slice());
+    let b = CValue::Array(vec![cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600))].into_boxed_slice());
+
+    assert!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_date_and_a_datetime_at_one_midnight_never_hash_match() {
+    // `_prep_date` skips normalization and formats a bare `YYYY-MM-DD`,
+    // which can never collide with `_prep_datetime`'s
+    // `YYYY-MM-DD HH:MM:SS+00:00` — the two are paired by distance instead,
+    // which surfaces as a type change rather than as nothing.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = CValue::Array(vec![cdate(2024, 1, 1)].into_boxed_slice());
+    let b = CValue::Array(vec![cdt(2024, 1, 1, None)].into_boxed_slice());
+
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .to_json_value(),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "date",
+            "new_type": "datetime",
+            "old_value": "2024-01-01",
+            "new_value": "2024-01-01T00:00:00",
+        }}})
+    );
+}
+
+#[test]
+fn a_paired_datetime_is_reported_normalized_while_an_unpaired_one_stays_raw() {
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = CValue::Array(
+        vec![
+            cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(-5 * 3600)),
+            cv(&json!("anchor")),
+        ]
+        .into_boxed_slice(),
+    );
+    let b = CValue::Array(
+        vec![
+            cv(&json!("anchor")),
+            cdt_at(2024, 1, 2, 10, 0, 0, 0, Some(-5 * 3600)),
+            cv(&json!("extra")),
+        ]
+        .into_boxed_slice(),
+    );
+
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .to_json_value(),
+        json!({
+            "values_changed": {"root[0]": {
+                "new_path": "root[1]",
+                "new_value": "2024-01-02T15:00:00+00:00",
+                "old_value": "2024-01-01T15:00:00+00:00",
+            }},
+            "iterable_item_added": {"root[2]": "extra"},
+        })
+    );
+}
+
+#[test]
+fn calendar_values_count_as_one_structural_node() {
+    // Both `_get_item_length` and `DeepHash`'s own node count treat a
+    // datetime and a date as a single leaf, like any other scalar.
+    assert_eq!(super::distance::item_length(&cdt(2024, 1, 1, None)), 1);
+    assert_eq!(super::distance::item_length(&cdate(2024, 1, 1)), 1);
+    assert_eq!(super::distance::rough_length(&cdt(2024, 1, 1, None)), 1);
+    assert_eq!(super::distance::rough_length(&cdate(2024, 1, 1)), 1);
+}
+
+#[test]
+fn a_datetime_leaf_counts_as_changed_only_when_the_instants_differ() {
+    let opts = DiffOptions::default();
+    let memo = IgnoreOrderMemo::new();
+    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+
+    assert_eq!(
+        count(
+            &cdt_at(2024, 1, 1, 10, 0, 0, 0, None),
+            &cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600))
+        ),
+        0
+    );
+    assert_eq!(count(&cdt(2024, 1, 1, None), &cdt(2024, 1, 2, None)), 1);
+    assert_eq!(count(&cdate(2024, 1, 1), &cdate(2024, 1, 1)), 0);
+    assert_eq!(count(&cdate(2024, 1, 1), &cdate(2024, 1, 2)), 1);
 }

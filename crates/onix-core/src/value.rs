@@ -63,6 +63,8 @@ use std::sync::Arc;
 
 use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
+use crate::datetime::{Date, DateTime};
+
 /// A compact JSON value: the memory-frugal counterpart of
 /// [`serde_json::Value`].
 ///
@@ -83,6 +85,16 @@ use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess
 /// [`From`]`<`[`serde_json::Value`]`>` nor [`Deserialize`] can produce one
 /// (JSON has no tuple literal): a tuple enters the model only from a caller
 /// holding real Python objects, through [`Value::Tuple`] directly.
+///
+/// [`Value::DateTime`] and [`Value::Date`] are the same story for the two
+/// calendar types (see [`mod@crate::datetime`]). They are kept as *structured*
+/// values rather than pre-rendered ISO strings because `DeepDiff` renders the
+/// same datetime two different ways depending on where it lands in a report
+/// (UTC-normalized in `values_changed`, raw everywhere else) and because
+/// [`crate::Report::to_value`] must hand a real `datetime` object back to a
+/// caller holding Python objects — neither is possible once the value has
+/// collapsed to a string. JSON has no literal for either, so, like a tuple,
+/// they enter the model only from such a caller.
 #[derive(Debug, Clone)]
 pub enum Value {
     /// JSON `null`.
@@ -93,6 +105,11 @@ pub enum Value {
     Number(Number),
     /// A string, stored as an exactly-sized `Box<str>` (no spare capacity).
     Str(Box<str>),
+    /// A Python `datetime.datetime` — see [`DateTime`], and this type's own
+    /// doc for why it is a variant rather than a pre-rendered string.
+    DateTime(DateTime),
+    /// A Python `datetime.date` — see [`Date`].
+    Date(Date),
     /// An array, stored as an exactly-sized `Box<[Value]>`.
     Array(Box<[Value]>),
     /// A Python tuple, stored exactly like [`Value::Array`] but kept as a
@@ -128,6 +145,8 @@ impl Value {
             Value::Bool(b) => serde_json::Value::Bool(*b),
             Value::Number(n) => serde_json::Value::Number(n.to_serde_number()),
             Value::Str(s) => serde_json::Value::String(s.as_ref().to_owned()),
+            Value::DateTime(value) => serde_json::Value::String(value.isoformat()),
+            Value::Date(value) => serde_json::Value::String(value.isoformat()),
             Value::Array(items) | Value::Tuple(items) => {
                 serde_json::Value::Array(items.iter().map(Value::to_serde_json).collect())
             }
@@ -210,7 +229,12 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
             let taken = std::mem::take(&mut obj.entries);
             stack.extend(taken.into_vec().into_iter().map(|(_, value)| value));
         }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_) => {}
+        Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::Str(_)
+        | Value::DateTime(_)
+        | Value::Date(_) => {}
     }
 }
 
@@ -239,6 +263,20 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
                 }
             }
             (Value::Str(x), Value::Str(y)) => {
+                if x != y {
+                    return false;
+                }
+            }
+            (Value::DateTime(x), Value::DateTime(y)) => {
+                // By instant, not by field: this backs the engine's own
+                // "equal inputs report nothing" fast path, and `DeepDiff`
+                // compares two datetimes by instant with a naive value read
+                // as UTC (see `crate::datetime`).
+                if x.instant() != y.instant() {
+                    return false;
+                }
+            }
+            (Value::Date(x), Value::Date(y)) => {
                 if x != y {
                     return false;
                 }

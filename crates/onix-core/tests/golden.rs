@@ -10,8 +10,8 @@
 //! versions and the regeneration command. This test never edits or
 //! regenerates those files; it only reads them.
 //!
-//! The two input files carry Python values JSON cannot express (a tuple
-//! today) in the tagged encoding `tests/golden/README.md` documents, decoded
+//! The two input files carry Python values JSON cannot express (a tuple, a
+//! datetime or a date) in the tagged encoding `tests/golden/README.md` documents, decoded
 //! here by [`decode_tagged`] — the Rust half of the same rule
 //! `scripts/golden_tags.py` implements for the corpus's Python readers. This
 //! decoding is test-only: the engine's own parse paths never interpret a tag
@@ -88,10 +88,10 @@ fn case_options(case_dir: &Path) -> onix_core::DiffOptions {
 }
 
 /// Every tag name the corpus's encoding reserves, mirroring
-/// `scripts/golden_tags.py`'s `RESERVED_TAGS`. Only `$tuple` decodes today;
-/// the rest are claimed so a fixture cannot quietly use one as an ordinary
-/// dict key before the type behind it is supported.
-const RESERVED_TAGS: &[&str] = &["$tuple", "$set", "$frozenset", "$datetime", "$date"];
+/// `scripts/golden_tags.py`'s `RESERVED_TAGS`. `$set`/`$frozenset` do not
+/// decode yet; they are claimed so a fixture cannot quietly use one as an
+/// ordinary dict key before the type behind it is supported.
+const RESERVED_TAGS: &[&str] = &["$tuple", "$datetime", "$date", "$set", "$frozenset"];
 
 /// Decodes one parsed fixture value into the engine's own value model,
 /// turning a tagged object — a JSON object with exactly one key, that key one
@@ -110,6 +110,10 @@ fn decode_tagged(value: &Value, builder: &mut onix_core::value::Builder) -> onix
         ),
         Value::Object(map) => match sole_tag(map) {
             Some("$tuple") => onix_core::Value::Tuple(decode_tagged_items(map, "$tuple", builder)),
+            Some("$datetime") => {
+                onix_core::Value::DateTime(parse_datetime(tag_text(map, "$datetime")))
+            }
+            Some("$date") => onix_core::Value::Date(parse_date(tag_text(map, "$date"))),
             Some(tag) => {
                 panic!("golden fixture uses the reserved tag {tag:?}, which has no decoder yet")
             }
@@ -148,6 +152,74 @@ fn decode_tagged_items(
         .iter()
         .map(|item| decode_tagged(item, builder))
         .collect()
+}
+
+/// The string payload of a tagged scalar value, panicking if it is not one
+/// (again: a corpus bug).
+fn tag_text<'a>(map: &'a serde_json::Map<String, Value>, tag: &str) -> &'a str {
+    let Some(Value::String(text)) = map.get(tag) else {
+        panic!("the {tag:?} tag's payload must be a string");
+    };
+    text
+}
+
+/// Parses the `YYYY-MM-DD` payload of a `$date` tag — Python's
+/// `date.isoformat()`, which is the only shape `scripts/golden_tags.py`
+/// writes.
+fn parse_date(text: &str) -> onix_core::Date {
+    let parsed = || {
+        let (year, rest) = text.split_once('-')?;
+        let (month, day) = rest.split_once('-')?;
+        onix_core::Date::new(year.parse().ok()?, month.parse().ok()?, day.parse().ok()?)
+    };
+    parsed().unwrap_or_else(|| panic!("not an ISO 8601 date: {text:?}"))
+}
+
+/// Parses the `YYYY-MM-DDTHH:MM:SS[.ffffff][±HH:MM[:SS]]` payload of a
+/// `$datetime` tag — Python's `datetime.isoformat()`, again the only shape
+/// the generator writes.
+fn parse_datetime(text: &str) -> onix_core::DateTime {
+    let parsed = || {
+        let (date_text, time_text) = text.split_once('T')?;
+        let sign_at = time_text.rfind(['+', '-']);
+        let (clock_text, offset) = match sign_at {
+            None => (time_text, None),
+            Some(index) => (
+                &time_text[..index],
+                Some(parse_offset(&time_text[index..])?),
+            ),
+        };
+        let (clock_text, microsecond) = match clock_text.split_once('.') {
+            None => (clock_text, 0),
+            Some((clock, fraction)) => (clock, fraction.parse().ok()?),
+        };
+        let mut fields = clock_text.split(':');
+        let hour = fields.next()?.parse().ok()?;
+        let minute = fields.next()?.parse().ok()?;
+        let second = fields.next()?.parse().ok()?;
+
+        onix_core::DateTime::new(
+            parse_date(date_text),
+            hour,
+            minute,
+            second,
+            microsecond,
+            offset,
+        )
+    };
+    parsed().unwrap_or_else(|| panic!("not an ISO 8601 datetime: {text:?}"))
+}
+
+/// Parses a `±HH:MM[:SS]` UTC-offset suffix into whole seconds.
+fn parse_offset(text: &str) -> Option<i32> {
+    let (sign, digits) = text.split_at(1);
+    let mut fields = digits.split(':');
+    let hours: i32 = fields.next()?.parse().ok()?;
+    let minutes: i32 = fields.next()?.parse().ok()?;
+    let seconds: i32 = fields.next().map_or(Ok(0), str::parse).ok()?;
+    let magnitude = hours * 3600 + minutes * 60 + seconds;
+
+    Some(if sign == "-" { -magnitude } else { magnitude })
 }
 
 /// Runs `onix_core::diff_with_options` on a case's `a.json`/`b.json` (per

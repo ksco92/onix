@@ -1,0 +1,10 @@
+{
+  "type_changes": {
+    "root['t']": {
+      "new_type": "int",
+      "new_value": 5,
+      "old_type": "datetime",
+      "old_value": "2024-01-01T00:00:00"
+    }
+  }
+}

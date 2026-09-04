@@ -3,6 +3,7 @@
 //! [`super::diff_at`] dispatches to whenever a pair is not two dicts or two
 //! arrays.
 
+use crate::datetime::DateTime;
 use crate::value::{Number, Value};
 
 use crate::error::Error;
@@ -25,6 +26,8 @@ pub(crate) fn python_type_name(value: &Value) -> &'static str {
         Value::Number(n) if n.is_f64() => "float",
         Value::Number(_) => "int",
         Value::Str(_) => "str",
+        Value::DateTime(_) => "datetime",
+        Value::Date(_) => "date",
         Value::Array(_) => "list",
         Value::Tuple(_) => "tuple",
         Value::Object(_) => "dict",
@@ -95,6 +98,36 @@ pub(crate) fn scalar_diff(
         },
     );
     Ok(report)
+}
+/// Diffs two datetimes, which `DeepDiff` compares by *instant* after
+/// normalizing each to UTC (`_diff_datetime` -> `datetime_normalize`, with a
+/// naive value stamped as UTC rather than read in local time).
+///
+/// The normalization is not just a comparison step: `_diff_datetime` assigns
+/// the normalized values back onto the level it then reports, so a
+/// `values_changed` entry carries the pair *as UTC* — `10:00-05:00` is
+/// reported as `15:00+00:00`. This is the one place in the engine a reported
+/// value differs from the input value; every other category (`type_changes`,
+/// the added/removed categories, and the `values_changed` that
+/// `Report::merge_mutual_add_removes` folds a same-path add/remove pair into)
+/// carries the raw value, because it never passes through this function.
+pub(crate) fn datetime_diff(
+    path: &[PathSegment],
+    old: DateTime,
+    new: DateTime,
+    depth: usize,
+    max_depth: usize,
+) -> Result<Report, Error> {
+    let (old, new) = (old.to_utc(), new.to_utc());
+
+    scalar_diff(
+        path,
+        old == new,
+        &Value::DateTime(old),
+        &Value::DateTime(new),
+        depth,
+        max_depth,
+    )
 }
 /// Diffs two same-JSON-variant numbers, first checking whether one is an int
 /// and the other a float (a `type_changes` finding, regardless of numeric

@@ -1,0 +1,11 @@
+{
+  "iterable_item_added": {
+    "root[1]": "anchor"
+  },
+  "values_changed": {
+    "root[0]": {
+      "new_value": "2030-06-01T10:00:00+00:30:30",
+      "old_value": "2024-01-01T10:00:00-05:00"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "iterable_item_removed": {
+    "root[0]": "x"
+  },
+  "values_changed": {
+    "root[2]": {
+      "new_path": "root[1]",
+      "new_value": "2024-01-02T10:00:00+00:00",
+      "old_value": "2024-01-01T10:00:00+00:00"
+    }
+  }
+}
