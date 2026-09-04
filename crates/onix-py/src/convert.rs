@@ -16,7 +16,7 @@
 //! | `str` | `Str` | |
 //! | `dict` (`str` keys only) | `Object` | keys interned across the whole walk |
 //! | `list` | `Array` | |
-//! | `tuple` | `Tuple` | a plain tuple; a `namedtuple` is rejected, see below |
+//! | `tuple` | `Tuple` | exactly `tuple`; every subclass is rejected, see below |
 //!
 //! Every other type raises a Python exception instead of converting:
 //!
@@ -36,13 +36,15 @@
 //! diffs positionally exactly like a list while still reporting a
 //! tuple-vs-list pairing as a `type_changes` — matching `DeepDiff`.
 //!
-//! A `namedtuple` is a `tuple` subclass but is **not** converted: real
-//! `DeepDiff` walks its *fields* (`deephash.py`'s `_prep_tuple` and
-//! `diff.py`'s object handling), reporting `root.y` rather than `root[1]`
-//! and the class name rather than `tuple`, which this MVP has no shape for.
-//! Converting it as a plain tuple would silently return paths and type names
-//! that disagree with `DeepDiff`, so it raises [`PyTypeError`] naming the
-//! class instead — the same treatment every other unsupported type gets.
+//! A `tuple` **subclass** is not converted, and raises [`PyTypeError`] naming
+//! the class like any other unsupported type. `DeepDiff` reports a value's
+//! `type(obj).__name__`, so a subclass never compares as a plain `tuple`
+//! there: `DeepDiff(Pair((1, 2)), (1, 2))` is a `type_changes` from `Pair` to
+//! `tuple`, where converting the subclass as a tuple would report no
+//! difference at all. A `namedtuple` diverges further still — `DeepDiff`
+//! walks its *fields* (`deephash.py`'s `_prep_tuple`), reporting `root.y`
+//! rather than `root[1]` — and is refused by the same rule, needing no check
+//! of its own.
 //!
 //! # Key interning
 //!
@@ -200,14 +202,10 @@ fn classify<'py>(
         return Ok(seq_step(SeqIter::List(list.iter())));
     }
 
-    if let Ok(tuple) = current.cast::<PyTuple>() {
-        // `cast` is subclass-inclusive. A `namedtuple` is the one tuple
-        // subclass that is not diffed as a tuple (see the module doc); it is
-        // recognized the way the standard library and `DeepDiff` itself do,
-        // by the generated `_fields` attribute.
-        if current.hasattr("_fields")? {
-            return Err(unsupported_type_error(current, path));
-        }
+    // Exact, unlike the casts above: a tuple subclass is reported under its
+    // own type name by `DeepDiff` and so is refused here (see the module
+    // doc), which the fall-through to `unsupported_type_error` below does.
+    if let Ok(tuple) = current.cast_exact::<PyTuple>() {
         return Ok(seq_step(SeqIter::Tuple(tuple.iter())));
     }
 
@@ -461,7 +459,7 @@ fn unsupported_type_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr
     PyTypeError::new_err(format!(
         "unsupported type for diffing: {} at {}; only \
          None/bool/int/float/str/dict[str, ...]/list/tuple are supported in this MVP (sets, \
-         dates, namedtuples, and custom objects are not)",
+         dates, tuple subclasses including namedtuples, and custom objects are not)",
         type_name(obj),
         render_path(path),
     ))

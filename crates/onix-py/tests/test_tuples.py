@@ -78,14 +78,33 @@ def test_namedtuple_is_refused_rather_than_diffed_as_a_plain_tuple() -> None:
     }
 
 
-def test_a_plain_tuple_subclass_is_still_diffed_as_a_tuple() -> None:
-    """Only namedtuples (identified by ``_fields``) are refused, not every tuple subclass."""
+def test_a_tuple_subclass_is_refused_too() -> None:
+    """
+    Every tuple subclass is refused, not just namedtuples.
+
+    DeepDiff reports each value under its own ``type(obj).__name__``, so a
+    subclass is never a plain tuple there: it reports a type change where
+    diffing the subclass as a tuple would report nothing at all.
+    """
 
     class Pair(tuple):
         pass
 
-    assert DeepDiff(Pair((1, 2)), Pair((1, 3))).to_dict() == {
-        "values_changed": {"root[1]": {"new_value": 3, "old_value": 2}}
+    with pytest.raises(TypeError, match="Pair"):
+        DeepDiff(Pair((1, 2)), (1, 2))
+
+    with pytest.raises(TypeError, match=r"Pair at root\['a'\]"):
+        DeepDiff({"a": Pair((1, 2))}, {"a": (1, 2)})
+
+    assert RealDeepDiff(Pair((1, 2)), (1, 2), verbose_level=2).to_dict() == {
+        "type_changes": {
+            "root": {
+                "old_type": Pair,
+                "new_type": tuple,
+                "old_value": Pair((1, 2)),
+                "new_value": (1, 2),
+            }
+        }
     }
 
 

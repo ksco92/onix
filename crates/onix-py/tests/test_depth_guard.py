@@ -410,6 +410,44 @@ def test_cross_arg_error_from_small_stack_thread_does_not_crash() -> None:
     assert "OK" in result.stdout
 
 
+def test_tuple_hashing_cost_stays_linear_in_nesting_depth() -> None:
+    """
+    Hashing a nested tuple must cost O(depth), not O(depth^2).
+
+    Under ``ignore_order`` every tuple node is looked up in (and added to) the
+    run's digest cache. Keying each node by its whole subtree, rather than by
+    its children's interned ids, made a single shuffle of one deep tuple cost
+    quadratic time and retained heap: at depth 4000 it took 1.7 s and 3.4 GB
+    where the identical list nest takes ~2 ms and ~29 MB. Quadratic growth
+    would show as ~16x here, linear as ~4x.
+    """
+
+    def best_of_three(depth: int) -> float:
+        """
+        Time the fastest of three pure-shuffle diffs of a `depth`-deep tuple.
+
+        :param depth: Nesting depth of the tuple being shuffled.
+        :return: The shortest wall-clock time observed, in seconds.
+        """
+        a = [_nested_tuple(depth, leaf=1), "x"]
+        b = ["x", _nested_tuple(depth, leaf=1)]
+        samples = []
+
+        for _ in range(3):
+            start = time.perf_counter()
+            diff = DeepDiff(a, b, ignore_order=True, max_depth=MAX_DEPTH_CEILING)
+            samples.append(time.perf_counter() - start)
+            assert not diff, diff.to_json()[:200]
+
+        return min(samples)
+
+    shallow = best_of_three(500)
+    deep = best_of_three(2000)
+    ratio = deep / shallow
+
+    assert ratio < 8.0, f"4x the depth cost {ratio:.1f}x the time; expected ~4x"
+
+
 def test_shallow_diff_per_call_overhead_is_bounded() -> None:
     """A trivial diff must not pay per-call thread-spawn overhead (shallow inline path)."""
     a = {"a": 1, "b": 2}

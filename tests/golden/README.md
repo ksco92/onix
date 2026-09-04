@@ -192,16 +192,18 @@ not part of this fixed corpus.
   section of `crates/onix-core/src/ignore_order/memo.rs` for the full mechanism.
   **`frozenset` is hashable too**, so the same applies to it when set support lands.
 
-- **A `namedtuple` is not diffed as a tuple; `deepdiff_rs` refuses it.** Real
-  `DeepDiff` walks a `namedtuple`'s *fields* (`root[0].x`, with the class name as
-  the reported type), because it inspects `_fields`/`_asdict`. This MVP has no
-  field-walking conversion, and diffing one as a plain tuple would silently return
-  index paths and the type name `tuple` instead — so the conversion raises
-  `TypeError` naming the class, like any other unsupported type.
-  `crates/onix-py/tests/test_tuples.py` asserts both the refusal and the real
-  tool's own output. No golden case uses a `namedtuple`: the corpus's fixtures are
-  JSON files, and the tagged encoding above deliberately has no tag for "an
-  arbitrary class".
+- **Tuple subclasses, including namedtuples, are refused.** `DeepDiff` reports
+  every value under its own `type(obj).__name__`, so a subclass is never a plain
+  `tuple` there: `DeepDiff(Pair((1, 2)), (1, 2))` is a `type_changes` from `Pair`
+  to `tuple`, and a `namedtuple` diverges further still (`DeepDiff` walks its
+  *fields*, reporting `root[0].x` with the class name as the type). This MVP has
+  neither a per-class type name nor a field-walking conversion, and diffing a
+  subclass as a plain tuple would silently report *no* difference where `DeepDiff`
+  reports one — so the conversion raises `TypeError` naming the class, like any
+  other unsupported type. `crates/onix-py/tests/test_tuples.py` asserts both the
+  refusal and the real tool's own output. No golden case uses one: the corpus's
+  fixtures are JSON files, and the tagged encoding above deliberately has no tag
+  for "an arbitrary class".
 
 - **`to_dict()` reports a `type_changes` entry's types as names, not classes.**
   Real `DeepDiff` puts the type objects themselves (`<class 'tuple'>`) in

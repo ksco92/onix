@@ -80,7 +80,7 @@
 use std::cell::RefCell;
 
 use super::fxhash::HashMap;
-use super::hash::{ItemKey, PyHashKey};
+use super::hash::{ItemKey, PyHashKey, TupleId};
 
 /// The per-top-level-diff caches described in this module's doc: container-pair
 /// [`rough_distance`] results keyed by the `(removed, added)` [`ItemKey`]
@@ -93,7 +93,13 @@ use super::hash::{ItemKey, PyHashKey};
 /// [`rough_distance`]: super::distance::rough_distance
 pub(crate) struct IgnoreOrderMemo {
     cache: RefCell<HashMap<(ItemKey, ItemKey), f64>>,
-    tuple_digests: RefCell<HashMap<PyHashKey, ItemKey>>,
+    /// Interns each distinct hashable-tuple identity to its place in
+    /// `tuple_digests`, so a nested tuple can be named by one [`TupleId`]
+    /// inside its parent's identity instead of by a copy of its own.
+    tuple_ids: RefCell<HashMap<PyHashKey, TupleId>>,
+    /// The digest assigned to each interned identity, indexed by
+    /// [`TupleId::index`].
+    tuple_digests: RefCell<Vec<ItemKey>>,
     enabled: bool,
 }
 
@@ -102,7 +108,8 @@ impl IgnoreOrderMemo {
     pub(crate) fn new() -> Self {
         Self {
             cache: RefCell::new(HashMap::default()),
-            tuple_digests: RefCell::new(HashMap::default()),
+            tuple_ids: RefCell::new(HashMap::default()),
+            tuple_digests: RefCell::new(Vec::new()),
             enabled: true,
         }
     }
@@ -114,7 +121,8 @@ impl IgnoreOrderMemo {
     pub(crate) fn disabled() -> Self {
         Self {
             cache: RefCell::new(HashMap::default()),
-            tuple_digests: RefCell::new(HashMap::default()),
+            tuple_ids: RefCell::new(HashMap::default()),
+            tuple_digests: RefCell::new(Vec::new()),
             enabled: false,
         }
     }
@@ -138,29 +146,36 @@ impl IgnoreOrderMemo {
         self.cache.borrow_mut().insert(key, value);
     }
 
-    /// The digest for a hashable tuple whose Python equality identity is
-    /// `key`: the one already assigned to an earlier Python-equal tuple in
-    /// this run, or `compute()`'s result, recorded for the rest of the run.
+    /// Interns a hashable tuple's Python equality identity and returns its
+    /// id together with its digest: the one already assigned to an earlier
+    /// Python-equal tuple in this run, or `compute()`'s result, recorded for
+    /// the rest of the run.
     ///
     /// See this module's "Tuple digests" section for why this cache is part
-    /// of the observable behavior rather than a speed-up. `compute` runs with
-    /// no borrow held, so it is free to recurse back into this same cache for
-    /// a nested tuple. The `disabled()` cache still serves this method: it
-    /// turns off *distance* memoization only, which is the one thing proven
-    /// decision-neutral.
+    /// of the observable behavior rather than a speed-up. Both the identity
+    /// (whose nested tuples are named by id) and the digest (whose nested
+    /// keys are shared through [`ItemKey::Tuple`]'s `Rc`) are `O(arity)` per
+    /// tuple node, so the two tables together stay linear in the number of
+    /// nodes hashed rather than quadratic in nesting depth. `compute` runs
+    /// with no borrow held, so it is free to recurse back into this same
+    /// cache for a nested tuple. The `disabled()` cache still serves this
+    /// method: it turns off *distance* memoization only, which is the one
+    /// thing proven decision-neutral.
     pub(crate) fn tuple_digest(
         &self,
         key: PyHashKey,
         compute: impl FnOnce() -> ItemKey,
-    ) -> ItemKey {
-        if let Some(existing) = self.tuple_digests.borrow().get(&key) {
-            return existing.clone();
+    ) -> (TupleId, ItemKey) {
+        if let Some(&id) = self.tuple_ids.borrow().get(&key) {
+            return (id, self.tuple_digests.borrow()[id.index()].clone());
         }
+
         let computed = compute();
-        self.tuple_digests
-            .borrow_mut()
-            .insert(key, computed.clone());
-        computed
+        let mut digests = self.tuple_digests.borrow_mut();
+        let id = TupleId::new(digests.len());
+        digests.push(computed.clone());
+        self.tuple_ids.borrow_mut().insert(key, id);
+        (id, computed)
     }
 }
 

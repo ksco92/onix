@@ -24,8 +24,8 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 /// `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`:
 ///
 /// - `t1`/`t2`: any of `None`, `bool`, `int`, `float`, `str`, `dict` (`str`
-///   keys), `list`, or `tuple`, arbitrarily nested (a `namedtuple` is not
-///   supported). Converted to `onix_core`'s value
+///   keys), `list`, or `tuple`, arbitrarily nested (a `tuple` subclass,
+///   `namedtuple` included, is not supported). Converted to `onix_core`'s value
 ///   model exactly once, up front — see `crate::convert`'s module doc for
 ///   the full conversion table and every unsupported-type error this can
 ///   raise (`TypeError` for an unsupported type, `ValueError` for an
