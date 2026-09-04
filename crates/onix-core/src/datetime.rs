@@ -140,13 +140,9 @@ impl Date {
     }
 
     /// Python's `str(date)`, which for a date is exactly its
-    /// [`isoformat`](Date::isoformat).
-    ///
-    /// Named separately because it is `str()`, not `isoformat()`, that
-    /// `DeepDiff` reproduces when it tests whether a `type_changes` pair's
-    /// new value is reachable by coercion (`model.py`'s `new_t1 =
-    /// new_type(change.t1)`), and that `DeepHash` embeds in a `frozenset`
-    /// member's digest.
+    /// [`isoformat`](Date::isoformat) — the two differ only for a datetime.
+    /// See [`DateTime::python_str`] for why `str()` is worth a method of its
+    /// own at all.
     #[must_use]
     pub fn python_str(self) -> String {
         self.isoformat()
@@ -321,7 +317,8 @@ impl DateTime {
     /// Python's `str(datetime)`, which is `isoformat(sep=" ")` — the same
     /// rendering with a space where the `T` goes.
     ///
-    /// Kept distinct from [`isoformat`](DateTime::isoformat) because the two
+    /// This is the one place the `str()`-versus-`isoformat()` distinction is
+    /// explained, for both calendar types. They are kept apart because they
     /// have different jobs: `isoformat()` is what `to_json()` prints, while
     /// `str()` is what `DeepDiff` reproduces when it tests whether a
     /// `type_changes` pair's new value is reachable by coercion

@@ -2176,12 +2176,12 @@ fn a_list_of_datetimes_takes_the_difflib_path() {
 
 #[test]
 fn a_naive_and_aware_pair_matched_by_difflib_replace_reports_nothing_at_a_drifted_index() {
-    // The sibling test below feeds two lists that are equal by this engine's
-    // own rules, so `diff_with_options`'s top-level fast path answers it
-    // before `array_diff` runs at all. Here an unmatched leading element
-    // keeps the lists genuinely unequal, so the difflib 'replace' opcode
-    // really is what decides the datetime pair — and the finding it must
-    // *not* record is the whole point.
+    // Two lists that differ *only* in a naive/aware pair at one instant are
+    // equal by this engine's own rules, so `diff_with_options`'s top-level
+    // fast path would answer them before `array_diff` ran at all. The
+    // unmatched leading element here keeps the lists genuinely unequal, so
+    // the difflib 'replace' opcode really is what decides the datetime pair,
+    // and the finding it must *not* record is the whole point.
     let report = super::diff(
         &CValue::Array(
             vec![
@@ -2205,28 +2205,6 @@ fn a_naive_and_aware_pair_matched_by_difflib_replace_reports_nothing_at_a_drifte
         report.to_json_value(),
         json!({"iterable_item_removed": {"root[0]": "x"}})
     );
-}
-
-#[test]
-fn a_naive_and_aware_pair_matched_by_difflib_replace_reports_nothing() {
-    // Python's `==` (what difflib matches with) never equates a naive
-    // datetime with an aware one, so this pair reaches a 'replace' opcode —
-    // where the engine's own instant comparison then finds them equal.
-    let report = super::diff(
-        &CValue::Array(
-            vec![cdt_at(2024, 1, 1, 10, 0, 0, 0, None), cv(&json!("anchor"))].into_boxed_slice(),
-        ),
-        &CValue::Array(
-            vec![
-                cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(0)),
-                cv(&json!("anchor")),
-            ]
-            .into_boxed_slice(),
-        ),
-    )
-    .unwrap();
-
-    assert!(report.is_empty());
 }
 
 #[test]
