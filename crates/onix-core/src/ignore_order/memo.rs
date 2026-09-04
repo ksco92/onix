@@ -1,7 +1,7 @@
 //! The caches one `ignore_order` diff shares across its whole run: the
 //! pairwise subtree distances it has already computed, the digests it has
-//! already assigned to hashable tuples for list-item matching, and the
-//! representatives it has assigned to set members.
+//! already assigned to hashable tuples for list-item matching, and the ids it
+//! has assigned to set members.
 //!
 //! # Pairwise distances
 //!
@@ -47,18 +47,17 @@
 //! observationally identical to recomputing — verified empirically by the
 //! with/without differential test in `super::tests`.
 //!
-//! # Hashable digests
+//! # Tuple digests
 //!
 //! The second cache is **not** an optimization: it is `DeepHash`'s own
 //! observable behavior. `deephash.py::_make_hash_key` type-wraps only bare
-//! numbers, so every other object — a tuple or a frozenset included — keys
+//! numbers, so every other object — a tuple included — keys
 //! the `hashes` dict as *itself*; `DeepHash._hash` reads that dict before
 //! computing anything and writes its result back under the same key; and
 //! `diff.py::_create_hashtable` builds both of a comparison's hashtables
-//! against one shared `hashes` dict. A **hashable** container (a tuple, or a
-//! frozenset when it appears as a set member) is therefore looked up under
-//! Python's own `==`/`hash` and inherits the digest of the first Python-equal
-//! container hashed anywhere in the run:
+//! against one shared `hashes` dict. A **hashable** tuple is therefore looked
+//! up under Python's own `==`/`hash` and inherits the digest of the first
+//! Python-equal tuple hashed anywhere in the run:
 //!
 //! ```text
 //! DeepDiff([(1,)],     [(1.0,)],     ignore_order=True) -> {}
@@ -81,57 +80,67 @@
 //!
 //! # Set-member digests
 //!
-//! [`super::hash::set_member_digest`] needs the same first-Python-equal-wins
-//! cache — a member's digest must collapse a Python-equal container the way
-//! `DeepHash` does — but it compares members by a *positional* digest
-//! ([`super::hash::MemberDigest`]) rather than the order-insensitive
-//! [`ItemKey`] the list path hashes by, so that a tuple set member matches
-//! `tuple.__eq__` (onix's one deliberate divergence from `DeepHash`'s
-//! order-insensitive iterable hashing — see that type's doc). It therefore
-//! keeps its own interning table (same [`HashKey`] identity, same
-//! first-write-wins rule, its own [`NodeId`] space) whose values are
-//! `MemberDigest` representatives. A nested hashable container is named inside
-//! its parent's representative by that [`NodeId`], so a `frozenset({True})`
-//! and a `frozenset({1})` — one [`HashKey`] — collapse to one id, and a
-//! `(naive, frozenset({True}))` member and an `(aware, frozenset({1}))` one
-//! agree on that inner id, leaving the naive/aware sibling difference to
-//! decide the match exactly as real `DeepDiff` decides it. Members are hashed
-//! a-side in canonical order, then b-side, so the representative each Python
-//! equality class settles on is deterministic.
+//! [`super::hash::set_member_digest`] reduces each set member to one content id
+//! ([`super::hash::RepId`]), reproducing `DeepHash`'s per-node cache decision
+//! with two run-scoped tables. `node_table`
+//! ([`super::hash::MemberHashKey`] → ([`super::hash::NodeId`], `RepId`)) is the
+//! first-Python-equal-wins cache the tuple digests also use: a container
+//! Python-equal to one hashed earlier in the run wins both ids, so `1` and
+//! `1.0` inside an otherwise-equal tuple collapse. `member_content`
+//! ([`super::hash::MemberContent`] → `RepId`) interns each distinct *content* —
+//! children content ids plus, at a leaf, the type-distinct scalar [`ItemKey`],
+//! with a `datetime` normalised to its instant — so a naive and an aware
+//! datetime at one moment collapse to one content id.
+//!
+//! The two ids are distinct on purpose. A parent's Python-equality key names a
+//! nested container by its `NodeId`, so `(naive,)` and `(aware,)` — different
+//! `NodeId`s though one content id — keep `(1, (naive,))` and `(1.0, (aware,))`
+//! Python-*un*equal, and those are then compared by content, where `1` and
+//! `1.0` differ: exactly what `DeepDiff` reports. A parent's content and the
+//! final comparison use the `RepId`, so a naive/aware difference that does not
+//! break Python-equality of a wrapping tuple still collapses, at the root or
+//! arbitrarily deep. A member is compared by its `RepId` — an `O(1)`,
+//! stack-safe comparison, which matters because a set member's nesting is not
+//! depth-guarded before this runs. A tuple stays positional and a frozenset by
+//! membership (onix's one deliberate divergence from `DeepHash`'s
+//! order-insensitive iterable hashing — see
+//! [`super::hash::set_member_digest`]'s doc). Members are hashed a-side in
+//! canonical order, then b-side, so the id each equality class settles on is
+//! deterministic.
 
 use std::cell::RefCell;
 
 use super::fxhash::HashMap;
-use super::hash::{HashKey, ItemKey, MemberDigest, NodeId};
+use super::hash::{ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId};
 
 /// The per-top-level-diff caches described in this module's doc: container-pair
 /// [`rough_distance`] results keyed by the `(removed, added)` [`ItemKey`]
-/// pair, and the two hashable-node interning tables keyed by Python's own
-/// equality ([`HashKey`]). Created in `crate::diff::diff_with_options`, threaded (by
-/// shared reference, interior mutability) through the whole recursive diff,
-/// and dropped when it returns. No eviction and no tuning knobs: both are
-/// bounded by the number of distinct queries one diff makes.
+/// pair, the tuple-digest interning table for list-item matching, and the two
+/// set-member interning tables. Created in `crate::diff::diff_with_options`,
+/// threaded (by shared reference, interior mutability) through the whole
+/// recursive diff, and dropped when it returns. No eviction and no tuning
+/// knobs: each is bounded by the number of distinct queries one diff makes.
 ///
 /// [`rough_distance`]: super::distance::rough_distance
 pub(crate) struct IgnoreOrderMemo {
     cache: RefCell<HashMap<(ItemKey, ItemKey), f64>>,
-    /// Interns each distinct hashable-node identity (a tuple, or a frozenset
-    /// hashed as a set member) to its place in `node_digests`, so a nested
-    /// node can be named by one [`NodeId`] inside its parent's identity
-    /// instead of by a copy of its own.
-    node_ids: RefCell<HashMap<HashKey, NodeId>>,
+    /// Interns each distinct hashable-tuple identity to its place in
+    /// `tuple_digests`, so a nested tuple can be named by one [`TupleId`]
+    /// inside its parent's identity instead of by a copy of its own.
+    tuple_ids: RefCell<HashMap<PyHashKey, TupleId>>,
     /// The digest assigned to each interned identity, indexed by
-    /// [`NodeId::index`].
-    node_digests: RefCell<Vec<ItemKey>>,
-    /// The set-member interning table (see this module's "Set-member digests"
-    /// section): the same [`HashKey`] identity as `node_ids`, but its own
-    /// [`NodeId`] space and its own [`MemberDigest`] representatives, because a
-    /// set member is compared by a positional digest rather than the
-    /// order-insensitive [`ItemKey`] the list path hashes by.
-    member_ids: RefCell<HashMap<HashKey, NodeId>>,
-    /// The representative assigned to each interned set-member identity,
-    /// indexed by its `member_ids` [`NodeId::index`].
-    member_digests: RefCell<Vec<MemberDigest>>,
+    /// [`TupleId::index`].
+    tuple_digests: RefCell<Vec<ItemKey>>,
+    /// Set-member Python-equality cache (see this module's "Set-member digests"
+    /// section): each distinct [`MemberHashKey`] gets a fresh [`NodeId`]
+    /// (its Python-equality class) paired with its content [`RepId`], so a
+    /// container Python-equal to one hashed earlier wins both — collapsing
+    /// `1`/`1.0` — while a naive/aware difference keeps distinct `NodeId`s.
+    node_table: RefCell<HashMap<MemberHashKey, (NodeId, RepId)>>,
+    /// Set-member content interning: each distinct [`MemberContent`] gets one
+    /// [`RepId`] (its `usize` index), so content-equal members — a naive and an
+    /// aware datetime at one instant included — collapse to one id.
+    member_content: RefCell<HashMap<MemberContent, RepId>>,
     enabled: bool,
 }
 
@@ -140,10 +149,10 @@ impl IgnoreOrderMemo {
     pub(crate) fn new() -> Self {
         Self {
             cache: RefCell::new(HashMap::default()),
-            node_ids: RefCell::new(HashMap::default()),
-            node_digests: RefCell::new(Vec::new()),
-            member_ids: RefCell::new(HashMap::default()),
-            member_digests: RefCell::new(Vec::new()),
+            tuple_ids: RefCell::new(HashMap::default()),
+            tuple_digests: RefCell::new(Vec::new()),
+            node_table: RefCell::new(HashMap::default()),
+            member_content: RefCell::new(HashMap::default()),
             enabled: true,
         }
     }
@@ -155,10 +164,10 @@ impl IgnoreOrderMemo {
     pub(crate) fn disabled() -> Self {
         Self {
             cache: RefCell::new(HashMap::default()),
-            node_ids: RefCell::new(HashMap::default()),
-            node_digests: RefCell::new(Vec::new()),
-            member_ids: RefCell::new(HashMap::default()),
-            member_digests: RefCell::new(Vec::new()),
+            tuple_ids: RefCell::new(HashMap::default()),
+            tuple_digests: RefCell::new(Vec::new()),
+            node_table: RefCell::new(HashMap::default()),
+            member_content: RefCell::new(HashMap::default()),
             enabled: false,
         }
     }
@@ -182,64 +191,75 @@ impl IgnoreOrderMemo {
         self.cache.borrow_mut().insert(key, value);
     }
 
-    /// Interns a hashable node's Python equality identity and returns its
+    /// Interns a hashable tuple's Python equality identity and returns its
     /// id together with its digest: the one already assigned to an earlier
-    /// Python-equal node in this run, or `compute()`'s result, recorded for
+    /// Python-equal tuple in this run, or `compute()`'s result, recorded for
     /// the rest of the run.
     ///
-    /// See this module's "Hashable digests" section for why this cache is part
+    /// See this module's "Tuple digests" section for why this cache is part
     /// of the observable behavior rather than a speed-up. Both the identity
-    /// (whose nested nodes are named by id) and the digest (whose nested
+    /// (whose nested tuples are named by id) and the digest (whose nested
     /// keys are shared through [`ItemKey::Tuple`]'s `Rc`) are `O(arity)` per
-    /// node, so the two tables together stay linear in the number of
+    /// tuple node, so the two tables together stay linear in the number of
     /// nodes hashed rather than quadratic in nesting depth. `compute` runs
     /// with no borrow held, so it is free to recurse back into this same
-    /// cache for a nested node. The `disabled()` cache still serves this
+    /// cache for a nested tuple. The `disabled()` cache still serves this
     /// method: it turns off *distance* memoization only, which is the one
     /// thing proven decision-neutral.
-    pub(crate) fn intern_hashable(
+    pub(crate) fn tuple_digest(
         &self,
-        key: HashKey,
+        key: PyHashKey,
         compute: impl FnOnce() -> ItemKey,
-    ) -> (NodeId, ItemKey) {
-        if let Some(&id) = self.node_ids.borrow().get(&key) {
-            return (id, self.node_digests.borrow()[id.index()].clone());
+    ) -> (TupleId, ItemKey) {
+        if let Some(&id) = self.tuple_ids.borrow().get(&key) {
+            return (id, self.tuple_digests.borrow()[id.index()].clone());
         }
 
         let computed = compute();
-        let mut digests = self.node_digests.borrow_mut();
-        let id = NodeId::new(digests.len());
+        let mut digests = self.tuple_digests.borrow_mut();
+        let id = TupleId::new(digests.len());
         digests.push(computed.clone());
-        self.node_ids.borrow_mut().insert(key, id);
+        self.tuple_ids.borrow_mut().insert(key, id);
         (id, computed)
     }
 
-    /// Interns a hashable set member's Python equality identity and returns its
-    /// id together with its [`MemberDigest`] representative — the one already
-    /// assigned to an earlier Python-equal member in this run, or `compute()`'s
-    /// result. The set-member twin of [`Self::intern_hashable`], in its own
-    /// [`NodeId`] space (see this module's "Set-member digests" section): a
-    /// member is compared by a positional `MemberDigest`, not the
-    /// order-insensitive [`ItemKey`] the list path stores. Each representative
-    /// names its nested hashable children by their id, so both the identity and
-    /// the representative are `O(arity)` per node and the table stays linear in
-    /// the number of nodes hashed. `compute` runs with no borrow held, free to
-    /// recurse back in for a nested member.
-    pub(crate) fn intern_member(
-        &self,
-        key: HashKey,
-        compute: impl FnOnce() -> MemberDigest,
-    ) -> (NodeId, MemberDigest) {
-        if let Some(&id) = self.member_ids.borrow().get(&key) {
-            return (id, self.member_digests.borrow()[id.index()].clone());
+    /// Interns one set-member content identity to its [`RepId`] (its `usize`
+    /// index): the id already assigned to an equal [`MemberContent`], or a
+    /// fresh one. This is the content half of [`super::hash::set_member_digest`]
+    /// (see this module's "Set-member digests" section) — where a naive and an
+    /// aware datetime at one instant collapse, their `MemberContent::Scalar`
+    /// being one and the same.
+    pub(crate) fn content_rep(&self, content: MemberContent) -> RepId {
+        let mut map = self.member_content.borrow_mut();
+        if let Some(&id) = map.get(&content) {
+            return id;
         }
+        let id = RepId::new(map.len());
+        map.insert(content, id);
+        id
+    }
 
-        let computed = compute();
-        let mut digests = self.member_digests.borrow_mut();
-        let id = NodeId::new(digests.len());
-        digests.push(computed.clone());
-        self.member_ids.borrow_mut().insert(key, id);
-        (id, computed)
+    /// The Python-equality half of [`super::hash::set_member_digest`]: returns
+    /// the ([`NodeId`], [`RepId`]) of the container Python-equal to `key` hashed
+    /// earlier in the run (collapsing `1`/`1.0`), or, on a miss, a fresh
+    /// `NodeId` paired with `content()`'s interned `RepId`, recorded under `key`.
+    /// The `NodeId` is the container's Python-equality class (a parent names it
+    /// by that, keeping a naive/aware difference distinct); the `RepId` is its
+    /// content class (a parent's content and the final comparison use that,
+    /// collapsing a naive/aware difference). `content` runs with no borrow held,
+    /// free to recurse back in for a nested member.
+    pub(crate) fn member_rep(
+        &self,
+        key: MemberHashKey,
+        content: impl FnOnce() -> MemberContent,
+    ) -> (NodeId, RepId) {
+        if let Some(&pair) = self.node_table.borrow().get(&key) {
+            return pair;
+        }
+        let rep = self.content_rep(content());
+        let node = NodeId::new(self.node_table.borrow().len());
+        self.node_table.borrow_mut().insert(key, (node, rep));
+        (node, rep)
     }
 }
 

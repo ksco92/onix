@@ -2391,3 +2391,98 @@ fn unhashable_set_members_of_different_kinds_stay_distinct() {
         })
     );
 }
+
+/// The per-node cache decision has to hold whether a naive/aware (or int/float)
+/// difference sits at the member's own root or nested below it. A member's
+/// digest is built through the shared cache at every node, so both families
+/// collapse. Pins the root-level rows (a control the below-root rows are read
+/// against) and the below-root rows in one place; every pairing but the
+/// bare-number sibling is `{}` in real `deepdiff==9.1.0`.
+#[test]
+fn a_set_member_collapses_a_calendar_difference_at_the_root_and_below_it() {
+    let n = || cdt(2024, 1, 1, None);
+    let a = || cdt(2024, 1, 1, Some(0));
+    let i = |x: i64| cv(&json!(x));
+    let f = |x: f64| cv(&json!(x));
+    let tup = |items: Vec<CValue>| CValue::Tuple(items.into_boxed_slice());
+    let fz = |items: Vec<CValue>| CValue::FrozenSet(SetItems::new(items));
+    let set = |items: Vec<CValue>| CValue::Set(SetItems::new(items));
+    let empty = |x: CValue, y: CValue| {
+        crate::diff::diff(&x, &y)
+            .expect("shallow sets diff cleanly")
+            .is_empty()
+    };
+
+    // Root level: the difference is a direct element of the member.
+    assert!(empty(
+        set(vec![tup(vec![n(), tup(vec![i(1)])])]),
+        set(vec![tup(vec![a(), tup(vec![f(1.0)])])]),
+    ));
+    assert!(
+        !empty(
+            set(vec![tup(vec![n(), i(1)])]),
+            set(vec![tup(vec![a(), f(1.0)])]),
+        ),
+        "a bare-number sibling is type-distinct with no shared cache entry"
+    );
+
+    // Below the root: `((N,),)` vs `((A,),)`, one level deeper than the rows above.
+    assert!(empty(
+        set(vec![tup(vec![tup(vec![n()])])]),
+        set(vec![tup(vec![tup(vec![a()])])]),
+    ));
+    // Deeper still: `(((N,),),)` vs `(((A,),),)`.
+    assert!(empty(
+        set(vec![tup(vec![tup(vec![tup(vec![n()])])])]),
+        set(vec![tup(vec![tup(vec![tup(vec![a()])])])]),
+    ));
+    // Through a frozenset: `fs({(N,)})` vs `fs({(A,)})`.
+    assert!(empty(
+        set(vec![fz(vec![tup(vec![n()])])]),
+        set(vec![fz(vec![tup(vec![a()])])]),
+    ));
+    // A twin naive/aware, one at the root and one below it, both collapsing.
+    assert!(empty(
+        set(vec![tup(vec![n(), tup(vec![n(), i(1)])])]),
+        set(vec![tup(vec![a(), tup(vec![a(), i(1)])])]),
+    ));
+}
+
+/// A set member's digest walk is iterative and its result compares in `O(1)`
+/// (a `RepId`), so a deeply nested member neither overflows the native stack
+/// while it is hashed nor while two members are compared — a naive structural
+/// digest with a derived comparison would overflow this small stack. The two
+/// members share one deep chain and differ only naive/aware at the outer tuple,
+/// so they match: the walk runs and the comparison genuinely fires (the two
+/// sets are unequal as wholes, so no fast path short-circuits).
+#[test]
+fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            const DEPTH: usize = 200_000;
+            let chain = |leaf: CValue| {
+                let mut value = leaf;
+                for _ in 0..DEPTH {
+                    value = CValue::FrozenSet(SetItems::new(vec![value]));
+                }
+                value
+            };
+            let member = |dt: CValue| {
+                CValue::Set(SetItems::new(vec![CValue::Tuple(
+                    vec![dt, chain(cv(&json!(0)))].into_boxed_slice(),
+                )]))
+            };
+            let a = member(cdt(2024, 1, 1, None));
+            let b = member(cdt(2024, 1, 1, Some(0)));
+            assert!(
+                crate::diff::diff(&a, &b)
+                    .expect("deep set members diff cleanly")
+                    .is_empty()
+            );
+        })
+        .expect("probe thread spawns");
+    handle
+        .join()
+        .expect("set-member hashing and comparison complete on a small stack");
+}

@@ -75,7 +75,7 @@ pub(crate) enum ItemKey {
     /// holding the same items never hash-match — see this type's own doc.
     /// A *hashable* tuple can also inherit an earlier Python-equal tuple's
     /// key outright, which is `DeepHash`'s own cache behavior: see
-    /// [`item_key`] and `super::memo`'s "Hashable digests" section.
+    /// [`item_key`] and `super::memo`'s "Tuple digests" section.
     ///
     /// The entries sit behind an [`Rc`] so that a nested tuple's key is
     /// *shared* between the parent key that contains it and the digest cache
@@ -108,46 +108,37 @@ pub(crate) enum ItemKey {
     Dict(BTreeMap<String, ItemKey>),
 }
 
-/// One element of a hashable node's Python identity: a scalar by value
-/// (numbers collapsed by Python `==` via [`python_scalar_key`]; a calendar
-/// value by Python's own `datetime`/`date` equality — a naive value never
-/// equal to an aware one, two aware values equal by instant, a `date` never
-/// equal to a `datetime`), or a nested hashable node (a tuple or a frozenset)
-/// by the id its own identity was interned to.
+/// One element of a hashable tuple's Python identity: a scalar by value, or
+/// a nested tuple by the id its own identity was interned to.
 ///
-/// Referring to a nested node by id rather than by its whole identity is
+/// Referring to a nested tuple by id rather than by its whole identity is
 /// what keeps this `O(arity)` per node: `((((1,),),),)` is four one-element
 /// identities, not four identities of size 1, 2, 3 and 4.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum PyHashPart {
     Scalar(ScalarKey),
-    Node(NodeId),
+    Tuple(TupleId),
 }
 
-/// A hashable node's Python identity — the key `DeepHash`'s shared `hashes`
-/// dict is looked up by (see `super::memo`'s "Hashable digests" section), so
-/// it mirrors Python exactly. Scalars go through the crate's one definition of
-/// Python scalar equality ([`python_scalar_key`], which makes `1`, `1.0` and
-/// `True` one key), and a list, set or dict is unhashable, which also makes
-/// any container holding one unhashable.
+/// A hashable tuple's Python identity: its elements, **positionally**
+/// (Python's tuple equality is order-sensitive, unlike the
+/// order-insensitive *content* digest [`item_key`] computes).
+///
+/// This is the key `DeepHash`'s shared `hashes` dict is looked up by (see
+/// `super::memo`'s "Tuple digests" section), so it mirrors Python exactly:
+/// scalars go through the crate's one definition of Python scalar equality
+/// ([`python_scalar_key`], which makes `1`, `1.0` and `True` one key), and a
+/// list or dict is unhashable, which also makes any tuple containing one
+/// unhashable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum HashKey {
-    /// A tuple, keyed **positionally** (Python's tuple equality is
-    /// order-sensitive, unlike the order-insensitive *content* digest each
-    /// node's [`ItemKey`] also carries).
-    Tuple(Box<[PyHashPart]>),
-    /// A frozenset, keyed by its **member set** (Python's frozenset equality
-    /// is order- and repetition-insensitive; the `BTreeSet` collapses
-    /// Python-equal members — `frozenset({1, True})` is `frozenset({1})`).
-    FrozenSet(BTreeSet<PyHashPart>),
-}
+pub(crate) struct PyHashKey(Box<[PyHashPart]>);
 
-/// A hashable node identity's place in the run's interning table — see
-/// [`super::IgnoreOrderMemo::intern_hashable`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct NodeId(usize);
+/// A hashable tuple identity's place in the run's interning table — see
+/// [`super::IgnoreOrderMemo::tuple_digest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TupleId(usize);
 
-impl NodeId {
+impl TupleId {
     /// The id for the entry at `index` (the interner's only constructor).
     pub(crate) fn new(index: usize) -> Self {
         Self(index)
@@ -159,52 +150,108 @@ impl NodeId {
     }
 }
 
-/// One set member's membership digest — the value `_diff_set` compares
-/// members by, computed as `DeepHash` computes it but kept **positional** for
-/// a tuple (onix's one deliberate divergence; see [`set_member_digest`]).
+// ---------------------------------------------------------------------
+// Set-member digests
+// ---------------------------------------------------------------------
+
+/// A set member's *content* digest, as a small id into the run's content
+/// interning table (see [`set_member_digest`]). Two members are the same member
+/// exactly when their `RepId`s are equal — so [`set_difference`] compares
+/// members in `O(1)`, and no comparison ever recurses into a member's structure
+/// (a set member's nesting is not depth-guarded before this runs, so a
+/// structural comparison could overflow the native stack).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct RepId(usize);
+
+impl RepId {
+    /// The id for the entry at `index` (the interner's only constructor).
+    pub(crate) fn new(index: usize) -> Self {
+        Self(index)
+    }
+}
+
+/// A set member's **Python-equality** class id, distinct from its content
+/// [`RepId`]. One fresh id per distinct [`MemberHashKey`], so a naive and an
+/// aware datetime wrapped in a tuple — Python-*un*equal, though their content
+/// coincides — keep different `NodeId`s. That is what stops the content
+/// collapse from leaking into the Python-equality key: `(1, (naive,))` and
+/// `(1.0, (aware,))` must *not* match (the outer tuples are Python-unequal, so
+/// `DeepDiff` compares content, where `1` and `1.0` are type-distinct), and
+/// they don't, because the inner tuples carry different `NodeId`s here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct NodeId(usize);
+
+impl NodeId {
+    /// The id for the entry at `index` (the interner's only constructor).
+    pub(crate) fn new(index: usize) -> Self {
+        Self(index)
+    }
+}
+
+/// One element of a set member's Python-equality identity ([`MemberHashKey`]):
+/// a scalar by Python `==` ([`python_scalar_key`], collapsing `1`/`1.0`/`True`
+/// but keeping a naive datetime distinct from an aware one), or a nested
+/// hashable container by its Python-equality [`NodeId`].
 ///
-/// A hashable container is compared by its own representative when it is the
-/// member being matched (`Tuple`/`FrozenSet` here), but *named by its interned
-/// id* ([`Self::Node`]) when it sits inside a parent — so a parent's digest is
-/// `O(arity)` and two Python-equal nested containers, which share one id,
-/// leave a parent's digest unchanged. See [`set_member_digest`] for the walk
-/// that builds these.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum MemberDigest {
-    /// A scalar leaf, by its content [`ItemKey`]: a number type-distinct
-    /// (`1`/`1.0`/`True` stay apart), a calendar value by its instant/ordinal,
-    /// null/str by value.
-    Scalar(ItemKey),
-    /// A nested hashable container (tuple or frozenset), named by its interned
-    /// [`NodeId`] — one id per Python equality class, so a Python-equal nested
-    /// container never changes its parent's digest.
+/// Referencing a nested container by its **[`NodeId`]** — its Python-equality
+/// class, not its content [`RepId`] — is what keeps this a faithful
+/// Python-equality key: `(naive,)` and `(aware,)` share a content id but not a
+/// `NodeId`, so `(1, (naive,))` and `(1.0, (aware,))` get different keys and are
+/// compared by content (where `1` and `1.0` differ), exactly as `DeepDiff`
+/// does. `1`/`1.0` still collapse when the *whole* container is Python-equal —
+/// then this whole key matches and the cache hands back one id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum MemberPart {
+    Scalar(ScalarKey),
     Node(NodeId),
-    /// A hashable tuple, **positionally** (matching `tuple.__eq__`), used when
-    /// the tuple is itself the member being matched.
-    Tuple(Vec<MemberDigest>),
-    /// A hashable frozenset, by membership, used when the frozenset is itself
-    /// the member being matched.
-    FrozenSet(BTreeSet<MemberDigest>),
-    /// A `list`, which Python cannot hash — reachable through a `list` subclass
-    /// with `__hash__`, keyed structurally (its own variant, since a list and a
-    /// set holding the same members are not Python-equal).
-    UnhashableList(Vec<MemberDigest>),
-    /// A `set`, likewise unhashable and likewise in its own variant.
-    UnhashableSet(Vec<MemberDigest>),
+}
+
+/// A set member's Python-equality identity — the key `DeepHash`'s shared cache
+/// is looked up by, so a Python-equal container hashed earlier in the run wins
+/// the digest (`1`/`1.0` collapse). A tuple is positional; a frozenset is by
+/// membership.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum MemberHashKey {
+    Tuple(Box<[MemberPart]>),
+    FrozenSet(BTreeSet<MemberPart>),
+}
+
+/// A set member's *content* identity, keyed by children [`RepId`]s (and, at a
+/// leaf, the type-distinct scalar [`ItemKey`]) — what a node's [`RepId`] is
+/// interned by when the Python-equality cache misses. A `datetime` normalises
+/// to its instant here, so a naive and an aware value at one moment share a
+/// content id even though their [`MemberPart`]s differ; a tuple stays
+/// positional and a frozenset by membership, onix's one deliberate divergence
+/// from `DeepHash`'s order- and repetition-insensitive iterable hashing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum MemberContent {
+    /// A scalar leaf, by its content [`ItemKey`]: numbers type-distinct
+    /// (`1`/`1.0`/`True` apart), a calendar value by its instant/ordinal.
+    Scalar(ItemKey),
+    /// A hashable tuple, positionally (matching `tuple.__eq__`).
+    Tuple(Vec<RepId>),
+    /// A hashable frozenset, by membership.
+    FrozenSet(BTreeSet<RepId>),
+    /// A `list` (unhashable; reachable through a `list` subclass with
+    /// `__hash__`), in its own variant since a list and a set of the same
+    /// members are not Python-equal.
+    UnhashableList(Vec<RepId>),
+    /// A `set`, likewise.
+    UnhashableSet(Vec<RepId>),
     /// A `dict`, likewise.
-    UnhashableDict(BTreeMap<String, MemberDigest>),
+    UnhashableDict(BTreeMap<String, RepId>),
 }
 
 /// The members of `a` that no member of `b` shares a digest with, and the
 /// same the other way round — the whole of `_diff_set`'s comparison, and of
 /// the distance mirror that counts what it would report.
 ///
-/// Each member is reduced to one [`MemberDigest`] by [`set_member_digest`].
-/// `a`'s members are digested (in [`crate::value::SetItems`]' canonical order)
-/// before `b`'s, because the run's shared set-member cache is first-write-wins:
-/// processing a deterministic order makes the representative each Python
-/// equality class settles on deterministic too. Two members are the same
-/// member exactly when their digests are equal.
+/// Each member is reduced to one [`RepId`] by [`set_member_digest`]. `a`'s
+/// members are digested (in [`crate::value::SetItems`]' canonical order) before
+/// `b`'s, because the run's shared cache is first-write-wins: processing a
+/// deterministic order makes the id each equality class settles on
+/// deterministic too. Two members are the same member exactly when their
+/// `RepId`s are equal.
 ///
 /// Shared by [`crate::diff::set_diff`] and
 /// [`crate::ignore_order::count_set_diff_leaves`] so the two can never drift
@@ -214,13 +261,13 @@ pub(crate) fn set_difference<'a>(
     b: &'a [Value],
     memo: &IgnoreOrderMemo,
 ) -> (Vec<&'a Value>, Vec<&'a Value>) {
-    let a_keys: Vec<MemberDigest> = a.iter().map(|v| set_member_digest(v, memo)).collect();
-    let b_keys: Vec<MemberDigest> = b.iter().map(|v| set_member_digest(v, memo)).collect();
+    let a_keys: Vec<RepId> = a.iter().map(|v| set_member_digest(v, memo)).collect();
+    let b_keys: Vec<RepId> = b.iter().map(|v| set_member_digest(v, memo)).collect();
 
-    let a_lookup: BTreeSet<&MemberDigest> = a_keys.iter().collect();
-    let b_lookup: BTreeSet<&MemberDigest> = b_keys.iter().collect();
+    let a_lookup: BTreeSet<RepId> = a_keys.iter().copied().collect();
+    let b_lookup: BTreeSet<RepId> = b_keys.iter().copied().collect();
 
-    let only_in = |items: &'a [Value], keys: &[MemberDigest], other: &BTreeSet<&MemberDigest>| {
+    let only_in = |items: &'a [Value], keys: &[RepId], other: &BTreeSet<RepId>| {
         items
             .iter()
             .zip(keys)
@@ -237,68 +284,65 @@ pub(crate) fn set_difference<'a>(
 
 /// The membership digest of one set member — the value `_diff_set` compares
 /// members by, computed exactly as `DeepHash` computes it, by consulting the
-/// run's shared set-member cache (`memo`) at every hashable node.
+/// run's shared cache (`memo`) at every hashable node and returning one
+/// [`RepId`].
 ///
-/// **Why the cache, not a standalone key.** `DeepHash._hash(obj)` first looks
+/// **Why a cache, and why a per-node one.** `DeepHash._hash(obj)` first looks
 /// `obj` up in a run-scoped cache keyed by `_make_hash_key(obj)` — which
-/// type-wraps a bare *number* (`(type(obj), obj)`, so `1` and `1.0` never
-/// share an entry) but leaves a *container* (tuple, frozenset) as its own
-/// object, looked up by Python `==`/`hash`. On a hit it reuses the earlier
-/// digest; on a miss it builds a content digest from the children's digests
-/// (each of which also went through the cache) and stores it. Because both of
-/// a comparison's set members are hashed against one shared cache
-/// (`diff.py::_create_hashtable`), a node can take the content path at its
-/// root and still hit the cache at a child — which is the whole subtlety this
-/// reproduces. For example `{(naive, (1,))}` vs `{(aware, (1.0,))}` is empty
-/// in real `DeepDiff`: the outer tuples are not Python-equal (`naive != aware`
-/// blocks the cache), so each outer digest is built fresh — but the inner
-/// `(1,)` and `(1.0,)` *are* Python-equal, share one interned id, and the two
-/// datetimes normalize to one instant, so the two fresh outer digests coincide
-/// anyway. A bare-number sibling instead of a nested tuple — `{(naive, 1)}` vs
-/// `{(aware, 1.0)}` — is a removal plus an addition, because `1` and `1.0`
-/// have their own type-distinct content ([`MemberDigest::Scalar`]) and no
-/// cache entry to share. Confirmed against `deepdiff==9.1.0` (`TZ=UTC`,
-/// `verbose_level=2`).
+/// type-wraps a bare *number* (`(type(obj), obj)`, so `1` and `1.0` never share
+/// an entry) but leaves a *container* (tuple, frozenset) as its own object,
+/// looked up by Python `==`/`hash`. On a hit it reuses the earlier digest; on a
+/// miss it builds a content digest from the children's (already-cached) digests
+/// and stores it. Because both members of a comparison are hashed against one
+/// shared cache (`diff.py::_create_hashtable`), a node can take the content
+/// path at its root and still hit the cache at a child. `onix` reproduces this
+/// with two interning tables per run (see `super::memo`'s "Set-member digests"
+/// section): a Python-equality one ([`MemberHashKey`] → ([`NodeId`], [`RepId`]),
+/// collapsing `1`/`1.0`) and a content one ([`MemberContent`] → [`RepId`],
+/// normalising a `datetime` to its instant). A hashable container's `RepId` is
+/// the cache's on a hit, its content's on a miss; a parent's Python-equality key
+/// names a nested container by its `NodeId` (Python class) while its content and
+/// the final comparison use the `RepId` (content class) — the two being distinct
+/// is what keeps `(1, (naive,))` and `(1.0, (aware,))` apart (the inner tuples'
+/// `NodeId`s differ, so the outer tuples are compared by content, where `1` and
+/// `1.0` differ) while still collapsing a naive/aware difference that does not
+/// break a wrapping tuple's Python-equality. Every one of these agrees with
+/// `deepdiff==9.1.0` (`TZ=UTC`, `verbose_level=2`), whether the naive/aware or
+/// `1`/`1.0` difference sits at the member's root or arbitrarily deep inside it:
 ///
-/// **Calendar values** are normalized to their instant in the content digest
-/// (`_prep_datetime` runs `datetime_normalize` unconditionally; a `date` keys
-/// by its ordinal and never joins a `datetime`'s class), and, in a node's
-/// Python-equality key ([`PyHashPart::Scalar`] via [`python_scalar_key`]),
-/// carry Python's own strict datetime equality — a naive value never equal to
-/// an aware one, two aware values equal by instant, a `date` never equal to a
-/// `datetime`. So a naive/aware difference blocks the whole-container cache
-/// while still normalizing away inside a content digest, which is exactly the
-/// split the examples above turn on.
+/// ```text
+/// {(naive, (1,))}       vs {(aware, (1.0,))}   -> {}    (inner tuple shares an id; outer content agrees)
+/// {((naive,),)}         vs {((aware,),)}       -> {}    (the difference two levels down still collapses)
+/// {(naive, 1)}          vs {(aware, 1.0)}      -> removal + addition (a bare number is type-distinct)
+/// {(naive, 1)}          vs {(naive, 1.0)}      -> {}    (whole tuple Python-equal: one cache hit)
+/// ```
 ///
 /// **Frozensets** take part in the cache here (a frozenset is hashable in
-/// Python), so a `frozenset({True})` and a `frozenset({1})` share one interned
-/// id the way two Python-equal tuples do. This is the one place the digest
-/// cache covers frozensets: in the *list*-item path ([`item_key`]) a frozenset
-/// keeps its own content key, a documented divergence — see
-/// [`ItemKey::FrozenSet`].
+/// Python), so a `frozenset({True})` and a `frozenset({1})` share one id the
+/// way two Python-equal tuples do — the one place the cache covers frozensets;
+/// in the *list*-item path ([`item_key`]) a frozenset keeps its own content
+/// key, a documented divergence (see [`ItemKey::FrozenSet`]).
 ///
 /// **One member kind still diverges from real `DeepDiff`, deliberately:** a
-/// tuple or frozenset here matches by Python's own `==` (positional for a
-/// tuple — [`MemberDigest::Tuple`] is a `Vec`, not the order-insensitive
-/// [`ItemKey::Tuple`] — and by membership for a frozenset), where
-/// `DeepHash._prep_iterable` hashes *every* iterable order- and
-/// repetition-insensitively — so `(1, 2)` and `(2, 1)` share one digest in
-/// real `_diff_set` but not here. Reproducing that would mean matching by
-/// something other than Python `==`; this crate keeps the honest `==` answer.
-/// See `tests/golden/README.md`'s "Set iteration order" section, its "A tuple
-/// or a frozenset set member matches order- and repetition-insensitively"
-/// point (and its "A naive and an aware datetime" point for why a same-instant
-/// naive/aware pair is two members here, not one).
+/// tuple matches positionally ([`MemberContent::Tuple`] is a `Vec`) and a
+/// frozenset by membership, where `DeepHash._prep_iterable` hashes *every*
+/// iterable order- and repetition-insensitively — so `(1, 2)` and `(2, 1)`
+/// share one digest in real `_diff_set` but not here. See
+/// `tests/golden/README.md`'s "Set iteration order" section (its "A tuple or a
+/// frozenset set member matches order- and repetition-insensitively" point, and
+/// its "A naive and an aware datetime" point for why a same-instant naive/aware
+/// pair is two members here, not one).
 ///
 /// Iterative (an explicit heap work-stack, no native recursion over value
 /// depth), because a set member's own nesting is not bounded by the engine's
-/// traversal depth guards before this runs — so a natively recursive walk
-/// would be an unguarded overflow sink on adversarially nested input. The
-/// walk pushes each node before its children, so `order` holds parents before
-/// children and each child's subtree is contiguous; assembling from the end
-/// therefore always finds a node's own children as the last entries of
-/// `built`, in their original order.
-pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> MemberDigest {
+/// traversal depth guards before this runs — so a natively recursive walk would
+/// be an unguarded overflow sink on adversarially nested input. (The
+/// comparison of the results is `O(1)` per pair — they are `RepId`s — so it
+/// cannot overflow either.) The walk pushes each node before its children, so
+/// `order` holds parents before children and each child's subtree is
+/// contiguous; assembling from the end therefore always finds a node's own
+/// children as the last entries of `built`, in their original order.
+pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> RepId {
     let mut order: Vec<&Value> = Vec::new();
     let mut stack: Vec<&Value> = vec![root];
 
@@ -317,7 +361,10 @@ pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> MemberD
         }
     }
 
-    let mut built: Vec<NodeOut> = Vec::with_capacity(order.len());
+    // Each entry: the node's content id, and its Python-equality part for a
+    // parent's key (`None` when unhashable, which makes any container holding
+    // it unhashable too).
+    let mut built: Vec<(RepId, Option<MemberPart>)> = Vec::with_capacity(order.len());
     for value in order.iter().rev() {
         let out = match value {
             Value::Null
@@ -326,15 +373,11 @@ pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> MemberD
             | Value::Str(_)
             | Value::DateTime(_)
             | Value::Date(_) => {
-                let digest = MemberDigest::Scalar(scalar_content_key(value));
+                let rep = memo.content_rep(MemberContent::Scalar(scalar_content_key(value)));
                 let part = python_scalar_key(value)
-                    .map(PyHashPart::Scalar)
+                    .map(MemberPart::Scalar)
                     .expect("python_scalar_key covers every scalar");
-                NodeOut {
-                    child_ref: digest.clone(),
-                    rep: digest,
-                    part: Some(part),
-                }
+                (rep, Some(part))
             }
             Value::Tuple(items) => {
                 let children = built.split_off(built.len() - items.len());
@@ -345,18 +388,19 @@ pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> MemberD
                 build_container(memo, children, ContainerKind::FrozenSet)
             }
             Value::Array(items) => {
-                let refs = child_refs(&mut built, items.len());
-                unhashable(MemberDigest::UnhashableList(refs))
+                let reps = child_reps(&mut built, items.len());
+                (memo.content_rep(MemberContent::UnhashableList(reps)), None)
             }
             Value::Set(items) => {
-                let refs = child_refs(&mut built, items.len());
-                unhashable(MemberDigest::UnhashableSet(refs))
+                let reps = child_reps(&mut built, items.len());
+                (memo.content_rep(MemberContent::UnhashableSet(reps)), None)
             }
             Value::Object(map) => {
-                let refs = child_refs(&mut built, map.len());
-                unhashable(MemberDigest::UnhashableDict(
-                    map.keys().map(str::to_owned).zip(refs).collect(),
-                ))
+                let reps = child_reps(&mut built, map.len());
+                let content = MemberContent::UnhashableDict(
+                    map.keys().map(str::to_owned).zip(reps).collect(),
+                );
+                (memo.content_rep(content), None)
             }
         };
         built.push(out);
@@ -365,22 +409,7 @@ pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> MemberD
     built
         .pop()
         .expect("the walk pushes at least the root's own entry")
-        .rep
-}
-
-/// One node's contribution to [`set_member_digest`]'s assembly.
-struct NodeOut {
-    /// The digest a *parent* embeds for this node: a nested hashable container
-    /// collapses to [`MemberDigest::Node`], everything else is its own digest.
-    child_ref: MemberDigest,
-    /// This node's digest when it is itself the member being compared (the walk
-    /// returns the root's `rep`). Equal to `child_ref` for every kind but a
-    /// hashable container, where `rep` is the positional content and
-    /// `child_ref` is the interned id.
-    rep: MemberDigest,
-    /// This node's Python-equality part for a parent's [`HashKey`]; `None` when
-    /// the node is unhashable, which makes any container holding it unhashable.
-    part: Option<PyHashPart>,
+        .0
 }
 
 /// Which hashable container [`build_container`] assembles.
@@ -390,64 +419,53 @@ enum ContainerKind {
     FrozenSet,
 }
 
-/// Pops the last `count` built entries and returns their parent-facing
-/// digests, in original child order.
-fn child_refs(built: &mut Vec<NodeOut>, count: usize) -> Vec<MemberDigest> {
+/// Pops the last `count` built entries and returns their content [`RepId`]s,
+/// in original child order.
+fn child_reps(built: &mut Vec<(RepId, Option<MemberPart>)>, count: usize) -> Vec<RepId> {
     built
         .split_off(built.len() - count)
         .into_iter()
-        .map(|out| out.child_ref)
+        .map(|(rep, _)| rep)
         .collect()
 }
 
-/// A node the cache never sees: it keeps its own digest and takes no part in a
-/// parent's Python-equality key.
-fn unhashable(digest: MemberDigest) -> NodeOut {
-    NodeOut {
-        child_ref: digest.clone(),
-        rep: digest,
-        part: None,
-    }
-}
-
-/// [`set_member_digest`]'s tuple/frozenset case: assembles the positional (or
-/// membership) content and the Python-equality key from the already-digested
-/// `children`, then interns it in the run's shared set-member cache when it is
-/// hashable (every child hashable) so a Python-equal node hashed earlier in
-/// the run wins the representative. An unhashable child makes the node
-/// unhashable: it keeps its own content and takes no part in the cache.
-fn build_container(memo: &IgnoreOrderMemo, children: Vec<NodeOut>, kind: ContainerKind) -> NodeOut {
-    let mut refs = Vec::with_capacity(children.len());
+/// [`set_member_digest`]'s tuple/frozenset case: assembles the content id and
+/// the Python-equality key from the already-digested `children`. When the node
+/// is hashable (every child hashable) its id comes from the run's shared cache,
+/// so a Python-equal node hashed earlier wins it; otherwise it is content-only,
+/// and takes no part in a parent's key.
+fn build_container(
+    memo: &IgnoreOrderMemo,
+    children: Vec<(RepId, Option<MemberPart>)>,
+    kind: ContainerKind,
+) -> (RepId, Option<MemberPart>) {
+    let mut reps = Vec::with_capacity(children.len());
     let mut parts = Vec::with_capacity(children.len());
     let mut hashable = true;
 
-    for child in children {
-        refs.push(child.child_ref);
-        match child.part {
+    for (rep, part) in children {
+        reps.push(rep);
+        match part {
             Some(part) => parts.push(part),
             None => hashable = false,
         }
     }
 
-    let content = match kind {
-        ContainerKind::Tuple => MemberDigest::Tuple(refs),
-        ContainerKind::FrozenSet => MemberDigest::FrozenSet(refs.into_iter().collect()),
+    let content = |reps: Vec<RepId>| match kind {
+        ContainerKind::Tuple => MemberContent::Tuple(reps),
+        ContainerKind::FrozenSet => MemberContent::FrozenSet(reps.into_iter().collect()),
     };
 
     if !hashable {
-        return unhashable(content);
+        return (memo.content_rep(content(reps)), None);
     }
 
     let hash_key = match kind {
-        ContainerKind::Tuple => HashKey::Tuple(parts.into_boxed_slice()),
-        ContainerKind::FrozenSet => HashKey::FrozenSet(parts.into_iter().collect()),
+        ContainerKind::Tuple => MemberHashKey::Tuple(parts.into_boxed_slice()),
+        ContainerKind::FrozenSet => MemberHashKey::FrozenSet(parts.into_iter().collect()),
     };
-    let (id, rep) = memo.intern_member(hash_key, || content);
-    NodeOut {
-        child_ref: MemberDigest::Node(id),
-        rep,
-        part: Some(PyHashPart::Node(id)),
-    }
+    let (node, rep) = memo.member_rep(hash_key, || content(reps));
+    (rep, Some(MemberPart::Node(node)))
 }
 
 /// The content digest of one scalar leaf, matching [`keyed`]'s own scalar
@@ -490,7 +508,7 @@ fn number_key(n: &crate::value::Number) -> ItemKey {
 /// Computes `value`'s [`ItemKey`], consulting `memo` for every hashable
 /// tuple it walks — a tuple that is Python-equal to one hashed earlier in
 /// this diff inherits that tuple's key, exactly as `DeepHash`'s shared cache
-/// makes it inherit its digest (see `super::memo`'s "Hashable digests" section
+/// makes it inherit its digest (see `super::memo`'s "Tuple digests" section
 /// for the mechanism, the source citations, and why the ordering is
 /// observable).
 ///
@@ -603,10 +621,10 @@ fn tuple_keyed(items: &[Value], memo: &IgnoreOrderMemo) -> (ItemKey, Option<PyHa
         return (ItemKey::Tuple(Rc::new(children)), None);
     }
 
-    let (id, digest) = memo.intern_hashable(HashKey::Tuple(parts.into_boxed_slice()), || {
+    let (id, digest) = memo.tuple_digest(PyHashKey(parts.into_boxed_slice()), || {
         ItemKey::Tuple(Rc::new(children))
     });
-    (digest, Some(PyHashPart::Node(id)))
+    (digest, Some(PyHashPart::Tuple(id)))
 }
 
 // ---------------------------------------------------------------------
