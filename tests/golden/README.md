@@ -298,9 +298,10 @@ with `_prep_datetime`'s `YYYY-MM-DD HH:MM:SS+00:00`.
 
 - **A datetime whose UTC form leaves year `1..=9999` cannot be compared to
   another datetime.** Normalizing `9999-12-31T23:00-01:00` lands on year
-  10000, and real `astimezone(timezone.utc)` raises `OverflowError: date value
-  out of range` there, so DeepDiff raises rather than reporting. onix raises
-  too: `onix_core::Error::DateTimeOutOfRange`, surfaced to Python as a
+  10000, and real `astimezone(timezone.utc)` raises
+  `OverflowError: date value out of range` there, so DeepDiff raises rather
+  than reporting anything. onix raises too, as
+  `onix_core::Error::DateTimeOutOfRange`, surfaced to Python as a
   `ValueError` naming the path. Both tools only normalize when two datetimes
   are genuinely compared, so such a value added, removed, or type-changed
   against a non-datetime still reports its raw rendering. No golden case can
