@@ -66,10 +66,9 @@ from deepdiff_rs import DeepDiff as OnixDeepDiff
 from deepdiff_rs import diff_json
 
 type JsonValue = dict[str, "JsonValue"] | list["JsonValue"] | str | int | float | bool | None
-# The `typed_records` fixture's field type: everything `JsonValue` scalars
-# cover, plus the three 0.4.0 types this benchmark exists to measure.
-type TypedFieldValue = str | int | bool | datetime | tuple[int, int] | tuple[float, float] | set[str]
-type TypedRecord = dict[str, TypedFieldValue]
+# `id`/`name` (int/str), `created_at` (datetime), `coordinate` (a tuple pair),
+# `tags` (a string set) — the fields `_make_typed_record` builds.
+type TypedRecord = dict[str, int | str | datetime | tuple[int, int] | tuple[float, float] | set[str]]
 
 ##############################################
 ##############################################
@@ -103,6 +102,17 @@ _TAG_POOL: Final[tuple[str, ...]] = ("alpha", "beta", "gamma", "delta", "epsilon
 # Fixture generation (live Python objects)
 
 
+def _mutation_indices(count: int, rng: random.Random) -> list[int]:
+    """
+    Sample the record indices to mutate for a `VALUE_CHANGE_RATE` batch.
+
+    :param count: Total record count to sample from.
+    :param rng: Seeded random source.
+    :return: The indices to mutate.
+    """
+    return rng.sample(range(count), int(count * VALUE_CHANGE_RATE))
+
+
 def build_ignore_order_case() -> tuple[JsonValue, JsonValue]:
     """
     Build the `ignore_order_10k` shape: a shuffled, ~5%-mutated int list.
@@ -113,9 +123,8 @@ def build_ignore_order_case() -> tuple[JsonValue, JsonValue]:
     a: list[JsonValue] = [rng.randint(*_ORIGINAL_INT_RANGE) for _ in range(IGNORE_ORDER_SIZE)]
     b = list(a)
     rng.shuffle(b)
-    change_n = int(IGNORE_ORDER_SIZE * VALUE_CHANGE_RATE)
 
-    for index in rng.sample(range(IGNORE_ORDER_SIZE), change_n):
+    for index in _mutation_indices(IGNORE_ORDER_SIZE, rng):
         b[index] = rng.randint(*_CHANGED_INT_RANGE)
 
     return a, b
@@ -195,9 +204,8 @@ def build_api_payloads_case() -> tuple[JsonValue, JsonValue]:
     rng = random.Random(SEED + 1)
     a: list[JsonValue] = [_make_record(i, rng) for i in range(RECORD_COUNT)]
     b = copy.deepcopy(a)
-    change_n = int(RECORD_COUNT * VALUE_CHANGE_RATE)
 
-    for index in rng.sample(range(RECORD_COUNT), change_n):
+    for index in _mutation_indices(RECORD_COUNT, rng):
         record = b[index]
         assert isinstance(record, dict)
         b[index] = _mutate_record(record, rng)
@@ -209,10 +217,6 @@ def _make_typed_record(index: int, rng: random.Random) -> TypedRecord:
     """
     Build one record whose fields exercise 0.4.0's typed-conversion path: a
     datetime (naive or aware), a numeric-pair tuple, and a small string set.
-
-    Tag indices are drawn before the set comprehension builds `tags`, never
-    while iterating it: set iteration order is hash-seeded, so drawing `rng`
-    values during iteration would make the fixture nondeterministic.
 
     :param index: The record's position (used for its `id` and to alternate
         naive/aware).
@@ -226,7 +230,11 @@ def _make_typed_record(index: int, rng: random.Random) -> TypedRecord:
     else:
         coordinate = (rng.randint(-1000, 1000), rng.randint(-1000, 1000))
 
-    tag_indices = rng.sample(range(len(_TAG_POOL)), rng.randint(1, 4))
+    # Drawn into a variable rather than inline in the dict literal below:
+    # dict values evaluate in key order, and `tags` must draw before
+    # `created_at` for this function's RNG consumption to stay positionally
+    # fixed regardless of how the dict literal is ordered or edited.
+    tags = set(rng.sample(_TAG_POOL, rng.randint(1, 4)))
 
     return {
         "id": index,
@@ -241,15 +249,16 @@ def _make_typed_record(index: int, rng: random.Random) -> TypedRecord:
             tzinfo=_TYPED_RECORD_TZ if index % 2 == 0 else None,
         ),
         "coordinate": coordinate,
-        "tags": {_TAG_POOL[i] for i in tag_indices},
+        "tags": tags,
     }
 
 
 def _mutate_typed_record(record: TypedRecord, rng: random.Random) -> TypedRecord:
     """
     Mutate one typed record for a "value changed" entry: shift its datetime
-    and add a tag, so both the calendar and set-conversion paths see a
-    genuine change.
+    and add a tag drawn from the pool. The tag draw is a no-op when the
+    record already holds that tag, so the datetime always changes but only
+    roughly 70% of mutated records also gain a set change.
 
     :param record: The original record; not mutated in place.
     :param rng: Seeded random source.
@@ -288,9 +297,7 @@ def build_typed_records_case(*, shuffle: bool = False) -> tuple[list[TypedRecord
     if shuffle:
         rng.shuffle(b)
 
-    change_n = int(TYPED_RECORD_COUNT * VALUE_CHANGE_RATE)
-
-    for index in rng.sample(range(TYPED_RECORD_COUNT), change_n):
+    for index in _mutation_indices(TYPED_RECORD_COUNT, rng):
         b[index] = _mutate_typed_record(b[index], rng)
 
     return a, b
