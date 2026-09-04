@@ -18,8 +18,8 @@ make mutants        # cargo mutants --package onix-core --package onix-cli
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **990** mutants (20 in `onix-cli`,
-970 in `onix-core`). Its classification of each mutant into
+`make mutants` enumerates a deterministic **1000** mutants (20 in `onix-cli`,
+980 in `onix-core`). Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
 depends on wall-clock time (a slow mutant is a "timeout" on one machine and
 "missed"/"caught" on another) and, in this workspace, on build caching (a
@@ -96,7 +96,7 @@ id (`NodeId`) keying the cache (the earlier two-key `IdentityMode::Loose`/
 not model `DeepHash`'s per-*node* cache decision and under-reported some
 naive/aware-in-tuple members). That rebuild replaced several `hash.rs`
 functions and added the set-member interning tables to `memo.rs`, so the mutant
-enumeration shifted from **986** to **990** total (20 `onix-cli`, 970
+enumeration shifted from **986** to **1000** total (20 `onix-cli`, 980
 `onix-core`).
 
 A scoped re-run of the two rebuilt files, on an otherwise-idle machine (no
@@ -108,7 +108,7 @@ cargo mutants --package onix-core \
   -f crates/onix-core/src/ignore_order/memo.rs
 ```
 
-50 tested — **26 caught, 20 unviable, 4 missed, 0 timeout**. All four misses
+51 tested — **26 caught, 20 unviable, 4 missed, 1 timeout**. All four misses
 are `memo.rs`'s pre-existing caching-gate equivalents (`should_cache`,
 `is_container` — kind (1) above, provably result-neutral); every viable mutant
 in the new set-member code (`set_member_digest`, `build_container`,
@@ -120,8 +120,18 @@ differs the bool across sides so a `Bool(*b) -> Bool(true)` mutant flips the
 result — confirmed by applying that mutant by hand and watching
 `cargo test --test golden` fail.
 
-The full `make mutants` enumeration is deterministic at **990** mutants
-(`cargo mutants --list`; hash.rs 36, memo.rs 14 of them). The last full
+The one timeout — replacing `<impl Hash for ItemKey>::hash` with `()` (a
+no-op hasher) — is genuine, not a false timeout from worker contention:
+reproduced standalone it does not complete in 90 s where the suite normally
+runs in seconds. A no-op `ItemKey` hash sends every `FxHash`-backed table
+(`HashedList`, tuple digests) to one bucket, i.e. `O(n^2)`; the
+`set_and_list_member_interning_scales_near_linearly` test is exactly what
+detects that (it would fail its `K -> 2K` ratio bound), but the suite-wide
+slowdown trips `cargo-mutants`' per-mutant test timeout first, so the tool
+records it as a timeout rather than a caught. Detected, not a survivor.
+
+The full `make mutants` enumeration is deterministic at **1000** mutants
+(`cargo mutants --list`; hash.rs 37, memo.rs 14, lcs.rs 111 of them). The last full
 representative run classified the previous 986-mutant enumeration as **890
 caught, 75 unviable, 15 missed, 6 timeout** — the survivors confined to the
 documented equivalent/uncompilable kinds: the `lcs.rs` LCS spots (missed plus
@@ -130,11 +140,13 @@ genuine non-terminating timeouts), `diff/array.rs`'s
 `* 1_000_000.0`, and `memo.rs`'s four caching-gate mutants, plus the
 `Default`-substitution mutants that do not compile (classification is noisy run
 to run, per the caveat above; the survivor *set* is not). The set-member
-rebuild adds a net **+4** mutants, all caught or unviable per the scoped run
-above (which covers both rebuilt files directly); it introduces no new missed
-or timeout survivor, so the 15/6 survivor set is unchanged. Its caller-threading
-elsewhere (`diff/set.rs`, `diff/dispatch.rs`, `distance.rs`'s
-`count_set_diff_leaves`) is exercised by the existing set/`ignore_order` tests.
+rebuild plus the hash-flooding/float-mixing hardening add a net **+14** mutants
+(986 -> 1000), mostly in `lcs.rs` (`mix_float_bits` and the hand-written
+`Hash` impls) and `hash.rs`; per the scoped run above every one is caught or
+unviable except the single genuine `ItemKey::hash`-no-op timeout documented
+there. No new *missed* survivor. Its caller-threading elsewhere (`diff/set.rs`,
+`diff/dispatch.rs`, `distance.rs`'s `count_set_diff_leaves`) is exercised by the
+existing set/`ignore_order` tests.
 
 - **Unviable:** the `Default`-substitution (and `HashMap::new()`) mutants of
   kind (2), including `args.rs:32`/`args.rs:76` and `distance.rs:32`/

@@ -444,7 +444,7 @@ generated — so it is pinned in `test_sets.py` instead.
   one cache across a whole run: a tuple that is Python-equal to one hashed earlier
   inherits its digest, while a tuple holding a list or a dict is unhashable and keeps
   its own. Which member of an equality class is hashed first is therefore observable,
-  and reproduced — see the `ignore_order_tuple_digest_*` cases and the "Hashable digests"
+  and reproduced — see the `ignore_order_tuple_digest_*` cases and the "Tuple digests"
   section of `crates/onix-core/src/ignore_order/memo.rs` for the full mechanism.
   **`frozenset` is hashable too, and `DeepDiff` caches one the same way** —
   `[frozenset({1}), frozenset({1.0})]` vs `[]` reports a *single* removal there,

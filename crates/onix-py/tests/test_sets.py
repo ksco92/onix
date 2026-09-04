@@ -607,7 +607,7 @@ def test_a_naive_aware_difference_below_a_member_root_collapses_at_every_depth()
         ({(8, (9, (n, (1,)))), "x"}, {(8, (9, (a, (1.0,)))), "y"}),
         ({(n, (n, 1)), "x"}, {(a, (a, 1)), "y"}),
     ]
-    for left, right, in nested_cases:
+    for left, right in nested_cases:
         onix = DeepDiff(left, right).to_dict()
         real = RealDeepDiff(left, right, verbose_level=2).to_dict()
 
