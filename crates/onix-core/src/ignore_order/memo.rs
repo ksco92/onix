@@ -49,32 +49,33 @@
 //! # Tuple digests
 //!
 //! The second cache is **not** an optimization: it is `DeepHash`'s own
-//! observable behavior. `DeepHash` keys its `hashes` dict by the object
-//! itself and only type-wraps bare numbers (`deephash.py`'s `_make_hash_key`,
-//! lines 616-628: `if not self.ignore_numeric_type_changes and
-//! isinstance(obj, only_numbers): return (type(obj), obj)`, `return obj`
-//! otherwise), and `DeepDiff` shares one such dict across every hashtable it
-//! builds in a run (`diff.py`'s `_create_hashtable`, lines 1286-1296, whose
-//! own comment states that the `self.hashes` dictionary is shared between
-//! different runs of `DeepHash` so that an object already calculated to have
-//! a hash is not re-calculated). A **hashable** tuple is therefore looked up under
-//! Python's own `==`/`hash`, so a tuple that is Python-equal to one hashed
-//! earlier in the run *inherits that tuple's digest* instead of computing its
-//! own — which is why real `DeepDiff` reports `DeepDiff([(1,)], [(1.0,)],
-//! ignore_order=True)` as `{}`. An unhashable tuple (one holding a list or a
-//! dict) misses that lookup — `self.hashes[hash_key]` raises `TypeError`,
-//! caught at `deephash.py` line 656 — and is stored by object identity
-//! (line 744-747), so it never collides; `DeepDiff([(1, [1])], [(1.0, [1])],
-//! ignore_order=True)` is a `type_changes`, as this port reproduces.
+//! observable behavior. `deephash.py::_make_hash_key` type-wraps only bare
+//! numbers, so every other object — a tuple included — keys the `hashes`
+//! dict as *itself*; `DeepHash._hash` reads that dict before computing
+//! anything and writes its result back under the same key; and
+//! `diff.py::_create_hashtable` builds both of a comparison's hashtables
+//! against one shared `hashes` dict. A **hashable** tuple is therefore looked
+//! up under Python's own `==`/`hash` and inherits the digest of the first
+//! Python-equal tuple hashed anywhere in the run:
+//!
+//! ```text
+//! DeepDiff([(1,)],     [(1.0,)],     ignore_order=True) -> {}
+//! DeepDiff([(1, [1])], [(1.0, [1])], ignore_order=True) -> type_changes at root[0][0]
+//! ```
+//!
+//! The second line is the boundary: a tuple holding a list or a dict cannot
+//! be a dict key at all, so both the lookup and the store raise `TypeError`,
+//! `DeepHash` falls back to object identity, and the tuple keeps its own
+//! type-strict digest.
 //!
 //! [`super::hash::item_key`] consults this cache at every tuple node it
 //! walks, in the order the engine hashes items (t1's list, then t2's — the
-//! same order `_create_hashtable` uses), so the *first* Python-equality class
-//! member seen decides the digest for all of them. That ordering is
+//! same order `_create_hashtable` uses), so the *first* member of a Python
+//! equality class seen decides the digest for all of them. That ordering is
 //! observable, and matching it is the point: `[(1.0,)]` vs `[(1, 1)]` is a
 //! `type_changes` in real `DeepDiff` while `[(1,)]` vs `[(1, 1)]` is empty,
-//! because in the first case the class digest was fixed by the float tuple
-//! before the deduplicated `(1, 1)` content digest could match it.
+//! because in the first case the float tuple fixed the class digest before
+//! the deduplicated `(1, 1)` content digest could match it.
 
 use std::cell::RefCell;
 

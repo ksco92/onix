@@ -183,19 +183,14 @@ not part of this fixed corpus.
   for the golden case.
 
 - **A hashable tuple can inherit another tuple's hash.** Under `ignore_order`,
-  `DeepDiff([(1,)], [(1.0,)])` is **empty** — the two tuples "match" even though
-  their contents are of different types, and `DeepDiff([(1,), (1.0,)], [])`
-  reports a single removal rather than two. This is not a rounding rule: `DeepHash`
-  keys its cache by the object itself (only bare numbers are type-wrapped) and
-  `DeepDiff` shares one cache across every hashtable it builds in a run, so a tuple
-  that is Python-equal to one hashed earlier inherits that tuple's digest. A tuple
-  holding a list or a dict is unhashable, misses the cache, and keeps its own
-  type-strict digest (`DeepDiff([(1, [1])], [(1.0, [1])], ignore_order=True)` is a
-  `type_changes`). Which member of an equality class is hashed first is therefore
-  observable, and reproduced: see the `ignore_order_tuple_digest_*` cases and
-  `crates/onix-core/src/ignore_order/memo.rs`'s "Tuple digests" section, which
-  cites the upstream source lines. **`frozenset` is hashable too**, so the same
-  mechanism will apply to it when set support lands.
+  `DeepDiff([(1,)], [(1.0,)])` is **empty** and `DeepDiff([(1,), (1.0,)], [])` reports
+  a single removal, because `DeepHash` keys its cache by the object itself and shares
+  one cache across a whole run: a tuple that is Python-equal to one hashed earlier
+  inherits its digest, while a tuple holding a list or a dict is unhashable and keeps
+  its own. Which member of an equality class is hashed first is therefore observable,
+  and reproduced — see the `ignore_order_tuple_digest_*` cases and the "Tuple digests"
+  section of `crates/onix-core/src/ignore_order/memo.rs` for the full mechanism.
+  **`frozenset` is hashable too**, so the same applies to it when set support lands.
 
 - **A `namedtuple` is not diffed as a tuple; `deepdiff_rs` refuses it.** Real
   `DeepDiff` walks a `namedtuple`'s *fields* (`root[0].x`, with the class name as

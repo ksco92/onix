@@ -212,6 +212,26 @@ fn merge_map(dst: &mut BTreeMap<Vec<PathSegment>, Value>, src: BTreeMap<Vec<Path
     }
 }
 
+/// [`push_raw_category`]'s [`Report::to_json_value`] twin: serializes `map`
+/// into `root` under `name`, skipping an empty category, and collapsing a
+/// rendered-string collision the same way — here through
+/// `serde_json::Map::insert`, which likewise overwrites on a repeated key,
+/// so the survivor is again the last structural path visited.
+fn serialize_raw_category(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    map: &BTreeMap<Vec<PathSegment>, Value>,
+) {
+    if map.is_empty() {
+        return;
+    }
+    let mut category = serde_json::Map::new();
+    for (path, value) in map {
+        category.insert(render_path(path), value.to_serde_json());
+    }
+    root.insert(name.to_string(), serde_json::Value::Object(category));
+}
+
 /// Pushes `map` onto `root` under `name` as one rendered category, skipping
 /// it entirely when `map` is empty (matching `DeepDiff`'s own `to_json()`
 /// behavior of omitting empty categories). Shared by [`Report::to_value`]'s
@@ -228,25 +248,6 @@ fn merge_map(dst: &mut BTreeMap<Vec<PathSegment>, Value>, src: BTreeMap<Vec<Path
 /// everywhere else in this file treats `map`'s structural keys as
 /// already-unique (which, structurally, they always are — see
 /// [`insert_checked`]).
-/// [`push_raw_category`]'s [`Report::to_json_value`] twin: serializes `map`
-/// into `root` under `name`, skipping an empty category, and collapsing a
-/// rendered-string collision the same way (`Map::insert` overwrites on a
-/// repeated key, so the last structural path visited survives).
-fn serialize_raw_category(
-    root: &mut serde_json::Map<String, serde_json::Value>,
-    name: &str,
-    map: &BTreeMap<Vec<PathSegment>, Value>,
-) {
-    if map.is_empty() {
-        return;
-    }
-    let mut category = serde_json::Map::new();
-    for (path, value) in map {
-        category.insert(render_path(path), value.to_serde_json());
-    }
-    root.insert(name.to_string(), serde_json::Value::Object(category));
-}
-
 fn push_raw_category(
     root: &mut Vec<(String, Value)>,
     builder: &mut Builder,
