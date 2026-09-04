@@ -2583,3 +2583,138 @@ fn set_and_list_member_interning_scales_near_linearly() {
         );
     }
 }
+
+// --- distance-memo repetition-collision regression (issue #31 round 2) ---
+
+/// Two sibling subtrees whose list elements share an `ItemKey` (order- and
+/// repetition-insensitive) but differ in element repetition have different
+/// distances, so the distance memo must not hand one's cached answer to the
+/// other. `[3, 4]` and `[3]*8 + [4]*8` both key as the set `{3, 4}`; paired
+/// against `[9, 8]`, the short list is close enough to pair (a whole-element
+/// `values_changed`) while the long list is not (it recurses). Keying the memo
+/// by `ItemKey` conflated them; keying by the exact structural `DistKey` does
+/// not. Verified by the memo being decision-neutral (enabled == disabled) and
+/// by the two sibling keys never contaminating each other.
+#[test]
+fn memo_does_not_conflate_lists_sharing_itemkey_but_differing_repetition() {
+    let short = json!([3, 4]);
+    let long = json!([3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4]);
+    let other = json!([9, 8]);
+    let opts = DiffOptions {
+        ignore_order: true,
+        max_depth: 1_000,
+    };
+
+    // Both key orders: the memo processes candidates in order, so a short-then-
+    // long and a long-then-short sibling arrangement stress it differently.
+    for (p_a, q_a) in [(&short, &long), (&long, &short)] {
+        let a = cv(&json!({"p": [p_a], "q": [q_a]}));
+        let b = cv(&json!({"p": [other], "q": [other]}));
+
+        let memoized = crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::new())
+            .expect("memoized diff succeeds");
+        let unmemoized =
+            crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::disabled())
+                .expect("unmemoized diff succeeds");
+        assert_eq!(
+            memoized.to_json_value().to_string(),
+            unmemoized.to_json_value().to_string(),
+            "the memo changed the report for arrangement p={p_a}, q={q_a}"
+        );
+
+        // No cross-key contamination: the whole diff must equal the two
+        // sibling subtrees diffed in isolation and merged. If the memo leaked
+        // one sibling's distance into the other, this would differ.
+        let mut isolated = crate::diff::diff_with_options(
+            &cv(&json!({"p": [p_a]})),
+            &cv(&json!({"p": [other]})),
+            &opts,
+        )
+        .expect("p-only diff succeeds");
+        let q_only = crate::diff::diff_with_options(
+            &cv(&json!({"q": [q_a]})),
+            &cv(&json!({"q": [other]})),
+            &opts,
+        )
+        .expect("q-only diff succeeds");
+        isolated.merge(q_only);
+        assert_eq!(
+            memoized.to_json_value(),
+            isolated.to_json_value(),
+            "sibling subtrees contaminated each other for arrangement p={p_a}, q={q_a}"
+        );
+    }
+}
+
+/// A list of 1..12 elements drawn from a tiny scalar alphabet, so distinct
+/// lists frequently share an `ItemKey` (the deduplicated set of members) while
+/// differing in element repetition — exactly the shape that made the distance
+/// memo unsound when keyed by `ItemKey`.
+fn arb_repeating_list() -> impl Strategy<Value = serde_json::Value> {
+    prop::collection::vec(
+        prop_oneof![Just(json!(0)), Just(json!(1)), Just(json!(2))],
+        1..12,
+    )
+    .prop_map(serde_json::Value::Array)
+}
+
+/// An `(a, b)` pair engineered to stress the distance memo: `a` is a dict of
+/// four sibling keys each wrapping its own repetition-varying list, while `b`
+/// gives *every* sibling the same "other" list. So each sibling pairs its inner
+/// list against one shared other list, and two siblings whose lists share a
+/// member set (frequent over a 3-symbol alphabet) present the same `(removed,
+/// added)` `ItemKey` pair with genuinely different distances — the exact
+/// collision the memo must not act on. The list lengths make those distances
+/// straddle the 0.3 cutoff.
+fn arb_repeating_siblings_pair() -> impl Strategy<Value = (serde_json::Value, serde_json::Value)> {
+    let siblings = (
+        arb_repeating_list(),
+        arb_repeating_list(),
+        arb_repeating_list(),
+        arb_repeating_list(),
+    );
+    (siblings, arb_repeating_list()).prop_map(|((p, q, r, s), other)| {
+        let wrap = |v: serde_json::Value| serde_json::Value::Array(vec![v]);
+        let a = serde_json::json!({
+            "p": wrap(p),
+            "q": wrap(q),
+            "r": wrap(r),
+            "s": wrap(s),
+        });
+        let b = serde_json::json!({
+            "p": wrap(other.clone()),
+            "q": wrap(other.clone()),
+            "r": wrap(other.clone()),
+            "s": wrap(other),
+        });
+        (a, b)
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(800))]
+
+    /// Targeted at issue #31 round 2: over dicts of single-element lists
+    /// wrapping repetition-varying lists — the shape where sibling candidates
+    /// share an `ItemKey` but not a distance, and where those distances
+    /// straddle the 0.3 pairing cutoff — the distance memo must still change no
+    /// decision. Fails on the pre-fix `ItemKey`-keyed cache.
+    #[test]
+    fn memo_neutral_on_repetition_varying_siblings(
+        (a, b) in arb_repeating_siblings_pair(),
+    ) {
+        let a = crate::value::Value::from(a);
+        let b = crate::value::Value::from(b);
+        let opts = DiffOptions {
+            ignore_order: true,
+            max_depth: 1_000,
+        };
+        let with = crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::new());
+        let without =
+            crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::disabled());
+        prop_assert_eq!(
+            with.map(|report| report.to_json_value().to_string()),
+            without.map(|report| report.to_json_value().to_string()),
+        );
+    }
+}

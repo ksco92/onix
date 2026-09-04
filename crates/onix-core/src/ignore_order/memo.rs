@@ -40,12 +40,17 @@
 //!   `max_depth - depth - 1` — the trial always completes. So the structural
 //!   result depends only on content too.
 //!
-//! Since [`ItemKey`] is an *exact* structural identity (the full recursive
-//! key, not a lossy digest — and signed zeros are normalized the same way
-//! `numeric_distance` treats them), the `(removed, added)` `ItemKey` pair
-//! keys `rough_distance` losslessly. Caching by it is therefore
-//! observationally identical to recomputing — verified empirically by the
-//! with/without differential test in `super::tests`.
+//! Caching is therefore decision-neutral **as long as the key distinguishes
+//! every value pair whose distance differs**. [`ItemKey`] does not: it is
+//! order- and repetition-*insensitive* for a list/tuple (a `BTreeSet`
+//! payload), while `rough_length` and the trial diff read multiplicity, so
+//! two lists that share an `ItemKey` — `[3, 4]` and `[3]*8 + [4]*8` — have
+//! different distances yet keyed one cache slot (issue #31). The key is
+//! therefore a [`super::hash::DistKey`], a value's exact structural identity
+//! ([`crate::value::Value`]'s own repetition- and order-preserving
+//! `PartialEq`); two entries collide only when their distance is provably
+//! equal. Verified empirically by the with/without differential test in
+//! `super::tests` (including a repetition-only sibling divergence).
 //!
 //! # Tuple digests
 //!
@@ -127,17 +132,18 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
 use super::fxhash::HashMap;
-use super::hash::{ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId};
+use super::hash::{
+    DistKey, ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId,
+};
 
-/// A `(removed, added)` container-pair distance-cache key. Each side is an
-/// [`Rc`] so recording the `A * R` entries one pairing produces costs a
-/// refcount bump per side, not a deep clone of the items' structural keys (see
-/// issue #31). The `Rc` must keep deriving its `Hash`/`Eq` from the pointee, so
-/// two distinct-but-equal keys still dedup across nesting levels.
-type DistanceKey = (Rc<ItemKey>, Rc<ItemKey>);
+/// A `(removed, added)` container-pair distance-cache key — see
+/// [`super::hash::DistKey`] for why each side is a value's exact structural
+/// identity (not its order/repetition-insensitive `ItemKey`) and why recording
+/// the `A * R` entries one pairing produces stays cheap (a refcount bump per
+/// side, the value interned once per candidate).
+type DistanceKey = (DistKey, DistKey);
 
 /// The per-top-level-diff caches described in this module's doc: container-pair
 /// [`rough_distance`] results keyed by the `(removed, added)` [`ItemKey`]
@@ -202,13 +208,15 @@ impl IgnoreOrderMemo {
         }
     }
 
-    /// Whether a candidate pair should be routed through the cache: only when
-    /// enabled *and* both sides are containers. Scalar-involving pairs never
-    /// recurse (so never re-compute), so they skip the cache entirely — no
-    /// key clone, no map operation — which keeps flat `ignore_order` shapes
-    /// (a list of numbers, say) free of any memoization overhead.
-    pub(crate) fn should_cache(&self, removed: &ItemKey, added: &ItemKey) -> bool {
-        self.enabled && is_container(removed) && is_container(added)
+    /// Whether distance memoization is live for this run. A candidate pair is
+    /// additionally only cached when both sides are containers (see
+    /// [`is_container`]): scalar-involving pairs never recurse, so they never
+    /// re-compute and skip the cache entirely, keeping flat `ignore_order`
+    /// shapes (a list of numbers, say) free of any memoization overhead. The
+    /// `disabled()` cache reports `false` here so the with/without differential
+    /// test runs the identical code path with the cache inert.
+    pub(crate) fn caching_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// The cached distance for `key`, if present.
@@ -294,7 +302,8 @@ impl IgnoreOrderMemo {
 }
 
 /// Whether `key` is a container (list/tuple/dict) rather than a scalar — the
-/// variants whose distance is computed by a recursive trial diff.
-fn is_container(key: &ItemKey) -> bool {
+/// variants whose distance is computed by a recursive trial diff, and so the
+/// only ones worth memoizing.
+pub(crate) fn is_container(key: &ItemKey) -> bool {
     matches!(key, ItemKey::List(_) | ItemKey::Tuple(_) | ItemKey::Dict(_))
 }

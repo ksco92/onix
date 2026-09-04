@@ -5,6 +5,7 @@
 //! how this fits into the algorithm end to end.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use crate::lcs::{ScalarKey, mix_float_bits, python_scalar_key};
@@ -12,6 +13,100 @@ use crate::value::Value;
 
 use super::IgnoreOrderMemo;
 use super::fxhash::HashMap;
+
+// ---------------------------------------------------------------------
+// Distance-memo cache key
+// ---------------------------------------------------------------------
+
+/// The distance memo's cache key for one side of a candidate pair: a value's
+/// **exact** structural identity.
+///
+/// [`ItemKey`] cannot serve here. It is deliberately order- and
+/// repetition-*insensitive* for a list/tuple (its `List`/`Tuple` payload is a
+/// [`BTreeSet`], matching `DeepHash`'s item-matching rules), but the distance a
+/// candidate pair is ranked by reads multiplicity — [`super::rough_length`]
+/// counts every repeated element, and the trial diff's leaf count depends on
+/// each list's first-occurrence representative — so two values that share an
+/// `ItemKey` can have genuinely different distances. Keying the memo by
+/// `ItemKey` handed one such value's cached distance to the other (issue #31).
+///
+/// This keys by [`Value`]'s own `PartialEq` instead, which is exact:
+/// order- and repetition-preserving for lists and tuples, variant-sensitive
+/// for numbers, by-instant for datetimes. Two entries therefore share a cache
+/// slot only when their values are structurally identical and so their
+/// distance is provably equal — the memo is decision-neutral by construction.
+/// The [`Rc`] lets the shared value outlive the per-level [`HashedList`] that
+/// produced it and keeps a cache entry two pointers wide.
+#[derive(Clone)]
+pub(crate) struct DistKey(Rc<Value>);
+
+impl DistKey {
+    /// Interns a copy of `value` as a cache key. Cloned once per distinct
+    /// candidate (added/removed) entry, not once per pair, so the `A * R`
+    /// entries one pairing records cost a refcount bump each.
+    pub(crate) fn new(value: &Value) -> Self {
+        Self(Rc::new(value.clone()))
+    }
+}
+
+impl PartialEq for DistKey {
+    fn eq(&self, other: &Self) -> bool {
+        // `Value`'s own iterative structural equality — exact, and stack-safe
+        // on the deep values `Rc::ptr_eq` would miss across nesting levels.
+        self.0 == other.0
+    }
+}
+
+impl Eq for DistKey {}
+
+impl Hash for DistKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_value(&self.0, state);
+    }
+}
+
+/// Hashes a value consistently with its structural `PartialEq` (equal values
+/// hash equal): a per-variant discriminant, then the fields that equality
+/// compares — numbers through [`number_key`] (so `-0.0`/`0.0` agree and an
+/// int and an equal-valued float stay distinct), a datetime by its instant, a
+/// date by its ordinal, a list/tuple by its elements *in order with
+/// repetition*, a set/frozenset by its canonical members, a dict by its sorted
+/// entries.
+///
+/// Recurses natively, like [`item_key`] and [`super::rough_length`] — safe for
+/// the same reason: every caller first proves the value's nesting is within the
+/// crate's depth budget via [`crate::diff::check_value_depth`] (see this
+/// module's parent "Depth safety" doc section).
+fn hash_value<H: Hasher>(value: &Value, state: &mut H) {
+    core::mem::discriminant(value).hash(state);
+    match value {
+        Value::Null => {}
+        Value::Bool(b) => b.hash(state),
+        Value::Number(n) => number_key(n).hash(state),
+        Value::Str(s) => s.hash(state),
+        Value::DateTime(dt) => dt.instant().hash(state),
+        Value::Date(date) => date.ordinal().hash(state),
+        Value::Array(items) | Value::Tuple(items) => {
+            items.len().hash(state);
+            for item in items {
+                hash_value(item, state);
+            }
+        }
+        Value::Set(items) | Value::FrozenSet(items) => {
+            items.len().hash(state);
+            for item in items {
+                hash_value(item, state);
+            }
+        }
+        Value::Object(map) => {
+            map.len().hash(state);
+            for (key, child) in map {
+                key.hash(state);
+                hash_value(child, state);
+            }
+        }
+    }
+}
 
 /// A canonical hash-equivalence key for one JSON value, matching
 /// `DeepHash`'s default semantics for **item matching** under

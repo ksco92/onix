@@ -14,7 +14,8 @@ use crate::diff::DiffOptions;
 use super::IgnoreOrderMemo;
 use super::distance::{Distance, rough_distance};
 use super::fxhash::{HashMap, HashSet};
-use super::hash::{HashedList, ItemKey};
+use super::hash::{DistKey, HashedList, ItemKey};
+use super::memo::is_container;
 
 /// `cutoff_distance_for_pairs`'s default (`DeepDiff`'s own name;
 /// `CUTOFF_DISTANCE_FOR_PAIRS_DEFAULT`, diff.py) — a candidate pair is
@@ -96,42 +97,58 @@ pub(crate) fn compute_pairs(
     let mut most_in_common_pairs: HashMap<Rc<ItemKey>, AddedCandidates> = HashMap::default();
     let mut distances_to_from_hashes: BTreeMap<Distance, Vec<Rc<ItemKey>>> = BTreeMap::new();
 
-    for added_key in hashes_added {
+    // The distance cache is keyed by each side's exact structural identity
+    // (`DistKey`), not its order/repetition-insensitive `ItemKey` (see
+    // `DistKey`'s doc and issue #31). Intern one `DistKey` per *distinct*
+    // container candidate here — once per added/removed entry, not once per
+    // `A * R` pair — so recording a pair is a refcount bump. Only container
+    // candidates get one: a scalar pair's distance never recurses, so it is
+    // never memoized.
+    let added_dist: Vec<Option<DistKey>> = hashes_added
+        .iter()
+        .map(|key| is_container(key).then(|| DistKey::new(t2.get(key).1)))
+        .collect();
+    let removed_dist: Vec<Option<DistKey>> = hashes_removed
+        .iter()
+        .map(|key| is_container(key).then(|| DistKey::new(t1.get(key).1)))
+        .collect();
+
+    for (added_idx, added_key) in hashes_added.iter().enumerate() {
         let (_, added_value) = t2.get(added_key);
-        for removed_key in hashes_removed {
+        for (removed_idx, removed_key) in hashes_removed.iter().enumerate() {
             let (_, removed_value) = t1.get(removed_key);
-            // Memoize the distance for container-vs-container candidates —
-            // the pairs whose distance is a recursive trial diff and so the
-            // ones that re-compute exponentially without a cache. Scalar
-            // pairs skip the cache entirely (see `IgnoreOrderMemo::should_cache`).
-            // `rough_distance` is a pure function of the two subtrees'
-            // content on this path, so a cached value is identical to a fresh
-            // one — see the `super::memo` module doc for the proof.
-            let distance = if memo.should_cache(removed_key, added_key) {
-                let key = (Rc::clone(removed_key), Rc::clone(added_key));
-                if let Some(cached) = memo.get(&key) {
-                    cached
-                } else {
-                    let computed = rough_distance(
-                        removed_value,
-                        added_value,
-                        CUTOFF_DISTANCE_FOR_PAIRS,
-                        depth,
-                        opts,
-                        memo,
-                    );
-                    memo.put(key, computed);
-                    computed
+            // Memoize container-vs-container candidates — the pairs whose
+            // distance is a recursive trial diff and so the ones that
+            // re-compute exponentially without a cache. `rough_distance` is a
+            // pure function of the two subtrees' content on this path, so a
+            // value cached under their exact `DistKey` pair is identical to a
+            // fresh one — see the `super::memo` module doc for the proof.
+            let distance = match (&removed_dist[removed_idx], &added_dist[added_idx]) {
+                (Some(removed_dist_key), Some(added_dist_key)) if memo.caching_enabled() => {
+                    let key = (removed_dist_key.clone(), added_dist_key.clone());
+                    if let Some(cached) = memo.get(&key) {
+                        cached
+                    } else {
+                        let computed = rough_distance(
+                            removed_value,
+                            added_value,
+                            CUTOFF_DISTANCE_FOR_PAIRS,
+                            depth,
+                            opts,
+                            memo,
+                        );
+                        memo.put(key, computed);
+                        computed
+                    }
                 }
-            } else {
-                rough_distance(
+                _ => rough_distance(
                     removed_value,
                     added_value,
                     CUTOFF_DISTANCE_FOR_PAIRS,
                     depth,
                     opts,
                     memo,
-                )
+                ),
             };
             if distance >= CUTOFF_DISTANCE_FOR_PAIRS {
                 continue;
