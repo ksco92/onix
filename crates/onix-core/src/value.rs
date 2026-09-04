@@ -476,9 +476,10 @@ impl Number {
 /// which for a real Python set is hash order — unreproducible from one
 /// process to the next, and for `str` members dependent on
 /// `PYTHONHASHSEED`. Nothing here depends on it: membership, hashing and
-/// coercion all go through order-independent identities (the crate-private
-/// `set_member_key`, which the set diff compares members by), and the source
-/// order is dropped outright at construction: [`SetItems::new`] stores the
+/// coercion all go through order-independent identities (`set_difference`'s
+/// own doc, in `crate::ignore_order`, has the matching rule the set diff
+/// compares members by), and the source order is dropped outright at
+/// construction: [`SetItems::new`] stores the
 /// members in the crate's **canonical set order** instead, so every
 /// rendering of a set is canonical without sorting anything. Reproducing
 /// `DeepDiff`'s own order-dependent answers is impossible, and matching them
@@ -531,22 +532,22 @@ impl SetItems {
     ///
     /// Equality here is the structural one `canonical_cmp` decides, which
     /// is exactly what "renders to the same path segment" means. It is
-    /// *finer* than the membership identity the diff itself compares by
-    /// (the crate-private `set_member_key`, whose own doc has the exact
-    /// rule — bare numbers type-tagged, tuples positional, calendar values
-    /// by instant): two members Python would call equal but that this crate
-    /// can tell apart — `(1,)` and `(1.0,)` — are both kept here, and then
-    /// reported as the two distinct items they are. No Python set can hold
-    /// that particular pair, and the golden generator can never write one, so
-    /// it is reachable only by building a [`Value`] directly.
+    /// *finer* than the membership identity the diff itself compares by —
+    /// `set_difference`'s own doc (in `crate::ignore_order`) has the exact,
+    /// two-path matching rule: two members Python would call equal but that
+    /// this crate can tell apart — `(1,)` and `(1.0,)` — are both kept here,
+    /// and then reported as the two distinct items they are. No Python set
+    /// can hold that particular pair, and the golden generator can never
+    /// write one, so it is reachable only by building a [`Value`] directly.
     ///
     /// A naive and an aware `datetime` at one instant are the *opposite*
     /// case: `naive == aware` is `false` in Python, so `{naive, aware}` is a
     /// perfectly ordinary two-member set — `canonical_cmp` keeps both here
     /// too (it orders a `datetime` by instant, then by whether it is aware,
-    /// so the two never compare equal) — even though `set_member_key`'s
-    /// *matching* identity treats a same-instant naive/aware pair as one,
-    /// for comparing across two different sets. Storing every structurally
+    /// so the two never compare equal) — even though the matching identity
+    /// `set_difference` uses treats a same-instant naive/aware pair as one
+    /// (again, see its doc for the exact rule), for comparing across two
+    /// different sets. Storing every structurally
     /// distinct member and matching by a coarser identity are not in
     /// tension: this is the same split ordinary Rust `HashMap`/`HashSet`
     /// keys make between `Eq` and a custom-normalized lookup key. See

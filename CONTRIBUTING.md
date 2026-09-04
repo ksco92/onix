@@ -113,8 +113,14 @@ repository's `README.md`. No machinery is added solely to reproduce such a nuanc
 The differences shipped as of 0.4.0 — name and pointer only; the rationale for
 each lives at its pointer, not restated here:
 
-- **Canonical set order** — `tests/golden/README.md`'s "Set iteration order"
-  section, its "Canonical set order" point;
+- **Entry order** — the order of `set_item_added`/`set_item_removed` entries
+  is onix's canonical order, not DeepDiff's hash order —
+  `tests/golden/README.md`'s "Set iteration order" section, its "Entry
+  order" point.
+- **Canonical set order** — a different mechanism (member order *inside* a
+  serialized set/frozenset array, not the finding-entry order above) —
+  `tests/golden/README.md`'s "Set iteration order" section, its "Canonical
+  set order" point;
   [`onix_core::value::SetItems`](crates/onix-core/src/value.rs)'s own doc.
 - **Order-independent tuple/frozenset digest-cache winner** — `tests/golden/README.md`'s
   "Set iteration order" section, its "Which member of an equality class wins"
