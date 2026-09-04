@@ -35,13 +35,13 @@ dependence on the process's set iteration order (see
   DeepDiff disagrees with itself the case is one onix deliberately answers
   deterministically instead. Anything DeepDiff answers stably, onix must
   match.
-- Two further, narrower classes are recognized the same way, both real
-  divergences DeepDiff answers *stably* (so the `_reverse_sets` check above
-  does not catch them) rather than order-dependent instability:
-  `_is_known_calendar_tuple_cache_divergence` (tests/golden/README.md's "Set
-  iteration order" §5) and `_is_known_set_sequence_coercion_divergence` (§3,
+- A further, narrower class is recognized the same way: a real divergence
+  DeepDiff answers *stably* (so the `_reverse_sets` check above does not
+  catch it) rather than order-dependent instability —
+  `_is_known_set_sequence_coercion_divergence` (`tests/golden/README.md`'s
+  "Set iteration order" section, its `` `list(a_set) == some_list` `` point),
   reachable through any batch's values once a set/frozenset can pair against
-  a list/tuple under `ignore_order`, not only the set batch's own).
+  a list/tuple under `ignore_order`, not only the set batch's own.
 
 Every generator function that walks an *existing* `set`/`frozenset`'s members
 (as opposed to building a fresh one) does so through `_deterministic_members`,
@@ -959,54 +959,6 @@ def _deepdiff_answer(a: object, b: object, ignore_order: bool) -> object:
     return _normalize_set_categories(_normalize_types(real.to_dict()))
 
 
-def _is_known_calendar_tuple_cache_divergence(expected: object, actual: object) -> bool:
-    """
-    Whether `expected` (real DeepDiff) differs from `actual` (onix) only by extra
-    `set_item_added`/`set_item_removed` entries that mention a `datetime` -- the
-    documented, deterministic (not hash-order-dependent) tuple-digest-cache class
-    in `tests/golden/README.md`'s "Known DeepDiff quirks" section, in the one form
-    that class takes for a calendar value.
-
-    `DeepHash`'s digest cache lets a tuple inherit an earlier **Python-equal**
-    tuple's digest (`_make_hash_key` uses the tuple itself, via its own `==`/
-    `hash`, as the cache key) -- which is how `(1,)` and `(1.0,)` end up sharing
-    one digest despite `_prep_number` giving `1` and `1.0` different raw digest
-    strings on their own. A tuple holding a naive and an aware datetime at the
-    same instant is *never* Python-equal to its counterpart (`==` is strict,
-    unlike the instant `_prep_datetime` normalizes by) -- so that cache shortcut
-    never fires for it, and whichever *other* element also differs (even one
-    `_prep_datetime` or a same-Python-equality-class number would otherwise
-    resolve) is compared by its own unnormalized raw digest instead, which can
-    disagree where the two tuples are otherwise value-equal. onix's set-member
-    identity does not carry this cache/no-cache distinction: a calendar value
-    always matches by instant, at any nesting depth, so onix can only under-report
-    relative to DeepDiff here, never over-report -- every entry `actual` is
-    missing that `expected` has is one this function verifies mentions a
-    `datetime`, and every entry both sides have must agree exactly.
-
-    :param expected: Real DeepDiff's normalized `to_dict()`.
-    :param actual: onix's normalized `to_dict()`.
-    :return: `True` if the only divergence is of this class.
-    """
-    if not isinstance(expected, dict) or not isinstance(actual, dict):
-        return False
-
-    for category in ("set_item_added", "set_item_removed"):
-        expected_entries = set(expected.get(category, []))
-        actual_entries = set(actual.get(category, []))
-
-        if not actual_entries <= expected_entries:
-            return False
-
-        extra = expected_entries - actual_entries
-        if not all("datetime.datetime" in entry for entry in extra):
-            return False
-
-    other_keys = (set(expected) | set(actual)) - {"set_item_added", "set_item_removed"}
-
-    return all(expected.get(key) == actual.get(key) for key in other_keys)
-
-
 # The container kinds `_is_known_set_sequence_coercion_divergence` treats as a
 # reachable "coerced" pairing under `ignore_order` -- see that function's doc.
 _SET_KINDS: Final[frozenset[str]] = frozenset({"set", "frozenset"})
@@ -1017,9 +969,9 @@ def _is_known_set_sequence_coercion_divergence(expected: object, actual: object)
     """
     Whether `expected` differs from `actual` only by the already-documented
     "`list(a_set) == some_list`" class in `tests/golden/README.md`'s "Set
-    iteration order" §3 -- reachable through any batch whose values can pair a
-    set/frozenset against a list/tuple under `ignore_order`, calendar values
-    included; this is not specific to them.
+    iteration order" section -- reachable through any batch whose values can
+    pair a set/frozenset against a list/tuple under `ignore_order`, calendar
+    values included; this is not specific to them.
 
     Once `ignore_order` pairs a set against a sequence, real DeepDiff decides
     whether to report the pair as `values_changed` (coercion "reproduced" the
@@ -1080,7 +1032,18 @@ def _is_known_set_sequence_coercion_divergence(expected: object, actual: object)
 
 def _diverges_with_sets(a: object, b: object, ignore_order: bool) -> tuple[object, object] | None:
     """
-    Diff `a`/`b` with both engines, allowing the two documented set-order relaxations.
+    Diff `a`/`b` with both engines, tolerating two accepted, distinct kinds of
+    non-divergence -- see this module's own doc for the full mechanism each
+    reproduces:
+
+    - `DeepDiff` disagreeing with itself once its sets are rebuilt in another
+      order (`_reverse_sets`, order-dependent): a case only onix answers
+      deterministically.
+    - The pre-existing, *deterministic* `` `list(a_set) == some_list` ``
+      class (`_is_known_set_sequence_coercion_divergence`): a real,
+      stably-reproducible divergence documented in
+      `tests/golden/README.md`'s "Set iteration order" section, not order
+      instability.
 
     :param a: The first value.
     :param b: The second value.
@@ -1100,14 +1063,10 @@ def _diverges_with_sets(a: object, b: object, ignore_order: bool) -> tuple[objec
         if expected_dict != _deepdiff_answer(_reverse_sets(a), _reverse_sets(b), ignore_order):
             return None
 
-        # The tuple-digest-cache class documented in tests/golden/README.md,
-        # in its calendar-value form: see `_is_known_calendar_tuple_cache_divergence`.
-        if _is_known_calendar_tuple_cache_divergence(expected_dict, actual_dict):
-            return None
-
         # The pre-existing "list(a_set) == some_list" class (Set iteration
-        # order §3), reachable through any batch's values, not only sets':
-        # see `_is_known_set_sequence_coercion_divergence`.
+        # order, the `list(a_set) == some_list` point), reachable through any
+        # batch's values, not only sets': see
+        # `_is_known_set_sequence_coercion_divergence`.
         if _is_known_set_sequence_coercion_divergence(expected_dict, actual_dict):
             return None
 

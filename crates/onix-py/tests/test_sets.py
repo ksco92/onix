@@ -253,7 +253,7 @@ def test_set_tags_are_ordinary_dicts_to_the_json_path() -> None:
 
 
 def test_a_nested_frozenset_renders_in_canonical_order() -> None:
-    """Documented difference 1: a frozenset rendered *inside* a path uses onix's order.
+    """Set iteration order, "Canonical set order": a frozenset rendered *inside* a path uses onix's order.
 
     Real DeepDiff renders it with Python's ``str()``, i.e. in the set's own
     hash order — which depends on how the set was built, and which no
@@ -280,7 +280,7 @@ def test_a_nested_frozenset_renders_in_canonical_order() -> None:
 
 
 def test_a_frozenset_never_inherits_another_ones_digest() -> None:
-    """Documented difference 2: no shared hash cache, so no order-decided winner.
+    """Set iteration order, "Which member of an equality class wins": no shared hash cache.
 
     A frozenset is hashable, so real DeepDiff lets it inherit the digest of the
     first Python-equal frozenset hashed in the run — which makes its answer
@@ -314,7 +314,7 @@ def test_a_frozenset_never_inherits_another_ones_digest() -> None:
 
 
 def test_a_set_versus_a_list_is_a_type_change_whatever_the_order() -> None:
-    """Documented difference 3: `list(a_set) == some_list` is answered by membership.
+    """Set iteration order, "`list(a_set) == some_list`": answered by membership in onix.
 
     Real DeepDiff answers it in the set's own iteration order, so whether the
     pair stays a type change depends on how the set happens to iterate:
@@ -471,7 +471,7 @@ def test_an_unhashable_container_anywhere_inside_a_set_member_is_refused() -> No
 
 
 def test_a_naive_and_aware_datetime_set_member_is_two_members_in_onix_one_in_deepdiff() -> None:
-    """Documented difference 4: DeepDiff's hasher can report only one of two Python members.
+    """Set iteration order, "A naive and an aware datetime": DeepDiff's hasher can report only one of two Python members.
 
     A real Python set never merges a naive and an aware datetime at one
     instant -- ``naive == aware`` is `False`, so ``{naive, aware}`` is a
@@ -502,7 +502,7 @@ def test_a_naive_and_aware_datetime_set_member_is_two_members_in_onix_one_in_dee
 
 
 def test_a_tuple_set_member_matches_by_position_where_deepdiff_ignores_order_and_repetition() -> None:
-    """Documented difference 5: a tuple/frozenset set member is Python `==`-strict in onix only.
+    """Set iteration order, "A tuple or a frozenset set member matches order- and repetition-insensitively": Python `==`-strict in onix only.
 
     `DeepHash._prep_iterable` runs with `ignore_iterable_order`/
     `ignore_repetition` for *every* iterable it hashes, tuples included, not
@@ -533,3 +533,35 @@ def test_a_tuple_set_member_matches_by_position_where_deepdiff_ignores_order_and
         "set_item_added": ["root[(1, 2, 2)]"],
     }
     assert real_repeat == {}
+
+
+def test_a_tuple_set_member_matches_deepdiff_on_either_its_cache_or_content_identity() -> None:
+    """A tuple set member's identity checks both of DeepHash's two paths, not just one.
+
+    `_diff_set` hashes a tuple set member through `DeepHash`, which is
+    genuinely two-tiered: two tuples share one digest outright when they are
+    fully Python-`==` equal (`==` is strict across naive/aware, so a datetime
+    difference blocks this shortcut), and *independently*, each tuple's own
+    per-element content digest can still coincide even when that shortcut
+    does not apply (`_prep_datetime` normalizes every datetime
+    unconditionally; `_prep_number` never collapses a number across types).
+    Reading only one of the two paths gets one of the four combinations below
+    wrong; onix checks both and matches on either.
+    """
+    naive = datetime.datetime(2024, 1, 1)
+    aware = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+
+    cases = [
+        # (a, b, expect_empty)
+        ({(naive, 1)}, {(aware, 1.0)}, False),  # neither path agrees
+        ({(naive, 1)}, {(naive, 1.0)}, True),  # agrees via the cache path
+        ({(naive, 1)}, {(aware, 1)}, True),  # agrees via the content path
+        ({naive}, {aware}, True),  # bare member, content path only
+        ({naive, aware}, {aware}, True),  # both onix members match aware
+    ]
+    for a, b, expect_empty in cases:
+        onix = DeepDiff(a, b).to_dict()
+        real = RealDeepDiff(a, b, verbose_level=2).to_dict()
+
+        assert onix == real, f"onix diverged from real DeepDiff for {a!r} vs {b!r}"
+        assert bool(onix) == (not expect_empty), f"unexpected result for {a!r} vs {b!r}: {onix!r}"
