@@ -279,10 +279,15 @@ impl DateTime {
     /// value whose UTC wall clock falls outside Python's own `1..=9999` year
     /// range, by at most one day (`9999-12-31T23:00-01:00`, say). Real
     /// `astimezone(timezone.utc)` raises `OverflowError: date value out of
-    /// range` there, and so `DeepDiff` raises rather than reporting anything
-    /// — verified live, including that it raises only when two datetimes are
-    /// actually compared, never when such a value is merely added, removed,
-    /// or type-changed against a non-datetime.
+    /// range` there, and so `DeepDiff` raises rather than reporting anything.
+    ///
+    /// *When* each tool reaches that point differs, verified live. On the
+    /// ordered path only `_diff_datetime` normalizes, so both raise only when
+    /// two datetimes are actually compared. Under `ignore_order`,
+    /// `deephash.py::_prep_datetime` normalizes every datetime it hashes, so
+    /// real `DeepDiff` raises for such a value even when it is merely added,
+    /// removed, or shuffled, where onix hashes by instant (see
+    /// `crate::ignore_order`) and reports it raw.
     #[must_use]
     pub fn to_utc(self) -> Option<Self> {
         let instant =

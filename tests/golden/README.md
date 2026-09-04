@@ -302,10 +302,20 @@ with `_prep_datetime`'s `YYYY-MM-DD HH:MM:SS+00:00`.
   `OverflowError: date value out of range` there, so DeepDiff raises rather
   than reporting anything. onix raises too, as
   `onix_core::Error::DateTimeOutOfRange`, surfaced to Python as a
-  `ValueError` naming the path. Both tools only normalize when two datetimes
-  are genuinely compared, so such a value added, removed, or type-changed
-  against a non-datetime still reports its raw rendering. No golden case can
-  hold one, since the corpus records reports rather than exceptions.
+  `ValueError` naming the path.
+
+  *When* each tool reaches that point differs. On the ordered path only
+  `_diff_datetime` normalizes, so both tools raise only when two datetimes are
+  actually compared, and such a value added, removed, or type-changed against
+  a non-datetime reports its raw rendering in both. Under `ignore_order`,
+  `DeepHash._prep_datetime` normalizes every datetime it hashes (the same
+  normalization noted above), so real DeepDiff raises even for a value that is
+  merely added, removed, or shuffled; onix hashes by instant and reports it
+  raw. Keeping the deterministic report is this project's compatibility
+  policy: a crash is not a semantic worth reproducing. No golden case can hold
+  such a value either way, since the corpus records reports rather than
+  exceptions; `an_unnormalizable_datetime_under_ignore_order_is_reported_raw`
+  in `crates/onix-core/src/diff/tests.rs` pins onix's side.
 
 `crate::diff::object_diff` (the ordinary dict-vs-dict diff, used
 identically whether or not `ignore_order` is set) implements `DeepDiff`'s

@@ -44,10 +44,16 @@ pub enum Error {
     /// aware value such as `9999-12-31T23:00-01:00`.
     ///
     /// Real `DeepDiff` raises `OverflowError: date value out of range` on
-    /// exactly this pair, so there is no report to produce. It raises only
-    /// when two datetimes are genuinely compared: such a value added,
-    /// removed, or type-changed against a non-datetime never normalizes, and
-    /// is reported raw by both tools.
+    /// exactly this pair, so there is no report to produce.
+    ///
+    /// On the ordered path only `_diff_datetime` normalizes, so both tools
+    /// raise only when two datetimes are actually compared. Under
+    /// `ignore_order`, `deephash.py::_prep_datetime` normalizes *every*
+    /// datetime it hashes, so real `DeepDiff` raises for such a value even
+    /// when it is merely added, removed, or shuffled, where onix hashes by
+    /// instant and reports it raw — a documented divergence under the
+    /// project's compatibility policy (a crash is not a semantic to
+    /// reproduce), not a gap.
     DateTimeOutOfRange {
         /// The DeepDiff-style path (e.g. `"root['a']"`) of the pair that
         /// could not be normalized.

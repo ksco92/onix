@@ -2265,9 +2265,11 @@ fn comparing_two_datetimes_that_cannot_normalize_to_utc_is_an_error_naming_the_p
 
 #[test]
 fn an_unnormalizable_datetime_still_diffs_when_it_is_never_compared_to_another_one() {
-    // Real `DeepDiff` normalizes only inside `_diff_datetime`, so the same
-    // value added, or type-changed against a non-datetime, reports its raw
-    // rendering rather than raising — verified live.
+    // On the ordered path real `DeepDiff` normalizes only inside
+    // `_diff_datetime`, so the same value added, or type-changed against a
+    // non-datetime, reports its raw rendering rather than raising in both
+    // tools — verified live. The `ignore_order` path differs; see the test
+    // below.
     let extreme = cdt_at(9999, 12, 31, 23, 0, 0, 0, Some(-3600));
 
     let added = super::diff(&cv(&json!({})), &wrapped(extreme.clone())).unwrap();
@@ -2286,4 +2288,44 @@ fn an_unnormalizable_datetime_still_diffs_when_it_is_never_compared_to_another_o
             "new_value": 5,
         }}})
     );
+}
+
+#[test]
+fn an_unnormalizable_datetime_under_ignore_order_is_reported_raw() {
+    // `ignore_order` hashes every item, and this engine's hash key is the
+    // instant, which every datetime has — so an extreme aware value that has
+    // no UTC form is still hashed, paired, and reported raw.
+    //
+    // Real `DeepDiff` diverges here, and deliberately so: its
+    // `deephash.py::_prep_datetime` runs `datetime_normalize` on every
+    // datetime it hashes, so it raises `OverflowError: date value out of
+    // range` for both cases below — the added one and the pure shuffle that
+    // has no finding at all. Reproducing a crash is not a semantic worth
+    // matching (see `tests/golden/README.md`), so onix keeps the
+    // deterministic report.
+    let extreme = cdt_at(9999, 12, 31, 23, 0, 0, 0, Some(-3600));
+    let opts = super::DiffOptions {
+        ignore_order: true,
+        ..super::DiffOptions::default()
+    };
+    let list = |items: Vec<CValue>| CValue::Array(items.into_boxed_slice());
+
+    let added = super::diff_with_options(
+        &list(vec![cv(&json!(1))]),
+        &list(vec![cv(&json!(1)), extreme.clone()]),
+        &opts,
+    )
+    .unwrap();
+    let shuffled = super::diff_with_options(
+        &list(vec![cv(&json!(1)), extreme.clone()]),
+        &list(vec![extreme, cv(&json!(1))]),
+        &opts,
+    )
+    .unwrap();
+
+    assert_eq!(
+        added.to_json_value(),
+        json!({"iterable_item_added": {"root[1]": "9999-12-31T23:00:00-01:00"}})
+    );
+    assert!(shuffled.is_empty());
 }
