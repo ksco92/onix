@@ -56,6 +56,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Final
 
@@ -65,6 +66,9 @@ from deepdiff_rs import DeepDiff as OnixDeepDiff
 from deepdiff_rs import diff_json
 
 type JsonValue = dict[str, "JsonValue"] | list["JsonValue"] | str | int | float | bool | None
+# `id`/`name` (int/str), `created_at` (datetime), `coordinate` (a tuple pair),
+# `tags` (a string set) — the fields `_make_typed_record` builds.
+type TypedRecord = dict[str, int | str | datetime | tuple[int, int] | tuple[float, float] | set[str]]
 
 ##############################################
 ##############################################
@@ -78,11 +82,17 @@ type JsonValue = dict[str, "JsonValue"] | list["JsonValue"] | str | int | float 
 SEED: Final[int] = 20260901
 IGNORE_ORDER_SIZE: Final[int] = 10_000
 RECORD_COUNT: Final[int] = 20_000
+TYPED_RECORD_COUNT: Final[int] = 10_000
 VALUE_CHANGE_RATE: Final[float] = 0.05
 RUNS: Final[int] = 11
 
 _ORIGINAL_INT_RANGE: Final[tuple[int, int]] = (0, 1_000_000)
 _CHANGED_INT_RANGE: Final[tuple[int, int]] = (10_000_000, 20_000_000)
+
+# A fixed offset, never the process's local zone, so the fixture's aware
+# half is deterministic across machines.
+_TYPED_RECORD_TZ: Final[timezone] = timezone(timedelta(hours=-5))
+_TAG_POOL: Final[tuple[str, ...]] = ("alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta")
 
 
 ##############################################
@@ -90,6 +100,17 @@ _CHANGED_INT_RANGE: Final[tuple[int, int]] = (10_000_000, 20_000_000)
 ##############################################
 ##############################################
 # Fixture generation (live Python objects)
+
+
+def _mutation_indices(count: int, rng: random.Random) -> list[int]:
+    """
+    Sample the indices to mutate for a `VALUE_CHANGE_RATE` batch.
+
+    :param count: Total element count to sample from.
+    :param rng: Seeded random source.
+    :return: The indices to mutate.
+    """
+    return rng.sample(range(count), int(count * VALUE_CHANGE_RATE))
 
 
 def build_ignore_order_case() -> tuple[JsonValue, JsonValue]:
@@ -102,9 +123,8 @@ def build_ignore_order_case() -> tuple[JsonValue, JsonValue]:
     a: list[JsonValue] = [rng.randint(*_ORIGINAL_INT_RANGE) for _ in range(IGNORE_ORDER_SIZE)]
     b = list(a)
     rng.shuffle(b)
-    change_n = int(IGNORE_ORDER_SIZE * VALUE_CHANGE_RATE)
 
-    for index in rng.sample(range(IGNORE_ORDER_SIZE), change_n):
+    for index in _mutation_indices(IGNORE_ORDER_SIZE, rng):
         b[index] = rng.randint(*_CHANGED_INT_RANGE)
 
     return a, b
@@ -184,12 +204,101 @@ def build_api_payloads_case() -> tuple[JsonValue, JsonValue]:
     rng = random.Random(SEED + 1)
     a: list[JsonValue] = [_make_record(i, rng) for i in range(RECORD_COUNT)]
     b = copy.deepcopy(a)
-    change_n = int(RECORD_COUNT * VALUE_CHANGE_RATE)
 
-    for index in rng.sample(range(RECORD_COUNT), change_n):
+    for index in _mutation_indices(RECORD_COUNT, rng):
         record = b[index]
         assert isinstance(record, dict)
         b[index] = _mutate_record(record, rng)
+
+    return a, b
+
+
+def _make_typed_record(index: int, rng: random.Random) -> TypedRecord:
+    """
+    Build one record whose fields exercise 0.4.0's typed-conversion path: a
+    datetime (naive or aware), a numeric-pair tuple, and a small string set.
+
+    :param index: The record's position (used for its `id` and to alternate
+        naive/aware).
+    :param rng: Seeded random source.
+    :return: The built record.
+    """
+    coordinate: tuple[int, int] | tuple[float, float]
+
+    if rng.random() < 0.5:
+        coordinate = (round(rng.uniform(-90.0, 90.0), 4), round(rng.uniform(-180.0, 180.0), 4))
+    else:
+        coordinate = (rng.randint(-1000, 1000), rng.randint(-1000, 1000))
+
+    # Drawn into a variable rather than inline in the dict literal below:
+    # dict values evaluate in key order, and `tags` must draw before
+    # `created_at` for this function's RNG consumption to stay positionally
+    # fixed regardless of how the dict literal is ordered or edited.
+    tags = set(rng.sample(_TAG_POOL, rng.randint(1, 4)))
+
+    return {
+        "id": index,
+        "name": f"typed_{index:07d}",
+        "created_at": datetime(
+            2020 + rng.randint(0, 5),
+            rng.randint(1, 12),
+            rng.randint(1, 28),
+            rng.randint(0, 23),
+            rng.randint(0, 59),
+            rng.randint(0, 59),
+            tzinfo=_TYPED_RECORD_TZ if index % 2 == 0 else None,
+        ),
+        "coordinate": coordinate,
+        "tags": tags,
+    }
+
+
+def _mutate_typed_record(record: TypedRecord, rng: random.Random) -> TypedRecord:
+    """
+    Mutate one typed record for a "value changed" entry: shift its datetime
+    and add a tag drawn from the pool. The tag draw is a no-op when the
+    record already holds that tag, so the datetime always changes but only
+    roughly 70% of mutated records also gain a set change.
+
+    :param record: The original record; not mutated in place.
+    :param rng: Seeded random source.
+    :return: The mutated copy.
+    """
+    mutated = dict(record)
+    created_at = record["created_at"]
+    tags = record["tags"]
+    assert isinstance(created_at, datetime)
+    assert isinstance(tags, set)
+    mutated["created_at"] = created_at + timedelta(days=rng.randint(1, 30))
+    mutated["tags"] = tags | {rng.choice(_TAG_POOL)}
+
+    return mutated
+
+
+def build_typed_records_case(*, shuffle: bool = False) -> tuple[list[TypedRecord], list[TypedRecord]]:
+    """
+    Build the `typed_records` shape: `TYPED_RECORD_COUNT` records, each
+    carrying a datetime, a tuple coordinate, and a string-set tags field,
+    ~5% mutated at record granularity.
+
+    `b` is `copy.deepcopy(a)`, for the same identity-sharing reason
+    documented on `build_api_payloads_case`. With `shuffle=True`, `b` is
+    reordered before mutation (matching `build_ignore_order_case`'s
+    shuffle-then-mutate order) for the `ignore_order` variant; the ordered
+    variant leaves `b` in `a`'s order, matching `build_api_payloads_case`.
+
+    :param shuffle: Whether to shuffle `b`'s record order before mutating.
+    :return: The `(a, b)` pair, as live Python lists of dicts.
+    """
+    rng = random.Random(SEED + 2)
+    a = [_make_typed_record(i, rng) for i in range(TYPED_RECORD_COUNT)]
+    b = copy.deepcopy(a)
+
+    if shuffle:
+        rng.shuffle(b)
+
+    for index in _mutation_indices(TYPED_RECORD_COUNT, rng):
+        b[index] = _mutate_typed_record(b[index], rng)
 
     return a, b
 
@@ -214,6 +323,8 @@ def build_api_payloads_case() -> tuple[JsonValue, JsonValue]:
 CASE_LABELS: Final[dict[str, str]] = {
     "ignore_order": "`ignore_order`, 10k shuffled ints, ~5% mutated (live objects)",
     "api_payloads": "Heterogeneous API-payload records, n=20,000 (live objects)",
+    "typed_records": "Typed records (datetime/tuple/set fields), n=10,000 (live objects)",
+    "typed_records_ignore_order": "Same typed-records shape, `ignore_order` (live objects)",
     "ignore_order_json": "Same `ignore_order` shape, via `diff_json` (JSON-string path)",
     "api_payloads_json": "Same API-payload shape, via `diff_json` (JSON-string path)",
     "api_payloads_file": "Same API-payload shape, both tools reading two JSON files from disk",
@@ -268,6 +379,12 @@ def _diff_callable(tool: str, case: str) -> Callable[[], object]:
     """
     if case in ("ignore_order", "ignore_order_json"):
         a, b = build_ignore_order_case()
+        ignore_order = True
+    elif case == "typed_records":
+        a, b = build_typed_records_case()
+        ignore_order = False
+    elif case == "typed_records_ignore_order":
+        a, b = build_typed_records_case(shuffle=True)
         ignore_order = True
     else:
         a, b = build_api_payloads_case()
