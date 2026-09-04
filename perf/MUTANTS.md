@@ -18,8 +18,8 @@ make mutants        # cargo mutants --package onix-core --package onix-cli
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **443** mutants (18 in `onix-cli`,
-425 in `onix-core`). Its classification of each mutant into
+`make mutants` enumerates a deterministic **979** mutants (20 in `onix-cli`,
+959 in `onix-core`). Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
 depends on wall-clock time (a slow mutant is a "timeout" on one machine and
 "missed"/"caught" on another) and, in this workspace, on build caching (a
@@ -30,8 +30,8 @@ independently of any single run's labels.
 ### Kinds of mutant that survive, and why none is a real test gap
 
 1. **Equivalent viable mutants** — a mutation that compiles and runs but
-   cannot change any output, so no test can kill it. All are confined to two
-   spots, each with the argument written at the source:
+   cannot change any output, so no test can kill it. Confined to these spots,
+   each with the argument written at the source:
    - `onix-core/src/lcs.rs`'s `find_longest_match` / `get_matching_blocks`:
      these either force a non-terminating loop (reported as a timeout) or
      produce a wrong-but-terminating result the surrounding comments prove is
@@ -44,6 +44,26 @@ independently of any single run's labels.
      and `<` mutants caught (the expected signature of an equivalent mutant
      beside non-equivalent ones). The argument for why is at the comment on
      that line.
+   - `onix-core/src/path.rs`'s `python_float_repr`: `exponent < 0` → `<=`
+     only runs inside the scientific-notation branch, where `exponent == 0`
+     is structurally unreachable (`decimal_point <= -4 || decimal_point >
+     16` already excludes it) — `<` and `<=` compute the same result for
+     every value that branch can see.
+   - `onix-core/src/ignore_order/distance.rs`'s `distance_family`: the
+     datetime `timestamp` field's `/ 1_000_000.0` → `* 1_000_000.0`.
+     `numeric_distance`'s own formula, `cutoff * (n1 - n2) / (n1 + n2)`, is a
+     ratio, invariant in the reals under scaling both operands by the same
+     nonzero constant — no reachable input has been observed to distinguish
+     `/` from `*` here, though `f64` rounding means this is an empirical, not
+     an algebraic, guarantee (unlike the `array.rs` case above, exact-integer
+     `/` versus `*` on `f64` is not bit-exact in general). The sibling `%`
+     mutant on the same line *is* a genuine, non-equivalent rescale and is
+     caught.
+   - `onix-core/src/ignore_order/memo.rs`'s `IgnoreOrderMemo::should_cache`/
+     `is_container`, mutated to always return `true`: both only gate whether
+     a candidate pair's distance is *cached*, never what value is computed —
+     caching unconditionally costs extra cycles (a scalar pair now pays a
+     clone + hashmap round trip it used to skip) but cannot change a result.
 
 2. **`Default`-substitution mutants that cannot compile.** cargo-mutants tries
    replacing a function body with `Default::default()` (and similar). Most fail
@@ -68,16 +88,29 @@ mutant is caught.
 
 ## A representative run (serial `make mutants`, this tree)
 
-443 mutants tested: 416 caught, 9 missed, 6 timeouts, 12 unviable.
+The full PR #21 (type-parity integration) run: 979 mutants tested — 873
+caught, 74 unviable, 13 missed, 19 timeout. `cargo-mutants`' own parallel
+workers contending with each other (and, in that run, with a concurrent
+`make check`) produced false timeouts outside the genuinely non-terminating
+`lcs.rs` spots; every one was reproduced by hand, standalone, and is either
+fixed (a real gap, now caught — see the PR body for the list) or one of the
+equivalent kinds documented above. A scoped re-run of just the touched files,
+after the fixes and on an otherwise-idle machine, shows the expected
+signature cleanly: 553 tested — 528 caught, 22 unviable, 2 missed (`path.rs`'s
+and `distance.rs`'s equivalent mutants above), **0 timeout**.
 
-- **Missed (9):** eight in `lcs.rs`'s `get_matching_blocks` and one in
-  `diff/array.rs`'s `lcs_or_positional_array_diff` (`> 1` → `>= 1`) — all
-  equivalent, per kind (1).
-- **Timeouts (6):** all in `lcs.rs` (`find_longest_match` /
-  `get_matching_blocks`), per kind (1).
-- **Unviable (12):** the `Default`-substitution (and one `HashMap::new()`)
+A fresh full run should therefore land close to: 979 tested, 74 unviable, and
+the survivors confined to the two kinds documented above — 8 in `lcs.rs`'s
+`get_matching_blocks` plus one in `diff/array.rs`'s `lcs_or_positional_array_diff`
+(missed), 6 in `lcs.rs`'s `find_longest_match`/`get_matching_blocks` (genuine
+timeouts, non-terminating), `path.rs`'s `python_float_repr` mutant (missed),
+`distance.rs`'s `* 1_000_000.0` mutant (missed), and `memo.rs`'s four
+caching-gate mutants (missed) — 15 missed + 6 timeout + 74 unviable + 884
+caught = 979.
+
+- **Unviable (74):** the `Default`-substitution (and `HashMap::new()`)
   mutants of kind (2), including `args.rs:32`/`args.rs:76` and
   `distance.rs:32`/`distance.rs:38`; none compiles, so no test can exercise it.
 
 Future work that touches this logic should re-run `make mutants` and confirm
-that no *viable* mutant survives outside the two documented equivalent spots.
+that no *viable* mutant survives outside the five documented equivalent spots.

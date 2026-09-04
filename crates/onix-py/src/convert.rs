@@ -36,12 +36,15 @@
 //! - A `set`/`frozenset` member that is not one of the types this MVP allows
 //!   a set to hold (`None`, `bool`, `int`, `float`, `str`, `tuple`,
 //!   `frozenset`, `datetime`, `date`) raises [`PyTypeError`] naming the
-//!   member's type and its path. A `list` or `dict` is only ever reachable
-//!   there via a subclass that defines `__hash__`, which real `DeepDiff`
-//!   would report under that subclass's own name — the same reason a
-//!   `tuple` subclass is refused below — and stays refused, including
-//!   nested inside an otherwise-allowed container: `{(datetime(2024, 1,
-//!   1),)}` converts, but `{([1],)}` does not.
+//!   member's type and its path. A plain `list` or `dict` cannot reach a set
+//!   member at all — Python itself refuses `{[1]}` with `TypeError:
+//!   unhashable type: 'list'` — but a `list`/`dict` *subclass* that defines
+//!   `__hash__` can, and real `DeepDiff` would report it under that
+//!   subclass's own name — the same reason a `tuple` subclass is refused
+//!   below — so it stays refused here too, including nested inside an
+//!   otherwise-allowed container: `{(datetime(2024, 1, 1),)}` converts, but
+//!   `{(HashableList([1]),)}` does not, for a `list` subclass `HashableList`
+//!   defining `__hash__`.
 //! - Any other unrecognized type (`datetime.time`, `datetime.timedelta`,
 //!   custom objects, …) raises [`PyTypeError`] naming the type and the exact
 //!   path it was found at (e.g. `"unsupported type for diffing: complex at
@@ -243,12 +246,14 @@ enum Step<'py> {
 ///
 /// `set_member` restricts the accepted types to the ones this MVP allows
 /// inside a set: a `list` or `dict` reaching a set member (only possible
-/// through a subclass defining `__hash__`) is refused with the same error any
-/// other unsupported type gets. The flag is *transitive* — it is set for a
-/// set's own members and for everything nested inside one — so `{([1],)}`
-/// is refused for its nested `list` the same way `{[1]}` would be. A
-/// `datetime`/`date` is accepted either way: [`onix_core::path::set_item_repr`]
-/// defines how one renders as a set item, top-level or nested.
+/// through a subclass defining `__hash__`, since a plain `list`/`dict` is
+/// unhashable and Python itself refuses to build the set) is refused with
+/// the same error any other unsupported type gets. The flag is *transitive*
+/// — it is set for a set's own members and for everything nested inside one
+/// — so `{(HashableList([1]),)}` is refused for its nested `list` subclass
+/// the same way `{HashableList([1])}` would be. A `datetime`/`date` is
+/// accepted either way: [`onix_core::path::set_item_repr`] defines how one
+/// renders as a set item, top-level or nested.
 fn classify<'py>(
     current: &Bound<'py, PyAny>,
     path: &[PathSegment],

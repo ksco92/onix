@@ -110,34 +110,36 @@ picks the simpler, deterministic behavior and documents the difference in
 [`tests/golden/README.md`](tests/golden/README.md) plus one sentence in this
 repository's `README.md`. No machinery is added solely to reproduce such a nuance.
 
-The differences shipped as of 0.4.0:
+The differences shipped as of 0.4.0 — name and pointer only; the rationale for
+each lives at its pointer, not restated here:
 
-- **Canonical set order.** A set's members, wherever they become output, are emitted
-  in one documented order rather than DeepDiff's hash order. See
-  [`onix_core::value::SetItems`](crates/onix-core/src/value.rs)'s own doc and
-  `tests/golden/README.md`'s "Set iteration order" section.
-- **Order-independent set membership and coercion.** Which member of a Python-equality
-  class a `frozenset` reports, and whether a set-versus-sequence pairing stays a
-  `type_changes`, are answered by the rule DeepDiff's cache implements rather than by
-  replaying its iteration order. See `tests/golden/README.md`'s "Set iteration order"
-  section.
-- **`frozenset` and `date` supersets.** A report holding a `frozenset` or a `date`
-  value still serializes to JSON here, where DeepDiff's own `to_json()` raises
-  `TypeError` on either. See `tests/golden/README.md`'s "The `date` superset" section.
-- **Naive datetimes read as UTC.** A naive `datetime`/`date` is always treated as UTC,
-  including for `ignore_order` pairing, where DeepDiff's own pairing distance reads a
-  naive value in the process's *local* timezone. See
+- **Canonical set order** — `tests/golden/README.md`'s "Set iteration order" §1;
+  [`onix_core::value::SetItems`](crates/onix-core/src/value.rs)'s own doc.
+- **Order-independent tuple/frozenset digest-cache winner** — `tests/golden/README.md`'s
+  "Set iteration order" §2.
+- **Set-versus-sequence coercion never folds into `values_changed`** —
+  `tests/golden/README.md`'s "Set iteration order" §3.
+- **A naive/aware calendar set-member pair is reported as every distinct Python
+  member it is** — `tests/golden/README.md`'s "Set iteration order" §4.
+- **A calendar-normalization difference does not inherit the tuple-digest
+  cache's number-type collapsing** — `tests/golden/README.md`'s "Set iteration
+  order" §5.
+- **A tuple/frozenset set member matches positionally** (`tuple.__eq__`), not
+  order-/repetition-insensitively — `tests/golden/README.md`'s "Set iteration
+  order" §6.
+- **`frozenset` and `date` supersets** — `tests/golden/README.md`'s "The `date`
+  superset" section.
+- **Naive datetimes read as UTC**, including for `ignore_order` pairing —
   [`crates/onix-core/src/ignore_order/distance.rs`](crates/onix-core/src/ignore_order/distance.rs)'s
   `distance_family` doc.
-- **Year-boundary rejection.** Comparing two datetimes whose UTC form would leave a
-  year outside `1..=9999` raises a clean, documented error rather than propagating
-  whatever DeepDiff's own `OverflowError` would leave in an inconsistent report. See
-  `tests/golden/README.md`'s "Known DeepDiff quirks" section.
-- **Tuple-subclass and namedtuple refusal.** A `tuple`/`set`/`frozenset` subclass
-  (including a `namedtuple`) is refused outright rather than silently diffed as its
-  base type, since DeepDiff reports every value under its own type name and this MVP
-  has no field-walking conversion for one. See
+- **Year-boundary rejection** — `tests/golden/README.md`'s "Known DeepDiff
+  quirks" section.
+- **Tuple/set/frozenset-subclass and namedtuple refusal** —
   [`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)'s module doc.
+- **Fixed-offset `tzinfo` round-trip** — a `zoneinfo`/`pytz` zone comes back as
+  a plain `datetime.timezone`, not the original zone object —
+  [`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)'s module doc;
+  `tests/golden/README.md`'s "Normalized versus raw datetimes" section.
 
 ## Golden corpus
 
@@ -231,8 +233,8 @@ cargo install cargo-mutants --locked
 make mutants
 ```
 
-**Standing result.** `make mutants` enumerates a deterministic **443** mutants
-(18 in `onix-cli`, 425 in `onix-core`). Every viable mutant is caught except
+**Standing result.** `make mutants` enumerates a deterministic **979** mutants
+(20 in `onix-cli`, 959 in `onix-core`). Every viable mutant is caught except
 two documented, harmless kinds: equivalent mutants confined to
 `onix-core/src/lcs.rs` and the `> 1` threshold in
 `onix-core/src/diff/array.rs` (where `>= 1` is provably output-neutral), and

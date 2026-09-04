@@ -150,35 +150,56 @@ impl TupleId {
     }
 }
 
-/// The identity a **set member** is compared by: Python's own `==`, with
-/// bare numbers kept type-distinct.
+/// The identity a **set member** is compared by in onix: Python's own `==`
+/// for a bare scalar (numbers kept type-distinct) or a tuple (positional,
+/// exactly `tuple.__eq__`), by instant for a calendar value, and by
+/// membership for a frozenset.
 ///
 /// This is `DeepHash`'s `_make_hash_key` rule (deephash.py) applied
-/// directly, rather than through the shared `hashes` cache real `DeepDiff`
-/// looks it up in: `_make_hash_key` type-wraps a number
-/// (`(type(obj), obj)`) and returns every other object unchanged, so a set
-/// member's identity *is* Python equality except that `1`, `1.0` and `True`
-/// stay three members. Reading the rule instead of the cache is what makes
-/// this deterministic — the cache's answer additionally depends on which
-/// member of an equality class the process hashed first, which follows the
-/// set's own hash order. See `tests/golden/README.md`'s "Set iteration
-/// order" section for the difference that buys and costs.
+/// directly for a bare, hashable scalar, rather than through the shared
+/// `hashes` cache real `DeepDiff` looks it up in: `_make_hash_key`
+/// type-wraps a number (`(type(obj), obj)`) and returns every other object
+/// unchanged, so a bare member's identity *is* Python equality except that
+/// `1`, `1.0` and `True` stay three members. Reading the rule instead of the
+/// cache is what makes this deterministic — the cache's answer additionally
+/// depends on which member of an equality class the process hashed first,
+/// which follows the set's own hash order. See `tests/golden/README.md`'s
+/// "Set iteration order" section for the difference that buys and costs.
 ///
 /// Confirmed against `deepdiff==9.1.0`: `{1}` vs `{1.0}` and `{True}` vs
 /// `{1}` are each a removal plus an addition (bare numbers, type-wrapped),
 /// while `{(1,)}` vs `{(1.0,)}` and `{frozenset({1})}` vs
-/// `{frozenset({1.0})}` are empty (containers, compared by Python `==`).
+/// `{frozenset({1.0})}` are empty (a Python-equal *number* inside a
+/// container is not type-wrapped).
 ///
-/// A `datetime`/`date` is the one type where `_diff_set` does **not**
-/// compare by plain Python `==`: `_create_hashtable` builds each side's
-/// table through the same `DeepHash` this crate's `ignore_order` item
-/// matching already reproduces (see [`ItemKey::DateTime`]/[`ItemKey::Date`]),
-/// whose `_prep_datetime` normalizes to UTC before hashing — so a naive and
-/// an aware value at one instant are one set member, at any nesting depth,
-/// and a `date` never joins a `datetime`'s equivalence class. Confirmed
-/// against `deepdiff==9.1.0`: `{datetime(2024,1,1)}` vs
-/// `{datetime(2024,1,1,tzinfo=timezone.utc)}` is `{}`, and so is the same
-/// pair nested one level inside a tuple or a frozenset set member.
+/// Two more member kinds diverge from real `DeepDiff` here, deliberately —
+/// each is `_diff_set` hashing through the *same* `DeepHash` this crate's
+/// `ignore_order` item matching already reproduces
+/// ([`ItemKey`]), not through plain Python `==`, and onix picks the
+/// simpler, always-deterministic rule instead of replicating either:
+///
+/// - **A calendar value matches by instant**, at any nesting depth
+///   (`_prep_datetime` normalizes every `datetime` to UTC before hashing,
+///   and a `date` never joins a `datetime`'s equivalence class) — so a naive
+///   and an aware value at one instant are the *same* member for matching
+///   here, unlike Python's own stricter `==` (never equal across
+///   naive/aware). This only decides which member of `a` pairs with which
+///   member of `b`; it does not merge two structurally distinct members
+///   *within* one set — see [`crate::value::SetItems::new`]'s doc for that
+///   split, and `tests/golden/README.md`'s "Set iteration order" §4 for the
+///   consequence: a set holding both a naive and an aware value at one
+///   instant reports both as members where `DeepDiff`'s own hashtable can
+///   report only whichever one it happened to keep.
+/// - **A tuple or a frozenset containing one matches order- and
+///   repetition-insensitively in real `DeepDiff`**, because
+///   `_prep_iterable` runs with `ignore_iterable_order`/`ignore_repetition`
+///   for every iterable it hashes (not only the list-nested-in-an-
+///   `ignore_order`-list case that motivates the default) — so `(1, 2)` and
+///   `(2, 1)`, or `(1, 1, 2)` and `(1, 2, 2)`, share one digest in
+///   `_diff_set` despite not being Python-equal. onix's [`SetMemberKey::Tuple`]
+///   stays positional, matching `tuple.__eq__` exactly, which this crate
+///   considers the honest answer rather than a nuance to chase — see
+///   `tests/golden/README.md`'s "Set iteration order" §5.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SetMemberKey {
     /// A bare `bool`, `int` or `float`, in its own type's bucket.
@@ -248,7 +269,9 @@ pub(crate) fn set_member_key(value: &Value) -> SetMemberKey {
 
 /// [`set_member_key`]'s walk: Python's own `==` all the way down, with no
 /// type-wrapping (a number nested inside a container is compared the way
-/// Python compares it, so `(1,)` and `(1.0,)` are one identity).
+/// Python compares it, so `(1,)` and `(1.0,)` are one identity) — except a
+/// calendar value, which keys by instant instead of Python's stricter `==`;
+/// see [`SetMemberKey::Calendar`]'s doc.
 ///
 /// Iterative (an explicit heap work-stack, no native recursion), because
 /// this runs from [`crate::value::SetItems::new`] — at *construction* time,

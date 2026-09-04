@@ -530,18 +530,33 @@ impl SetItems {
     /// pair in the first place.
     ///
     /// Equality here is the structural one `canonical_cmp` decides, which
-    /// is exactly what "renders to the same path segment"
-    /// means. It is *finer* than the membership identity the diff itself
-    /// compares by (the crate-private `set_member_key`: Python's `==` with
-    /// bare numbers type-tagged): two members Python would call equal but that
-    /// this crate can tell apart — `(1,)` and `(1.0,)` — are both kept, and
-    /// then reported as the two distinct items they are. No Python set can
-    /// hold that pair, and the golden generator can never write one, so it is
-    /// reachable only by building a [`Value`] directly. Comparing
-    /// structurally rather than by identity is also what keeps this cheap: a
-    /// comparison stops at the first difference, where building an identity
-    /// always walks the whole member, which would make constructing a deeply
-    /// nested set quadratic in its depth.
+    /// is exactly what "renders to the same path segment" means. It is
+    /// *finer* than the membership identity the diff itself compares by
+    /// (the crate-private `set_member_key`, whose own doc has the exact
+    /// rule — bare numbers type-tagged, tuples positional, calendar values
+    /// by instant): two members Python would call equal but that this crate
+    /// can tell apart — `(1,)` and `(1.0,)` — are both kept here, and then
+    /// reported as the two distinct items they are. No Python set can hold
+    /// that particular pair, and the golden generator can never write one, so
+    /// it is reachable only by building a [`Value`] directly.
+    ///
+    /// A naive and an aware `datetime` at one instant are the *opposite*
+    /// case: `naive == aware` is `false` in Python, so `{naive, aware}` is a
+    /// perfectly ordinary two-member set — `canonical_cmp` keeps both here
+    /// too (it orders a `datetime` by instant, then by whether it is aware,
+    /// so the two never compare equal) — even though `set_member_key`'s
+    /// *matching* identity treats a same-instant naive/aware pair as one,
+    /// for comparing across two different sets. Storing every structurally
+    /// distinct member and matching by a coarser identity are not in
+    /// tension: this is the same split ordinary Rust `HashMap`/`HashSet`
+    /// keys make between `Eq` and a custom-normalized lookup key. See
+    /// `tests/golden/README.md`'s "Set iteration order" section for where
+    /// this leaves `DeepDiff`'s own (hash-order-dependent) answer behind.
+    ///
+    /// Comparing structurally rather than by identity is also what keeps
+    /// this cheap: a comparison stops at the first difference, where
+    /// building an identity always walks the whole member, which would make
+    /// constructing a deeply nested set quadratic in its depth.
     ///
     /// Costs one `O(n log n)` sort of short-circuiting comparisons, and
     /// nothing at all below two members.

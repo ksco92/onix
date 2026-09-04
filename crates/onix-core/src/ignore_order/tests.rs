@@ -1188,13 +1188,16 @@ fn rough_distance_depth_boundary_is_exact() {
 /// here, bypassing `distance_family` entirely.
 ///
 /// Catches a `/` mutated to `%` (a non-linear rescale, changing which
-/// candidates fall within the pairing cutoff). It does **not**, and
-/// provably cannot, catch a `/` mutated to `*`: `numeric_distance`'s own
-/// formula, `cutoff * (n1 - n2) / (n1 + n2)`, is invariant under scaling
-/// both operands by the same nonzero constant (the constant cancels in the
-/// ratio), and `timestamp` here is used nowhere else — so `/ 1_000_000.0`
-/// and `* 1_000_000.0` are provably equivalent for every input this
-/// function can receive, not merely untested.
+/// candidates fall within the pairing cutoff). It does **not** catch a `/`
+/// mutated to `*`: `numeric_distance`'s own formula, `cutoff * (n1 - n2) /
+/// (n1 + n2)`, is a ratio that is invariant *in the reals* under scaling
+/// both operands by the same nonzero constant, and `timestamp` here is used
+/// nowhere else — but that is an argument about real-number algebra, not
+/// `f64`: exact-integer `/` and `*` are not bit-exact inverses in floating
+/// point in general, so this is an empirical finding (no reachable input
+/// has been observed to distinguish `/ 1_000_000.0` from `* 1_000_000.0`
+/// here, i.e. the two agree up to `f64` rounding for every case this suite
+/// exercises), not an algebraic proof of equivalence.
 #[test]
 #[allow(
     clippy::cast_precision_loss,
