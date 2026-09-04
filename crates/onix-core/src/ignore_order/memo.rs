@@ -219,6 +219,15 @@ impl IgnoreOrderMemo {
         self.enabled
     }
 
+    /// The number of distinct container-pair distances currently memoized.
+    /// Test-only: lets the gate tests assert that scalar pairs are never
+    /// cached and that a `disabled()` memo caches nothing, pinning the two
+    /// conditions `caching_enabled`/`is_container` guard.
+    #[cfg(test)]
+    pub(crate) fn cache_len(&self) -> usize {
+        self.cache.borrow().len()
+    }
+
     /// The cached distance for `key`, if present.
     pub(crate) fn get(&self, key: &DistanceKey) -> Option<f64> {
         self.cache.borrow().get(key).copied()

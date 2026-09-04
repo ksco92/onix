@@ -18,7 +18,7 @@ instead of an unexplained mismatch.
 
 Usage::
 
-    uv run scripts/differential_fuzz.py [seed] [count] [--bias-nested-low-overlap-dicts]
+    uv run scripts/differential_fuzz.py [seed] [count] [--bias-nested-low-overlap-dicts|--bias-repeated-scalars]
 
 The optional third argument switches to a generator biased toward nested
 single-dict-in-a-list elements with low key overlap between `a`/`b` --
@@ -150,6 +150,63 @@ def mutate_toward_low_overlap(rng: random.Random, a: list[JsonValue]) -> list[Js
     return b
 
 
+REPEAT_ALPHABET: Final[list[JsonValue]] = [0, 1, 2, 3]
+
+
+def gen_repeating_inner(rng: random.Random) -> list[JsonValue]:
+    """A list of 1..14 scalars drawn from a tiny alphabet, so distinct lists
+    frequently share DeepHash's order- and repetition-insensitive item key
+    (the set of members) while differing in element repetition -- the shape
+    that made onix's distance memo unsound when keyed by that item key."""
+    length = rng.randint(1, 14)
+    return [rng.choice(REPEAT_ALPHABET) for _ in range(length)]
+
+
+REPEAT_SIBLING_KEYS: Final[list[str]] = ["p", "q", "r", "s", "t"]
+
+
+def gen_repeating_sibling_dict(rng: random.Random) -> dict[str, JsonValue]:
+    """A dict whose values are single-item lists wrapping repetition-varying
+    inner lists. Diffing two such dicts runs one array_diff per shared key
+    against a common run memo, so sibling keys whose inner lists share an item
+    key (the deduplicated member set) but not a distance make the same
+    (removed, added) item-key pair recur with different true distances -- the
+    exact structure that made the ItemKey-keyed memo unsound (issue #31)."""
+    keys = rng.sample(REPEAT_SIBLING_KEYS, rng.randint(2, len(REPEAT_SIBLING_KEYS)))
+    return {k: [gen_repeating_inner(rng)] for k in keys}
+
+
+def gen_list_with_repeated_scalars(rng: random.Random, depth: int) -> list[JsonValue]:
+    """A top-level list of repeating-sibling dicts (see
+    `gen_repeating_sibling_dict`), plus the odd unbiased element."""
+    length = rng.randint(1, 5)
+    result: list[JsonValue] = []
+    for _ in range(length):
+        if rng.random() < 0.85:
+            result.append(gen_repeating_sibling_dict(rng))
+        else:
+            result.append(gen_value(rng, depth))
+    return result
+
+
+def mutate_toward_repeated_scalars(rng: random.Random, a: list[JsonValue]) -> list[JsonValue]:
+    """Shuffle and, for each repeating-sibling dict, give *every* one of its
+    keys the same shared "other" wrapped inner list. That is what makes the
+    sibling keys' (removed, added) item-key pairs collide in the run memo while
+    their distances differ -- the pre-fix cache handed one sibling's distance to
+    the next. A fresh shared other per dict keeps distances straddling the 0.3
+    pairing cutoff."""
+    b = list(a)
+    rng.shuffle(b)
+    for index, item in enumerate(b):
+        if isinstance(item, dict) and item and all(isinstance(v, list) for v in item.values()):
+            shared_other = [gen_repeating_inner(rng)]
+            b[index] = {k: shared_other for k in item}
+        elif rng.random() < 0.3:
+            b[index] = gen_value(rng, 2)
+    return b
+
+
 def run_onix(scratch: Path, a: JsonValue, b: JsonValue) -> JsonValue:
     """Run the onix CLI with --ignore-order and return its parsed report."""
     a_path = scratch / "a.json"
@@ -228,6 +285,7 @@ def main() -> None:
     seed = int(sys.argv[1], 0) if len(sys.argv) > 1 else 0xDEC0DE
     count = int(sys.argv[2]) if len(sys.argv) > 2 else 300
     bias_nested_dicts = len(sys.argv) > 3 and sys.argv[3] == "--bias-nested-low-overlap-dicts"
+    bias_repeated = len(sys.argv) > 3 and sys.argv[3] == "--bias-repeated-scalars"
     rng = random.Random(seed)
 
     mismatches: list[tuple[int, JsonValue, JsonValue, JsonValue, JsonValue]] = []
@@ -240,6 +298,9 @@ def main() -> None:
             if bias_nested_dicts:
                 a = gen_list_with_nested_low_overlap_dicts(rng, depth=2)
                 b = mutate_toward_low_overlap(rng, a)
+            elif bias_repeated:
+                a = gen_list_with_repeated_scalars(rng, depth=2)
+                b = mutate_toward_repeated_scalars(rng, a)
             else:
                 a = gen_list(rng, depth=2)
                 b = mutate(rng, a)

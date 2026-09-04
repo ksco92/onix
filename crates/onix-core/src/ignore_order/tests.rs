@@ -2718,3 +2718,54 @@ proptest! {
         );
     }
 }
+
+/// The distance memo's two caching conditions are load-bearing, so pin each:
+/// a scalar-only `ignore_order` diff must cache nothing (scalar distances never
+/// recurse, so `is_container` gates them out), and a `disabled()` memo must
+/// cache nothing regardless of shape (so the with/without differential tests
+/// genuinely exercise the uncached path). Both also guard the caching gate
+/// against being widened to "always cache", which would make the memo do
+/// redundant work.
+#[test]
+fn distance_memo_only_caches_container_pairs_when_enabled() {
+    let opts = DiffOptions {
+        ignore_order: true,
+        max_depth: 1_000,
+    };
+
+    // Scalars never recurse, so an enabled memo caches nothing for them.
+    let scalar_memo = IgnoreOrderMemo::new();
+    crate::diff::diff_with_options_memo(
+        &cv(&json!([1, 2, 3])),
+        &cv(&json!([3, 4, 5])),
+        &opts,
+        &scalar_memo,
+    )
+    .expect("scalar diff succeeds");
+    assert_eq!(
+        scalar_memo.cache_len(),
+        0,
+        "scalar-only ignore_order diff must not populate the distance cache"
+    );
+
+    // Container pairs do populate an enabled memo...
+    let container_a = cv(&json!([[1, 2], [3, 4], "anchor"]));
+    let container_b = cv(&json!(["anchor", [1, 9], [3, 8]]));
+    let enabled_memo = IgnoreOrderMemo::new();
+    crate::diff::diff_with_options_memo(&container_a, &container_b, &opts, &enabled_memo)
+        .expect("container diff succeeds");
+    assert!(
+        enabled_memo.cache_len() > 0,
+        "container ignore_order diff should populate the distance cache"
+    );
+
+    // ...but a disabled memo caches nothing, whatever the shape.
+    let disabled_memo = IgnoreOrderMemo::disabled();
+    crate::diff::diff_with_options_memo(&container_a, &container_b, &opts, &disabled_memo)
+        .expect("container diff succeeds");
+    assert_eq!(
+        disabled_memo.cache_len(),
+        0,
+        "a disabled memo must never populate the distance cache"
+    );
+}
