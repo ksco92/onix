@@ -133,13 +133,10 @@ use super::fxhash::HashMap;
 use super::hash::{ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId};
 
 /// A `(removed, added)` container-pair distance-cache key. Each side is an
-/// [`Rc`] so recording the pair costs two refcount bumps rather than two deep
-/// clones of the items' structural keys -- the pairing of `A` added against `R`
-/// removed containers records `A * R` of these, so a deep clone here scaled the
-/// cache with `pairs * record_size` and drove the `ignore_order` peak on
-/// set/tuple/datetime-bearing records to ~9x the ordered diff (issue #31). The
-/// `Rc` derives the same `Hash`/`Eq` as the key it points at, so cross-nesting
-/// dedup of two distinct-but-equal keys is unchanged.
+/// [`Rc`] so recording the `A * R` entries one pairing produces costs a
+/// refcount bump per side, not a deep clone of the items' structural keys (see
+/// issue #31). The `Rc` must keep deriving its `Hash`/`Eq` from the pointee, so
+/// two distinct-but-equal keys still dedup across nesting levels.
 type DistanceKey = (Rc<ItemKey>, Rc<ItemKey>);
 
 /// The per-top-level-diff caches described in this module's doc: container-pair

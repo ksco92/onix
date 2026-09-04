@@ -667,19 +667,9 @@ fn tuple_keyed(items: &[Value], memo: &IgnoreOrderMemo) -> (ItemKey, Option<PyHa
 pub(crate) struct HashedList<'a> {
     /// Distinct keys, in first-occurrence (ascending original index) order
     /// — this is `SetOrdered(full_t{1,2}_hashtable.keys())`'s own iteration
-    /// order (a Python dict's insertion order).
-    ///
-    /// Each key sits behind an [`Rc`] so the one copy this table holds is
-    /// *shared* with [`Self::info`], with the `hashes_added`/`hashes_removed`
-    /// slices filtered out of it, and — the reason it matters for memory —
-    /// with the distance memo's `(removed, added)` cache keys: pairing a list
-    /// of `A` added against `R` removed containers records `A * R` cache
-    /// entries, and cloning a whole record's structural key into each of them
-    /// (rather than bumping a refcount) is what drove the `ignore_order` peak
-    /// on set/tuple/datetime-bearing records to ~9x the ordered diff's. `Rc`
-    /// derives the same `Hash`/`Eq` as the key it points at, so the cache
-    /// still dedups two distinct-but-equal keys across nesting levels exactly
-    /// as before.
+    /// order (a Python dict's insertion order). Each key sits behind an [`Rc`]
+    /// shared with [`Self::info`] and the distance-memo cache keys (see
+    /// [`super::memo::DistanceKey`]).
     pub(crate) distinct_order: Vec<Rc<ItemKey>>,
     info: HashMap<Rc<ItemKey>, (usize, &'a Value)>,
 }

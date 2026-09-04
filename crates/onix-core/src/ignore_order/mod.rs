@@ -246,7 +246,7 @@ pub(crate) fn ignore_order_array_diff(
         let (new_idx, new_value) = t2.get(added_key);
 
         if let Some(removed_key) = pairs.get(added_key) {
-            consumed_removed.insert(removed_key.clone());
+            consumed_removed.insert(Rc::clone(removed_key));
             let (old_idx, old_value) = t1.get(removed_key);
             let prefix_depth = path.len();
             let sub_report = scoped(path, PathSegment::Index(old_idx), |path| {

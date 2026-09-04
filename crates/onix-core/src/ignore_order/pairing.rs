@@ -108,7 +108,7 @@ pub(crate) fn compute_pairs(
             // content on this path, so a cached value is identical to a fresh
             // one — see the `super::memo` module doc for the proof.
             let distance = if memo.should_cache(removed_key, added_key) {
-                let key = (removed_key.clone(), added_key.clone());
+                let key = (Rc::clone(removed_key), Rc::clone(added_key));
                 if let Some(cached) = memo.get(&key) {
                     cached
                 } else {
@@ -138,14 +138,16 @@ pub(crate) fn compute_pairs(
             }
 
             let dist = Distance(distance);
-            let candidates = most_in_common_pairs.entry(added_key.clone()).or_default();
+            let candidates = most_in_common_pairs
+                .entry(Rc::clone(added_key))
+                .or_default();
             let is_new_bucket = !candidates.buckets.contains_key(&dist);
-            candidates.push(dist, removed_key.clone());
+            candidates.push(dist, Rc::clone(removed_key));
             if is_new_bucket {
                 distances_to_from_hashes
                     .entry(dist)
                     .or_default()
-                    .push(added_key.clone());
+                    .push(Rc::clone(added_key));
             }
         }
     }

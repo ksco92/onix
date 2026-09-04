@@ -1,16 +1,7 @@
-//! Regression guard for the `ignore_order` distance-memo cache footprint,
-//! isolated in its own integration-test binary.
-//!
-//! `ignore_order` pairing ranks every `(removed, added)` candidate pair by a
-//! subtree distance and caches the result keyed by the two items' structural
-//! keys, so a list with `A` added and `R` removed distinct containers records
-//! `A * R` cache entries. Each key is a whole record's structural identity;
-//! cloning that identity into every cache entry (rather than sharing it behind
-//! a refcount) made the cache cost scale with `pairs * record_size`, driving
-//! the peak on set/tuple/datetime-bearing records to ~9x the ordered diff and
-//! ~9x `DeepDiff` (roughly 1 GB for 10k records -- see issue #31). Sharing the
-//! key means a cache entry costs a bounded number of allocations no matter how
-//! large the record is.
+//! Regression guard, in its own integration-test binary, for the
+//! `ignore_order` distance-memo cache footprint: its keys are shared, not
+//! deep-cloned into every entry (issue #31; mechanism on the crate-private
+//! `memo::DistanceKey`).
 //!
 //! This test pins that invariant with an *allocation count* rather than a
 //! wall-clock or peak-RSS number (peak RSS is not observable in-process
