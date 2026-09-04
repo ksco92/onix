@@ -2487,20 +2487,25 @@ fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
         .expect("set-member hashing and comparison complete on a small stack");
 }
 
-/// Interning `K` set members whose keys share a hash bucket must stay near
-/// linear in `K`, never quadratic. Two distinct hazards, on two shapes:
+/// Interning `K` set members must stay near linear in `K`, never quadratic.
 ///
-/// - **Adversarial collision (`SetIntPair`).** The set-member tables are keyed
-///   by attacker-controlled content and reached with the default
-///   `ignore_order=false`; on `FxHash` (fixed seed, invertible) a crafted set
-///   of int tuples could be driven to `O(n^2)` — a `DoS`. They are [`BTreeMap`]s
-///   instead, immune by construction. A run of plain int 2-tuples stands in for
-///   the crafted shape here.
-/// - **Float bit-pattern collision (`SetFloat*`, `ListFloat`).** A float
-///   carrying an integer or half-integer has ~50 trailing zero bits; on the
-///   `FxHash` tables the crate keeps (e.g. `HashedList` for an `ignore_order`
-///   list), a run of them collides unless the float bits are mixed first
-///   ([`crate::lcs::mix_float_bits`]).
+/// - **Float bit-pattern collision (`SetFloat*`, `ListFloat`) — the runtime
+///   guard.** A float carrying an integer or half-integer has ~50 trailing zero
+///   bits; on the `FxHash` tables the crate keeps (e.g. `HashedList` for an
+///   `ignore_order` list), a run of them collides unless the float bits are
+///   mixed first ([`crate::lcs::mix_float_bits`]). Reverting the mixing turns
+///   the float rows here red, so they genuinely guard it.
+/// - **Benign near-linearity (`SetIntPair`).** A run of plain int 2-tuples
+///   exercises the set-member tables on the *shape* of the crafted
+///   hash-flooding attack, but does **not** stand in for the attack: sequential
+///   ints do not collide under `FxHash`, so this row stays green even if the
+///   tables were reverted to `FxHash`. The adversarial hazard — the tables are
+///   keyed by attacker-controlled content and reached with the default
+///   `ignore_order=false` — is guarded at the **type level** instead: the tables
+///   are [`BTreeMap`]s, and [`super::hash::MemberHashKey`]/
+///   [`super::hash::MemberContent`] no longer derive `Hash`, so putting them
+///   back on an `FxHash` map fails to compile (`E0599`). This row is a plain
+///   regression check that the `BTreeMap` path itself scales.
 ///
 /// Each asserts the `K -> 2K` diff-time ratio stays under `3.0` — a linear (or
 /// `n log n`) pass is `~2x`, a quadratic one `~4x`. Sized to run well under a

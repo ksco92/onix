@@ -225,7 +225,7 @@ impl NodeId {
 /// compared by content (where `1` and `1.0` differ), exactly as `DeepDiff`
 /// does. `1`/`1.0` still collapse when the *whole* container is Python-equal —
 /// then this whole key matches and the cache hands back one id.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum MemberPart {
     Scalar(ScalarKey),
     Node(NodeId),
