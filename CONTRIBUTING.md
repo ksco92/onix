@@ -101,6 +101,44 @@ The code is best read in this order, each step building on the last:
    ([`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)) before
    calling the same core the CLI does.
 
+## Compatibility policy
+
+Parity with real DeepDiff is byte-for-byte for real semantics. Where DeepDiff's own
+result depends on something outside the diff itself — Python's set hash order,
+`PYTHONHASHSEED`, the process timezone — or would make DeepDiff crash, onix instead
+picks the simpler, deterministic behavior and documents the difference in
+[`tests/golden/README.md`](tests/golden/README.md) plus one sentence in this
+repository's `README.md`. No machinery is added solely to reproduce such a nuance.
+
+The differences shipped as of 0.4.0:
+
+- **Canonical set order.** A set's members, wherever they become output, are emitted
+  in one documented order rather than DeepDiff's hash order. See
+  [`onix_core::value::SetItems`](crates/onix-core/src/value.rs)'s own doc and
+  `tests/golden/README.md`'s "Set iteration order" section.
+- **Order-independent set membership and coercion.** Which member of a Python-equality
+  class a `frozenset` reports, and whether a set-versus-sequence pairing stays a
+  `type_changes`, are answered by the rule DeepDiff's cache implements rather than by
+  replaying its iteration order. See `tests/golden/README.md`'s "Set iteration order"
+  section.
+- **`frozenset` and `date` supersets.** A report holding a `frozenset` or a `date`
+  value still serializes to JSON here, where DeepDiff's own `to_json()` raises
+  `TypeError` on either. See `tests/golden/README.md`'s "The `date` superset" section.
+- **Naive datetimes read as UTC.** A naive `datetime`/`date` is always treated as UTC,
+  including for `ignore_order` pairing, where DeepDiff's own pairing distance reads a
+  naive value in the process's *local* timezone. See
+  [`crates/onix-core/src/ignore_order/distance.rs`](crates/onix-core/src/ignore_order/distance.rs)'s
+  `distance_family` doc.
+- **Year-boundary rejection.** Comparing two datetimes whose UTC form would leave a
+  year outside `1..=9999` raises a clean, documented error rather than propagating
+  whatever DeepDiff's own `OverflowError` would leave in an inconsistent report. See
+  `tests/golden/README.md`'s "Known DeepDiff quirks" section.
+- **Tuple-subclass and namedtuple refusal.** A `tuple`/`set`/`frozenset` subclass
+  (including a `namedtuple`) is refused outright rather than silently diffed as its
+  base type, since DeepDiff reports every value under its own type name and this MVP
+  has no field-walking conversion for one. See
+  [`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)'s module doc.
+
 ## Golden corpus
 
 `crates/onix-core/tests/golden.rs` (part of `make test`) proves onix's report
