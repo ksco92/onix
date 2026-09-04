@@ -526,3 +526,38 @@ fn a_date_key_never_equals_a_datetime_key_or_another_dates() {
     assert_ne!(date, super::python_scalar_key(&cdate(2024, 1, 2)));
     assert_eq!(date, super::python_scalar_key(&cdate(2024, 1, 1)));
 }
+
+/// `mix_float_bits` must spread the low bits of integral and half-integer
+/// floats — whose raw bit patterns share ~50 trailing zeros — so they do not
+/// all fall in one hash bucket (which would make the crate's `FxHash`-backed
+/// interning tables degrade to a linear scan; see the function's own doc).
+/// Deterministic, so this guards the mixing without a timing measurement.
+#[test]
+fn mix_float_bits_spreads_low_bits_of_integral_and_half_integer_floats() {
+    use std::collections::HashSet;
+    for &half in &[0.0_f64, 0.5] {
+        let low_bytes: HashSet<u8> = (0..1000u64)
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss)]
+                let f = i as f64 + half;
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    (super::mix_float_bits(f.to_bits()) & 0xff) as u8
+                }
+            })
+            .collect();
+        // The raw bit patterns share their low byte (all zeros); mixed, 1000
+        // of them must cover most of the 256 possible low bytes. A no-op mix
+        // would leave a single value here.
+        assert!(
+            low_bytes.len() > 200,
+            "mixed low byte covered only {} of 256 values for +{half}",
+            low_bytes.len()
+        );
+    }
+    // Distinct inputs stay distinct (the mix is injective enough for a key).
+    assert_ne!(
+        super::mix_float_bits(1.0_f64.to_bits()),
+        super::mix_float_bits(2.0_f64.to_bits())
+    );
+}

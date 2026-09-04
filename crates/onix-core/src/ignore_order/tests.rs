@@ -2486,3 +2486,95 @@ fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
         .join()
         .expect("set-member hashing and comparison complete on a small stack");
 }
+
+/// Interning `K` set members whose keys share a hash bucket must stay near
+/// linear in `K`, never quadratic. Two distinct hazards, on two shapes:
+///
+/// - **Adversarial collision (`SetIntPair`).** The set-member tables are keyed
+///   by attacker-controlled content and reached with the default
+///   `ignore_order=false`; on `FxHash` (fixed seed, invertible) a crafted set
+///   of int tuples could be driven to `O(n^2)` — a `DoS`. They are [`BTreeMap`]s
+///   instead, immune by construction. A run of plain int 2-tuples stands in for
+///   the crafted shape here.
+/// - **Float bit-pattern collision (`SetFloat*`, `ListFloat`).** A float
+///   carrying an integer or half-integer has ~50 trailing zero bits; on the
+///   `FxHash` tables the crate keeps (e.g. `HashedList` for an `ignore_order`
+///   list), a run of them collides unless the float bits are mixed first
+///   ([`crate::lcs::mix_float_bits`]).
+///
+/// Each asserts the `K -> 2K` diff-time ratio stays under `3.0` — a linear (or
+/// `n log n`) pass is `~2x`, a quadratic one `~4x`. Sized to run well under a
+/// second.
+#[test]
+fn set_and_list_member_interning_scales_near_linearly() {
+    use crate::value::Number;
+
+    #[derive(Clone, Copy)]
+    enum Shape {
+        SetIntFloat,
+        SetHalfFloat,
+        SetIntPair,
+        ListFloat,
+    }
+
+    let f = |x: f64| CValue::Number(Number::from_f64(x).expect("finite"));
+    let i = |n: i64| CValue::Number(Number::from_i64(n));
+
+    let build = |k: usize, shape: Shape| -> (CValue, CValue, DiffOptions) {
+        #[allow(clippy::cast_precision_loss)]
+        let member = |n: usize| -> CValue {
+            let n_i = i64::try_from(n).expect("test sizes fit i64");
+            match shape {
+                Shape::SetIntFloat => CValue::Tuple(vec![f(n as f64)].into_boxed_slice()),
+                Shape::SetHalfFloat => CValue::Tuple(vec![f(n as f64 + 0.5)].into_boxed_slice()),
+                Shape::SetIntPair => CValue::Tuple(vec![i(n_i), i(n_i)].into_boxed_slice()),
+                Shape::ListFloat => f(n as f64),
+            }
+        };
+        let side = |extra: bool| {
+            let mut items: Vec<CValue> = (0..k).map(member).collect();
+            if extra {
+                items.push(CValue::Str("sentinel".to_string().into_boxed_str()));
+            }
+            match shape {
+                Shape::ListFloat => CValue::Array(items.into_boxed_slice()),
+                _ => CValue::Set(SetItems::new(items)),
+            }
+        };
+        let opts = DiffOptions {
+            ignore_order: matches!(shape, Shape::ListFloat),
+            ..DiffOptions::default()
+        };
+        // Differ by one member so the whole-value fast path can't short-circuit.
+        (side(false), side(true), opts)
+    };
+
+    let best_diff = |k: usize, shape: Shape| -> f64 {
+        let (a, b, opts) = build(k, shape);
+        let _ = crate::diff::diff_with_options(&a, &b, &opts).expect("diffs cleanly"); // warm
+        (0..5)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                let _ = crate::diff::diff_with_options(&a, &b, &opts).expect("diffs cleanly");
+                start.elapsed().as_secs_f64()
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+
+    for (name, shape) in [
+        ("set int-float", Shape::SetIntFloat),
+        ("set half-float", Shape::SetHalfFloat),
+        ("set int-pair", Shape::SetIntPair),
+        ("ignore_order list float", Shape::ListFloat),
+    ] {
+        let k = 10_000;
+        let t1 = best_diff(k, shape);
+        let t2 = best_diff(2 * k, shape);
+        let ratio = t2 / t1;
+        assert!(
+            ratio < 3.0,
+            "{name}: K->2K ratio {ratio:.2} (t1={t1:.4}s t2={t2:.4}s) is super-linear — \
+             keys are colliding in their interning table"
+        );
+    }
+}
