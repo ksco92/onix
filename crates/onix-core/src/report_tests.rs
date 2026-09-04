@@ -572,3 +572,142 @@ fn the_two_renderings_agree_on_every_category() {
 
     assert_eq!(report.to_json_value(), report.to_value().to_serde_json());
 }
+
+// --- set categories ------------------------------------------------------
+
+/// A one-set-item structural path, e.g. `root[1]`.
+fn set_item_path(item: &str) -> Vec<PathSegment> {
+    vec![PathSegment::SetItem(item.to_string())]
+}
+
+#[test]
+fn set_categories_serialize_as_arrays_of_path_strings() {
+    let mut report = Report::new();
+    report.insert_set_item_removed(set_item_path("1"), cv(&json!(1)));
+    report.insert_set_item_added(set_item_path("'b'"), cv(&json!("b")));
+
+    let expected = json!({
+        "set_item_added": ["root['b']"],
+        "set_item_removed": ["root[1]"],
+    });
+    assert_eq!(report.to_json_value(), expected);
+    assert_eq!(report.to_value().to_serde_json(), expected);
+}
+
+#[test]
+fn empty_set_categories_are_omitted() {
+    let mut report = Report::new();
+    report.insert_set_item_added(set_item_path("1"), cv(&json!(1)));
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"set_item_added": ["root[1]"]})
+    );
+}
+
+/// The documented order: ascending by rendered path string, which is not
+/// the same as the structural key order whenever a key's own quoting
+/// character differs (`"` sorts before `'`).
+#[test]
+fn set_entries_are_sorted_by_rendered_path_string() {
+    let mut report = Report::new();
+    for key in ["it's", "a", "b"] {
+        report.insert_set_item_added(
+            vec![
+                PathSegment::Key(key.to_string()),
+                PathSegment::SetItem("1".to_string()),
+            ],
+            cv(&json!(1)),
+        );
+    }
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"set_item_added": ["root[\"it's\"][1]", "root['a'][1]", "root['b'][1]"]})
+    );
+}
+
+/// Two structurally distinct paths that render identically collapse to one
+/// entry, the same way every path-keyed category does.
+#[test]
+fn set_entries_rendering_identically_collapse_to_one() {
+    // The same colliding pair as
+    // `two_structural_paths_rendering_identically_collapse_without_panicking`
+    // (see its comment for the mechanism), with a set-item segment appended
+    // to each side.
+    let mut flat_key = String::new();
+    flat_key.push('p');
+    flat_key.push('\'');
+    flat_key.push('"');
+    flat_key.push(']');
+    flat_key.push('[');
+    flat_key.push('"');
+    flat_key.push('q');
+    flat_key.push('\'');
+
+    let item = PathSegment::SetItem("1".to_string());
+    let flat = vec![PathSegment::Key(flat_key), item.clone()];
+    let nested = vec![
+        PathSegment::Key("p'".to_string()),
+        PathSegment::Key("q'".to_string()),
+        item,
+    ];
+    assert_eq!(
+        crate::path::render_path(&flat),
+        crate::path::render_path(&nested),
+        "test fixture assumption: these two structural paths must render identically",
+    );
+
+    let mut report = Report::new();
+    report.insert_set_item_added(flat, cv(&json!(1)));
+    report.insert_set_item_added(nested, cv(&json!(1)));
+
+    let rendered = report.to_json_value();
+    assert_eq!(
+        rendered["set_item_added"]
+            .as_array()
+            .expect("an array")
+            .len(),
+        1
+    );
+    assert_eq!(rendered, report.to_value().to_serde_json());
+}
+
+#[test]
+fn set_categories_count_toward_emptiness_and_finding_count() {
+    let mut report = Report::new();
+    assert!(report.is_empty());
+
+    report.insert_set_item_added(set_item_path("1"), cv(&json!(1)));
+    assert!(!report.is_empty());
+    assert_eq!(report.finding_count(), 1);
+
+    report.insert_set_item_removed(set_item_path("2"), cv(&json!(2)));
+    assert_eq!(report.finding_count(), 2);
+}
+
+#[test]
+fn merging_carries_set_categories_over() {
+    let mut report = Report::new();
+    report.insert_set_item_added(set_item_path("1"), cv(&json!(1)));
+
+    let mut other = Report::new();
+    other.insert_set_item_removed(set_item_path("2"), cv(&json!(2)));
+    report.merge(other);
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"set_item_added": ["root[1]"], "set_item_removed": ["root[2]"]})
+    );
+}
+
+/// A set finding contributes the item's own `item_length` to the distance
+/// numerator — the item is kept in the report solely for this.
+#[test]
+fn set_findings_contribute_their_item_length_to_the_distance() {
+    let mut report = Report::new();
+    report.insert_set_item_added(set_item_path("(1, 2)"), cv(&json!([1, 2])));
+    report.insert_set_item_removed(set_item_path("1"), cv(&json!(1)));
+
+    assert_eq!(report.distance_leaf_length(), 3);
+}

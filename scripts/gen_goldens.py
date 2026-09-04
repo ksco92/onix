@@ -22,8 +22,14 @@ For each hand-designed case in ``CASES`` this writes three files under
 This is the ONLY source of the golden corpus: every file it writes is
 committed, and regenerating must reproduce them byte-for-byte (no timestamps,
 no random ordering — ``CASES`` and its inputs are the sole source of
-variation). Run with the pinned interpreter/dependency declared in this
-file's inline script metadata:
+variation). A Python set's iteration order is the one thing that does vary
+per process — it follows hash order, and for ``str`` members
+``PYTHONHASHSEED`` — so nothing here records or depends on it: fixtures write
+a set's members in onix's canonical order, and ``golden_tags.canonical_report``
+puts DeepDiff's own set-derived output into that same order before it is
+written. See ``tests/golden/README.md``'s "Set iteration order" section. Run
+with the pinned interpreter/dependency declared in this file's inline script
+metadata:
 
     uv run scripts/gen_goldens.py
 
@@ -38,7 +44,7 @@ from pathlib import Path
 from typing import Final
 
 from deepdiff import DeepDiff
-from golden_tags import JSON_DEFAULT_MAPPING, TaggedValue, decode_tags, encode_tags
+from golden_tags import TaggedValue, canonical_report, decode_tags, encode_tags
 
 UTC: Final[timezone] = timezone.utc
 PLUS_TWO: Final[timezone] = timezone(timedelta(hours=2))
@@ -245,6 +251,58 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
     # A tuple element is not basic-hashable, so it disqualifies its list from
     # the difflib match exactly as a nested list or dict element does.
     "tuple_element_disqualifies_list_lcs": ([(1, 2), 3], [3]),
+    # Sets and frozensets: two report categories of their own
+    # (set_item_added/set_item_removed), whose entries are paths ending in
+    # the item itself. See crates/onix-core/src/diff/set.rs.
+    "set_added_and_removed_at_root": ({1, 2, 3}, {2, 3, 4}),
+    "set_nested_in_dict": ({"s": {1, "a"}}, {"s": {1, "b"}}),
+    "set_item_removed_at_depth": ({"a": {1, 2}}, {"a": {1}}),
+    "set_added_as_dict_value": ({}, {"s": {1, 2}}),
+    "set_same_items_is_empty": ({1, 2}, {2, 1}),
+    "set_empty_vs_one_item": (set(), {1}),
+    "set_multiple_items_each_side": (set(range(5)), set(range(3, 8))),
+    "set_vs_list_at_root": ({1, 2}, [1, 2]),
+    "set_vs_dict_at_root": ({"a": 1}, {1, 2}),
+    "frozenset_item_added": (frozenset({1}), frozenset({1, 2})),
+    # Item rendering, one case per kind: DeepDiff formats a set item with
+    # `str()`, except a top-level `str` item which it wraps in single quotes
+    # unconditionally and unescaped (NOT the dict-key rule).
+    "set_none_item_removed": ({None, 1}, {1}),
+    "set_bool_vs_int_are_distinct_items": ({True}, {1}),
+    "set_int_vs_float_are_distinct_items": ({1}, {1.0}),
+    "set_float_item_reprs": ({1.0, 0.1, 1e16, 1e-05, -0.0}, {2.0}),
+    # A set holding both signed zeros, which Python can only express by
+    # nesting them: canonical order is a *total* float order, so `-0.0`
+    # sorts before `0.0` where Python's own `<` calls them equal.
+    "set_signed_zero_members_order_totally": ({}, {"s": {(0.0,), (-0.0, -1)}}),
+    "set_str_items": ({"a"}, {"b"}),
+    "set_str_item_with_single_quote": ({"it's"}, {"x"}),
+    "set_str_item_with_double_quote": ({'he said "hi"'}, {"x"}),
+    "set_tuple_items": ({(1, 2)}, {(1, 3)}),
+    "set_nested_tuple_item": ({(1, (2, 3))}, {(1, (2, 4))}),
+    # A `str` nested inside a tuple item IS escaped (Python `repr`), unlike a
+    # top-level one — the two halves of the rule in one case.
+    "set_str_inside_tuple_item": ({("it's",)}, {"x"}),
+    "set_frozenset_items": ({frozenset({1, 2})}, {frozenset({1, 3})}),
+    "set_empty_frozenset_item": ({frozenset()}, {1}),
+    # Only a *bare* number is type-wrapped, so a container Python's `==`
+    # calls equal is one member: these two pairs are empty where the
+    # bare-number pair above is a change.
+    "set_tuple_item_python_equality": ({(1,)}, {(1.0,)}),
+    "set_frozenset_item_python_equality": ({frozenset({1})}, {frozenset({1.0})}),
+    # A set element disqualifies its list from the difflib match, the way a
+    # nested list or a tuple element does.
+    "set_element_disqualifies_list_lcs": ([{1}, 3], [3]),
+    "set_inside_list_diffs_positionally": ([{1, 2}], [{2, 3}]),
+    # A tuple and a frozenset holding the same members are not Python-equal,
+    # so DeepHash's shared cache must keep them in separate namespaces: if it
+    # did not, these two items would share a digest and the report would be
+    # empty. Both are reported by path only, which is what lets this be a
+    # golden at all (a frozenset *value* cannot be serialized by DeepDiff).
+    "set_tuple_and_frozenset_items_never_share_a_digest": (
+        {(1,)},
+        {frozenset({1})},
+    ),
     # DeepDiff's global, whole-tree
     # mutual_add_removes_to_become_value_changes() post-pass (model.py) —
     # runs once, after the entire diff, and merges any iterable_item_added
@@ -597,6 +655,39 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
         {"ignore_order": True},
     ),
     # ...while a nested tuple never equals a nested list, so this one does not.
+    # Sets under ignore_order: a set has no order to ignore, so DeepDiff
+    # dispatches to the same set diff either way; and a set/frozenset is
+    # hashed in its own bucket, so it never hash-matches a list or a tuple.
+    "ignore_order_set_diff_is_unaffected": ({1, 2}, {2, 3}, {"ignore_order": True}),
+    "ignore_order_list_of_sets_pairs": (
+        [{1, 2}, {3}],
+        [{3}, {1, 2}],
+        {"ignore_order": True},
+    ),
+    "ignore_order_set_vs_list_never_hash_match": ([{1, 2}], [[1, 2]], {"ignore_order": True}),
+    "ignore_order_sets_pair_then_diff": (
+        [{1, 2, 3, 4}],
+        [{1, 2, 3, 5}],
+        {"ignore_order": True},
+    ),
+    # Above the pairing cutoff, so the two sets stay a raw add plus remove,
+    # which the whole-tree mutual-add-remove merge then folds into one
+    # values_changed.
+    "ignore_order_set_pair_above_cutoff_merges": ([{1}], [{1.0}], {"ignore_order": True}),
+    # A set is unhashable in Python, so it never inherits another set's
+    # digest — the boundary of the shared-cache rule the frozenset case above
+    # sits on the other side of.
+    "ignore_order_unhashable_set_never_collides": ([{1}, {1.0}], [], {"ignore_order": True}),
+    "ignore_order_tuple_and_frozenset_items_never_share_a_digest": (
+        {(1,)},
+        {frozenset({1})},
+        {"ignore_order": True},
+    ),
+    "ignore_order_set_in_dict_in_list": (
+        [{"s": {1, 2}}, "anchor"],
+        ["anchor", {"s": {1, 3}}],
+        {"ignore_order": True},
+    ),
     "ignore_order_tuple_vs_list_nested_kinds_differ": (
         [(1, (2,))],
         [[1, [2]]],
@@ -745,6 +836,7 @@ def read_case_input(path: Path) -> TaggedValue:
 
 def main() -> None:
     """Regenerate every case directory under tests/golden/ from every case dict above."""
+
     ordered_cases: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {
         name: (a, b, {}) for name, (a, b) in {**CASES, **_generate_fuzz_cases()}.items()
     }
@@ -771,10 +863,10 @@ def main() -> None:
         for path, value in ((case_dir / "a.json", a), (case_dir / "b.json", b)):
             assert read_case_input(path) == value, f"{path} does not decode back to its case value"
 
-        expected = json.loads(
-            DeepDiff(a, b, verbose_level=2, **kwargs).to_json(default_mapping=JSON_DEFAULT_MAPPING)
+        write_json(
+            case_dir / "expected.json",
+            canonical_report(DeepDiff(a, b, verbose_level=2, **kwargs)),
         )
-        write_json(case_dir / "expected.json", expected)
 
     print(f"Wrote {len(all_cases)} golden cases to {GOLDEN_ROOT}")
 

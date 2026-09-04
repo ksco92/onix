@@ -17,6 +17,8 @@
 //! | `dict` (`str` keys only) | `Object` | keys interned across the whole walk |
 //! | `list` | `Array` | |
 //! | `tuple` | `Tuple` | exactly `tuple`; every subclass is rejected, see below |
+//! | `set` | `Set` | exactly `set`; members restricted, see below |
+//! | `frozenset` | `FrozenSet` | exactly `frozenset`; members restricted, see below |
 //! | `datetime.datetime` | `DateTime` | exactly `datetime`; naive or any `tzinfo`, see below |
 //! | `datetime.date` | `Date` | exactly `date` |
 //!
@@ -31,10 +33,20 @@
 //!   key's type and the path to the dict containing it.
 //! - A `tzinfo` whose `utcoffset()` is not a whole number of seconds raises
 //!   [`PyValueError`]: the value model carries an offset in seconds.
-//! - Any other unrecognized type (`set`, `frozenset`, `datetime.time`,
-//!   `datetime.timedelta`, custom objects, …) raises [`PyTypeError`] naming
-//!   the type and the exact path it was found at (e.g. `"unsupported type
-//!   for diffing: set at root['a'][2]"`).
+//! - A `set`/`frozenset` member that is not one of the types this MVP allows
+//!   a set to hold (`None`, `bool`, `int`, `float`, `str`, `tuple`,
+//!   `frozenset`) raises [`PyTypeError`] naming the member's type and its
+//!   path. A `list` or `dict` is only ever reachable there via a subclass
+//!   that defines `__hash__`, which real `DeepDiff` would report under that
+//!   subclass's own name — the same reason a `tuple` subclass is refused
+//!   below. A `datetime` or `date` is refused there for now as well — it
+//!   needs the rendering rule that lands with issue #21 — and the refusal is
+//!   transitive, so `{(datetime(2024, 1, 1),)}` is refused too rather than
+//!   rendering its path with `str()` where `DeepDiff` uses `repr()`.
+//! - Any other unrecognized type (`datetime.time`, `datetime.timedelta`,
+//!   custom objects, …) raises [`PyTypeError`] naming the type and the exact
+//!   path it was found at (e.g. `"unsupported type for diffing: complex at
+//!   root['a'][2]"`).
 //!
 //! # Datetimes and dates
 //!
@@ -57,6 +69,13 @@
 //! A `tuple` converts to [`onix_core::Value::Tuple`], which the engine
 //! diffs positionally exactly like a list while still reporting a
 //! tuple-vs-list pairing as a `type_changes` — matching `DeepDiff`.
+//!
+//! A `set`/`frozenset` converts to [`onix_core::Value::Set`]/
+//! [`onix_core::Value::FrozenSet`]. Its members are compared, and rendered,
+//! without reference to the order they were iterated in — see
+//! [`onix_core::value::SetItems`], and `tests/golden/README.md`'s "Set
+//! iteration order" section for where that leaves `DeepDiff` behind. Like a
+//! `tuple`, only the exact type converts.
 //!
 //! A `tuple` **subclass** is not converted, and raises [`PyTypeError`] naming
 //! the class like any other unsupported type. `DeepDiff` reports a value's
@@ -84,11 +103,15 @@
 //! *diff* itself. [`to_value`] uses the identical technique, an explicit
 //! `Vec`-backed stack of in-progress list/dict frames walked in a single
 //! loop, so peak *native* stack usage is `O(1)` regardless of how deeply the
-//! input is nested. Because the build is iterative and the compact
-//! [`onix_core::Value`]'s own `Drop` is iterative too, conversion — and the
-//! teardown of a partially built tree on any error path — is stack-safe on
-//! *any* thread at *any* depth, without a sized worker: only the natively
-//! recursive diff engine still needs one (see [`crate::guard`]).
+//! input is nested. The same has to hold for anything `onix_core` runs while
+//! a value is being built — a set sorts its members into canonical order at
+//! construction, and that comparison is iterative for exactly this reason
+//! (see `onix_core::value`'s "Stack safety" section). Because every step of
+//! the build is iterative and the compact [`onix_core::Value`]'s own `Drop`
+//! is iterative too, conversion — and the teardown of a partially built tree
+//! on any error path — is stack-safe on *any* thread at *any* depth, without
+//! a sized worker: only the natively recursive diff engine still needs one
+//! (see [`crate::guard`]).
 //!
 //! On top of that native-stack safety, [`to_value`] separately takes the
 //! same `max_depth` budget the diff itself will use and raises
@@ -101,15 +124,18 @@
 //! because equality can't be known yet at conversion time.
 use onix_core::datetime::{Date as CDate, DateTime as CDateTime};
 use onix_core::path::{PathSegment, render_path};
-use onix_core::value::{Builder, Entries};
+use onix_core::value::{Builder, Entries, SetItems};
 use onix_core::{Number as CNumber, Value as CValue};
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::iter::{BoundDictIterator, BoundListIterator, BoundTupleIterator};
+use pyo3::types::iter::{
+    BoundDictIterator, BoundFrozenSetIterator, BoundListIterator, BoundSetIterator,
+    BoundTupleIterator,
+};
 use pyo3::types::{
-    PyBool, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
-    PyTzInfo,
+    PyBool, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet,
+    PyString, PyTuple, PyTzInfo,
 };
 
 use crate::errors::MaxDepthError;
@@ -121,6 +147,8 @@ use crate::errors::MaxDepthError;
 enum SeqIter<'py> {
     List(BoundListIterator<'py>),
     Tuple(BoundTupleIterator<'py>),
+    Set(BoundSetIterator<'py>),
+    FrozenSet(BoundFrozenSetIterator<'py>),
 }
 
 impl<'py> SeqIter<'py> {
@@ -128,6 +156,8 @@ impl<'py> SeqIter<'py> {
         match self {
             SeqIter::List(iter) => iter.next(),
             SeqIter::Tuple(iter) => iter.next(),
+            SeqIter::Set(iter) => iter.next(),
+            SeqIter::FrozenSet(iter) => iter.next(),
         }
     }
 
@@ -137,16 +167,25 @@ impl<'py> SeqIter<'py> {
         match self {
             SeqIter::List(iter) => iter.len(),
             SeqIter::Tuple(iter) => iter.len(),
+            SeqIter::Set(iter) => iter.len(),
+            SeqIter::FrozenSet(iter) => iter.len(),
         }
     }
 
     /// Wraps this sequence's finished items in the matching value shape.
     fn build(&self, items: Vec<CValue>) -> CValue {
-        let items = items.into_boxed_slice();
         match self {
-            SeqIter::List(_) => CValue::Array(items),
-            SeqIter::Tuple(_) => CValue::Tuple(items),
+            SeqIter::List(_) => CValue::Array(items.into_boxed_slice()),
+            SeqIter::Tuple(_) => CValue::Tuple(items.into_boxed_slice()),
+            SeqIter::Set(_) => CValue::Set(SetItems::new(items)),
+            SeqIter::FrozenSet(_) => CValue::FrozenSet(SetItems::new(items)),
         }
+    }
+
+    /// Whether this sequence's elements are set members — the ones that get
+    /// a [`child_segment`] placeholder instead of an index.
+    fn holds_set_members(&self) -> bool {
+        matches!(self, SeqIter::Set(_) | SeqIter::FrozenSet(_))
     }
 }
 
@@ -163,6 +202,11 @@ enum Frame<'py> {
     Seq {
         remaining: SeqIter<'py>,
         built: Vec<CValue>,
+        /// Whether this sequence's elements are inside a set member, which
+        /// restricts the types [`classify`] accepts for them. Transitive:
+        /// true for a set's own members, and for the elements of any
+        /// container nested inside one (see the module doc).
+        restricted: bool,
     },
     Dict {
         remaining: BoundDictIterator<'py>,
@@ -197,10 +241,19 @@ enum Step<'py> {
 /// unsupported-type error, and — when `current` is a dict — also passed
 /// through to [`next_dict_entry`] for a bad-key error). `builder` builds the
 /// one container this can finish outright, an empty dict.
+///
+/// `set_member` restricts the accepted types to the ones this MVP allows
+/// inside a set: a `list` or `dict` reaching a set member (only possible
+/// through a subclass defining `__hash__`) is refused with the same error any
+/// other unsupported type gets, and so is a `datetime`/`date` (issue #21).
+/// The flag is *transitive* — it is set for a set's own members and for
+/// everything nested inside one — so a calendar value cannot slip in one
+/// level down, as `{(datetime(2024, 1, 1),)}`.
 fn classify<'py>(
     current: &Bound<'py, PyAny>,
     path: &[PathSegment],
     builder: &mut Builder,
+    set_member: bool,
 ) -> PyResult<Step<'py>> {
     if current.is_none() {
         return Ok(Step::Done(CValue::Null));
@@ -225,16 +278,17 @@ fn classify<'py>(
     }
 
     // Exact, and `datetime` before `date`: see the module doc. A `date` cast
-    // that was not exact would swallow every `datetime` too.
-    if current.cast_exact::<PyDateTime>().is_ok() {
+    // that was not exact would swallow every `datetime` too. Both are
+    // refused inside a set until issue #21 defines how one renders there.
+    if !set_member && current.cast_exact::<PyDateTime>().is_ok() {
         return Ok(Step::Done(datetime_to_value(current, path)?));
     }
 
-    if current.cast_exact::<PyDate>().is_ok() {
+    if !set_member && current.cast_exact::<PyDate>().is_ok() {
         return Ok(Step::Done(CValue::Date(date_fields(current, path)?)));
     }
 
-    if let Ok(list) = current.cast::<PyList>() {
+    if !set_member && let Ok(list) = current.cast::<PyList>() {
         return Ok(seq_step(SeqIter::List(list.iter())));
     }
 
@@ -245,7 +299,17 @@ fn classify<'py>(
         return Ok(seq_step(SeqIter::Tuple(tuple.iter())));
     }
 
-    if let Ok(dict) = current.cast::<PyDict>() {
+    // Exact, for the same reason a tuple is: `DeepDiff` reports a subclass
+    // under its own type name, never as a plain `set`/`frozenset`.
+    if let Ok(set) = current.cast_exact::<PySet>() {
+        return Ok(seq_step(SeqIter::Set(set.iter())));
+    }
+
+    if let Ok(frozen) = current.cast_exact::<PyFrozenSet>() {
+        return Ok(seq_step(SeqIter::FrozenSet(frozen.iter())));
+    }
+
+    if !set_member && let Ok(dict) = current.cast::<PyDict>() {
         let mut iter = dict.iter();
 
         return Ok(match next_dict_entry(&mut iter, path)? {
@@ -258,7 +322,11 @@ fn classify<'py>(
         });
     }
 
-    Err(unsupported_type_error(current, path))
+    Err(if set_member {
+        unhashable_member_error(current, path)
+    } else {
+        unsupported_type_error(current, path)
+    })
 }
 
 /// Starts one sequence: an empty one is finished outright, a non-empty one
@@ -275,11 +343,16 @@ fn seq_step(mut iter: SeqIter<'_>) -> Step<'_> {
 /// converted before it can finish, or it's fully built.
 enum Advance<'py> {
     NeedsChild {
-        pending: (Bound<'py, PyAny>, usize),
+        pending: Pending<'py>,
         frame: Frame<'py>,
     },
     Done(CValue),
 }
+
+/// The next object [`to_value`]'s loop must convert: the object itself, the
+/// depth it sits at, and whether it is a set member (which restricts the
+/// types [`classify`] accepts for it).
+type Pending<'py> = (Bound<'py, PyAny>, usize, bool);
 
 /// Attaches a just-finished child `value` into `frame` and figures out what
 /// happens next: either `frame` has another child to convert
@@ -302,6 +375,7 @@ fn advance_frame<'py>(
         Frame::Seq {
             mut remaining,
             mut built,
+            restricted,
         } => {
             built.push(value);
 
@@ -310,10 +384,14 @@ fn advance_frame<'py>(
                     // The just-finished child was appended above, so the next
                     // child's index is the new length, and its depth is the
                     // path length once its segment is pushed.
-                    path.push(PathSegment::Index(built.len()));
+                    path.push(child_segment(remaining.holds_set_members(), built.len()));
                     Advance::NeedsChild {
-                        pending: (next_item, path.len()),
-                        frame: Frame::Seq { remaining, built },
+                        pending: (next_item, path.len(), restricted),
+                        frame: Frame::Seq {
+                            remaining,
+                            built,
+                            restricted,
+                        },
                     }
                 }
                 None => Advance::Done(remaining.build(built)),
@@ -332,7 +410,7 @@ fn advance_frame<'py>(
                     Ok(Advance::NeedsChild {
                         // The child's depth is the path length once its key
                         // segment is pushed above.
-                        pending: (next_value, path.len()),
+                        pending: (next_value, path.len(), false),
                         frame: Frame::Dict {
                             remaining,
                             built,
@@ -358,7 +436,7 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
     let mut builder = Builder::new();
     let mut stack: Vec<Frame<'_>> = Vec::new();
     let mut path: Vec<PathSegment> = Vec::new();
-    let mut pending: Option<(Bound<'_, PyAny>, usize)> = Some((obj.clone(), 0));
+    let mut pending: Option<Pending<'_>> = Some((obj.clone(), 0, false));
     let mut finished: Option<CValue> = None;
 
     // On any error break, `stack` (and its parked, possibly deep entries)
@@ -366,16 +444,19 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
     // so that teardown is stack-safe on the calling thread at any depth — the
     // conversion never needs a sized-worker drop path.
     loop {
-        if let Some((current, depth)) = pending.take() {
+        if let Some((current, depth, set_member)) = pending.take() {
             if depth > max_depth {
                 return Err(max_depth_error(max_depth, &path));
             }
 
-            match classify(&current, &path, &mut builder)? {
+            match classify(&current, &path, &mut builder, set_member)? {
                 Step::Done(value) => finished = Some(value),
                 Step::Seq { iter, first } => {
                     let child_depth = depth + 1;
-                    path.push(PathSegment::Index(0));
+                    // Transitive: a set's members are restricted, and so is
+                    // everything inside a container that is itself restricted.
+                    let restricted = set_member || iter.holds_set_members();
+                    path.push(child_segment(iter.holds_set_members(), 0));
                     // `iter` has already yielded `first`, so the finished
                     // sequence will hold `iter.len() + 1` elements — pre-size
                     // for exactly that (both sequence iterators are
@@ -384,8 +465,9 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
                     stack.push(Frame::Seq {
                         remaining: iter,
                         built: Vec::with_capacity(capacity),
+                        restricted,
                     });
-                    pending = Some((first, child_depth));
+                    pending = Some((first, child_depth, restricted));
                     continue;
                 }
                 Step::Dict {
@@ -401,7 +483,7 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
                         built: Vec::with_capacity(capacity),
                         current_key: first_key,
                     });
-                    pending = Some((first_value, child_depth));
+                    pending = Some((first_value, child_depth, false));
                     continue;
                 }
             }
@@ -428,6 +510,23 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
                 }
             }
         }
+    }
+}
+
+/// The path segment for one sequence element.
+///
+/// A set member has no subscript at all — `DeepDiff` names one only by its
+/// *rendered value*, which an object that fails to convert never gets — so
+/// reporting a positional index there would be inventing a path the tool
+/// cannot resolve (`root[0][2]` where `root[0]` is a set). This placeholder
+/// keeps the depth count honest and reports as
+/// `root['a'][<set member>]`, including for a failure further inside the
+/// member (`root['a'][<set member>][1]`).
+fn child_segment(set_member: bool, index: usize) -> PathSegment {
+    if set_member {
+        PathSegment::SetItem("<set member>".to_string())
+    } else {
+        PathSegment::Index(index)
     }
 }
 
@@ -565,9 +664,22 @@ fn max_depth_error(max_depth: usize, path: &[PathSegment]) -> PyErr {
 fn unsupported_type_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
     PyTypeError::new_err(format!(
         "unsupported type for diffing: {} at {}; only \
-         None/bool/int/float/str/dict[str, ...]/list/tuple/datetime/date are supported in this \
-         MVP (sets, time, timedelta, tuple subclasses including namedtuples, datetime and date \
-         subclasses, and custom objects are not)",
+         None/bool/int/float/str/dict[str, ...]/list/tuple/set/frozenset/datetime/date are \
+         supported in this MVP (time, timedelta, subclasses of tuple/set/frozenset including \
+         namedtuples, datetime and date subclasses, and custom objects are not)",
+        type_name(obj),
+        render_path(path),
+    ))
+}
+
+/// The error for an object that reached a set member, or anything nested
+/// inside one, but is not a type this MVP allows there — see [`classify`]'s
+/// `set_member` parameter.
+fn unhashable_member_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
+    PyTypeError::new_err(format!(
+        "unsupported type for a set member: {} at {}; a set member must be \
+         None/bool/int/float/str/tuple/frozenset (a datetime or date member lands with \
+         set support for calendar types)",
         type_name(obj),
         render_path(path),
     ))
@@ -586,6 +698,8 @@ fn type_name(obj: &Bound<'_, PyAny>) -> String {
 enum SeqKind {
     List,
     Tuple,
+    Set,
+    FrozenSet,
 }
 
 impl SeqKind {
@@ -593,6 +707,12 @@ impl SeqKind {
         match self {
             SeqKind::List => items.into_py_any(py),
             SeqKind::Tuple => PyTuple::new(py, items)?.into_py_any(py),
+            // Every member of a `Value::Set`/`Value::FrozenSet` came through
+            // `classify`'s transitive set-member restriction, which accepts
+            // only hashable kinds all the way down (see the module doc), so
+            // `PySet::new` cannot fail on one.
+            SeqKind::Set => PySet::new(py, items)?.into_py_any(py),
+            SeqKind::FrozenSet => PyFrozenSet::new(py, items)?.into_py_any(py),
         }
     }
 }
@@ -636,40 +756,30 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
 
     loop {
         if let Some(current) = pending.take() {
-            finished = Some(match current {
-                CValue::Null => py.None(),
-                CValue::Bool(b) => b.into_py_any(py)?,
-                CValue::Number(n) => number_to_pyobject(py, n)?,
-                CValue::Str(s) => s.as_ref().into_py_any(py)?,
-                CValue::DateTime(value) => datetime_to_pyobject(py, *value)?,
-                CValue::Date(value) => date_to_pyobject(py, *value)?,
-                CValue::Array(items) | CValue::Tuple(items) => {
-                    let kind = if matches!(current, CValue::Tuple(_)) {
-                        SeqKind::Tuple
-                    } else {
-                        SeqKind::List
-                    };
-                    let mut iter = items.iter();
-
-                    match iter.next() {
-                        None => kind.build(py, Vec::new())?,
-                        Some(first) => {
-                            let capacity = iter.len().saturating_add(1);
-                            stack.push(RenderFrame::Seq {
-                                kind,
-                                remaining: iter,
-                                built: Vec::with_capacity(capacity),
-                            });
-                            pending = Some(first);
-                            continue;
-                        }
-                    }
+            let step = match current {
+                CValue::Null => RenderStep::Done(py.None()),
+                CValue::Bool(b) => RenderStep::Done(b.into_py_any(py)?),
+                CValue::Number(n) => RenderStep::Done(number_to_pyobject(py, n)?),
+                CValue::Str(s) => RenderStep::Done(s.as_ref().into_py_any(py)?),
+                CValue::DateTime(value) => RenderStep::Done(datetime_to_pyobject(py, *value)?),
+                CValue::Date(value) => RenderStep::Done(date_to_pyobject(py, *value)?),
+                CValue::Array(items) => {
+                    start_sequence(py, SeqKind::List, items, &mut stack, &mut pending)?
+                }
+                CValue::Tuple(items) => {
+                    start_sequence(py, SeqKind::Tuple, items, &mut stack, &mut pending)?
+                }
+                CValue::Set(items) => {
+                    start_sequence(py, SeqKind::Set, items, &mut stack, &mut pending)?
+                }
+                CValue::FrozenSet(items) => {
+                    start_sequence(py, SeqKind::FrozenSet, items, &mut stack, &mut pending)?
                 }
                 CValue::Object(map) => {
                     let mut iter = map.iter();
 
                     match iter.next() {
-                        None => PyDict::new(py).into_py_any(py)?,
+                        None => RenderStep::Done(PyDict::new(py).into_py_any(py)?),
                         Some((key, first_value)) => {
                             stack.push(RenderFrame::Object {
                                 remaining: iter,
@@ -677,11 +787,16 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                                 current_key: key,
                             });
                             pending = Some(first_value);
-                            continue;
+                            RenderStep::Descend
                         }
                     }
                 }
-            });
+            };
+
+            match step {
+                RenderStep::Descend => continue,
+                RenderStep::Done(value) => finished = Some(value),
+            }
         }
 
         let rendered = finished.take().expect(
@@ -759,6 +874,40 @@ fn datetime_to_pyobject(py: Python<'_>, value: CDateTime) -> PyResult<Py<PyAny>>
         tzinfo.as_ref(),
     )?
     .into_py_any(py)
+}
+
+/// One step of [`value_to_pyobject`]'s loop: a value finished outright, or
+/// a container whose first child was just made pending.
+enum RenderStep {
+    Done(Py<PyAny>),
+    Descend,
+}
+
+/// Starts one sequence-shaped value: an empty one is finished outright, a
+/// non-empty one parks a [`RenderFrame::Seq`] and makes its first item
+/// pending. Shared by all four sequence shapes, which differ only in the
+/// Python object [`SeqKind::build`] finally produces.
+fn start_sequence<'py, 'v>(
+    py: Python<'py>,
+    kind: SeqKind,
+    items: &'v [CValue],
+    stack: &mut Vec<RenderFrame<'py, 'v>>,
+    pending: &mut Option<&'v CValue>,
+) -> PyResult<RenderStep> {
+    let mut remaining = items.iter();
+
+    let Some(first) = remaining.next() else {
+        return Ok(RenderStep::Done(kind.build(py, Vec::new())?));
+    };
+
+    let capacity = remaining.len().saturating_add(1);
+    stack.push(RenderFrame::Seq {
+        kind,
+        remaining,
+        built: Vec::with_capacity(capacity),
+    });
+    *pending = Some(first);
+    Ok(RenderStep::Descend)
 }
 
 fn number_to_pyobject(py: Python<'_>, n: &CNumber) -> PyResult<Py<PyAny>> {

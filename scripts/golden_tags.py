@@ -27,18 +27,22 @@ against the same fixtures.
 """
 
 import datetime
+import json
+import math
 from collections.abc import Callable
-from typing import Final
+from typing import Final, Protocol
 
 TUPLE_TAG: Final[str] = "$tuple"
+SET_TAG: Final[str] = "$set"
+FROZENSET_TAG: Final[str] = "$frozenset"
 DATETIME_TAG: Final[str] = "$datetime"
 DATE_TAG: Final[str] = "$date"
 
-# Every tag name the encoding reserves. `$set`/`$frozenset` are not implemented yet; they
-# are claimed here so a fixture can never use one as an ordinary dict key in the meantime,
-# and so all three readers agree on the full set from the start.
+# Every tag name the encoding reserves. All five are implemented; the list is still
+# fixed here so a fixture can never use one as an ordinary dict key, and so all three
+# readers agree on the full set.
 RESERVED_TAGS: Final[frozenset[str]] = frozenset(
-    {TUPLE_TAG, DATETIME_TAG, DATE_TAG, "$set", "$frozenset"}
+    {TUPLE_TAG, SET_TAG, FROZENSET_TAG, DATETIME_TAG, DATE_TAG}
 )
 
 # DeepDiff's own `to_json()` cannot serialize a `date` at all: `serialization.JSON_CONVERTOR`
@@ -57,6 +61,8 @@ type TaggedValue = (
     dict[str, "TaggedValue"]
     | list["TaggedValue"]
     | tuple["TaggedValue", ...]
+    | set["SetMember"]
+    | frozenset["SetMember"]
     | datetime.datetime
     | datetime.date
     | str
@@ -65,6 +71,9 @@ type TaggedValue = (
     | bool
     | None
 )
+
+# What a Python set can hold: hashable values only, so no dict, list or set.
+type SetMember = tuple["SetMember", ...] | frozenset["SetMember"] | str | int | float | bool | None
 
 
 def _sole_tag(value: dict[str, TaggedValue]) -> str | None:
@@ -102,6 +111,16 @@ def encode_tags(value: TaggedValue) -> TaggedValue:
     if isinstance(value, datetime.date):
         return {DATE_TAG: value.isoformat()}
 
+    # Written in onix's canonical set order rather than the live set's own iteration
+    # order, which is hash order and, for `str` members, PYTHONHASHSEED-dependent. onix
+    # never depends on a set's order, so the fixture does not have to record one — and
+    # writing the canonical order is what makes the file byte-identical between runs.
+    if isinstance(value, frozenset):
+        return {FROZENSET_TAG: [encode_tags(item) for item in canonical_set_order(value)]}
+
+    if isinstance(value, set):
+        return {SET_TAG: [encode_tags(item) for item in canonical_set_order(value)]}
+
     if isinstance(value, list):
         return [encode_tags(item) for item in value]
 
@@ -135,6 +154,12 @@ def decode_tags(value: TaggedValue) -> TaggedValue:
         if tag == TUPLE_TAG:
             return tuple(decode_tags(item) for item in value[tag])
 
+        if tag == SET_TAG:
+            return {decode_tags(item) for item in value[tag]}
+
+        if tag == FROZENSET_TAG:
+            return frozenset(decode_tags(item) for item in value[tag])
+
         if tag == DATETIME_TAG:
             return datetime.datetime.fromisoformat(str(value[tag]))
 
@@ -147,3 +172,188 @@ def decode_tags(value: TaggedValue) -> TaggedValue:
         return {key: decode_tags(item) for key, item in value.items()}
 
     return value
+
+
+# The two report categories whose entries are bare path strings rather than
+# path-keyed values (see :func:`canonical_report`).
+SET_CATEGORIES: Final[frozenset[str]] = frozenset({"set_item_added", "set_item_removed"})
+
+
+class OnixReport(Protocol):
+    """The one method :func:`sorted_set_categories` needs from an onix report."""
+
+    def to_json(self) -> str:
+        """
+        Render the report as a JSON string.
+
+        :return: The JSON text.
+        """
+
+
+class RealReport(Protocol):
+    """The two methods :func:`canonical_report` needs from a real DeepDiff report."""
+
+    def to_json(self, default_mapping: dict[type, Callable[[datetime.date], str]]) -> str:
+        """
+        Render the report as a JSON string.
+
+        :param default_mapping: Serializers for the types DeepDiff cannot render itself.
+        :return: The JSON text.
+        """
+
+    def to_dict(self) -> dict[str, object]:
+        """
+        Render the report as native Python objects.
+
+        :return: The report, with real ``set``/``frozenset`` objects still in place.
+        """
+
+
+def canonical_report(diff: RealReport) -> TaggedValue:
+    """
+    Render one **real DeepDiff** report as the JSON spec onix must match.
+
+    ``to_json()`` is the spec for everything except the *order* of anything that came
+    out of a Python set, which follows hash order and, for ``str`` members,
+    ``PYTHONHASHSEED``. Exactly two things are reordered here, and nothing else is
+    touched:
+
+    - the two set categories, whose entries are path strings, are sorted; and
+    - every JSON array that stands for a set value (found by walking ``to_dict()``,
+      which still holds the real ``set`` objects, alongside the parsed JSON) is
+      reordered into :func:`canonical_set_order`, onix's own documented order.
+
+    Reordering pairs each JSON element with its Python member by iterating the set once
+    more: ``to_json()`` serialized it by the same single iteration, so ``zip`` lines the
+    two up exactly. Every value in the result is therefore still DeepDiff's own. Use
+    :func:`sorted_set_categories` for onix's own report, whose arrays are canonical
+    already and would be scrambled by that pairing.
+
+    :param diff: A real DeepDiff instance.
+    :return: The parsed, canonically ordered report.
+    """
+    # `JSON_DEFAULT_MAPPING` is what lets a `date`-carrying case be rendered at all:
+    # DeepDiff's stock `to_json()` raises TypeError on one.
+    parsed = json.loads(diff.to_json(default_mapping=JSON_DEFAULT_MAPPING))
+    as_objects = diff.to_dict()
+
+    return {
+        category: (
+            sorted(entries)
+            if category in SET_CATEGORIES
+            else {
+                path: _canonical_value(as_objects[category][path], entry)
+                for path, entry in entries.items()
+            }
+        )
+        for category, entries in parsed.items()
+    }
+
+
+def sorted_set_categories(diff: OnixReport) -> TaggedValue:
+    """
+    Render one **onix** report, sorting only the two set categories.
+
+    onix already emits every set value in :func:`canonical_set_order`; only the two
+    categories are left in the structural order the report stores them in.
+
+    :param diff: An onix report object.
+    :return: The parsed report, with both set categories sorted.
+    """
+    return {
+        category: sorted(entries) if category in SET_CATEGORIES else entries
+        for category, entries in json.loads(diff.to_json()).items()
+    }
+
+
+def _canonical_value(as_object: object, as_json: TaggedValue) -> TaggedValue:
+    """
+    Reorder every set-derived array inside one report entry; leave everything else alone.
+
+    :param as_object: The same subtree as DeepDiff's own ``to_dict()`` holds it, still
+        carrying real ``set``/``frozenset`` objects.
+    :param as_json: That subtree parsed back from ``to_json()``.
+    :return: `as_json` with each set-derived array in canonical order.
+    """
+    if isinstance(as_object, (set, frozenset)) and isinstance(as_json, list):
+        paired = sorted(zip(as_object, as_json), key=lambda pair: _order_key(pair[0]))
+
+        return [_canonical_value(member, element) for member, element in paired]
+
+    if isinstance(as_object, (list, tuple)) and isinstance(as_json, list):
+        return [
+            _canonical_value(member, element) for member, element in zip(as_object, as_json)
+        ]
+
+    if isinstance(as_object, dict) and isinstance(as_json, dict):
+        return {
+            key: _canonical_value(value, as_json[key])
+            for key, value in as_object.items()
+            if key in as_json
+        }
+
+    return as_json
+
+
+def canonical_set_order(members: object) -> list[SetMember]:
+    """
+    Sort a set's members into onix's canonical set order.
+
+    This is the Python twin of ``onix_core::value::SetItems``'s own ordering, whose doc
+    is the definition of the rule. Two points it is easy to get wrong here: ``bool`` is
+    ranked before ``int`` even though every Python bool *is* an int, and ``float``
+    comparison is a **total** one, so ``-0.0`` sorts before ``0.0`` where Python's ``<``
+    calls them equal.
+
+    :param members: Any iterable of set members.
+    :return: The members in canonical order.
+    """
+    return sorted(members, key=_order_key)
+
+
+def _order_key(value: object) -> tuple[object, ...]:
+    """
+    Build the sort key :func:`canonical_set_order` compares by.
+
+    Calendar values are deliberately absent: a `datetime` or `date` cannot be a set
+    member yet (the bindings refuse one), so no set this ever sorts can hold one.
+
+    :param value: Any value.
+    :raises TypeError: If `value` is of a kind no set can hold.
+    :return: A tuple ordering `value` against any other by kind, then by value.
+    """
+    if value is None:
+        return (0,)
+
+    # `bool` before `int`: every bool is an int in Python.
+    if isinstance(value, bool):
+        return (1, value)
+
+    if isinstance(value, int):
+        return (2, value)
+
+    if isinstance(value, float):
+        # A total order, matching Rust's `f64::total_cmp`: Python's own `<`
+        # calls the two signed zeros equal, which would leave a set holding
+        # both in whatever order it arrived in.
+        return (3, math.copysign(1.0, value) > 0.0, value)
+
+    if isinstance(value, str):
+        return (4, value)
+
+    if isinstance(value, tuple):
+        return (5, [_order_key(item) for item in value])
+
+    if isinstance(value, frozenset):
+        return (6, [_order_key(item) for item in canonical_set_order(value)])
+
+    if isinstance(value, list):
+        return (7, [_order_key(item) for item in value])
+
+    if isinstance(value, set):
+        return (8, [_order_key(item) for item in canonical_set_order(value)])
+
+    if isinstance(value, dict):
+        return (9, [(key, _order_key(item)) for key, item in sorted(value.items())])
+
+    raise TypeError(f"no canonical order defined for {type(value).__name__}")

@@ -113,7 +113,13 @@ fn distance_family(value: &Value) -> Option<DistanceFamily> {
             ordinal: value.date().ordinal() as f64,
         }),
         Value::Date(value) => Some(DistanceFamily::Date(value.ordinal() as f64)),
-        Value::Null | Value::Str(_) | Value::Array(_) | Value::Tuple(_) | Value::Object(_) => None,
+        Value::Null
+        | Value::Str(_)
+        | Value::Array(_)
+        | Value::Tuple(_)
+        | Value::Set(_)
+        | Value::FrozenSet(_)
+        | Value::Object(_) => None,
     }
 }
 
@@ -190,6 +196,11 @@ pub(crate) fn rough_length(value: &Value) -> usize {
         Value::Array(items) | Value::Tuple(items) => {
             1 + items.iter().map(rough_length).sum::<usize>()
         }
+        // `_prep_iterable` handles a set exactly like a list (confirmed
+        // with real `DeepHash`: `{1, 2}` and `[1, 2]` both count `3`).
+        Value::Set(items) | Value::FrozenSet(items) => {
+            1 + items.iter().map(rough_length).sum::<usize>()
+        }
         Value::Object(map) => 1 + map.values().map(|v| 1 + rough_length(v)).sum::<usize>(),
     }
 }
@@ -217,6 +228,7 @@ pub(crate) fn item_length(value: &Value) -> usize {
             1
         }
         Value::Array(items) | Value::Tuple(items) => items.iter().map(item_length).sum(),
+        Value::Set(items) | Value::FrozenSet(items) => items.iter().map(item_length).sum(),
         Value::Object(map) => item_length_of_map(map),
     }
 }
@@ -293,6 +305,9 @@ pub(crate) fn count_diff_leaves(
         (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
             count_array_diff_leaves(x, y, depth, opts, memo)
         }
+        (Value::Set(x), Value::Set(y)) | (Value::FrozenSet(x), Value::FrozenSet(y)) => {
+            count_set_diff_leaves(x, y)
+        }
         (Value::Object(x), Value::Object(y)) => count_object_diff_leaves(x, y, depth, opts, memo),
         _ => type_change_leaf_length(a, b),
     }
@@ -340,12 +355,28 @@ fn new_value_reproduced_by_coercion(old_value: &Value, new_value: &Value) -> boo
     match (old_value, new_value) {
         (Value::Tuple(old_items), Value::Array(new_items))
         | (Value::Array(old_items), Value::Tuple(new_items)) => {
-            old_items.len() == new_items.len()
-                && old_items
-                    .iter()
-                    .zip(new_items.iter())
-                    .all(|(a, b)| python_eq(a, b))
+            sequences_python_eq(old_items, new_items)
         }
+        // `set(x)`/`frozenset(x)` over any of the four container kinds: the
+        // constructor keeps only distinct members, so what it reproduces is
+        // decided by [`unordered_python_eq`], never by order.
+        (
+            Value::Array(old_items) | Value::Tuple(old_items),
+            Value::Set(new_items) | Value::FrozenSet(new_items),
+        ) => unordered_python_eq(old_items, new_items),
+        (
+            Value::Set(old_items) | Value::FrozenSet(old_items),
+            Value::Set(new_items) | Value::FrozenSet(new_items),
+        ) => unordered_python_eq(old_items, new_items),
+        // `list(a_set) == some_list` is the one direction whose Python
+        // answer depends on the set's own iteration order. `onix` answers it
+        // by membership instead, so both orders of the same list count as
+        // reproduced — deterministic where real `DeepDiff` is not. See
+        // `tests/golden/README.md`'s "Set iteration order" section.
+        (
+            Value::Set(old_items) | Value::FrozenSet(old_items),
+            Value::Array(new_items) | Value::Tuple(new_items),
+        ) => unordered_python_eq(old_items, new_items),
         _ => coerce_for_type_change(old_value, new_value)
             .is_some_and(|coerced| coerced == *new_value),
     }
@@ -367,6 +398,11 @@ fn python_eq(a: &Value, b: &Value) -> bool {
         (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| python_eq(a, b))
         }
+        // A `set` and a `frozenset` holding equal members *are* Python-equal
+        // (unlike a list and a tuple), so these two kinds share one arm.
+        (Value::Set(x) | Value::FrozenSet(x), Value::Set(y) | Value::FrozenSet(y)) => {
+            unordered_python_eq(x, y)
+        }
         (Value::Object(x), Value::Object(y)) => {
             x.len() == y.len()
                 && x.iter()
@@ -385,6 +421,22 @@ fn python_eq(a: &Value, b: &Value) -> bool {
             _ => false,
         },
     }
+}
+
+/// Element-wise [`python_eq`] over two sequences of the same length — what
+/// `list(x) == y` compares once `list()` has copied `x`'s items in order.
+fn sequences_python_eq(a: &[Value], b: &[Value]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| python_eq(a, b))
+}
+
+/// Python's `set(a) == set(b)`: every member of each side has a
+/// [`python_eq`] counterpart in the other. Quadratic, deliberately — this
+/// runs only on a candidate pair's distance measurement, where a set is
+/// small, and a linear version would need a hashable projection of
+/// [`python_eq`] that this crate has no other use for.
+fn unordered_python_eq(a: &[Value], b: &[Value]) -> bool {
+    a.iter().all(|x| b.iter().any(|y| python_eq(x, y)))
+        && b.iter().all(|y| a.iter().any(|x| python_eq(x, y)))
 }
 
 /// Replicates Python's `new_type(old_value)` — literally calling the new
@@ -429,6 +481,8 @@ fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value>
         | Value::Date(_)
         | Value::Array(_)
         | Value::Tuple(_)
+        | Value::Set(_)
+        | Value::FrozenSet(_)
         | Value::Object(_) => None,
     }
 }
@@ -451,6 +505,7 @@ fn is_truthy(value: &Value) -> bool {
         Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
         Value::Str(s) => !s.is_empty(),
         Value::Array(items) | Value::Tuple(items) => !items.is_empty(),
+        Value::Set(items) | Value::FrozenSet(items) => !items.is_empty(),
         Value::Object(map) => !map.is_empty(),
     }
 }
@@ -467,6 +522,8 @@ fn coerce_to_f64(value: &Value) -> Option<f64> {
         | Value::Date(_)
         | Value::Array(_)
         | Value::Tuple(_)
+        | Value::Set(_)
+        | Value::FrozenSet(_)
         | Value::Object(_) => None,
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         Value::Number(n) => n.as_f64(),
@@ -502,6 +559,8 @@ fn coerce_to_i64(value: &Value) -> Option<i64> {
         | Value::Date(_)
         | Value::Array(_)
         | Value::Tuple(_)
+        | Value::Set(_)
+        | Value::FrozenSet(_)
         | Value::Object(_) => None,
         Value::Bool(b) => Some(i64::from(*b)),
         Value::Number(n) => {
@@ -546,7 +605,11 @@ fn coerce_to_python_str(value: &Value) -> Option<String> {
         // pair's new value — see `DateTime::python_str`.
         Value::DateTime(value) => Some(value.python_str()),
         Value::Date(value) => Some(value.python_str()),
-        Value::Array(_) | Value::Tuple(_) | Value::Object(_) => None,
+        Value::Array(_)
+        | Value::Tuple(_)
+        | Value::Set(_)
+        | Value::FrozenSet(_)
+        | Value::Object(_) => None,
         Value::Bool(b) => Some(if *b { "True" } else { "False" }.to_string()),
         Value::Number(n) => {
             if n.is_f64() {
@@ -648,6 +711,20 @@ pub(crate) fn count_object_diff_leaves(
     }
 
     total
+}
+
+/// [`count_diff_leaves`]'s set case: `DeepDiff`'s delta view of a set diff
+/// is `{"set_item_added": {<path>: {<items>}}, "set_item_removed": ...}`,
+/// and `_get_item_length` sums the [`item_length`] of every added and every
+/// removed item — verified against real `deepdiff==9.1.0` (`{1, 2}` vs
+/// `{1, 2, 3, 4, 5}` measures `3`).
+///
+/// Membership goes through the same [`super::set_difference`] the real set
+/// diff uses, so this count can never drift from what it mirrors.
+fn count_set_diff_leaves(a: &[Value], b: &[Value]) -> usize {
+    let (removed, added) = super::set_difference(a, b);
+
+    removed.into_iter().chain(added).map(item_length).sum()
 }
 
 /// [`count_diff_leaves`]'s array case — see that function's doc for why

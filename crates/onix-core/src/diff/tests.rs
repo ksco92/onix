@@ -2,8 +2,8 @@ use super::DEFAULT_MAX_DEPTH;
 use crate::error::Error;
 use crate::path::PathSegment;
 use crate::report::Report;
-use crate::test_support::{cdate, cdt, cdt_at, cnum, cobj, ctup, cv};
-use crate::value::{Object as CObject, Value as CValue};
+use crate::test_support::{cdate, cdt, cdt_at, cfrozen, cnum, cobj, cset, ctup, cv};
+use crate::value::{Object as CObject, SetItems, Value as CValue};
 use serde_json::{Map, Number, Value, json};
 
 // Thin wrappers routing each `serde_json`-literal-based test through the real
@@ -2328,4 +2328,222 @@ fn an_unnormalizable_datetime_under_ignore_order_is_reported_raw() {
         json!({"iterable_item_added": {"root[1]": "9999-12-31T23:00:00-01:00"}})
     );
     assert!(shuffled.is_empty());
+}
+
+// --- sets ----------------------------------------------------------------
+
+/// Diffs two already-compact values, for the set cases whose inputs no
+/// JSON literal can express.
+fn diff_compact(a: &CValue, b: &CValue) -> Result<Report, Error> {
+    super::diff(a, b)
+}
+
+#[test]
+fn set_reports_added_and_removed_items() {
+    let report = diff_compact(
+        &cset(&[json!(1), json!(2), json!(3)]),
+        &cset(&[json!(2), json!(3), json!(4)]),
+    )
+    .expect("shallow sets diff cleanly");
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"set_item_added": ["root[4]"], "set_item_removed": ["root[1]"]})
+    );
+}
+
+#[test]
+fn a_set_with_the_same_items_in_another_order_reports_nothing() {
+    let report = diff_compact(&cset(&[json!(1), json!(2)]), &cset(&[json!(2), json!(1)]))
+        .expect("shallow sets diff cleanly");
+
+    assert!(report.is_empty());
+}
+
+#[test]
+fn set_findings_carry_the_sets_own_path() {
+    let mut builder = crate::value::Builder::new();
+    let a = builder.object(vec![("a".to_string(), cset(&[json!(1), json!(2)]))]);
+    let b = builder.object(vec![("a".to_string(), cset(&[json!(1)]))]);
+
+    assert_eq!(
+        diff_compact(&a, &b)
+            .expect("shallow sets diff cleanly")
+            .to_json_value(),
+        json!({"set_item_removed": ["root['a'][2]"]})
+    );
+}
+
+/// Membership is `DeepHash` identity, which is type-aware for bare numbers
+/// — the same pairs that are one Python object inside a real set are still
+/// two distinct items here.
+#[test]
+fn set_membership_is_type_aware_for_numbers() {
+    for (a, b, removed, added) in [
+        (json!(1), json!(1.0), "root[1]", "root[1.0]"),
+        (json!(true), json!(1), "root[True]", "root[1]"),
+    ] {
+        assert_eq!(
+            diff_compact(
+                &cset(std::slice::from_ref(&a)),
+                &cset(std::slice::from_ref(&b)),
+            )
+            .expect("shallow sets diff cleanly")
+            .to_json_value(),
+            json!({"set_item_added": [added], "set_item_removed": [removed]}),
+            "{a} vs {b}"
+        );
+    }
+}
+
+/// The other side of that rule: only a *bare* number is type-wrapped, so a
+/// container that Python's `==` calls equal is one member — the tuple pair
+/// wrapping the very same numbers reports nothing at all (golden:
+/// `set_tuple_item_python_equality`).
+#[test]
+fn a_container_set_item_is_compared_by_python_equality() {
+    let tuples = diff_compact(
+        &CValue::Set(SetItems::new(vec![ctup(&[json!(1)])])),
+        &CValue::Set(SetItems::new(vec![ctup(&[json!(1.0)])])),
+    )
+    .expect("shallow sets diff cleanly");
+    assert!(tuples.is_empty());
+
+    let frozensets = diff_compact(
+        &CValue::Set(SetItems::new(vec![cfrozen(&[json!(1)])])),
+        &CValue::Set(SetItems::new(vec![cfrozen(&[json!(1.0)])])),
+    )
+    .expect("shallow sets diff cleanly");
+    assert!(frozensets.is_empty());
+}
+
+#[test]
+fn a_set_and_a_frozenset_are_a_type_change() {
+    let report =
+        diff_compact(&cset(&[json!(1)]), &cfrozen(&[json!(1)])).expect("shallow sets diff cleanly");
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "set", "new_type": "frozenset",
+            "old_value": [1], "new_value": [1],
+        }}})
+    );
+}
+
+#[test]
+fn python_type_name_names_both_set_kinds() {
+    assert_eq!(super::python_type_name(&cset(&[])), "set");
+    assert_eq!(super::python_type_name(&cfrozen(&[])), "frozenset");
+}
+
+/// A set element disqualifies its list from the difflib match, the way a
+/// nested list or a tuple element does (golden:
+/// `set_element_disqualifies_list_lcs`).
+#[test]
+fn a_set_element_disqualifies_a_list_from_the_lcs_match() {
+    assert!(!crate::lcs::all_basic_scalars(&[cset(&[json!(1)])]));
+    assert!(!crate::lcs::all_basic_scalars(&[cfrozen(&[json!(1)])]));
+}
+
+/// Membership is an identity, not a cache lookup, so the report does not
+/// depend on which member of a Python-equality class was seen first — where
+/// real `DeepDiff`'s does. Both orders give two removals and one addition.
+#[test]
+fn a_sets_report_does_not_depend_on_its_member_order() {
+    let float_tuple = CValue::Tuple(Box::new([ctup(&[json!(1.0)])]));
+    let int_tuple = CValue::Tuple(Box::new([ctup(&[json!(1)]), cv(&json!(0))]));
+    let b = CValue::Set(SetItems::new(vec![CValue::Tuple(Box::new([ctup(&[
+        json!(1),
+        json!(1),
+    ])]))]));
+
+    let expected = json!({
+        "set_item_added": ["root[((1, 1),)]"],
+        "set_item_removed": ["root[((1,), 0)]", "root[((1.0,),)]"],
+    });
+    for members in [
+        vec![float_tuple.clone(), int_tuple.clone()],
+        vec![int_tuple, float_tuple],
+    ] {
+        assert_eq!(
+            diff_compact(&CValue::Set(SetItems::new(members)), &b)
+                .expect("shallow sets diff cleanly")
+                .to_json_value(),
+            expected
+        );
+    }
+}
+
+/// `list(a_set) == some_list` is answered by membership, so an
+/// `ignore_order` set-versus-list pairing stays a type change whichever
+/// order either side happens to hold.
+#[test]
+fn a_set_versus_list_type_change_does_not_depend_on_order() {
+    let opts = super::DiffOptions {
+        ignore_order: true,
+        ..super::DiffOptions::default()
+    };
+    let listed = |value: CValue| CValue::Array(Box::new([value]));
+    let members = || vec![cv(&json!(75)), cv(&json!(47))];
+    let mut reversed = members();
+    reversed.reverse();
+
+    for set_members in [members(), reversed] {
+        for list in [json!([75, 47]), json!([47, 75])] {
+            let report = super::diff_with_options(
+                &listed(CValue::Set(SetItems::new(set_members.clone()))),
+                &listed(cv(&list)),
+                &opts,
+            )
+            .expect("shallow values diff cleanly");
+            assert_eq!(
+                report.to_json_value()["type_changes"]["root[0]"]["new_type"],
+                json!("list"),
+                "for set {set_members:?} against {list}"
+            );
+        }
+    }
+}
+
+/// A member that survived the conversion boundary as a duplicate is dropped
+/// once, at construction, so it can never become a second finding at the
+/// same report path.
+#[test]
+fn a_duplicate_set_member_is_reported_once() {
+    let with_duplicate = CValue::Set(SetItems::new(vec![
+        cv(&json!("x")),
+        cv(&json!("x")),
+        cv(&json!("y")),
+    ]));
+
+    assert_eq!(
+        diff_compact(&with_duplicate, &cset(&[json!("y")]))
+            .expect("shallow sets diff cleanly")
+            .to_json_value(),
+        json!({"set_item_removed": ["root['x']"]})
+    );
+}
+
+/// A set item's own nesting shares the traversal's `max_depth` budget, so
+/// a finding carrying an over-deep item is a clean error rather than a
+/// native-stack clone.
+#[test]
+fn a_too_deep_set_item_reports_max_depth_exceeded() {
+    // A set holding one tuple nested `nesting` levels deep.
+    let deep = |nesting: usize| {
+        let mut value = ctup(&[json!(1)]);
+        for _ in 1..nesting {
+            value = CValue::Tuple(Box::new([value]));
+        }
+        CValue::Set(SetItems::new(vec![value]))
+    };
+
+    // The item sits one level under the set, so at `max_depth == 3` its own
+    // nesting may reach 2 but not 3.
+    assert!(super::diff_with_max_depth(&deep(2), &cset(&[json!(9)]), 3).is_ok());
+    assert!(matches!(
+        super::diff_with_max_depth(&deep(3), &cset(&[json!(9)]), 3),
+        Err(Error::MaxDepthExceeded { .. })
+    ));
 }

@@ -47,7 +47,7 @@ use std::fmt::Write as _;
 /// Microseconds in one second.
 const MICROS_PER_SECOND: i64 = 1_000_000;
 /// Seconds in one day.
-const SECONDS_PER_DAY: i64 = 86_400;
+pub(crate) const SECONDS_PER_DAY: i64 = 86_400;
 /// Days from `0001-01-01` to the Unix epoch — the shift between Python's
 /// `date.toordinal()` origin and this module's civil-date arithmetic.
 const DAYS_FROM_YEAR_ONE_TO_EPOCH: i64 = 719_162;
@@ -371,7 +371,7 @@ impl DateTime {
 /// Floored division and its remainder, both taken toward negative infinity —
 /// the split [`DateTime::to_utc`] needs to turn a possibly-negative
 /// microsecond count into a whole day plus a non-negative offset into it.
-fn div_rem_euclid(value: i64, divisor: i64) -> (i64, i64) {
+pub(crate) fn div_rem_euclid(value: i64, divisor: i64) -> (i64, i64) {
     (value.div_euclid(divisor), value.rem_euclid(divisor))
 }
 

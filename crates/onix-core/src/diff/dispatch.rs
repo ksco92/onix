@@ -14,7 +14,7 @@ use crate::path::{PathSegment, render_path};
 use crate::report::Report;
 
 use super::{
-    DiffOptions, array_diff, datetime_diff, numeric_diff, object_diff, scalar_diff,
+    DiffOptions, array_diff, datetime_diff, numeric_diff, object_diff, scalar_diff, set_diff,
     type_change_report,
 };
 
@@ -62,6 +62,9 @@ pub(crate) fn diff_at(
         }
         (Value::Array(old), Value::Array(new)) | (Value::Tuple(old), Value::Tuple(new)) => {
             array_diff(path, old, new, depth, opts, memo)
+        }
+        (Value::Set(old), Value::Set(new)) | (Value::FrozenSet(old), Value::FrozenSet(new)) => {
+            set_diff(path, old, new, depth, opts)
         }
         (Value::Object(old), Value::Object(new)) => object_diff(path, old, new, depth, opts, memo),
         _ => type_change_report(path, a, b, depth, opts.max_depth),
@@ -111,6 +114,9 @@ pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
         }
         match v {
             Value::Array(items) | Value::Tuple(items) => {
+                stack.extend(items.iter().map(|item| (item, depth + 1)));
+            }
+            Value::Set(items) | Value::FrozenSet(items) => {
                 stack.extend(items.iter().map(|item| (item, depth + 1)));
             }
             Value::Object(map) => stack.extend(map.values().map(|item| (item, depth + 1))),

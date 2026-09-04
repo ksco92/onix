@@ -211,6 +211,7 @@ mod dispatch;
 mod object;
 mod options;
 mod scalar;
+mod set;
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -230,3 +231,4 @@ pub(crate) use scalar::{
     datetime_diff, normalized_pair, numbers_equal, numeric_diff, python_type_name, scalar_diff,
     type_change_report,
 };
+pub(crate) use set::set_diff;

@@ -177,7 +177,11 @@ pub(crate) fn python_scalar_key(value: &Value) -> Option<ScalarKey> {
             instant: value.instant(),
         },
         Value::Date(value) => ScalarKey::Date(value.ordinal()),
-        Value::Array(_) | Value::Tuple(_) | Value::Object(_) => return None,
+        Value::Array(_)
+        | Value::Tuple(_)
+        | Value::Set(_)
+        | Value::FrozenSet(_)
+        | Value::Object(_) => return None,
     })
 }
 

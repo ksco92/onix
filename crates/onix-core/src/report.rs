@@ -170,12 +170,17 @@ fn rendered(path: &[PathSegment]) -> Value {
 ///
 /// Categories implemented so far: `type_changes`, `values_changed`,
 /// `dictionary_item_added`, `dictionary_item_removed`,
-/// `iterable_item_added`, `iterable_item_removed`. Further categories would
-/// be added the same way (an additive change, no restructuring of existing
-/// ones).
+/// `iterable_item_added`, `iterable_item_removed`, `set_item_added`,
+/// `set_item_removed`. Further categories would be added the same way (an
+/// additive change, no restructuring of existing ones).
 ///
 /// Every category is keyed by the structural path (`Vec<PathSegment>`), not
-/// the rendered string — see this module's doc for why.
+/// the rendered string — see this module's doc for why. The two set
+/// categories are keyed identically, even though they *serialize* as bare
+/// arrays of path strings rather than path-keyed objects (that is
+/// `DeepDiff`'s own shape for them): the item each one holds is not part of
+/// the output at all, it is what the crate-private `distance_leaf_length`
+/// measures when the finding lands inside an `ignore_order` trial diff.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Report {
     type_changes: BTreeMap<Vec<PathSegment>, TypeChangeEntry>,
@@ -184,6 +189,35 @@ pub struct Report {
     dictionary_item_removed: BTreeMap<Vec<PathSegment>, Value>,
     iterable_item_added: BTreeMap<Vec<PathSegment>, Value>,
     iterable_item_removed: BTreeMap<Vec<PathSegment>, Value>,
+    /// The two set categories, allocated only once a set finding exists.
+    ///
+    /// Boxed because a [`Report`] is returned by value through every level
+    /// of the engine's native recursion, so its size is part of the frame
+    /// budget `max_depth` is calibrated against (see
+    /// `crate::diff::array_diff`'s "Stack-footprint note"): two more inline
+    /// `BTreeMap`s cost 48 bytes on every frame of a deep traversal, where
+    /// one pointer costs 8 and is `None` for the overwhelming majority of
+    /// diffs, which involve no set at all.
+    set_items: Option<Box<SetCategories>>,
+}
+
+/// [`Report`]'s two set categories — see the field's own doc for why they
+/// live behind one pointer.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct SetCategories {
+    added: BTreeMap<Vec<PathSegment>, Value>,
+    removed: BTreeMap<Vec<PathSegment>, Value>,
+}
+
+/// The empty pair, for the read paths that need one when nothing was found.
+static NO_SET_ITEMS: std::sync::LazyLock<SetCategories> =
+    std::sync::LazyLock::new(SetCategories::default);
+
+impl Report {
+    /// The two set categories, or an empty pair when no set finding exists.
+    fn set_items(&self) -> &SetCategories {
+        self.set_items.as_deref().unwrap_or(&NO_SET_ITEMS)
+    }
 }
 
 /// Inserts `value` at `path` into `map`, debug-asserting `path` wasn't
@@ -264,6 +298,59 @@ fn push_raw_category(
     root.push((name.to_string(), builder.object(entries)));
 }
 
+/// The documented order of a set category's entries: ascending by rendered
+/// path string, with a rendered-string collision collapsed to a single entry
+/// (the same collapse [`push_raw_category`] performs, here by deduplicating
+/// the sorted strings).
+///
+/// This is the **only** place `onix` orders anything about a set for itself,
+/// and the only order-related difference from real `DeepDiff` anywhere in
+/// the output. `DeepDiff` builds these entries from `t2_hashes - t1_hashes`
+/// (`_diff_set`), a Python set of SHA-256 hex *strings*, so their order
+/// follows `PYTHONHASHSEED` and is unreproducible even in principle — unlike
+/// a set *value*, which both tools render in the set's own iteration order
+/// (see [`crate::value::SetItems`]). See `tests/golden/README.md`.
+fn rendered_set_entries(map: &BTreeMap<Vec<PathSegment>, Value>) -> Vec<String> {
+    let mut rendered: Vec<String> = map.keys().map(|path| render_path(path)).collect();
+    rendered.sort();
+    rendered.dedup();
+    rendered
+}
+
+/// [`push_raw_category`]'s twin for a set category: a JSON **array** of
+/// rendered path strings, in [`rendered_set_entries`]'s canonical order,
+/// omitted entirely when empty.
+fn push_set_category(
+    root: &mut Vec<(String, Value)>,
+    name: &str,
+    map: &BTreeMap<Vec<PathSegment>, Value>,
+) {
+    if map.is_empty() {
+        return;
+    }
+    let entries = rendered_set_entries(map)
+        .into_iter()
+        .map(|path| Value::Str(path.into_boxed_str()))
+        .collect::<Vec<_>>();
+    root.push((name.to_string(), Value::Array(entries.into_boxed_slice())));
+}
+
+/// [`push_set_category`]'s [`Report::to_json_value`] twin.
+fn serialize_set_category(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    map: &BTreeMap<Vec<PathSegment>, Value>,
+) {
+    if map.is_empty() {
+        return;
+    }
+    let entries = rendered_set_entries(map)
+        .into_iter()
+        .map(serde_json::Value::String)
+        .collect();
+    root.insert(name.to_string(), serde_json::Value::Array(entries));
+}
+
 impl Report {
     /// Creates an empty report.
     pub(crate) fn new() -> Self {
@@ -316,6 +403,29 @@ impl Report {
         insert_checked(&mut self.iterable_item_removed, path, value);
     }
 
+    /// Records a `set_item_added` finding at the structural `path`, whose
+    /// last segment is the added item itself (see
+    /// [`crate::path::PathSegment::SetItem`]). `value` is that same item,
+    /// kept for distance measurement only — the serialized output is the
+    /// rendered path and nothing else.
+    pub(crate) fn insert_set_item_added(&mut self, path: Vec<PathSegment>, value: Value) {
+        insert_checked(
+            &mut self.set_items.get_or_insert_default().added,
+            path,
+            value,
+        );
+    }
+
+    /// Records a `set_item_removed` finding at the structural `path` — see
+    /// [`Self::insert_set_item_added`] for the shape.
+    pub(crate) fn insert_set_item_removed(&mut self, path: Vec<PathSegment>, value: Value) {
+        insert_checked(
+            &mut self.set_items.get_or_insert_default().removed,
+            path,
+            value,
+        );
+    }
+
     /// Folds another report's findings into `self`, one entry at a time
     /// (through the guarded `insert_*` methods for `type_changes`/
     /// `values_changed`, and through [`merge_map`] — which shares the same
@@ -341,6 +451,11 @@ impl Report {
         );
         merge_map(&mut self.iterable_item_added, other.iterable_item_added);
         merge_map(&mut self.iterable_item_removed, other.iterable_item_removed);
+        if let Some(set_items) = other.set_items {
+            let own = self.set_items.get_or_insert_default();
+            merge_map(&mut own.added, set_items.added);
+            merge_map(&mut own.removed, set_items.removed);
+        }
     }
 
     /// `DeepDiff`'s global "mutual add/remove becomes a value change" pass
@@ -510,6 +625,8 @@ impl Report {
             .chain(self.dictionary_item_removed.values())
             .chain(self.iterable_item_added.values())
             .chain(self.iterable_item_removed.values())
+            .chain(self.set_items().added.values())
+            .chain(self.set_items().removed.values())
             .map(crate::ignore_order::item_length)
             .sum();
 
@@ -525,6 +642,8 @@ impl Report {
             && self.dictionary_item_removed.is_empty()
             && self.iterable_item_added.is_empty()
             && self.iterable_item_removed.is_empty()
+            && self.set_items().added.is_empty()
+            && self.set_items().removed.is_empty()
     }
 
     /// The total number of findings across every category.
@@ -543,6 +662,8 @@ impl Report {
             + self.dictionary_item_removed.len()
             + self.iterable_item_added.len()
             + self.iterable_item_removed.len()
+            + self.set_items().added.len()
+            + self.set_items().removed.len()
     }
 
     /// Renders the report into the `DeepDiff` `to_json()` shape at
@@ -609,6 +730,8 @@ impl Report {
             "iterable_item_removed",
             &self.iterable_item_removed,
         );
+        push_set_category(&mut root, "set_item_added", &self.set_items().added);
+        push_set_category(&mut root, "set_item_removed", &self.set_items().removed);
 
         builder.object(root)
     }
@@ -669,6 +792,8 @@ impl Report {
             "iterable_item_removed",
             &self.iterable_item_removed,
         );
+        serialize_set_category(&mut root, "set_item_added", &self.set_items().added);
+        serialize_set_category(&mut root, "set_item_removed", &self.set_items().removed);
 
         serde_json::Value::Object(root)
     }

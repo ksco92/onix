@@ -16,8 +16,10 @@ use serde::de::value::{
     BytesDeserializer, F64Deserializer, I128Deserializer, StringDeserializer, U128Deserializer,
 };
 
-use super::{Number, Object, Value};
-use crate::test_support::{cdate, cdt, cdt_at, cv};
+use serde_json::json;
+
+use super::{Builder, Number, Object, SetItems, Value};
+use crate::test_support::{cdate, cdt, cdt_at, cfrozen, cset, ctup, cv};
 
 /// The convenience alias for `serde`'s in-memory deserializer error type.
 type DeError = serde::de::value::Error;
@@ -575,4 +577,275 @@ fn calendar_values_nested_in_deep_containers_drop_without_native_recursion() {
         .expect("thread spawns");
 
     assert!(handle.join().is_ok());
+}
+
+// --- sets ----------------------------------------------------------------
+
+/// Canonical order ranks the kinds `None` < `bool` < `int` < `float` <
+/// `str` < `tuple` < `frozenset` < `list` < `set` < `dict`, and orders
+/// within a kind by value — numbers numerically, not by their text.
+#[test]
+fn canonical_order_ranks_by_kind_then_value() {
+    let items = SetItems::new(vec![
+        Value::Str("b".into()),
+        Value::Number(Number::from_u64(10)),
+        Value::Null,
+        Value::Number(Number::from_u64(2)),
+        Value::Number(Number::from_f64(1.5).expect("finite")),
+        Value::Bool(true),
+        ctup(&[json!(1)]),
+        cfrozen(&[json!(1)]),
+    ]);
+
+    let rendered: Vec<String> = items.iter().map(crate::path::set_item_repr).collect();
+    assert_eq!(
+        rendered,
+        [
+            "None",
+            "True",
+            "2",
+            "10",
+            "1.5",
+            "'b'",
+            "(1,)",
+            "frozenset({1})"
+        ]
+    );
+}
+
+/// The source order is dropped at construction, so every rendering is
+/// canonical without sorting anything.
+#[test]
+fn a_set_renders_to_a_json_array_in_canonical_order() {
+    let set = cset(&[json!(3), json!(1), json!(2)]);
+    assert_eq!(set.to_serde_json(), json!([1, 2, 3]));
+
+    let frozen = cfrozen(&[json!("b"), json!("a")]);
+    assert_eq!(frozen.to_serde_json(), json!(["a", "b"]));
+}
+
+/// A member equal to an earlier one is dropped: two of them would render
+/// to one report path, which `Report` requires to be unique. A real Python
+/// set cannot produce the pair, but the lossy `str` conversion boundary and
+/// this crate's own public API can.
+#[test]
+fn set_items_drop_a_member_equal_to_an_earlier_one() {
+    let items = SetItems::new(vec![
+        Value::Str("x".into()),
+        Value::Null,
+        Value::Str("x".into()),
+        Value::Null,
+    ]);
+
+    assert_eq!(items.len(), 2);
+    assert_eq!(&*items, &[Value::Null, Value::Str("x".into())]);
+}
+
+/// Deduplication is structural, so every one of these survives — including
+/// the two signed zeros, which render differently (`0.0` and `-0.0`).
+#[test]
+fn set_items_keep_members_that_only_look_alike() {
+    let items = SetItems::new(vec![
+        Value::Number(Number::from_u64(1)),
+        Value::Number(Number::from_f64(1.0).expect("finite")),
+        Value::Bool(true),
+        Value::Number(Number::from_f64(0.0).expect("finite")),
+        Value::Number(Number::from_f64(-0.0).expect("finite")),
+        Value::Number(Number::from_u64(u64::MAX)),
+        Value::Number(Number::from_i64(-1)),
+    ]);
+
+    assert_eq!(items.len(), 7);
+}
+
+/// Two members Python would call equal but that are structurally different
+/// survive construction — no Python set can hold the pair — while the *diff*
+/// still treats them as one member, which is what makes `{(1,)}` versus
+/// `{(1.0,)}` empty.
+#[test]
+fn set_items_keep_members_only_python_would_call_equal() {
+    assert_eq!(
+        SetItems::new(vec![ctup(&[json!(1)]), ctup(&[json!(1.0)])]).len(),
+        2
+    );
+    assert!(
+        crate::diff::diff(
+            &Value::Set(SetItems::new(vec![ctup(&[json!(1)])])),
+            &Value::Set(SetItems::new(vec![ctup(&[json!(1.0)])])),
+        )
+        .expect("shallow sets diff cleanly")
+        .is_empty()
+    );
+}
+
+/// Equality is element-wise in stored order — which is canonical, so two
+/// sets built from the same members in different orders *are* equal, and the
+/// diff's equal-inputs fast path sees them as such.
+#[test]
+fn sets_with_the_same_items_in_different_orders_are_structurally_equal() {
+    assert_eq!(cset(&[json!(1), json!(2)]), cset(&[json!(2), json!(1)]));
+    assert!(
+        crate::diff::diff(&cset(&[json!(1), json!(2)]), &cset(&[json!(2), json!(1)]))
+            .expect("shallow sets diff cleanly")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_set_never_equals_another_container_kind_holding_the_same_items() {
+    let items = [json!(1), json!(2)];
+    assert_ne!(cset(&items), cfrozen(&items));
+    assert_ne!(cset(&items), cv(&json!([1, 2])));
+    assert_ne!(cset(&items), ctup(&items));
+    assert_ne!(cset(&items), cset(&[json!(1)]));
+}
+
+#[test]
+fn int_and_float_set_items_stay_distinct() {
+    assert_ne!(cset(&[json!(1)]), cset(&[json!(1.0)]));
+}
+
+/// The iterative `Drop` covers sets too: a nest far deeper than the native
+/// stack tolerates tears down cleanly rather than aborting the process.
+#[test]
+fn dropping_a_deeply_nested_set_does_not_overflow_the_stack() {
+    let mut value = Value::FrozenSet(SetItems::new(vec![]));
+    for _ in 0..200_000 {
+        value = Value::FrozenSet(SetItems::new(vec![value]));
+    }
+    drop(value);
+}
+
+#[test]
+fn set_items_expose_the_slice_and_iterate() {
+    let set = SetItems::new(vec![Value::Null, Value::Bool(false)]);
+    assert_eq!(set.len(), 2);
+    assert!(!set.is_empty());
+    assert!(SetItems::new(vec![]).is_empty());
+    assert_eq!((&set).into_iter().count(), 2);
+    assert_eq!(set.first(), Some(&Value::Null));
+    assert_eq!(&*set, &[Value::Null, Value::Bool(false)]);
+}
+
+#[test]
+fn object_entries_iterate_from_both_ends() {
+    let value = cv(&json!({"a": 1, "b": 2, "c": 3}));
+    let Value::Object(object) = &value else {
+        panic!("a JSON object converts to Value::Object");
+    };
+    let keys: Vec<&str> = object.iter().rev().map(|(key, _)| key).collect();
+    assert_eq!(keys, ["c", "b", "a"]);
+}
+
+/// Canonical order compares two containers of the same kind element by
+/// element and then by length, and reaches every kind a `Value` can be —
+/// including the ones no Python set could hold, which only a directly-built
+/// value can carry.
+#[test]
+fn canonical_order_compares_same_kind_containers_element_wise() {
+    let mut builder = Builder::new();
+    let object =
+        |builder: &mut Builder, key: &str| builder.object(vec![(key.to_string(), Value::Null)]);
+    let first = object(&mut builder, "a");
+    let second = object(&mut builder, "b");
+    let longer = builder.object(vec![
+        ("a".to_string(), Value::Null),
+        ("b".to_string(), Value::Null),
+    ]);
+
+    let items = SetItems::new(vec![
+        cv(&json!([2])),
+        cv(&json!([1, 9])),
+        cv(&json!([1])),
+        ctup(&[json!(2)]),
+        ctup(&[json!(1), json!(9)]),
+        ctup(&[json!(1)]),
+        cfrozen(&[json!(2)]),
+        cfrozen(&[json!(1), json!(9)]),
+        cfrozen(&[json!(1)]),
+        cset(&[json!(2)]),
+        cset(&[json!(1)]),
+        second,
+        longer,
+        first,
+        Value::Null,
+        Value::Null,
+        Value::Bool(true),
+        Value::Bool(false),
+        Value::Number(Number::from_u64(u64::MAX)),
+        Value::Number(Number::from_u64(u64::MAX - 1)),
+        Value::Number(Number::from_i64(-3)),
+    ]);
+
+    let rendered: Vec<String> = items.iter().map(crate::path::set_item_repr).collect();
+    assert_eq!(
+        rendered,
+        [
+            "None",
+            "False",
+            "True",
+            "-3",
+            "18446744073709551614",
+            "18446744073709551615",
+            "(1,)",
+            "(1, 9)",
+            "(2,)",
+            "frozenset({1})",
+            "frozenset({1, 9})",
+            "frozenset({2})",
+            "[1]",
+            "[1, 9]",
+            "[2]",
+            "{1}",
+            "{2}",
+            "{'a': None}",
+            "{'a': None, 'b': None}",
+            "{'b': None}",
+        ]
+    );
+}
+
+/// Two structurally equal containers are one member, whatever kind they are.
+#[test]
+fn set_items_drop_an_equal_container_member() {
+    let items = SetItems::new(vec![
+        ctup(&[json!(1)]),
+        cv(&json!([1])),
+        ctup(&[json!(1)]),
+        cv(&json!([1])),
+        cfrozen(&[json!(1)]),
+        cfrozen(&[json!(1)]),
+    ]);
+
+    assert_eq!(items.len(), 3);
+}
+
+/// A calendar value cannot reach a set through the Python bindings — the
+/// conversion refuses one anywhere inside a set member until issue #21
+/// defines the rule — but the value model can hold one, so its canonical
+/// order and rendering are pinned rather than left to chance: both kinds
+/// sort after every other, datetimes by instant and dates by ordinal, and
+/// each renders as Python's own `repr()` (the form a container holding one
+/// shows), which is what #21 will need.
+#[test]
+fn canonical_order_ranks_calendar_values_last() {
+    let items = SetItems::new(vec![
+        cdate(2024, 1, 2),
+        cdt(2024, 1, 1, None),
+        cdate(2024, 1, 1),
+        cdt(2024, 1, 1, Some(3600)),
+        cv(&json!("z")),
+    ]);
+
+    let rendered: Vec<String> = items.iter().map(crate::path::set_item_repr).collect();
+    assert_eq!(
+        rendered,
+        [
+            "'z'",
+            "datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600)))",
+            "datetime.datetime(2024, 1, 1, 0, 0)",
+            "datetime.date(2024, 1, 1)",
+            "datetime.date(2024, 1, 2)",
+        ]
+    );
 }

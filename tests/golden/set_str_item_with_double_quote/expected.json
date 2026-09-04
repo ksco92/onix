@@ -1,0 +1,8 @@
+{
+  "set_item_added": [
+    "root['x']"
+  ],
+  "set_item_removed": [
+    "root['he said \"hi\"']"
+  ]
+}

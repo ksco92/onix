@@ -9,8 +9,15 @@ Python-only case list — every case directory holds ``a.json``/``b.json``/
 
 The two input files are decoded through ``scripts/golden_tags.py`` (on the
 path via this package's pytest configuration), which turns the corpus's tagged
-objects back into the Python values they stand for — a tuple, a datetime or a date.
-Both engines then see the same live objects.
+objects back into the Python values they stand for — a tuple, a set, a frozenset,
+a datetime or a date. Both engines then see the same live objects.
+
+Real DeepDiff's report goes through ``golden_tags.canonical_report`` — the same
+function ``scripts/gen_goldens.py`` writes ``expected.json`` with — which puts
+anything that came out of a Python set (hash-ordered, and for ``str`` members
+``PYTHONHASHSEED``-dependent) into onix's canonical order and touches nothing
+else. onix's own report is already in that order, so only its two set
+categories are sorted.
 """
 
 import json
@@ -18,7 +25,7 @@ from pathlib import Path
 
 import pytest
 from deepdiff import DeepDiff as RealDeepDiff
-from golden_tags import JSON_DEFAULT_MAPPING, TaggedValue, decode_tags
+from golden_tags import TaggedValue, canonical_report, decode_tags, sorted_set_categories
 
 from deepdiff_rs import DeepDiff as OnixDeepDiff
 
@@ -91,12 +98,8 @@ def test_golden_case_matches_real_deepdiff(case_name: str) -> None:
     b = _read_case_input(case_dir / "b.json")
     ignore_order = bool(_case_options(case_dir).get("ignore_order", False))
 
-    real = RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)
-    # `JSON_DEFAULT_MAPPING` is what lets a `date`-carrying case be compared at
-    # all: DeepDiff's stock `to_json()` raises TypeError on one. See
-    # `scripts/golden_tags.py` for why it renders exactly what onix does.
-    expected = json.loads(real.to_json(default_mapping=JSON_DEFAULT_MAPPING))
-    actual = json.loads(OnixDeepDiff(a, b, ignore_order=ignore_order).to_json())
+    expected = canonical_report(RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2))
+    actual = sorted_set_categories(OnixDeepDiff(a, b, ignore_order=ignore_order))
 
     assert actual == expected
 

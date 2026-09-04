@@ -1,13 +1,19 @@
 //! DeepDiff-style path rendering.
 //!
-//! A path locates a value inside a nested dict/list structure, e.g.
+//! A path locates a value inside a nested dict/list/set structure, e.g.
 //! `root['a'][3]['b c']`. This module owns the (small) segment vocabulary and
 //! the textual rendering rules, kept isolated from the diff engine. The
 //! golden corpus (generated against real `DeepDiff`) is the final authority
 //! on quoting; see [`quote_key`]'s doc for the (surprisingly escape-free)
-//! rule it verified.
+//! rule it verified, and [`set_item_repr`]'s for the *different* — and
+//! equally escape-free — rule a set item follows.
 
-/// One step in a path: either a dict key or a list index.
+use std::fmt::Write as _;
+
+use crate::datetime::{SECONDS_PER_DAY, div_rem_euclid};
+use crate::value::{Number, Value};
+
+/// One step in a path: a dict key, a list index, or a set item.
 ///
 /// Derives `Ord` so a full path (`Vec<PathSegment>`) can be used as a
 /// `BTreeMap` key — see [`crate::report::Report`]'s doc for why: findings
@@ -26,6 +32,14 @@ pub enum PathSegment {
     Key(String),
     /// A list index access, e.g. the `3` in `root[3]`.
     Index(usize),
+    /// A set item, e.g. the `1` in `root[1]` for the set `{1}` — carrying
+    /// the item **already rendered** by [`set_item_repr`], because that
+    /// rendering is the only identity `DeepDiff` gives a set item: its
+    /// `set_item_added`/`set_item_removed` entries are plain path strings
+    /// built by formatting the item into the set's own path (see
+    /// [`set_item_repr`]'s doc for the exact upstream code), never a
+    /// subscript that could be resolved back to a position.
+    SetItem(String),
 }
 
 /// Renders a path (a sequence of [`PathSegment`]s from the root) as a
@@ -63,6 +77,11 @@ pub fn render_path(segments: &[PathSegment]) -> String {
             PathSegment::Index(index) => {
                 rendered.push('[');
                 rendered.push_str(&index.to_string());
+                rendered.push(']');
+            }
+            PathSegment::SetItem(item) => {
+                rendered.push('[');
+                rendered.push_str(item);
                 rendered.push(']');
             }
         }
@@ -115,9 +134,390 @@ pub fn quote_key(key: &str) -> String {
     }
 }
 
+/// Renders one set item the way `DeepDiff` renders it inside a
+/// `set_item_added`/`set_item_removed` entry — the text that becomes a
+/// [`PathSegment::SetItem`].
+///
+/// `DeepDiff` builds those entries in
+/// `model.py::TextResult._from_tree_set_item_added_or_removed`, which is
+/// literally:
+///
+/// ```text
+/// path = change.up.path()                  # the SET's own path
+/// item = change.t2 if added else change.t1
+/// if ADD_QUOTES_TO_STRINGS and isinstance(item, strings):
+///     item = "'%s'" % item
+/// "{}[{}]".format(path, str(item))
+/// ```
+///
+/// So the rule has two halves, and neither is [`quote_key`]'s:
+///
+/// - A `str` item is wrapped in **single quotes, unconditionally, with no
+///   escaping of any kind** — `{"it's"}` renders `root['it's']`, where the
+///   *dict key* `"it's"` renders `root["it's"]`. The two rules genuinely
+///   differ; confirmed against `deepdiff==9.1.0`.
+/// - Every other item is rendered by Python's `str()`, which for the types
+///   a set can hold is `repr()` ([`python_repr`]) — so a `str` *nested
+///   inside* a tuple or frozenset item **is** escaped, unlike a top-level
+///   one: `{("it's",)}` renders `root[("it's",)]`.
+///
+/// # Examples
+///
+/// ```
+/// use onix_core::Value;
+/// use onix_core::path::set_item_repr;
+///
+/// assert_eq!(set_item_repr(&Value::Str("it's".into())), "'it's'");
+/// assert_eq!(set_item_repr(&Value::Bool(true)), "True");
+/// ```
+#[must_use]
+pub fn set_item_repr(item: &Value) -> String {
+    match item {
+        Value::Str(s) => format!("'{s}'"),
+        other => python_repr(other),
+    }
+}
+
+/// Renders `value` as Python's `repr()` would.
+///
+/// `repr()` and `str()` agree on every type this model holds (Python only
+/// separates them for `str` itself, and a container's `str()` uses `repr()`
+/// for its elements either way), so this one function covers both sides of
+/// [`set_item_repr`]'s rule.
+///
+/// A `set`/`frozenset` renders its members in the crate's canonical set
+/// order (see [`crate::value::SetItems`]), where Python's own `str()` uses
+/// the set's hash order — the one place a rendered set item can differ from
+/// `DeepDiff`'s, and a documented one. See `tests/golden/README.md`.
+///
+/// Iterative (an explicit heap work-stack, no native recursion) all the way
+/// through, sets included — their members are stored in canonical order, so
+/// rendering one never sorts and never re-enters a comparator. This matches
+/// [`Value`]'s own stack-safety posture: nothing bounds how deep a value a
+/// caller may render, and a natively recursive renderer would be an
+/// unguarded overflow sink on adversarially nested input.
+///
+/// # Divergence from Python: non-printable non-ASCII characters
+///
+/// Python's `repr()` escapes any character it considers non-printable (the
+/// Unicode `Cc`/`Cf`/`Cs`/`Co`/`Cn`/`Zl`/`Zp` categories, plus `Zs` other
+/// than a plain space) as `\xXX`/`\uXXXX`/`\UXXXXXXXX`. This port escapes
+/// exactly those below `U+0100` (every ASCII control, `U+007F`–`U+00A0`,
+/// and the soft hyphen `U+00AD` — the complete non-printable set in that
+/// range) and passes everything above through literally, which is what
+/// Python does for all *printable* text. Reproducing the rest would mean
+/// carrying a Unicode category table for characters (zero-width joiners,
+/// unassigned code points) that no realistic diff input holds; this is an
+/// accepted, narrow, documented limitation, in the same class as
+/// `crate::lcs`'s `2^53` numeric bound.
+#[must_use]
+pub fn python_repr(value: &Value) -> String {
+    let mut out = String::new();
+    let mut stack: Vec<Work<'_>> = vec![Work::Value(value)];
+
+    while let Some(work) = stack.pop() {
+        match work {
+            Work::Text(text) => out.push_str(text),
+            Work::Key(key) => {
+                out.push_str(&python_repr_str(key));
+                out.push_str(": ");
+            }
+            Work::Value(value) => write_repr_head(&mut out, &mut stack, value),
+        }
+    }
+
+    out
+}
+
+/// One step of [`python_repr`]'s work-stack: a value still to render, a
+/// literal separator/bracket, or a dict key (rendered, then `": "`).
+enum Work<'a> {
+    Value(&'a Value),
+    Text(&'static str),
+    Key(&'a str),
+}
+
+/// Renders `value`'s own text into `out`, pushing any children it still
+/// needs rendered onto `stack` (in reverse, so they pop in order).
+fn write_repr_head<'a>(out: &mut String, stack: &mut Vec<Work<'a>>, value: &'a Value) {
+    match value {
+        Value::Null => out.push_str("None"),
+        Value::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
+        Value::Number(n) => out.push_str(&number_repr(n)),
+        Value::Str(s) => out.push_str(&python_repr_str(s)),
+        Value::DateTime(value) => out.push_str(&datetime_repr(*value)),
+        Value::Date(value) => {
+            let _ = write!(
+                out,
+                "datetime.date({}, {}, {})",
+                value.year(),
+                value.month(),
+                value.day()
+            );
+        }
+        Value::Array(items) => push_sequence(out, stack, items, "[", "]"),
+        Value::Tuple(items) => {
+            let close = if items.len() == 1 { ",)" } else { ")" };
+            push_sequence(out, stack, items, "(", close);
+        }
+        Value::Set(items) => push_set(out, stack, items, "set()", "{", "}"),
+        Value::FrozenSet(items) => {
+            push_set(out, stack, items, "frozenset()", "frozenset({", "})");
+        }
+        Value::Object(map) => {
+            out.push('{');
+            stack.push(Work::Text("}"));
+            for (index, (key, entry)) in map.iter().enumerate().rev() {
+                stack.push(Work::Value(entry));
+                stack.push(Work::Key(key));
+                if index > 0 {
+                    stack.push(Work::Text(", "));
+                }
+            }
+        }
+    }
+}
+
+/// Python's `repr()` for a `datetime`, which is what `str()` of a container
+/// holding one shows — the form a calendar value takes *inside* a set item.
+///
+/// The conversion refuses a calendar value anywhere inside a set member
+/// today (that combination is issue #21), so nothing in the bindings reaches
+/// this; a caller building a [`Value`] directly can, and when #21 lifts the
+/// refusal it is this form — not `str()`'s `2024-01-01 00:00:00` — that a
+/// nested datetime must render as. Python omits the trailing zero fields:
+/// seconds appear only when the second or the microsecond is non-zero, and
+/// microseconds only when non-zero.
+fn datetime_repr(value: crate::datetime::DateTime) -> String {
+    let date = value.date();
+    let mut out = format!(
+        "datetime.datetime({}, {}, {}, {}, {}",
+        date.year(),
+        date.month(),
+        date.day(),
+        value.hour(),
+        value.minute()
+    );
+
+    if value.second() != 0 || value.microsecond() != 0 {
+        let _ = write!(out, ", {}", value.second());
+    }
+    if value.microsecond() != 0 {
+        let _ = write!(out, ", {}", value.microsecond());
+    }
+
+    match value.utc_offset_seconds() {
+        None => {}
+        // Python's own `timezone.utc` singleton reprs by name; every other
+        // fixed offset reprs as the `timedelta` it was built from, which
+        // normalizes a negative offset into whole days plus seconds.
+        Some(0) => out.push_str(", tzinfo=datetime.timezone.utc"),
+        Some(offset) => {
+            let (days, seconds) = div_rem_euclid(i64::from(offset), SECONDS_PER_DAY);
+            let day_part = if days == 0 {
+                String::new()
+            } else {
+                format!("days={days}, ")
+            };
+            let _ = write!(
+                out,
+                ", tzinfo=datetime.timezone(datetime.timedelta({day_part}seconds={seconds}))"
+            );
+        }
+    }
+
+    out.push(')');
+    out
+}
+
+/// Writes one set's repr: `empty` when it has no members, otherwise
+/// `open`, its members (already in the crate's canonical order — see
+/// [`crate::value::SetItems`]) and `close`.
+fn push_set<'a>(
+    out: &mut String,
+    stack: &mut Vec<Work<'a>>,
+    items: &'a crate::value::SetItems,
+    empty: &'static str,
+    open: &'static str,
+    close: &'static str,
+) {
+    if items.is_empty() {
+        out.push_str(empty);
+        return;
+    }
+
+    out.push_str(open);
+    stack.push(Work::Text(close));
+    for (index, item) in items.iter().enumerate().rev() {
+        stack.push(Work::Value(item));
+        if index > 0 {
+            stack.push(Work::Text(", "));
+        }
+    }
+}
+
+/// Writes `open` and schedules `items` comma-separated followed by `close`
+/// — the shared shape of every bracketed Python container repr.
+fn push_sequence<'a>(
+    out: &mut String,
+    stack: &mut Vec<Work<'a>>,
+    items: &'a [Value],
+    open: &'static str,
+    close: &'static str,
+) {
+    out.push_str(open);
+    stack.push(Work::Text(close));
+    for (index, item) in items.iter().enumerate().rev() {
+        stack.push(Work::Value(item));
+        if index > 0 {
+            stack.push(Work::Text(", "));
+        }
+    }
+}
+
+/// Python's `repr()` for a `str`: single quotes unless the string contains a
+/// single quote and no double quote (then double quotes), with `\`, the
+/// wrapping quote and the non-printable characters escaped — see
+/// [`python_repr`]'s doc for the one documented gap above `U+00FF`.
+fn python_repr_str(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '\t' => out.push_str(r"\t"),
+            '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if is_escaped_below_u100(c) => {
+                // Writing into a `String` is infallible.
+                let _ = write!(out, "\\x{:02x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// Python's `repr()` for an `int` or a `float`, split by the [`Number`]
+/// representation the value was parsed or built with — the same int/float
+/// distinction `crate::diff`'s `python_type_name` reports.
+fn number_repr(n: &Number) -> String {
+    if n.is_f64() {
+        return python_float_repr(
+            n.as_f64()
+                .expect("Number::is_f64 guarantees as_f64 succeeds"),
+        );
+    }
+    if let Some(i) = n.as_i64() {
+        return i.to_string();
+    }
+    n.as_u64()
+        .expect("a non-float Number always has an i64 or u64 representation")
+        .to_string()
+}
+
+/// The complete set of code points below `U+0100` Python's `repr()` escapes
+/// as `\xXX`: the C0 controls, `DEL` through `NBSP`, and the soft hyphen.
+fn is_escaped_below_u100(c: char) -> bool {
+    c < '\u{20}' || ('\u{7f}'..='\u{a0}').contains(&c) || c == '\u{ad}'
+}
+
+/// Python's `repr()` for a `float`, which is `float_repr_style="short"`: the
+/// shortest decimal string that round-trips, formatted with an exponent
+/// when the decimal point sits at or below `-4` or above `16`, and with a
+/// `.0` suffix otherwise so the result always reads as a float.
+///
+/// # Why this is two formatting calls, not one
+///
+/// `CPython`'s `repr` is `dtoa` mode 0: among the shortest digit strings
+/// that round-trip, the one *nearest* the float's exact value, ties broken
+/// to an even last digit. Rust's `{:e}` produces a shortest string that
+/// round-trips, which fixes the digit *count* but not always the last
+/// digit: about one float in 3,800 sits close enough to a midpoint that
+/// the two disagree (`160598971591683.12` renders as `...13`). So the digit
+/// count comes from `{:e}`, and the digits themselves from a second,
+/// fixed-precision `{:.*e}` at that count — Rust's exact mode, which is
+/// correctly rounded with ties to even, i.e. mode 0's own rule. Both calls
+/// are in `core::fmt`; no arbitrary-precision arithmetic and no dependency
+/// is involved. Verified against real Python `repr()` over a million random
+/// bit patterns in the bindings suite.
+fn python_float_repr(value: f64) -> String {
+    let shortest = format!("{value:e}");
+    let significant = shortest
+        .split_once('e')
+        .map_or(shortest.as_str(), |(mantissa, _)| mantissa)
+        .chars()
+        .filter(char::is_ascii_digit)
+        .count();
+    let scientific = format!("{value:.*e}", significant.saturating_sub(1));
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("Rust's {:e} always emits an `e` separator");
+    let exponent: i32 = exponent
+        .parse()
+        .expect("Rust's {:e} always emits a decimal exponent");
+    let (sign, mantissa) = mantissa
+        .strip_prefix('-')
+        .map_or(("", mantissa), |rest| ("-", rest));
+    let mut digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    // Re-rounding to the shortest length can carry (`9.99` to `1.00e1`),
+    // which pads with zeros Python's shortest form never keeps.
+    let trimmed = digits.trim_end_matches('0').len().max(1);
+    digits.truncate(trimmed);
+
+    // `decimal_point` is Python's own `decpt`: the value is
+    // `0.<digits> * 10^decimal_point`.
+    let decimal_point = exponent + 1;
+
+    if decimal_point <= -4 || decimal_point > 16 {
+        let (lead, rest) = digits.split_at(1);
+        let point = if rest.is_empty() {
+            String::new()
+        } else {
+            format!(".{rest}")
+        };
+        let exponent_sign = if exponent < 0 { '-' } else { '+' };
+        return format!(
+            "{sign}{lead}{point}e{exponent_sign}{:02}",
+            exponent.unsigned_abs()
+        );
+    }
+
+    if decimal_point <= 0 {
+        // The decimal point sits at or before the first digit: `0.` then
+        // enough leading zeros to push the digits down to their place.
+        let zeros = "0".repeat(usize::try_from(-decimal_point).unwrap_or(0));
+        return format!("{sign}0.{zeros}{digits}");
+    }
+
+    let decimal_point =
+        usize::try_from(decimal_point).expect("the branch above rejected every non-positive value");
+
+    if decimal_point >= digits.len() {
+        let zeros = "0".repeat(decimal_point - digits.len());
+        return format!("{sign}{digits}{zeros}.0");
+    }
+
+    let (whole, fraction) = digits.split_at(decimal_point);
+    format!("{sign}{whole}.{fraction}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PathSegment, quote_key, render_path};
+    use super::{PathSegment, python_repr, quote_key, render_path, set_item_repr};
+    use crate::test_support::{cdate, cdt_at};
+    use crate::value::{Builder, Number, SetItems, Value};
 
     #[test]
     fn empty_path_renders_as_root() {
@@ -211,6 +611,283 @@ mod tests {
     #[test]
     fn quote_key_empty_string() {
         assert_eq!(quote_key(""), "''");
+    }
+
+    /// A set item renders as its own path segment, with no quoting applied
+    /// on top of [`set_item_repr`]'s own (golden: `set_str_items`).
+    #[test]
+    fn set_item_segment_renders_its_text_verbatim() {
+        assert_eq!(
+            render_path(&[
+                PathSegment::Key("a".to_string()),
+                PathSegment::SetItem("(1, 2)".to_string()),
+            ]),
+            "root['a'][(1, 2)]"
+        );
+    }
+
+    /// A top-level `str` set item is wrapped in single quotes
+    /// unconditionally and with no escaping — deliberately **not**
+    /// [`quote_key`]'s rule, which would double-quote the second of these
+    /// (golden: `set_str_item_with_single_quote`,
+    /// `set_str_item_with_double_quote`).
+    #[test]
+    fn set_item_str_always_uses_bare_single_quotes() {
+        assert_eq!(set_item_repr(&Value::Str("a".into())), "'a'");
+        assert_eq!(set_item_repr(&Value::Str("it's".into())), "'it's'");
+        assert_eq!(
+            set_item_repr(&Value::Str(r#"he said "hi""#.into())),
+            r#"'he said "hi"'"#
+        );
+        assert_eq!(set_item_repr(&Value::Str("a\nb".into())), "'a\nb'");
+        assert_ne!(
+            set_item_repr(&Value::Str("it's".into())),
+            quote_key("it's"),
+            "the set-item rule and the dict-key rule genuinely differ"
+        );
+    }
+
+    #[test]
+    fn set_item_scalars_render_as_python_str() {
+        assert_eq!(set_item_repr(&Value::Null), "None");
+        assert_eq!(set_item_repr(&Value::Bool(true)), "True");
+        assert_eq!(set_item_repr(&Value::Bool(false)), "False");
+        assert_eq!(set_item_repr(&Value::Number(Number::from_i64(-7))), "-7");
+        assert_eq!(
+            set_item_repr(&Value::Number(Number::from_u64(u64::MAX))),
+            "18446744073709551615"
+        );
+    }
+
+    /// A `str` nested inside a container item goes through Python `repr()`,
+    /// which *does* escape — the other half of the set-item rule (golden:
+    /// `set_str_inside_tuple_item`).
+    #[test]
+    fn str_nested_in_a_tuple_item_uses_python_repr() {
+        let tuple = Value::Tuple(Box::new([Value::Str("it's".into())]));
+        assert_eq!(set_item_repr(&tuple), r#"("it's",)"#);
+
+        let both = Value::Tuple(Box::new([Value::Str("it's \"x\"".into())]));
+        assert_eq!(set_item_repr(&both), r#"('it\'s "x"',)"#);
+    }
+
+    #[test]
+    fn python_repr_renders_every_container_kind() {
+        let inner = Value::Tuple(Box::new([Value::Number(Number::from_u64(1))]));
+        assert_eq!(python_repr(&inner), "(1,)");
+        assert_eq!(
+            python_repr(&Value::Tuple(Box::new([
+                Value::Number(Number::from_u64(1)),
+                Value::Number(Number::from_u64(2)),
+            ]))),
+            "(1, 2)"
+        );
+        assert_eq!(python_repr(&Value::Tuple(Box::new([]))), "()");
+        assert_eq!(
+            python_repr(&Value::Array(Box::new([
+                Value::Null,
+                Value::Str("a".into()),
+            ]))),
+            "[None, 'a']"
+        );
+        assert_eq!(python_repr(&Value::Array(Box::new([]))), "[]");
+    }
+
+    /// A set renders its members in the crate's canonical order, whatever
+    /// order they are stored in.
+    #[test]
+    fn python_repr_renders_sets_in_canonical_order() {
+        let members = || {
+            vec![
+                Value::Number(Number::from_u64(2)),
+                Value::Number(Number::from_u64(1)),
+            ]
+        };
+
+        assert_eq!(python_repr(&Value::Set(SetItems::new(members()))), "{1, 2}");
+        assert_eq!(python_repr(&Value::Set(SetItems::new(vec![]))), "set()");
+        assert_eq!(
+            python_repr(&Value::FrozenSet(SetItems::new(members()))),
+            "frozenset({1, 2})"
+        );
+        assert_eq!(
+            python_repr(&Value::FrozenSet(SetItems::new(vec![]))),
+            "frozenset()"
+        );
+    }
+
+    /// Every float the tie-breaking rule was found to disagree on: Rust's
+    /// own shortest form rounds these away from Python's `repr`, so this
+    /// goes red on a renderer that trusts `{:e}`'s digits.
+    #[test]
+    fn python_float_repr_breaks_shortest_form_ties_pythons_way() {
+        let cases = [
+            (160_598_971_591_683.12_f64, "160598971591683.12"),
+            (2_113_325_745_016_023.2, "2113325745016023.2"),
+            (-20_243_279_817_481.062, "-20243279817481.062"),
+            (245_712_874_376_162.12, "245712874376162.12"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                set_item_repr(&Value::Number(Number::from_f64(input).expect("finite"))),
+                expected,
+                "for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_repr_renders_a_dict_with_repr_keys() {
+        let mut builder = Builder::new();
+        let object = builder.object(vec![
+            ("b".to_string(), Value::Number(Number::from_u64(2))),
+            ("a".to_string(), Value::Null),
+        ]);
+        assert_eq!(python_repr(&object), "{'a': None, 'b': 2}");
+        assert_eq!(python_repr(&builder.object(vec![])), "{}");
+    }
+
+    /// A container nested several levels deep still renders element by
+    /// element, proving the explicit work-stack composes rather than only
+    /// handling one level.
+    #[test]
+    fn python_repr_nests_containers() {
+        let value = Value::Tuple(Box::new([
+            Value::Number(Number::from_u64(1)),
+            Value::Tuple(Box::new([
+                Value::Number(Number::from_u64(2)),
+                Value::FrozenSet(SetItems::new(vec![Value::Str("x".into())])),
+            ])),
+        ]));
+        assert_eq!(python_repr(&value), "(1, (2, frozenset({'x'})))");
+    }
+
+    /// The renderer is iterative, so a nest far deeper than any native
+    /// stack tolerates renders instead of aborting the process.
+    #[test]
+    fn python_repr_of_a_very_deep_nest_does_not_overflow_the_stack() {
+        let mut value = Value::Tuple(Box::new([]));
+        for _ in 0..100_000 {
+            value = Value::Tuple(Box::new([value]));
+        }
+
+        let rendered = python_repr(&value);
+
+        assert!(rendered.starts_with("((((("));
+        assert!(rendered.ends_with(",),),),),)"));
+    }
+
+    /// Python's own `repr` quoting: single quotes by default, double
+    /// quotes only when the string holds a single quote and no double one,
+    /// and a backslash escape when both appear.
+    #[test]
+    fn python_repr_str_picks_pythons_quote_and_escapes() {
+        let cases = [
+            ("a", "'a'"),
+            ("it's", "\"it's\""),
+            (r#"say "hi""#, r#"'say "hi"'"#),
+            (r#"it's "x""#, r#"'it\'s "x"'"#),
+            (r"a\b", r"'a\\b'"),
+            ("a\tb\nc\rd", r"'a\tb\nc\rd'"),
+            ("a\u{0}b", r"'a\x00b'"),
+            ("a\u{7f}\u{a0}\u{ad}b", r"'a\x7f\xa0\xadb'"),
+            ("héllo世界", "'héllo世界'"),
+        ];
+        for (input, expected) in cases {
+            let item = Value::Tuple(Box::new([Value::Str(input.into())]));
+            assert_eq!(
+                python_repr(&item),
+                format!("({expected},)"),
+                "for {input:?}"
+            );
+        }
+    }
+
+    /// Python's `repr()` for a calendar value — the form a container holding
+    /// one shows, and the form issue #21 will need once a calendar value may
+    /// be a set member. Every expectation here is real Python `repr()`
+    /// output, including the trailing-field trimming and the way a negative
+    /// offset's `timedelta` normalizes into whole days plus seconds.
+    #[test]
+    fn calendar_values_render_as_python_repr() {
+        let cases = [
+            (
+                cdt_at(2024, 1, 1, 0, 0, 0, 0, None),
+                "datetime.datetime(2024, 1, 1, 0, 0)",
+            ),
+            (
+                cdt_at(2024, 1, 1, 10, 30, 0, 0, None),
+                "datetime.datetime(2024, 1, 1, 10, 30)",
+            ),
+            (
+                cdt_at(2024, 1, 1, 10, 30, 5, 0, None),
+                "datetime.datetime(2024, 1, 1, 10, 30, 5)",
+            ),
+            (
+                cdt_at(2024, 1, 1, 10, 30, 5, 7, None),
+                "datetime.datetime(2024, 1, 1, 10, 30, 5, 7)",
+            ),
+            (
+                cdt_at(2024, 1, 1, 0, 0, 0, 7, None),
+                "datetime.datetime(2024, 1, 1, 0, 0, 0, 7)",
+            ),
+            (
+                cdt_at(2024, 1, 1, 0, 0, 0, 0, Some(0)),
+                "datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc)",
+            ),
+            (
+                cdt_at(2024, 1, 1, 0, 0, 0, 0, Some(3600)),
+                "datetime.datetime(2024, 1, 1, 0, 0, \
+                 tzinfo=datetime.timezone(datetime.timedelta(seconds=3600)))",
+            ),
+            (
+                cdt_at(2024, 1, 1, 0, 0, 0, 0, Some(-18000)),
+                "datetime.datetime(2024, 1, 1, 0, 0, \
+                 tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=68400)))",
+            ),
+            (cdate(2024, 1, 1), "datetime.date(2024, 1, 1)"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                python_repr(&value),
+                expected.replace("\n                 ", "")
+            );
+        }
+    }
+
+    /// Python's `float.__repr__`: always a decimal point or an exponent,
+    /// the exponent form at `decpt <= -4` or `decpt > 16`, and an
+    /// exponent of at least two digits with an explicit sign. Every
+    /// expectation here is real Python `repr()` output (see also the
+    /// bindings suite's seeded 1,000-float differential test).
+    #[test]
+    fn python_float_repr_matches_python() {
+        let cases = [
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (1.0, "1.0"),
+            (-2.5, "-2.5"),
+            (0.1, "0.1"),
+            (1.5, "1.5"),
+            (100.0, "100.0"),
+            (123.456, "123.456"),
+            (0.0001, "0.0001"),
+            (1e-5, "1e-05"),
+            (1.5e-7, "1.5e-07"),
+            (1e15, "1000000000000000.0"),
+            (1e16, "1e+16"),
+            (1.5e16, "1.5e+16"),
+            (1e100, "1e+100"),
+            (5e-324, "5e-324"),
+            (f64::MAX, "1.7976931348623157e+308"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                set_item_repr(&Value::Number(Number::from_f64(input).expect("finite"))),
+                expected,
+                "for {input:?}"
+            );
+        }
     }
 
     /// No escaping of control characters either: newline, tab, NUL, and DEL

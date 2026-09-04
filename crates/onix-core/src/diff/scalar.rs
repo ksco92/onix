@@ -30,6 +30,8 @@ pub(crate) fn python_type_name(value: &Value) -> &'static str {
         Value::Date(_) => "date",
         Value::Array(_) => "list",
         Value::Tuple(_) => "tuple",
+        Value::Set(_) => "set",
+        Value::FrozenSet(_) => "frozenset",
         Value::Object(_) => "dict",
     }
 }

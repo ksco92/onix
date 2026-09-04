@@ -1,0 +1,15 @@
+{
+  "iterable_item_removed": {
+    "root[1]": 3
+  },
+  "type_changes": {
+    "root[0]": {
+      "new_type": "int",
+      "new_value": 3,
+      "old_type": "set",
+      "old_value": [
+        1
+      ]
+    }
+  }
+}

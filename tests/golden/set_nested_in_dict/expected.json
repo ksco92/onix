@@ -1,0 +1,8 @@
+{
+  "set_item_added": [
+    "root['s']['b']"
+  ],
+  "set_item_removed": [
+    "root['s']['a']"
+  ]
+}

@@ -10,8 +10,15 @@
 //! thread stack and aborts the whole interpreter with an uncatchable
 //! `SIGSEGV`, which no Python `try`/`except` can recover.
 //!
-//! Three mechanisms here make that impossible, so no input and no `max_depth`
-//! reachable from Python can crash the process:
+//! Three mechanisms here make that impossible for the *diff*, so no input and
+//! no `max_depth` reachable from Python can crash the process there. They do
+//! not cover the step before it: `crate::convert`'s walk from Python objects
+//! into the value model runs on the calling thread, gets no worker, and
+//! happens before any depth guard has a value to measure — so **every walk
+//! reachable during conversion must itself be iterative**, including the
+//! ones `onix_core` runs on the caller's behalf while a value is being
+//! built (`SetItems::new`'s canonical ordering is one). The three
+//! mechanisms:
 //!
 //! 1. A hard ceiling ([`MAX_DEPTH_CEILING`]) on the `max_depth` a caller may
 //!    request; anything above it is rejected up front with a catchable

@@ -13,10 +13,12 @@ Each subdirectory is one case:
 tests/golden/<case_name>/
 ├── a.json         # t1, as fed to both DeepDiff and onix
 ├── b.json         # t2
-├── expected.json  # json.loads(DeepDiff(t1, t2, verbose_level=2, **kwargs)
-│                  #   .to_json(default_mapping=golden_tags.JSON_DEFAULT_MAPPING)),
-│                  # re-dumped with sort_keys=True — the mapping is what lets a
-│                  # case hold a `date` (see "The `date` superset" below)
+├── expected.json  # DeepDiff(t1, t2, verbose_level=2, **kwargs), rendered through
+│                  # golden_tags.canonical_report (which passes the
+│                  # JSON_DEFAULT_MAPPING a `date` case needs, and puts anything
+│                  # set-derived into onix's canonical order) and re-dumped with
+│                  # sort_keys=True — see "The `date` superset" and "Set
+│                  # iteration order" below
 └── options.json   # {"ignore_order": bool} — which DiffOptions onix diffs
                     # this case with; kwargs above mirrors it (currently the
                     # only option this corpus varies)
@@ -31,16 +33,19 @@ literal. A case that needs one writes it as a **tagged object**: a JSON object w
 | Tag | Decodes to | Status |
 | --- | --- | --- |
 | `$tuple` | `tuple` | supported |
+| `$set` | `set` | supported |
+| `$frozenset` | `frozenset` | supported |
 | `$datetime` | `datetime.datetime` | supported (ISO 8601 string, offset optional) |
 | `$date` | `datetime.date` | supported (ISO 8601 string) |
-| `$set` | `set` | reserved |
-| `$frozenset` | `frozenset` | reserved |
 
-So `{"$tuple": [1, 2]}` is the tuple `(1, 2)`, `[{"$tuple": []}]` is a list
-holding the empty tuple, `{"$datetime": "2024-01-01T10:00:00+02:00"}` is that
-aware datetime and `{"$date": "2024-01-01"}` is that date. The two calendar
-tags carry exactly what `isoformat()` produces and `fromisoformat()` reads
-back, with the UTC offset present only for an aware value. **Any other object is plain data**, including one that has a
+So `{"$tuple": [1, 2]}` is the tuple `(1, 2)`, `{"$set": [1, 2]}` is the set
+`{1, 2}`, `[{"$tuple": []}]` is a list holding the empty tuple,
+`{"$datetime": "2024-01-01T10:00:00+02:00"}` is that aware datetime and
+`{"$date": "2024-01-01"}` is that date. The two calendar tags carry exactly
+what `isoformat()` produces and `fromisoformat()` reads back, with the UTC
+offset present only for an aware value; a set's members are always *written* in
+the canonical order documented below, which is what makes a fixture holding one
+byte-identical between runs. **Any other object is plain data**, including one that has a
 reserved key alongside others (`{"$tuple": [1], "x": 2}` is a two-key dict). The
 reserved names are claimed all at once, before their types are supported, so a
 fixture can never use one as an ordinary dict key and then change meaning later; a
@@ -136,6 +141,27 @@ the "keep the smaller, ties favor index-aligned" count comparison, and the
 `crates/onix-core/src/diff/mod.rs`'s "List diffing" module doc for the
 full spec these pin down.
 
+**Set cases (`set_*`, `frozenset_*`, `ignore_order_set_*`,
+`ignore_order_frozenset_*`, `ignore_order_unhashable_set_*`):** a set diffs into
+the two categories no other type produces, `set_item_added`/`set_item_removed`,
+whose entries are paths ending in the item itself rather than a path-keyed
+value; at the root, nested in a dict, to and from an empty set, and with several
+items on each side. A set *versus* a `frozenset`, a `list` or a `dict` is a
+`type_changes` at the container itself. One case per item kind pins the
+rendering rule (`onix_core::path::set_item_repr`'s own doc has it, and it is
+not `quote_key`'s): `None`, `bool`, `int`, `float`
+(including `1e+16`, `1e-05` and `-0.0`), `str` (plain, with a single quote, with
+a double quote), `tuple` (nested, and holding a `str` — which *is* escaped,
+unlike a top-level one), and `frozenset` (empty and non-empty). Membership is Python's own
+`==` with bare numbers kept type-distinct, so `{1}` vs `{1.0}` and `{True}` vs
+`{1}` are each a removal plus an addition, while `{(1,)}` vs `{(1.0,)}` and
+`{frozenset({1})}` vs `{frozenset({1.0})}` are empty. A tuple and a frozenset
+holding the same members are not Python-equal, so they never collide either.
+Under `ignore_order` a set diffs identically (a set has no order to ignore),
+never hash-matches another container kind, and pairs with another set by
+distance like any other item. See "Set iteration order" below for the three
+places this rule is deliberately more deterministic than `DeepDiff`'s own.
+
 **Tuple cases (`tuple_*`, `ignore_order_tuple_*`, `ignore_order_unhashable_tuple_*`):** a tuple diffs positionally
 exactly like a list (element change, length change, tuples of dicts, tuples in
 tuples, and the same difflib match — including its `new_path` — for all-scalar
@@ -200,6 +226,99 @@ and an aware value at one instant hash-match under `ignore_order`, while
 `_prep_date` does not and formats a bare `YYYY-MM-DD`, which can never collide
 with `_prep_datetime`'s `YYYY-MM-DD HH:MM:SS+00:00`.
 
+## Set iteration order: where onix is deliberately different
+
+This is the one place `onix` does not chase `DeepDiff`, and the reason is that
+there is nothing stable to chase. `DeepDiff`'s answers for sets depend on the
+order the *running process* happens to iterate a Python set in — hash order,
+and for `str` members `PYTHONHASHSEED`-dependent, so it varies between runs of
+the same program. `onix` is deterministic and order-independent instead
+(owner-approved, 2026-09-03). Three consequences, each verified against
+`deepdiff==9.1.0`:
+
+**1. Entry order.** `_diff_set` builds its findings from
+`t2_hashes - t1_hashes`, a Python set of SHA-256 hex *strings*, so the order of
+the `set_item_added`/`set_item_removed` entries follows those strings' hashes.
+`onix` sorts the entries by their rendered path string. Same findings, listed
+in a different order — the only one of the three that is order-only.
+
+**2. Which member of an equality class wins.** `DeepHash` keys its shared cache
+by `_make_hash_key(obj)`, which type-wraps a *number* (`(type(obj), obj)`) and
+returns every other object as itself — so a `tuple` or `frozenset` member is
+looked up under Python's own `==`, and the first member of an equality class
+hashed in the run fixes the digest for all of them. `onix` reads the rule
+rather than the cache: a set member's identity *is* Python's `==`, with bare
+numbers kept type-distinct, computed per member and never inherited. The two
+agree wherever `DeepDiff`'s cache is not order-sensitive — `{1}` vs `{1.0}` and
+`{True}` vs `{1}` are each a removal plus an addition, `{(1,)}` vs `{(1.0,)}`
+and `{frozenset({1})}` vs `{frozenset({1.0})}` are empty — and differ where it
+is:
+
+```text
+DeepDiff({((1.0,),), ((1,), 0)}, {((1, 1),)})
+  -> two removals and one addition, or one removal and one addition,
+     depending on which member the set iterated first
+onix -> two removals and one addition, always
+
+DeepDiff([frozenset({1})], [frozenset({1.0})], ignore_order=True)   -> {}
+onix -> values_changed at root[0]: the two frozensets are different items
+```
+
+A `frozenset` is hashable, so `DeepDiff` caches it like a tuple; `onix` keys it
+by its own membership under `ignore_order` too. A `set` is unhashable, so
+neither tool ever caches one.
+
+**3. `list(a_set) == some_list`.** `DeepDiff`'s distance computation asks
+whether applying the new side's type to the old value reproduces it
+(`_from_tree_type_changes`'s `include_values`), and for a set against a
+sequence that is `list(the_set) == the_list` — answered in the set's own
+iteration order, so which of two orderings of the same list keeps a
+`type_changes` is decided by the process:
+
+```text
+DeepDiff([{75, 47}], [[75, 47]], ignore_order=True) -> values_changed
+DeepDiff([{75, 47}], [[47, 75]], ignore_order=True) -> type_changes
+onix -> type_changes for both: it compares the two by membership
+```
+
+**Canonical set order.** Everywhere a set's members become output — the JSON
+array a set serializes to, and the members of a `frozenset` rendered inside a
+`set_item_*` entry's path — `onix` emits them in one documented order, which
+is a purely structural comparison rather than anything rendered. The rule
+itself lives in `onix_core::value::SetItems`'s own doc (not duplicated here);
+`scripts/golden_tags.py`'s `canonical_set_order` is the Python twin the corpus
+tooling uses.
+
+**How the corpus stays exact anyway.** `scripts/golden_tags.py`'s
+`canonical_report` — used by the generator to write `expected.json`, and by
+`crates/onix-py/tests/test_golden_parity.py` to render real `DeepDiff`'s live
+output — reorders exactly two things and touches nothing else: the two set
+categories (sorted), and every JSON array that stands for a set (found by
+walking `to_dict()`, which still holds the real `set` objects, alongside the
+parsed JSON, and paired element by element because `to_json()` serialized the
+set by that same single iteration). Every *value* in `expected.json` is still
+`DeepDiff`'s own; only the order is `onix`'s. Fixtures likewise write a `$set`
+or `$frozenset` in canonical order, which is what makes the corpus
+byte-identical between runs without pinning `PYTHONHASHSEED`. Everything else
+— categories, path strings, values, and list and tuple order — is compared
+byte for byte.
+
+**No case whose `DeepDiff` answer is order-dependent is a golden.** The three
+examples above are pinned in `crates/onix-py/tests/test_sets.py` as `onix`'s
+own output, with `DeepDiff`'s shown alongside rather than asserted; a golden
+for them could not be regenerated reproducibly. The bindings' set fuzz batch
+detects the class mechanically: it re-diffs each pair with every set rebuilt
+from its members in reverse, and skips any case where `DeepDiff` disagrees
+with itself. The one remaining rendering difference — a multi-member
+`frozenset` nested inside a set item, whose members appear inside the entry's
+opaque path string — is why that batch caps a nested frozenset at one member.
+
+**`frozenset` values are a superset, not a difference.** `DeepDiff`'s own
+`to_json()` raises `TypeError` on a report holding a `frozenset` (e.g. the
+`new_value` of a set-vs-frozenset `type_changes`); `onix` serializes it as an
+array. No golden case can exist for that shape — `expected.json` could not be
+generated — so it is pinned in `test_sets.py` instead.
+
 ## Known DeepDiff quirks
 
 - **Key quoting does not escape anything.** `DeepDiff`'s path rendering
@@ -210,6 +329,11 @@ with `_prep_datetime`'s `YYYY-MM-DD HH:MM:SS+00:00`.
   `key_single_quote`/`key_double_quote`/`key_both_quotes`/`key_backslash`/
   `key_control_chars`) lives in that function's own doc
   (`crates/onix-core/src/path.rs`) — not duplicated here.
+
+- **A set item is quoted by a different rule again**, also not duplicated
+  here: `onix_core::path::set_item_repr`'s doc has it, with the upstream code
+  it reproduces (`model.py::TextResult._from_tree_set_item_added_or_removed`)
+  and the `set_str_item_*` and `set_str_inside_tuple_item` cases that pin it.
 
 - **A key can make path rendering collide, in both tools.** `path_rendering_collision`:
   a dict key whose own text contains `']['`-shaped syntax (e.g. `p'"]["q'`)
@@ -248,9 +372,20 @@ with `_prep_datetime`'s `YYYY-MM-DD HH:MM:SS+00:00`.
   its own. Which member of an equality class is hashed first is therefore observable,
   and reproduced — see the `ignore_order_tuple_digest_*` cases and the "Tuple digests"
   section of `crates/onix-core/src/ignore_order/memo.rs` for the full mechanism.
-  **`frozenset` is hashable too**, so the same applies to it when set support lands.
+  **`frozenset` is hashable too, and `DeepDiff` caches one the same way** —
+  `[frozenset({1}), frozenset({1.0})]` vs `[]` reports a *single* removal there,
+  of whichever one it hashed first. `onix` deliberately does not reproduce that:
+  it reports both, because the survivor depends on the process's own set
+  iteration order (see "Set iteration order" §2 above, which shows both tools'
+  output, and `ignore_order_unhashable_set_never_collides` for the `set` case
+  where the two agree because a `set` is unhashable in Python too). What `onix`
+  does match is the *rule* the cache implements — Python `==` with bare numbers
+  type-wrapped — so `{(1,)}` vs `{(1.0,)}` and `{frozenset({1})}` vs
+  `{frozenset({1.0})}` are both empty in both tools; see the
+  `set_tuple_item_python_equality` and `set_frozenset_item_python_equality`
+  cases.
 
-- **Tuple subclasses, including namedtuples, are refused.** `DeepDiff` reports
+- **Tuple, set and frozenset subclasses, including namedtuples, are refused.** `DeepDiff` reports
   every value under its own `type(obj).__name__`, so a subclass is never a plain
   `tuple` there: `DeepDiff(Pair((1, 2)), (1, 2))` is a `type_changes` from `Pair`
   to `tuple`, and a `namedtuple` diverges further still (`DeepDiff` walks its
@@ -258,15 +393,17 @@ with `_prep_datetime`'s `YYYY-MM-DD HH:MM:SS+00:00`.
   neither a per-class type name nor a field-walking conversion, and diffing a
   subclass as a plain tuple would silently report *no* difference where `DeepDiff`
   reports one — so the conversion raises `TypeError` naming the class, like any
-  other unsupported type. `crates/onix-py/tests/test_tuples.py` asserts both the
-  refusal and the real tool's own output. No golden case uses one: the corpus's
+  other unsupported type. The same rule and the same reason apply to a `set` or
+  `frozenset` subclass. `crates/onix-py/tests/test_tuples.py` and
+  `crates/onix-py/tests/test_sets.py` assert both the refusal and the real tool's
+  own output. No golden case uses one: the corpus's
   fixtures are JSON files, and the tagged encoding above deliberately has no tag
   for "an arbitrary class".
 
 - **`to_dict()` reports a `type_changes` entry's types as names, not classes.**
   Real `DeepDiff` puts the type objects themselves (`<class 'tuple'>`) in
   `to_dict()`; `deepdiff_rs` puts the same names its `to_json()` uses (`"tuple"`).
-  Values are unaffected — a tuple comes back as a tuple. See
+  Values are unaffected — a tuple comes back as a tuple, and a set as a set. See
   `crates/onix-py/src/deepdiff.rs`'s `to_dict` doc.
 
 - **List-LCS numeric matching is exact only within `2^53`.** The matcher's
@@ -337,10 +474,19 @@ nested array pair now measures a nested dict-vs-dict candidate through
 this same real `object_diff` collapse, so no inflated leaf count can flip
 a pairing decision.
 
+One more accepted limitation lives in `onix_core::path::python_repr`, which
+ports Python's `repr()` for the strings nested inside a tuple or frozenset set
+item: it escapes every non-printable code point below `U+0100` (the complete set
+in that range) and passes everything above through literally, where Python also
+escapes the non-printable ones (zero-width joiners, unassigned code points).
+Reproducing those would mean carrying a Unicode category table; the port is
+exact for all of ASCII and all printable text.
+
 Every other divergence found while building the corpus was fixed in `onix-core` to match
-`DeepDiff` exactly. The two path-rendering exceptions above, the
-list-LCS `2^53` limitation and the naive-datetime pairing timezone above are the
-only accepted, documented exceptions —
+`DeepDiff` exactly. The two path-rendering exceptions above, the three
+set-iteration-order differences, the `repr()` gap just described, the
+list-LCS `2^53` limitation and the naive-datetime pairing timezone above are
+the only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
 `scripts/differential_fuzz.py`) found zero *other* unexplained
