@@ -85,8 +85,25 @@ pub(crate) enum ItemKey {
     /// table — is a refcount bump. `Rc` derives the same `Eq`/`Ord`/`Hash`
     /// as the set it points at, so the key's *semantics* are exactly what
     /// holding the set inline gave. Only this variant needs the sharing;
-    /// lists and dicts are never cached, so theirs stay inline.
+    /// lists, sets and dicts are never cached, so theirs stay inline.
     Tuple(Rc<BTreeSet<ItemKey>>),
+    /// A `set`, in its own bucket so it never hash-matches a list, a tuple
+    /// or a `frozenset` holding the same members — confirmed against real
+    /// `deepdiff==9.1.0`, where `[{1, 2}]` vs `[frozenset({1, 2})]` under
+    /// `ignore_order` is a `type_changes` (a pairing that recursed), not an
+    /// empty report. A `set` is unhashable in Python, so unlike
+    /// [`ItemKey::FrozenSet`] it never participates in the digest cache and
+    /// always keeps its own content key.
+    Set(BTreeSet<ItemKey>),
+    /// A `frozenset`, keyed like [`ItemKey::Set`] but in its own bucket.
+    ///
+    /// A `frozenset` *is* hashable in Python, so real `DeepDiff` lets it
+    /// inherit an earlier Python-equal frozenset's digest the way a tuple
+    /// does — which makes its result depend on which member of an equality
+    /// class the process happened to hash first. `onix` deliberately does
+    /// not reproduce that: a frozenset keys by its own membership, always.
+    /// See `tests/golden/README.md`'s "Set iteration order" section.
+    FrozenSet(BTreeSet<ItemKey>),
     /// Key-sorted, recursively keyed values.
     Dict(BTreeMap<String, ItemKey>),
 }
@@ -131,6 +148,173 @@ impl TupleId {
     pub(crate) fn index(self) -> usize {
         self.0
     }
+}
+
+/// The identity a **set member** is compared by: Python's own `==`, with
+/// bare numbers kept type-distinct.
+///
+/// This is `DeepHash`'s `_make_hash_key` rule (deephash.py) applied
+/// directly, rather than through the shared `hashes` cache real `DeepDiff`
+/// looks it up in: `_make_hash_key` type-wraps a number
+/// (`(type(obj), obj)`) and returns every other object unchanged, so a set
+/// member's identity *is* Python equality except that `1`, `1.0` and `True`
+/// stay three members. Reading the rule instead of the cache is what makes
+/// this deterministic — the cache's answer additionally depends on which
+/// member of an equality class the process hashed first, which follows the
+/// set's own hash order. See `tests/golden/README.md`'s "Set iteration
+/// order" section for the difference that buys and costs.
+///
+/// Confirmed against `deepdiff==9.1.0`: `{1}` vs `{1.0}` and `{True}` vs
+/// `{1}` are each a removal plus an addition (bare numbers, type-wrapped),
+/// while `{(1,)}` vs `{(1.0,)}` and `{frozenset({1})}` vs
+/// `{frozenset({1.0})}` are empty (containers, compared by Python `==`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SetMemberKey {
+    /// A bare `bool`, `int` or `float`, in its own type's bucket.
+    Number(ItemKey),
+    /// `None` or a `str`, and every number *nested* inside a container,
+    /// where Python's `==` does collapse `1`, `1.0` and `True`.
+    Scalar(ScalarKey),
+    /// A tuple, positionally (Python's tuple equality is order-sensitive).
+    Tuple(Vec<SetMemberKey>),
+    /// A frozenset, by membership (Python's frozenset equality is not
+    /// order-sensitive).
+    FrozenSet(BTreeSet<SetMemberKey>),
+    /// A `list`, which Python cannot hash. Reachable through a `list`
+    /// subclass that defines `__hash__`, and keyed structurally so it is at
+    /// least deterministic — in its own variant, because a list and a set
+    /// holding the same members are not Python-equal either.
+    UnhashableList(Vec<SetMemberKey>),
+    /// A `set`, likewise unhashable and likewise in its own variant.
+    UnhashableSet(Vec<SetMemberKey>),
+    /// A `dict`, likewise.
+    UnhashableDict(BTreeMap<String, SetMemberKey>),
+}
+
+/// The members of `a` that no member of `b` shares an identity with, and
+/// the same the other way round — the whole of `_diff_set`'s comparison,
+/// and of the distance mirror that counts what it would report.
+///
+/// Each member's identity is computed exactly once. Shared by
+/// [`crate::diff::set_diff`] and
+/// [`crate::ignore_order::count_set_diff_leaves`] so the two can never drift
+/// on what "the same member" means.
+pub(crate) fn set_difference<'a>(
+    a: &'a [Value],
+    b: &'a [Value],
+) -> (Vec<&'a Value>, Vec<&'a Value>) {
+    let a_keys: Vec<SetMemberKey> = a.iter().map(set_member_key).collect();
+    let b_keys: Vec<SetMemberKey> = b.iter().map(set_member_key).collect();
+    let a_lookup: BTreeSet<&SetMemberKey> = a_keys.iter().collect();
+    let b_lookup: BTreeSet<&SetMemberKey> = b_keys.iter().collect();
+
+    let only_in = |items: &'a [Value], keys: &[SetMemberKey], other: &BTreeSet<&SetMemberKey>| {
+        items
+            .iter()
+            .zip(keys)
+            .filter(|(_, key)| !other.contains(key))
+            .map(|(item, _)| item)
+            .collect()
+    };
+
+    (
+        only_in(a, &a_keys, &b_lookup),
+        only_in(b, &b_keys, &a_lookup),
+    )
+}
+
+/// The identity of one set member — see [`SetMemberKey`].
+pub(crate) fn set_member_key(value: &Value) -> SetMemberKey {
+    match value {
+        Value::Bool(b) => SetMemberKey::Number(ItemKey::Bool(*b)),
+        Value::Number(n) => SetMemberKey::Number(number_key(n)),
+        other => python_identity(other),
+    }
+}
+
+/// [`set_member_key`]'s walk: Python's own `==` all the way down, with no
+/// type-wrapping (a number nested inside a container is compared the way
+/// Python compares it, so `(1,)` and `(1.0,)` are one identity).
+///
+/// Iterative (an explicit heap work-stack, no native recursion), because
+/// this runs from [`crate::value::SetItems::new`] — at *construction* time,
+/// before any of the engine's depth guards have seen the value — so a
+/// natively recursive version would be an unguarded overflow sink on
+/// adversarially nested input.
+///
+/// The walk pushes each node before its children, so `order` holds parents
+/// before children and each child's subtree is contiguous; assembling from
+/// the end therefore always finds a node's own children as the last entries
+/// of `built`, in their original order.
+fn python_identity(root: &Value) -> SetMemberKey {
+    let mut order: Vec<&Value> = Vec::new();
+    let mut stack: Vec<&Value> = vec![root];
+
+    while let Some(value) = stack.pop() {
+        order.push(value);
+        match value {
+            Value::Array(items) | Value::Tuple(items) => stack.extend(items.iter()),
+            Value::Set(items) | Value::FrozenSet(items) => stack.extend(items.iter()),
+            Value::Object(map) => stack.extend(map.values()),
+            Value::Null
+            | Value::Bool(_)
+            | Value::Number(_)
+            | Value::Str(_)
+            | Value::DateTime(_)
+            | Value::Date(_) => {}
+        }
+    }
+
+    let mut built: Vec<SetMemberKey> = Vec::with_capacity(order.len());
+    for value in order.iter().rev() {
+        let mut children = |count: usize| built.split_off(built.len() - count);
+
+        let key = match value {
+            Value::Null
+            | Value::Bool(_)
+            | Value::Number(_)
+            | Value::Str(_)
+            | Value::DateTime(_)
+            | Value::Date(_) => SetMemberKey::Scalar(
+                python_scalar_key(value).expect("python_scalar_key covers every scalar"),
+            ),
+            Value::Tuple(items) => SetMemberKey::Tuple(children(items.len())),
+            Value::FrozenSet(items) => {
+                SetMemberKey::FrozenSet(children(items.len()).into_iter().collect())
+            }
+            Value::Array(items) => SetMemberKey::UnhashableList(children(items.len())),
+            Value::Set(items) => SetMemberKey::UnhashableSet(children(items.len())),
+            Value::Object(map) => SetMemberKey::UnhashableDict(
+                map.keys()
+                    .map(str::to_owned)
+                    .zip(children(map.len()))
+                    .collect(),
+            ),
+        };
+        built.push(key);
+    }
+
+    built
+        .pop()
+        .expect("the walk pushes at least the root's own key")
+}
+
+/// The type-distinct key for a bare number, mirroring [`ItemKey`]'s own
+/// number rule (see [`keyed`]'s number branch for the signed-zero note).
+fn number_key(n: &crate::value::Number) -> ItemKey {
+    if n.is_f64() {
+        let f = n
+            .as_f64()
+            .expect("Number::is_f64 guarantees as_f64 succeeds");
+        return ItemKey::Float((f + 0.0).to_bits());
+    }
+    if let Some(i) = n.as_i64() {
+        return ItemKey::Int(i128::from(i));
+    }
+    ItemKey::Int(i128::from(
+        n.as_u64()
+            .expect("a non-f64 Number always has an i64 or u64 repr"),
+    ))
 }
 
 /// Computes `value`'s [`ItemKey`], consulting `memo` for every hashable
@@ -204,6 +388,17 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
             None,
         ),
         Value::Tuple(items) => tuple_keyed(items, memo),
+        // Neither set kind consults the digest cache: a `set` is unhashable
+        // in Python, and a `frozenset` is deliberately kept out of it (see
+        // [`ItemKey::FrozenSet`]), so both key by content like a list does.
+        Value::Set(items) => (
+            ItemKey::Set(items.iter().map(|i| item_key(i, memo)).collect()),
+            None,
+        ),
+        Value::FrozenSet(items) => (
+            ItemKey::FrozenSet(items.iter().map(|i| item_key(i, memo)).collect()),
+            None,
+        ),
         Value::Object(map) => (
             ItemKey::Dict(
                 map.iter()

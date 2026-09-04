@@ -32,7 +32,8 @@
 //! # Stack safety
 //!
 //! [`Value`] nests through `Box<[Value]>` (both [`Value::Array`] and
-//! [`Value::Tuple`]) and through [`Object`]'s entries, so a naive derived `Drop` would
+//! [`Value::Tuple`]), through [`SetItems`] (both [`Value::Set`] and
+//! [`Value::FrozenSet`]) and through [`Object`]'s entries, so a naive derived `Drop` would
 //! recurse natively — an uncatchable process abort on adversarially deep
 //! input, the same latent sink [`serde_json::Value`]'s derived `Drop` has.
 //! This type instead implements an **iterative `Drop`** (see the `impl Drop`
@@ -47,7 +48,12 @@
 //! Structural equality ([`PartialEq`]) is likewise iterative (an explicit
 //! work-stack, the same posture as `Drop`), so deep comparison — which the
 //! engine migration will run on attacker-shaped input — cannot overflow the
-//! native stack either. The derived [`Debug`] and [`Clone`] are deliberately
+//! native stack either. So is the canonical set ordering `canonical_cmp`
+//! that [`SetItems::new`] sorts with, and for a sharper reason: a set is
+//! built during *conversion*, on whatever thread the caller is on, before
+//! any depth guard has seen the value and with no sized worker underneath
+//! it — a recursive comparator there was an uncatchable abort on a set of
+//! two deep members. The derived [`Debug`] and [`Clone`] are deliberately
 //! left recursive: `Debug` is debug/test-only, and the diff engine only ever
 //! clones a value that has already passed its combined path-plus-value depth
 //! guard (`crate::diff`'s internal `check_value_depth`), so clone recursion
@@ -73,28 +79,29 @@ use crate::datetime::{Date, DateTime};
 /// are held as an [`Object`] (a sorted, exactly-sized entry slice) and
 /// numbers as a [`Number`] preserving the `i64`/`u64`/`f64` distinction.
 ///
-/// [`Value::Tuple`] is the seventh, and the only one JSON itself cannot
-/// express: a Python `tuple`, which `DeepDiff` diffs positionally exactly
-/// like a `list` but reports as a *different type* from one (`tuple` vs
-/// `list` is a `type_changes` finding, and the two never hash-match under
-/// `ignore_order`). It carries the same `Box<[Value]>` payload as
-/// [`Value::Array`] and renders to the same JSON array in
-/// [`Value::to_serde_json`]; the separate variant is what makes the
-/// type distinction structural, so mixing the two can only ever be a
-/// compile error or a `type_changes`, never a silent equality. Neither
-/// [`From`]`<`[`serde_json::Value`]`>` nor [`Deserialize`] can produce one
-/// (JSON has no tuple literal): a tuple enters the model only from a caller
-/// holding real Python objects, through [`Value::Tuple`] directly.
+/// Five variants are the ones JSON itself cannot express:
+/// [`Value::Tuple`], [`Value::Set`] and [`Value::FrozenSet`] — the Python
+/// `tuple`, `set` and `frozenset` — and [`Value::DateTime`] and
+/// [`Value::Date`]. Each is a *different type* from every other and from
+/// `list` (a `tuple`-vs-`list` or `set`-vs-`frozenset` pairing is a
+/// `type_changes` finding, and neither pair ever hash-matches under
+/// `ignore_order`), which is exactly why each gets its own variant: the type
+/// distinction is structural, so mixing two of them can only ever be a
+/// compile error or a `type_changes`, never a silent equality. The three
+/// container kinds render to a JSON array in [`Value::to_serde_json`],
+/// matching what `DeepDiff`'s own `to_json()` shows.
 ///
-/// [`Value::DateTime`] and [`Value::Date`] are the same story for the two
-/// calendar types (see [`mod@crate::datetime`]). They are kept as *structured*
-/// values rather than pre-rendered ISO strings because `DeepDiff` renders the
-/// same datetime two different ways depending on where it lands in a report
-/// (UTC-normalized in `values_changed`, raw everywhere else) and because
-/// [`crate::Report::to_value`] must hand a real `datetime` object back to a
-/// caller holding Python objects — neither is possible once the value has
-/// collapsed to a string. JSON has no literal for either, so, like a tuple,
-/// they enter the model only from such a caller.
+/// The two calendar types (see [`mod@crate::datetime`]) are kept as
+/// *structured* values rather than pre-rendered ISO strings because
+/// `DeepDiff` renders the same datetime two different ways depending on
+/// where it lands in a report (UTC-normalized in `values_changed`, raw
+/// everywhere else) and because [`crate::Report::to_value`] must hand a real
+/// `datetime` object back to a caller holding Python objects — neither is
+/// possible once the value has collapsed to a string.
+///
+/// Neither [`From`]`<`[`serde_json::Value`]`>` nor [`Deserialize`] can
+/// produce any of the five (JSON has no literal for them): they enter the
+/// model only from a caller holding real Python objects.
 #[derive(Debug, Clone)]
 pub enum Value {
     /// JSON `null`.
@@ -115,6 +122,11 @@ pub enum Value {
     /// A Python tuple, stored exactly like [`Value::Array`] but kept as a
     /// distinct variant — see this type's own doc for why.
     Tuple(Box<[Value]>),
+    /// A Python `set`, stored as canonically ordered [`SetItems`].
+    Set(SetItems),
+    /// A Python `frozenset`, stored exactly like [`Value::Set`] but kept as
+    /// a distinct variant — see this type's own doc for why.
+    FrozenSet(SetItems),
     /// An object: key-sorted, exactly-sized entries (see [`Object`]).
     Object(Object),
 }
@@ -148,6 +160,11 @@ impl Value {
             Value::DateTime(value) => serde_json::Value::String(value.isoformat()),
             Value::Date(value) => serde_json::Value::String(value.isoformat()),
             Value::Array(items) | Value::Tuple(items) => {
+                serde_json::Value::Array(items.iter().map(Value::to_serde_json).collect())
+            }
+            // Already in canonical order: a set's source order is dropped at
+            // construction, since it is not reproducible (see [`SetItems`]).
+            Value::Set(items) | Value::FrozenSet(items) => {
                 serde_json::Value::Array(items.iter().map(Value::to_serde_json).collect())
             }
             Value::Object(obj) => {
@@ -225,6 +242,10 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
             let taken = std::mem::take(items);
             stack.extend(taken.into_vec());
         }
+        Value::Set(items) | Value::FrozenSet(items) => {
+            let taken = std::mem::take(&mut items.items);
+            stack.extend(taken.into_vec());
+        }
         Value::Object(obj) => {
             let taken = std::mem::take(&mut obj.entries);
             stack.extend(taken.into_vec().into_iter().map(|(_, value)| value));
@@ -244,7 +265,11 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
 /// `DeepDiff`'s own `tuple`-vs-`list` type distinction — with
 /// `Number`'s variant sensitivity intact (`PosInt(1)` is not equal to
 /// `Float(1.0)`); objects compare over their sorted entries (equal key sets
-/// and per-key values), arrays over equal length and per-index values. See
+/// and per-key values), and arrays over equal length and per-index values.
+///
+/// Sets compare like arrays, element-wise in stored order — which is
+/// canonical (see [`SetItems`]), so two sets built from the same members in
+/// any order do compare equal. See
 /// the [module documentation](self)'s "Stack safety" section for why it is
 /// iterative rather than recursive.
 fn structural_eq(a: &Value, b: &Value) -> bool {
@@ -282,6 +307,12 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
                 }
             }
             (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+                if x.len() != y.len() {
+                    return false;
+                }
+                stack.extend(x.iter().zip(y.iter()));
+            }
+            (Value::Set(x), Value::Set(y)) | (Value::FrozenSet(x), Value::FrozenSet(y)) => {
                 if x.len() != y.len() {
                     return false;
                 }
@@ -438,6 +469,252 @@ impl Number {
     }
 }
 
+/// A Python `set`'s or `frozenset`'s members: duplicate-free, and held in
+/// the crate's canonical set order.
+///
+/// A set's members reach `onix` in whatever order the source iterated them,
+/// which for a real Python set is hash order — unreproducible from one
+/// process to the next, and for `str` members dependent on
+/// `PYTHONHASHSEED`. Nothing here depends on it: membership, hashing and
+/// coercion all go through order-independent identities (the crate-private
+/// `set_member_key`, which the set diff compares members by), and the source
+/// order is dropped outright at construction: [`SetItems::new`] stores the
+/// members in the crate's **canonical set order** instead, so every
+/// rendering of a set is canonical without sorting anything. Reproducing
+/// `DeepDiff`'s own order-dependent answers is impossible, and matching them
+/// is not worth being nondeterministic for. See `tests/golden/README.md`'s
+/// "Set iteration order" section.
+///
+/// The order is: `None` first, then `bool`, `int`, `float`, `str`, `tuple`,
+/// `frozenset`, `list`, `set`, `dict` and finally the two calendar kinds —
+/// each kind after the last — and within a kind by value: booleans and
+/// numbers numerically, strings by code point, datetimes by instant, dates
+/// by ordinal, and every container element by element and then by length.
+/// It is a purely structural comparison (the crate-private
+/// `canonical_cmp`), so ordering a
+/// set never renders its members.
+///
+/// A set has no duplicate members, so [`SetItems::new`] drops any member
+/// equal to an earlier one.
+///
+/// # Examples
+///
+/// ```
+/// use onix_core::{Number, Value};
+/// use onix_core::value::SetItems;
+///
+/// let set = Value::Set(SetItems::new(vec![
+///     Value::Number(Number::from_u64(2)),
+///     Value::Number(Number::from_u64(1)),
+/// ]));
+/// assert_eq!(set.to_serde_json().to_string(), "[1,2]");
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct SetItems {
+    /// The members. Invariants, both established by [`SetItems::new`]: in
+    /// ascending [`canonical_cmp`] order, and no two structurally equal.
+    items: Box<[Value]>,
+}
+
+impl SetItems {
+    /// Builds a set's members, sorting them into canonical set order and
+    /// dropping any member equal to an earlier one.
+    ///
+    /// A real Python `set` cannot hold two equal members, but this
+    /// constructor cannot assume it was handed one: the Python conversion
+    /// boundary is lossy for lone surrogates (`'\ud800'` and `'\udc00'`
+    /// both become `U+FFFD`), and this type is public. Two equal members
+    /// would render to the same path segment and so to the same *structural*
+    /// report path, which [`crate::report::Report`] requires to be unique;
+    /// dropping the later one is what a Python set would have done with the
+    /// pair in the first place.
+    ///
+    /// Equality here is the structural one `canonical_cmp` decides, which
+    /// is exactly what "renders to the same path segment"
+    /// means. It is *finer* than the membership identity the diff itself
+    /// compares by (the crate-private `set_member_key`: Python's `==` with
+    /// bare numbers type-tagged): two members Python would call equal but that
+    /// this crate can tell apart — `(1,)` and `(1.0,)` — are both kept, and
+    /// then reported as the two distinct items they are. No Python set can
+    /// hold that pair, and the golden generator can never write one, so it is
+    /// reachable only by building a [`Value`] directly. Comparing
+    /// structurally rather than by identity is also what keeps this cheap: a
+    /// comparison stops at the first difference, where building an identity
+    /// always walks the whole member, which would make constructing a deeply
+    /// nested set quadratic in its depth.
+    ///
+    /// Costs one `O(n log n)` sort of short-circuiting comparisons, and
+    /// nothing at all below two members.
+    #[must_use]
+    pub fn new(mut items: Vec<Value>) -> Self {
+        if items.len() < 2 {
+            return Self {
+                items: items.into_boxed_slice(),
+            };
+        }
+
+        items.sort_by(canonical_cmp);
+        items.dedup_by(|a, b| canonical_cmp(a, b).is_eq());
+
+        Self {
+            items: items.into_boxed_slice(),
+        }
+    }
+}
+
+impl std::ops::Deref for SetItems {
+    type Target = [Value];
+
+    fn deref(&self) -> &[Value] {
+        &self.items
+    }
+}
+
+impl<'a> IntoIterator for &'a SetItems {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter()
+    }
+}
+
+/// The crate's canonical set order, as a comparison — see [`SetItems`] for
+/// the rule it implements, and why it is structural rather than based on
+/// each member's rendered text (rendering a member to order it costs as much
+/// as the member is big, which makes ordering a nested set quadratic in its
+/// depth).
+///
+/// Iterative (an explicit heap work-stack, no native recursion), matching
+/// [`Value`]'s [`PartialEq`] and `Drop`. It has to be: [`SetItems::new`]
+/// sorts with it, and a set is built during *conversion*, which runs on the
+/// caller's own thread: `onix-py`'s guard module hands the *diff* a
+/// stack-sized worker thread, but conversion never gets one (see that
+/// module's doc).
+///
+/// The stack holds the comparisons still owed, deepest-first, so a container
+/// pushes its length tie-break underneath its elements and each element's
+/// own sub-comparisons land on top: popping therefore visits exactly the
+/// lexicographic order a recursive version would, and the first non-`Equal`
+/// answer wins.
+fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    /// The kind's place in the documented order.
+    fn rank(value: &Value) -> u8 {
+        match value {
+            Value::Null => 0,
+            Value::Bool(_) => 1,
+            Value::Number(n) if n.is_f64() => 3,
+            Value::Number(_) => 2,
+            Value::Str(_) => 4,
+            Value::Tuple(_) => 5,
+            Value::FrozenSet(_) => 6,
+            Value::Array(_) => 7,
+            Value::Set(_) => 8,
+            Value::Object(_) => 9,
+            Value::DateTime(_) => 10,
+            Value::Date(_) => 11,
+        }
+    }
+
+    /// One comparison still owed: two values, two dict keys, or the length
+    /// tie-break a container falls back on once its elements all matched.
+    enum Work<'a> {
+        Values(&'a Value, &'a Value),
+        Keys(&'a str, &'a str),
+        Lengths(usize, usize),
+    }
+
+    /// Schedules `a` and `b`'s elements, in order, with their length
+    /// tie-break last.
+    fn push_slices<'a>(stack: &mut Vec<Work<'a>>, a: &'a [Value], b: &'a [Value]) {
+        stack.push(Work::Lengths(a.len(), b.len()));
+        for (a, b) in a.iter().zip(b.iter()).rev() {
+            stack.push(Work::Values(a, b));
+        }
+    }
+
+    let mut stack = vec![Work::Values(a, b)];
+
+    while let Some(work) = stack.pop() {
+        let ordering = match work {
+            Work::Keys(a, b) => a.cmp(b),
+            Work::Lengths(a, b) => a.cmp(&b),
+            Work::Values(a, b) => {
+                let ranking = rank(a).cmp(&rank(b));
+                if ranking != Ordering::Equal {
+                    return ranking;
+                }
+
+                match (a, b) {
+                    (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+                    (Value::Number(x), Value::Number(y)) => number_cmp(x, y),
+                    (Value::Str(x), Value::Str(y)) => x.cmp(y),
+                    // By instant, then by whether the value is aware, so that
+                    // two datetimes at one instant still order deterministically.
+                    (Value::DateTime(x), Value::DateTime(y)) => x
+                        .instant()
+                        .cmp(&y.instant())
+                        .then_with(|| x.utc_offset_seconds().cmp(&y.utc_offset_seconds())),
+                    (Value::Date(x), Value::Date(y)) => x.ordinal().cmp(&y.ordinal()),
+                    (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
+                        push_slices(&mut stack, x, y);
+                        Ordering::Equal
+                    }
+                    // A set is stored in this very order, so its members
+                    // compare element-wise like any other sequence.
+                    (Value::Set(x), Value::Set(y)) | (Value::FrozenSet(x), Value::FrozenSet(y)) => {
+                        push_slices(&mut stack, x, y);
+                        Ordering::Equal
+                    }
+                    (Value::Object(x), Value::Object(y)) => {
+                        stack.push(Work::Lengths(x.entries.len(), y.entries.len()));
+                        for ((x_key, x_value), (y_key, y_value)) in
+                            x.entries.iter().zip(y.entries.iter()).rev()
+                        {
+                            stack.push(Work::Values(x_value, y_value));
+                            stack.push(Work::Keys(x_key, y_key));
+                        }
+                        Ordering::Equal
+                    }
+                    // Equal ranks with no arm above can only be `Null`
+                    // against `Null`.
+                    _ => Ordering::Equal,
+                }
+            }
+        };
+
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+
+    Ordering::Equal
+}
+
+/// [`canonical_cmp`]'s number case, for two numbers of the same kind (an
+/// int and a float are already ranked apart).
+fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
+    if a.is_f64() {
+        return a
+            .as_f64()
+            .unwrap_or_default()
+            .total_cmp(&b.as_f64().unwrap_or_default());
+    }
+
+    match (a.as_i64(), b.as_i64()) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        // A `u64` above `i64::MAX` has no `i64` form, and is greater than
+        // every value that does.
+        (x, y) => x.is_some().cmp(&y.is_some()).reverse().then_with(|| {
+            a.as_u64()
+                .unwrap_or_default()
+                .cmp(&b.as_u64().unwrap_or_default())
+        }),
+    }
+}
+
 /// A JSON object: key-sorted, exactly-sized entries backed by a single
 /// `Box<[(Arc<str>, Value)]>`, with binary-search lookup
 /// ([`get`](Object::get)/[`contains_key`](Object::contains_key)) and
@@ -549,6 +826,14 @@ impl<'a> Iterator for Entries<'a> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for Entries<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next_back()
+            .map(|(key, value)| (key.as_ref(), value))
     }
 }
 

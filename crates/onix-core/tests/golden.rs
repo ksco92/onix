@@ -11,7 +11,8 @@
 //! regenerates those files; it only reads them.
 //!
 //! The two input files carry Python values JSON cannot express (a tuple, a
-//! datetime or a date) in the tagged encoding `tests/golden/README.md` documents, decoded
+//! set, a frozenset, a datetime or a date) in the tagged encoding
+//! `tests/golden/README.md` documents, decoded
 //! here by [`decode_tagged`] — the Rust half of the same rule
 //! `scripts/golden_tags.py` implements for the corpus's Python readers. This
 //! decoding is test-only: the engine's own parse paths never interpret a tag
@@ -88,10 +89,10 @@ fn case_options(case_dir: &Path) -> onix_core::DiffOptions {
 }
 
 /// Every tag name the corpus's encoding reserves, mirroring
-/// `scripts/golden_tags.py`'s `RESERVED_TAGS`. `$set`/`$frozenset` do not
-/// decode yet; they are claimed so a fixture cannot quietly use one as an
-/// ordinary dict key before the type behind it is supported.
-const RESERVED_TAGS: &[&str] = &["$tuple", "$datetime", "$date", "$set", "$frozenset"];
+/// `scripts/golden_tags.py`'s `RESERVED_TAGS`. Every one of them decodes
+/// today; the list is still fixed here so a fixture cannot quietly use one
+/// as an ordinary dict key.
+const RESERVED_TAGS: &[&str] = &["$tuple", "$set", "$frozenset", "$datetime", "$date"];
 
 /// Decodes one parsed fixture value into the engine's own value model,
 /// turning a tagged object — a JSON object with exactly one key, that key one
@@ -114,6 +115,10 @@ fn decode_tagged(value: &Value, builder: &mut onix_core::value::Builder) -> onix
                 onix_core::Value::DateTime(parse_datetime(tag_text(map, "$datetime")))
             }
             Some("$date") => onix_core::Value::Date(parse_date(tag_text(map, "$date"))),
+            Some("$set") => onix_core::Value::Set(decode_set_members(map, "$set", builder)),
+            Some("$frozenset") => {
+                onix_core::Value::FrozenSet(decode_set_members(map, "$frozenset", builder))
+            }
             Some(tag) => {
                 panic!("golden fixture uses the reserved tag {tag:?}, which has no decoder yet")
             }
@@ -127,6 +132,30 @@ fn decode_tagged(value: &Value, builder: &mut onix_core::value::Builder) -> onix
         },
         scalar => onix_core::Value::from(scalar.clone()),
     }
+}
+
+/// The decoded members of a `$set`/`$frozenset` fixture.
+///
+/// Panics if two members are **structurally** equal — the pair the value
+/// model itself collapses, so a fixture holding one would stand for a
+/// smaller set than it lists and would silently disagree with the Python
+/// readers (which decode into a real `set`). Two members that are merely
+/// *Python*-equal without being structurally equal (`{"$tuple": [1]}` and
+/// `{"$tuple": [1.0]}`) are not caught here; they would fail downstream, on
+/// the expected report, since the generator can never write such a pair.
+fn decode_set_members(
+    map: &serde_json::Map<String, Value>,
+    tag: &str,
+    builder: &mut onix_core::value::Builder,
+) -> onix_core::value::SetItems {
+    let members = decode_tagged_items(map, tag, builder).into_vec();
+    let items = onix_core::value::SetItems::new(members);
+    assert_eq!(
+        items.len(),
+        map[tag].as_array().map_or(0, Vec::len),
+        "golden fixture {tag} holds two equal members, which no Python set can"
+    );
+    items
 }
 
 /// The reserved tag `map` is an encoding of, or `None` if it is plain data.
@@ -363,10 +392,29 @@ fn tagged_objects_are_ordinary_data_to_the_parser() {
         }}})
     );
 
-    // The test-only decoder, on the same input, gives the tuple instead.
+    // The test-only decoder, on the same input, gives the tuple instead —
+    // and the same split holds for every other implemented tag.
     let mut builder = onix_core::value::Builder::new();
-    let decoded = decode_tagged(&read_json_str(r#"{"$tuple": [1]}"#), &mut builder);
-    assert!(matches!(decoded, onix_core::Value::Tuple(_)));
+    for (tagged, decodes_to_container) in [
+        (r#"{"$tuple": [1]}"#, "tuple"),
+        (r#"{"$set": [1]}"#, "set"),
+        (r#"{"$frozenset": [1]}"#, "frozenset"),
+    ] {
+        let parsed: onix_core::Value = serde_json::from_str(tagged).expect("valid JSON");
+        assert!(
+            matches!(parsed, onix_core::Value::Object(_)),
+            "{tagged} must parse as an ordinary dict on the product path"
+        );
+
+        let decoded = decode_tagged(&read_json_str(tagged), &mut builder);
+        assert_eq!(
+            onix_core::diff(&parsed, &decoded)
+                .expect("shallow values diff cleanly")
+                .to_json_value()["type_changes"]["root"]["new_type"],
+            serde_json::json!(decodes_to_container),
+            "the test-only decoder must give the {decodes_to_container} the tag stands for"
+        );
+    }
 }
 
 /// Parses JSON text for a test that needs a `serde_json::Value` without a

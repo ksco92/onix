@@ -341,7 +341,7 @@ def test_cross_arg_error_drops_deep_first_arg_without_crashing() -> None:
             return v
         t1 = deep({MAX_DEPTH_CEILING} - 1)
         try:
-            DeepDiff(t1, {{"x": {{1, 2}}}}, max_depth={MAX_DEPTH_CEILING})
+            DeepDiff(t1, {{"x": 1j}}, max_depth={MAX_DEPTH_CEILING})
         except TypeError:
             print("OK")
         else:
@@ -361,7 +361,7 @@ def test_intra_arg_error_after_deep_sibling_does_not_crash() -> None:
             for _ in range(d):
                 v = {{"a": v, "b": 2}}
             return v
-        t1 = {{"deep": deep({MAX_DEPTH_CEILING} - 1), "bad": {{1, 2}}}}
+        t1 = {{"deep": deep({MAX_DEPTH_CEILING} - 1), "bad": 1j}}
         try:
             DeepDiff(t1, {{}}, max_depth={MAX_DEPTH_CEILING})
         except TypeError:
@@ -391,7 +391,7 @@ def test_cross_arg_error_from_small_stack_thread_does_not_crash() -> None:
         # run ONLY the DeepDiff call and its exception handling, so t1 is passed
         # in by reference and kept alive here until after the thread joins.
         t1 = deep({MAX_DEPTH_CEILING} - 1)
-        bad = {{"x": {{1, 2}}}}
+        bad = {{"x": 1j}}
         outcome = []
         def work():
             try:
@@ -431,6 +431,110 @@ def test_tuple_hashing_cost_stays_linear_in_nesting_depth() -> None:
         """
         a = [_nested_tuple(depth, leaf=1), "x"]
         b = ["x", _nested_tuple(depth, leaf=1)]
+        samples = []
+
+        for _ in range(3):
+            start = time.perf_counter()
+            diff = DeepDiff(a, b, ignore_order=True, max_depth=MAX_DEPTH_CEILING)
+            samples.append(time.perf_counter() - start)
+            assert not diff, diff.to_json()[:200]
+
+        return min(samples)
+
+    shallow = best_of_three(500)
+    deep = best_of_three(2000)
+    ratio = deep / shallow
+
+    assert ratio < 8.0, f"4x the depth cost {ratio:.1f}x the time; expected ~4x"
+
+
+def _nested_frozenset(depth: int, leaf: JsonValue) -> JsonValue:
+    """
+    Build a two-member frozenset nested `depth` levels deep around `leaf`.
+
+    Two members, not one: a single-member set is the case every ordering
+    shortcut handles trivially, so a one-member nest cannot detect a cost
+    that scales with a set's *own* member count.
+
+    :param depth: How many frozenset layers to wrap `leaf` in.
+    :param leaf: The innermost value.
+    :return: `leaf` wrapped in `depth` two-member frozensets.
+    """
+    value = leaf
+
+    for level in range(depth):
+        value = frozenset({value, level})
+
+    return value
+
+
+def test_a_deep_two_member_set_converts_on_a_small_stack_thread() -> None:
+    """A set of two deep members must not overflow the stack while it is being built.
+
+    Conversion runs on the calling thread — `guard.py`'s sized worker takes
+    only the diff and the JSON rendering — so every walk it triggers has to be
+    iterative. Building a set sorts its members into canonical order, and that
+    comparison used to recurse: two members with an equal spine make it
+    descend the whole way, and at a few thousand levels on a 512 KiB thread
+    the process died with an uncatchable SIGBUS before any `MaxDepthError`
+    could fire. CPython itself builds the same set on that thread, so this is
+    onix's own limit, not Python's.
+    """
+    result = _run_isolated(
+        f"""
+        import threading
+
+        def spine(leaf, depth):
+            value = leaf
+            for _ in range(depth):
+                value = (value,)
+            return value
+
+        outcome = []
+
+        def work():
+            # Equal until the leaf, so the comparison cannot short-circuit.
+            members = {{spine((0,), 3000), spine((1,), 3000)}}
+            other = {{spine((2,), 3000)}}
+            diff = DeepDiff(members, other, max_depth={MAX_DEPTH_CEILING})
+            outcome.append(len(diff.to_dict()["set_item_added"]))
+
+        threading.stack_size(512 * 1024)
+        thread = threading.Thread(target=work)
+        thread.start()
+        thread.join()
+        assert outcome == [1], outcome
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_frozenset_hashing_cost_stays_linear_in_nesting_depth() -> None:
+    """
+    Diffing a nested frozenset must cost O(depth), not O(depth^2).
+
+    Two costs meet here, and both have to stay linear. A frozenset is
+    hashable, so like a tuple every node is looked up in (and added to) the
+    run's digest cache, keyed by its members' interned ids rather than by its
+    whole subtree. And nothing may render a member to order it: an earlier
+    version of this slice sorted a set's members by their rendered text at
+    construction, which made this exact shape quadratic (394 ms at depth
+    4,000 against 1.9 ms for the tuple control, and 6.1 s at depth 16,000).
+    Quadratic growth would show as ~16x here, linear as ~4x. See
+    `test_tuple_hashing_cost_stays_linear_in_nesting_depth`.
+    """
+
+    def best_of_three(depth: int) -> float:
+        """
+        Time the fastest of three pure-shuffle diffs of a `depth`-deep frozenset.
+
+        :param depth: Nesting depth of the frozenset being shuffled.
+        :return: The shortest wall-clock time observed, in seconds.
+        """
+        a = [_nested_frozenset(depth, leaf=1), "x"]
+        b = ["x", _nested_frozenset(depth, leaf=1)]
         samples = []
 
         for _ in range(3):

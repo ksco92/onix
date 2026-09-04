@@ -7,7 +7,7 @@
 //! identical helpers in every test module.
 
 use crate::datetime::{Date, DateTime};
-use crate::value::{Number, Object, Value};
+use crate::value::{Number, Object, SetItems, Value};
 
 /// Compact value from a borrowed `serde_json` value.
 pub(crate) fn cv(value: &serde_json::Value) -> Value {
@@ -23,6 +23,17 @@ pub(crate) fn cvec(items: &[serde_json::Value]) -> Vec<Value> {
 /// a JSON literal cannot express, so tests that need a tuple build it here.
 pub(crate) fn ctup(items: &[serde_json::Value]) -> Value {
     Value::Tuple(cvec(items).into_boxed_slice())
+}
+
+/// Compact set value from a slice of `serde_json` values, in the order
+/// given — the source order a real Python set would supply.
+pub(crate) fn cset(items: &[serde_json::Value]) -> Value {
+    Value::Set(SetItems::new(cvec(items)))
+}
+
+/// Compact frozenset value — [`cset`]'s twin.
+pub(crate) fn cfrozen(items: &[serde_json::Value]) -> Value {
+    Value::FrozenSet(SetItems::new(cvec(items)))
 }
 
 /// Compact `date` value — the other shape a JSON literal cannot express.

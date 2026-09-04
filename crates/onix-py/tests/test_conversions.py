@@ -92,16 +92,30 @@ def test_namedtuple_raises_type_error_naming_the_class() -> None:
         DeepDiff((point(1, 2),), (point(1, 3),))
 
 
-def test_set_raises_type_error() -> None:
-    """A set (unsupported in this MVP) raises TypeError naming `set`."""
-    with pytest.raises(TypeError, match="set"):
-        DeepDiff({1, 2}, {1, 3})
+def test_set_converts_and_diffs() -> None:
+    """A set is supported: it diffs into the two set categories (see test_sets.py)."""
+    assert DeepDiff({1, 2}, {1, 3}).to_dict() == {
+        "set_item_added": ["root[3]"],
+        "set_item_removed": ["root[2]"],
+    }
 
 
-def test_frozenset_raises_type_error() -> None:
-    """A frozenset (unsupported in this MVP) raises TypeError naming `frozenset`."""
-    with pytest.raises(TypeError, match="frozenset"):
-        DeepDiff(frozenset({1, 2}), frozenset({1, 3}))
+def test_frozenset_converts_and_diffs() -> None:
+    """A frozenset is supported too, and stays distinct from a set."""
+    assert DeepDiff(frozenset({1, 2}), frozenset({1, 3})).to_dict() == {
+        "set_item_added": ["root[3]"],
+        "set_item_removed": ["root[2]"],
+    }
+
+
+def test_unhashable_set_member_raises_type_error_naming_the_set() -> None:
+    """A member no Python set can normally hold is refused, reporting the set's own path."""
+
+    class HashableDict(dict):
+        __hash__ = object.__hash__
+
+    with pytest.raises(TypeError, match=r"HashableDict at root\[<set member>\]"):
+        DeepDiff({HashableDict()}, {1})
 
 
 def test_datetime_is_accepted_and_compared_by_instant() -> None:
@@ -181,20 +195,20 @@ def test_custom_object_raises_type_error() -> None:
 
 def test_unsupported_type_is_reported_even_when_nested() -> None:
     """An unsupported type nested inside an otherwise-supported dict raises with its exact path."""
-    with pytest.raises(TypeError, match=r"set at root\['a'\]\['b'\]\[1\]"):
-        DeepDiff({"a": {"b": [1, {1, 2}]}}, {"a": {"b": [1, {1, 3}]}})
+    with pytest.raises(TypeError, match=r"complex at root\['a'\]\['b'\]\[1\]"):
+        DeepDiff({"a": {"b": [1, 1j]}}, {"a": {"b": [1, 2j]}})
 
 
 def test_unsupported_type_nested_in_a_tuple_reports_its_path() -> None:
     """A tuple is walked like a list, so an unsupported element inside one reports its index."""
-    with pytest.raises(TypeError, match=r"set at root\['a'\]\[1\]"):
-        DeepDiff({"a": (1, {1, 2})}, {"a": (1, {1, 3})})
+    with pytest.raises(TypeError, match=r"complex at root\['a'\]\[1\]"):
+        DeepDiff({"a": (1, 1j)}, {"a": (1, 2j)})
 
 
 def test_unsupported_type_at_root_reports_bare_root_path() -> None:
     """A top-level unsupported value reports the bare `root` path."""
-    with pytest.raises(TypeError, match=r"set at root;"):
-        DeepDiff({1, 2}, {1, 3})
+    with pytest.raises(TypeError, match=r"complex at root;"):
+        DeepDiff(1j, 2j)
 
 
 def test_non_str_dict_key_error_reports_path_to_the_dict() -> None:

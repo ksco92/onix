@@ -1,0 +1,15 @@
+{
+  "type_changes": {
+    "root": {
+      "new_type": "set",
+      "new_value": [
+        1,
+        2
+      ],
+      "old_type": "dict",
+      "old_value": {
+        "a": 1
+      }
+    }
+  }
+}

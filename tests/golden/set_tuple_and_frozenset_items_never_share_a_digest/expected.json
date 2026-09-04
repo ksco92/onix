@@ -1,0 +1,8 @@
+{
+  "set_item_added": [
+    "root[frozenset({1})]"
+  ],
+  "set_item_removed": [
+    "root[(1,)]"
+  ]
+}

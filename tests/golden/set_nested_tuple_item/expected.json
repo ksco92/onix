@@ -1,0 +1,8 @@
+{
+  "set_item_added": [
+    "root[(1, (2, 4))]"
+  ],
+  "set_item_removed": [
+    "root[(1, (2, 3))]"
+  ]
+}

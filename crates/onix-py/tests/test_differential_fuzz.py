@@ -4,19 +4,36 @@ Runs through the actual `deepdiff_rs.DeepDiff` class (not the fast JSON-string
 path), so this exercises the Python-object-to-`Value` conversion layer itself,
 not just the diff engine underneath it.
 
-Five batches, each of `SEED_COUNT` seeded cases run twice (ordered and
+Six batches, each of `SEED_COUNT` seeded cases run twice (ordered and
 `ignore_order=True`): the JSON-shaped types; the same plus tuples, as
 containers in their own right and as elements of lists, dicts and other
-tuples; the same plus naive and aware datetimes and dates anywhere in a nested
-value; flat, tightly clustered calendar lists, which put maximum pressure on
-difflib alignment and `ignore_order` pairing because near-identical candidates
-make every tie-break observable; and dict-wrapped calendar values against
-strings of themselves, which is the shape the `str()` coercion decides. Every
-batch compares `to_json()` (canonically, i.e. parsed, since neither tool
-promises a key order) *and* `to_dict()` by `==`, the comparison that can see a
-tuple, a `datetime` or a `date` where the JSON one cannot.
+tuples; the same plus sets and frozensets, likewise; the same plus naive and
+aware datetimes and dates anywhere in a nested value; flat, tightly clustered
+calendar lists, which put maximum pressure on difflib alignment and
+`ignore_order` pairing because near-identical candidates make every tie-break
+observable; and dict-wrapped calendar values against strings of themselves,
+which is the shape the `str()` coercion decides. Every batch compares
+`to_json()` (canonically, i.e. parsed, since neither tool promises a key
+order) *and* `to_dict()` by `==`, the comparison that can see a tuple, a set,
+a `datetime` or a `date` where the JSON one cannot.
 
 The three calendar batches run under a pinned `TZ=UTC` — see `utc_timezone`.
+
+The set batch makes two allowances, both for DeepDiff's own dependence on the
+process's set iteration order (see `tests/golden/README.md`):
+
+- Anything that came out of a set is compared order-insensitively, since
+  DeepDiff emits it in hash order and onix in its own canonical order.
+- A case whose *DeepDiff* answer is itself order-dependent is skipped, and
+  detected mechanically rather than guessed at: the same pair is diffed a
+  second time with every set rebuilt from its members in reverse, and if
+  DeepDiff disagrees with itself the case is one onix deliberately answers
+  deterministically instead. Anything DeepDiff answers stably, onix must
+  match.
+
+Real DeepDiff's own `to_json()` raises on a report holding a `frozenset`
+value, where onix serializes it as an array; such a case is compared through
+`to_dict()` alone.
 """
 
 import datetime
@@ -54,9 +71,13 @@ SCALARS: Final[list[JsonValue]] = [
 # ordered, once ignore_order=True), so this is 2x SEED_COUNT diffs per batch.
 SEED_COUNT: Final[int] = 300
 
-# The tuple batch draws from a disjoint seed range, so the two batches are
-# independent corpora rather than the same shapes with tuples sprinkled in.
+# The tuple and set batches draw from disjoint seed ranges, so the batches are
+# independent corpora rather than the same shapes with extra types sprinkled in.
 TUPLE_SEED_BASE: Final[int] = 1_000_000
+SET_SEED_BASE: Final[int] = 5_000_000
+
+# How often the set batch turns a generated sequence into a set or a frozenset.
+SET_PROBABILITY: Final[float] = 0.4
 
 # ...and so do the two calendar batches.
 CALENDAR_SEED_BASE: Final[int] = 2_000_000
@@ -637,4 +658,327 @@ def test_differential_fuzz_with_stringified_calendar_values_matches_real_deepdif
     assert not mismatches, (
         f"{len(mismatches)} of {SEED_COUNT * 2} stringified calendar fuzz cases diverged from "
         f"real DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+def _gen_hashable(rng: random.Random, depth: int) -> object:
+    """
+    Generate a value a Python set can hold: a scalar, a tuple of them, or a frozenset.
+
+    A set member is *rendered into* its finding's path, and rendering a
+    frozenset means rendering its members in some order — DeepDiff's is
+    Python's hash order, onix's is canonical, and no order-insensitive
+    comparison can reconcile the two inside a single opaque path string. A
+    frozenset generated here is therefore capped at one member, where the two
+    orders provably coincide; the difference itself is pinned by name in
+    ``test_sets.py``. Tuples are unrestricted, their order being positional in
+    both tools.
+
+    :param rng: Seeded RNG.
+    :param depth: Remaining nesting budget.
+    :return: A hashable value.
+    """
+    if depth <= 0 or rng.random() < 0.55:
+        return _gen_scalar(rng)
+
+    if rng.random() < 0.5:
+        return frozenset([_gen_hashable(rng, depth - 1)] if rng.random() < 0.75 else [])
+
+    return tuple(_gen_hashable(rng, depth - 1) for _ in range(rng.randint(0, 3)))
+
+
+def _gen_set_value(rng: random.Random, depth: int) -> object:
+    """
+    Generate a random value whose sequences are sometimes sets or frozensets.
+
+    :param rng: Seeded RNG.
+    :param depth: Remaining nesting budget.
+    :return: A random value built from the supported types, sets included.
+    """
+    if depth <= 0:
+        return _gen_scalar(rng)
+
+    kind = rng.random()
+
+    if kind < 0.3:
+        return _gen_scalar(rng)
+
+    if kind < 0.8:
+        if rng.random() < SET_PROBABILITY:
+            members = [_gen_hashable(rng, depth - 1) for _ in range(rng.randint(0, 4))]
+
+            return frozenset(members) if rng.random() < 0.4 else set(members)
+
+        items = [_gen_set_value(rng, depth - 1) for _ in range(rng.randint(0, 4))]
+
+        return tuple(items) if rng.random() < 0.3 else items
+
+    keys = rng.sample(DICT_KEYS, rng.randint(0, len(DICT_KEYS)))
+
+    return {key: _gen_set_value(rng, depth - 1) for key in keys}
+
+
+def _mutate_set_value(rng: random.Random, value: object) -> object:
+    """
+    Build a related-but-different copy of a set-batch value, keeping each container's kind.
+
+    :param rng: Seeded RNG.
+    :param value: The value to derive a mutated copy from.
+    :return: A structurally related, partially mutated copy.
+    """
+    if isinstance(value, (set, frozenset)):
+        members = [
+            _gen_hashable(rng, 2) if rng.random() < 0.4 else member for member in value
+        ]
+
+        if rng.random() < 0.3:
+            members.append(_gen_hashable(rng, 2))
+
+        return frozenset(members) if isinstance(value, frozenset) else set(members)
+
+    if isinstance(value, (list, tuple)):
+        mutated = [
+            _gen_set_value(rng, 2) if rng.random() < 0.3 else _mutate_set_value(rng, item)
+            for item in value
+        ]
+
+        return tuple(mutated) if isinstance(value, tuple) else mutated
+
+    if isinstance(value, dict):
+        mutated = {
+            key: _gen_set_value(rng, 2) if rng.random() < 0.3 else item
+            for key, item in value.items()
+        }
+
+        if rng.random() < 0.3:
+            mutated[rng.choice(DICT_KEYS)] = _gen_set_value(rng, 2)
+
+        return mutated
+
+    return _gen_set_value(rng, 2)
+
+
+def _set_edge_mutations(rng: random.Random, value: object, in_set: bool = False) -> object:
+    """
+    Apply the two set-specific edits recursively, mirroring `_tuple_edge_mutations`.
+
+    Both target shapes ordinary kind-preserving mutation can never reach, and both are
+    where a set's *iteration order* becomes load-bearing rather than cosmetic: flipping
+    a container between the four kinds while keeping its members (which is what makes a
+    `list(a_set) == some_list` coercion decide a pairing), and re-typing a number inside
+    a set member within Python's `1 == 1.0 == True` family (which is what makes DeepHash
+    hand two members one digest, so that *which* member was iterated first decides what
+    gets reported).
+
+    Whatever it is handed, this returns a hashable value whenever `in_set` is set: a
+    list or a set cannot be a set member, so inside a set those kinds become their
+    `tuple`/`frozenset` counterparts and a flip swaps only those two.
+
+    :param rng: Seeded RNG.
+    :param value: The value to edit.
+    :param in_set: Whether `value` is itself a set member.
+    :return: The edited value, hashable whenever `in_set` is set.
+    """
+    if isinstance(value, (set, frozenset, list, tuple)):
+        # A set's members are set members, and hashability is transitive, so
+        # `in_set` both starts at a set and carries down through it.
+        member_in_set = in_set or isinstance(value, (set, frozenset))
+        members = [_set_edge_mutations(rng, item, in_set=member_in_set) for item in value]
+        target = _HASHABLE_KIND[type(value)] if in_set else type(value)
+
+        if rng.random() < KIND_FLIP_PROBABILITY:
+            flipped = _FLIPPED_IN_SET[target] if in_set else _FLIPPED[target]
+
+            # Outside a set, a flip *into* one is only possible when every
+            # member happens to be hashable (a dict member forbids it).
+            if flipped not in (set, frozenset) or all(map(_is_hashable, members)):
+                target = flipped
+
+        if member_in_set and target is frozenset and len(members) > 1:
+            # Same cap, and same reason, as `_gen_hashable`'s: a multi-member
+            # frozenset inside a set member renders its own members into an
+            # opaque path string.
+            target = tuple
+
+        return list(members) if target is list else target(members)
+
+    if isinstance(value, dict):
+        return {key: _set_edge_mutations(rng, item) for key, item in value.items()}
+
+    if in_set and isinstance(value, (bool, int, float)) and rng.random() < RETYPE_PROBABILITY:
+        return _retype_number(rng, value)
+
+    return value
+
+
+def _is_hashable(value: object) -> bool:
+    """
+    Report whether `value` could be a set member.
+
+    :param value: Any value.
+    :return: True if `hash(value)` succeeds.
+    """
+    try:
+        hash(value)
+    except TypeError:
+        return False
+
+    return True
+
+
+# The hashable counterpart of each container kind, for a value that has to be
+# usable as a set member.
+_HASHABLE_KIND: Final[dict[type, type]] = {
+    set: frozenset,
+    frozenset: frozenset,
+    list: tuple,
+    tuple: tuple,
+}
+
+
+# Outside a set, a flip swaps each kind with its unhashable/hashable
+# counterpart, so every flip crosses the boundary `list(a_set)`-style coercion
+# sits on. Inside one, only the two hashable kinds are available.
+_FLIPPED: Final[dict[type, type]] = {set: list, list: set, frozenset: tuple, tuple: frozenset}
+
+
+_FLIPPED_IN_SET: Final[dict[type, type]] = {frozenset: tuple, tuple: frozenset}
+
+
+def _normalize_set_categories(report: dict[str, object]) -> dict[str, object]:
+    """
+    Sort the two set categories, whose order real DeepDiff draws from Python hash order.
+
+    :param report: A report as either engine's `to_dict()` or parsed `to_json()` gives it.
+    :return: The same report with both set categories as sorted lists.
+    """
+    return {
+        key: sorted(value) if key in {"set_item_added", "set_item_removed"} else value
+        for key, value in report.items()
+    }
+
+
+def _reverse_sets(value: object) -> object:
+    """
+    Rebuild every set and frozenset in `value` from its members in reverse.
+
+    Python inserts a set literal's members in written order, and insertion order can
+    change where a collision lands, so this often (not always) gives a set the same
+    members in a different iteration order.
+
+    :param value: The value to rebuild.
+    :return: A copy with every set rebuilt.
+    """
+    if isinstance(value, (set, frozenset)):
+        members = [_reverse_sets(member) for member in reversed(list(value))]
+
+        return frozenset(members) if isinstance(value, frozenset) else set(members)
+
+    if isinstance(value, (list, tuple)):
+        members = [_reverse_sets(item) for item in value]
+
+        return tuple(members) if isinstance(value, tuple) else members
+
+    if isinstance(value, dict):
+        return {key: _reverse_sets(item) for key, item in value.items()}
+
+    return value
+
+
+def _deepdiff_answer(a: object, b: object, ignore_order: bool) -> object:
+    """
+    Real DeepDiff's own answer for one pair, normalized the way the comparison reads it.
+
+    :param a: The first value.
+    :param b: The second value.
+    :param ignore_order: Whether to diff with `ignore_order=True`.
+    :return: The normalized `to_dict()` report.
+    """
+    real = RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)
+
+    return _normalize_set_categories(_normalize_types(real.to_dict()))
+
+
+def _diverges_with_sets(a: object, b: object, ignore_order: bool) -> tuple[object, object] | None:
+    """
+    Diff `a`/`b` with both engines, allowing the two documented set-order relaxations.
+
+    :param a: The first value.
+    :param b: The second value.
+    :param ignore_order: Whether to diff with `ignore_order=True`.
+    :return: `(expected, actual)` if they diverge, else `None`.
+    """
+    real = RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)
+    onix = OnixDeepDiff(a, b, ignore_order=ignore_order)
+
+    expected_dict = _normalize_set_categories(_normalize_types(real.to_dict()))
+    actual_dict = _normalize_set_categories(_normalize_types(onix.to_dict()))
+
+    if actual_dict != expected_dict:
+        # DeepDiff disagreeing with itself once its sets are rebuilt in
+        # another order is the documented class onix answers deterministically
+        # instead, not a divergence to chase.
+        if expected_dict != _deepdiff_answer(_reverse_sets(a), _reverse_sets(b), ignore_order):
+            return None
+
+        return expected_dict, actual_dict
+
+    try:
+        expected_json = json.loads(real.to_json())
+    except TypeError:
+        # DeepDiff cannot serialize a frozenset value at all; onix can, so
+        # there is nothing to compare the JSON rendering against here.
+        return None
+
+    actual_json = _as_set_insensitive(_normalize_set_categories(json.loads(onix.to_json())))
+    expected_json = _as_set_insensitive(_normalize_set_categories(expected_json))
+
+    if actual_json != expected_json:
+        return expected_json, actual_json
+
+    return None
+
+
+def _as_set_insensitive(value: JsonValue) -> JsonValue:
+    """
+    Sort every array in a parsed report, so a set-derived one compares order-free.
+
+    Only used for the set batch's JSON comparison; the `to_dict()` comparison beside it
+    is exact and sees real `set` objects, so list and tuple order is still checked (a
+    Python `set` compares by membership, a `list` does not).
+
+    :param value: A parsed report, or any part of one.
+    :return: The same value with every array sorted by its canonical JSON text.
+    """
+    if isinstance(value, dict):
+        return {key: _as_set_insensitive(item) for key, item in value.items()}
+
+    if isinstance(value, list):
+        return sorted(
+            (_as_set_insensitive(item) for item in value),
+            key=lambda item: json.dumps(item, sort_keys=True),
+        )
+
+    return value
+
+
+def test_differential_fuzz_with_sets_matches_real_deepdiff() -> None:
+    """Runs a third SEED_COUNT-case batch whose values also contain sets and frozensets."""
+    mismatches = []
+
+    for seed in range(SET_SEED_BASE, SET_SEED_BASE + SEED_COUNT):
+        rng = random.Random(seed)
+        a = _gen_set_value(rng, 3)
+        b = _set_edge_mutations(rng, _mutate_set_value(rng, a))
+
+        for ignore_order in (False, True):
+            divergence = _diverges_with_sets(a, b, ignore_order)
+
+            if divergence is not None:
+                expected, actual = divergence
+                mismatches.append((seed, ignore_order, a, b, expected, actual))
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} set fuzz cases diverged from real DeepDiff "
+        f"(showing up to 3): {mismatches[:3]}"
     )

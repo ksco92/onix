@@ -166,6 +166,9 @@ use pairing::compute_pairs;
 pub(crate) use distance::{
     is_below_threshold_to_diff_deeper, item_length, type_change_leaf_length,
 };
+pub(crate) use hash::set_difference;
+#[cfg(test)]
+pub(crate) use hash::set_member_key;
 
 /// `cutoff_intersection_for_pairs`'s default (`DeepDiff`'s own name;
 /// `CUTOFF_INTERSECTION_FOR_PAIRS_DEFAULT`, diff.py) — the get-pairs gate

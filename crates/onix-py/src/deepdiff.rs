@@ -24,10 +24,15 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 /// `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`:
 ///
 /// - `t1`/`t2`: any of `None`, `bool`, `int`, `float`, `str`, `dict` (`str`
-///   keys), `list`, `tuple`, `datetime.datetime`, or `datetime.date`,
-///   arbitrarily nested. A *subclass* of any of these is not supported (a
-///   `namedtuple`, a pandas `Timestamp`), because `DeepDiff` reports every
-///   value under its own type name. Converted to `onix_core`'s value
+///   keys), `list`, `tuple`, `set`, `frozenset`, `datetime.datetime`, or
+///   `datetime.date`, arbitrarily nested. A *subclass* of any of these is
+///   not supported (a `namedtuple`, a `set` subclass, a pandas
+///   `Timestamp`), because `DeepDiff` reports every value under its own type
+///   name. A `set`/`frozenset` member is restricted further, to `None`,
+///   `bool`, `int`, `float`, `str`, `tuple` and `frozenset`, and the
+///   restriction is transitive: a `list`, `dict`, `set`, `datetime` or
+///   `date` anywhere inside a set member is refused (calendar values there
+///   land with issue #21). Converted to `onix_core`'s value
 ///   model exactly once, up front — see `crate::convert`'s module doc for
 ///   the full conversion table and every unsupported-type error this can
 ///   raise (`TypeError` for an unsupported type, `ValueError` for an
@@ -95,12 +100,17 @@ impl DeepDiff {
     }
 
     /// Byte-compatible with real `DeepDiff(...).to_json()` at
-    /// `verbose_level=2` — the whole point of this crate. A tuple renders as
-    /// the JSON array `DeepDiff`'s own `to_json()` shows for one, and a
-    /// datetime as the `isoformat()` string it shows for one. The single
-    /// documented superset is `datetime.date`, rendered as `YYYY-MM-DD`
-    /// where real `DeepDiff`'s `to_json()` raises `TypeError` — see
-    /// `tests/golden/README.md`.
+    /// `verbose_level=2` — the whole point of this crate. A tuple or a set
+    /// renders as the JSON array `DeepDiff`'s own `to_json()` shows for one,
+    /// a datetime as the `isoformat()` string it shows for one, and the
+    /// `set_item_added`/`set_item_removed` categories as arrays of path
+    /// strings. Three documented differences, all in
+    /// `tests/golden/README.md`: `datetime.date` renders as `YYYY-MM-DD` and
+    /// a report holding a `frozenset` renders as an array, both where real
+    /// `DeepDiff`'s `to_json()` raises `TypeError`; and a set's members (and
+    /// the two set categories' entries) come out in `onix`'s canonical order
+    /// rather than the process's own unreproducible set iteration order (see
+    /// that file's "Set iteration order" section).
     ///
     /// Rendering a report to JSON is natively recursive, so a report deep
     /// enough to matter is rendered on the sized worker thread; a shallow one
@@ -112,14 +122,14 @@ impl DeepDiff {
 
     /// The report as a native Python `dict` — [`Self::to_json`]'s content
     /// with the Python types intact rather than their JSON renderings, so a
-    /// value the diff found in a `tuple` comes back as a `tuple` and a
-    /// datetime comes back as a real `datetime.datetime`, exactly as real
-    /// `DeepDiff`'s own `to_dict()` does. Two documented differences: type
-    /// *names* in a `type_changes` entry stay strings here, where real
-    /// `DeepDiff` returns the type objects themselves, and an aware datetime
-    /// carries a fixed-offset `datetime.timezone` rather than whatever
-    /// `tzinfo` class it went in with. See `crate::convert`'s module doc for
-    /// the second. Conversion back to Python objects is
+    /// value the diff found in a `tuple`, `set` or `frozenset` comes back as
+    /// one and a datetime comes back as a real `datetime.datetime`, exactly
+    /// as real `DeepDiff`'s own `to_dict()` does. Two documented
+    /// differences: type *names* in a `type_changes` entry stay strings
+    /// here, where real `DeepDiff` returns the type objects themselves, and
+    /// an aware datetime carries a fixed-offset `datetime.timezone` rather
+    /// than whatever `tzinfo` class it went in with. See `crate::convert`'s
+    /// module doc for the second. Conversion back to Python objects is
     /// iterative (see `crate::convert::value_to_pyobject`), so it is safe on
     /// the calling thread at any depth.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {

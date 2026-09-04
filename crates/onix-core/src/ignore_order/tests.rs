@@ -1,7 +1,7 @@
 use super::IgnoreOrderMemo;
 use crate::diff::DiffOptions;
-use crate::test_support::{cdate, cdt, cdt_at, cobj, ctup, cv, cvec};
-use crate::value::Value as CValue;
+use crate::test_support::{cdate, cdt, cdt_at, cfrozen, cobj, cset, ctup, cv, cvec};
+use crate::value::{SetItems, Value as CValue};
 use serde_json::json;
 
 // Thin wrappers routing each `serde_json`-literal-based test through the real
@@ -1995,5 +1995,276 @@ fn a_pre_epoch_datetime_pairs_with_a_date_by_ordinal_not_by_timestamp() {
             "old_value": "1950-01-01T00:00:00",
             "new_value": "1990-01-01",
         }}})
+    );
+}
+
+// --- sets ----------------------------------------------------------------
+
+/// An `ignore_order` diff of two already-compact values, for the set cases
+/// whose inputs no JSON literal can express.
+fn compact_ignore_order_diff(
+    a: &CValue,
+    b: &CValue,
+) -> Result<crate::report::Report, crate::error::Error> {
+    crate::diff::diff_with_options(
+        a,
+        b,
+        &DiffOptions {
+            ignore_order: true,
+            ..DiffOptions::default()
+        },
+    )
+}
+
+/// A one-item list holding `value`, the shape that puts a set through the
+/// `ignore_order` hashing path rather than through a direct set diff.
+fn listed(value: CValue) -> CValue {
+    CValue::Array(Box::new([value]))
+}
+
+/// Each container kind hashes into its own bucket, so two of them holding
+/// the same items never hash-match — the pairing recurses instead and finds
+/// a type change (golden: `ignore_order_set_vs_list_never_hash_match`).
+#[test]
+fn a_set_never_hash_matches_another_container_kind() {
+    let items = [json!(1), json!(2)];
+    for (other, new_type) in [
+        (cv(&json!([1, 2])), "list"),
+        (ctup(&items), "tuple"),
+        (cfrozen(&items), "frozenset"),
+    ] {
+        let report = compact_ignore_order_diff(&listed(cset(&items)), &listed(other))
+            .expect("shallow values diff cleanly");
+        assert_eq!(
+            report.to_json_value()["type_changes"]["root[0]"]["new_type"],
+            json!(new_type),
+        );
+    }
+}
+
+/// A set's own items hash order-insensitively, so a reordered set pairs as
+/// equal (golden: `ignore_order_list_of_sets_pairs`).
+#[test]
+fn sets_holding_the_same_items_hash_match() {
+    let report = compact_ignore_order_diff(
+        &listed(cset(&[json!(1), json!(2)])),
+        &listed(cset(&[json!(2), json!(1)])),
+    )
+    .expect("shallow values diff cleanly");
+
+    assert!(report.is_empty());
+}
+
+/// Neither set kind consults the run's digest cache: a `set` is unhashable
+/// in Python, and a `frozenset` is deliberately kept out of it, so both keep
+/// their own content key. Real `DeepDiff` lets a frozenset inherit an
+/// earlier Python-equal one's digest, which makes its answer depend on
+/// hashing order; `onix` is deterministic instead (see
+/// `tests/golden/README.md`'s "Set iteration order" section).
+#[test]
+fn neither_set_kind_inherits_another_items_digest() {
+    let frozen = compact_ignore_order_diff(
+        &listed(cfrozen(&[json!(1)])),
+        &listed(cfrozen(&[json!(1.0)])),
+    )
+    .expect("shallow values diff cleanly");
+    assert_eq!(
+        frozen.to_json_value(),
+        json!({"values_changed": {"root[0]": {"old_value": [1], "new_value": [1.0]}}}),
+        "the two frozensets are distinct items, and too far apart to pair"
+    );
+
+    let plain = compact_ignore_order_diff(
+        &CValue::Array(Box::new([cset(&[json!(1)]), cset(&[json!(1.0)])])),
+        &CValue::Array(Box::new([])),
+    )
+    .expect("shallow values diff cleanly");
+    assert_eq!(
+        plain.to_json_value(),
+        json!({"iterable_item_removed": {"root[0]": [1], "root[1]": [1.0]}})
+    );
+}
+
+/// A frozenset hashes by membership, so a reordered one is the same item —
+/// and a tuple holding the same members is not, since the two are not
+/// Python-equal (golden:
+/// `set_tuple_and_frozenset_items_never_share_a_digest`).
+#[test]
+fn a_frozenset_hashes_by_membership_and_apart_from_a_tuple() {
+    let report = compact_ignore_order_diff(
+        &listed(cfrozen(&[json!(1), json!(2)])),
+        &listed(cfrozen(&[json!(2), json!(1)])),
+    )
+    .expect("shallow values diff cleanly");
+    assert!(report.is_empty());
+
+    let memo = IgnoreOrderMemo::new();
+    assert_ne!(
+        super::hash::item_key(&ctup(&[json!(1)]), &memo),
+        super::hash::item_key(&cfrozen(&[json!(1)]), &memo),
+        "a tuple and a frozenset holding the same members are not one item"
+    );
+}
+
+/// `_get_item_length` of a set diff's delta view is the number of added
+/// plus removed *items*, each measured by `item_length` — verified against
+/// real `deepdiff==9.1.0` (`{1, 2}` vs `{1, 2, 3, 4, 5}` measures 3).
+#[test]
+fn count_diff_leaves_of_two_sets_counts_added_and_removed_items() {
+    let memo = IgnoreOrderMemo::new();
+    let opts = DiffOptions::default();
+    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+
+    assert_eq!(
+        count(
+            &cset(&[json!(1), json!(2)]),
+            &cset(&[json!(1), json!(2), json!(3), json!(4), json!(5)]),
+        ),
+        3
+    );
+    assert_eq!(count(&cset(&[json!(1)]), &cset(&[json!(1.0)])), 2);
+    assert_eq!(count(&cset(&[json!(1)]), &cset(&[json!(1)])), 0);
+}
+
+/// `_prep_iterable` counts a set exactly like a list — verified with real
+/// `DeepHash` (`{1, 2}` and `[1, 2]` both count 3).
+#[test]
+fn rough_length_of_a_set_matches_a_list_of_the_same_items() {
+    assert_eq!(
+        super::distance::rough_length(&cset(&[json!(1), json!(2)])),
+        3
+    );
+    assert_eq!(super::distance::rough_length(&cfrozen(&[])), 1);
+    assert_eq!(
+        super::distance::item_length(&cset(&[json!(1), json!(2)])),
+        2
+    );
+}
+
+/// `DeepDiff`'s delta view omits a `type_changes` entry's `new_value`
+/// whenever applying the new side's own type to the old value reproduces it
+/// — for the set kinds, `set(x)`/`frozenset(x)` keeps only distinct members,
+/// so the answer never depends on order.
+#[test]
+fn a_set_type_change_omits_its_new_value_when_the_constructor_reproduces_it() {
+    let leaves = super::distance::type_change_leaf_length;
+    let items = [json!(1), json!(2)];
+
+    // Reproduced: the entry costs the single `new_type` leaf.
+    assert_eq!(leaves(&cv(&json!([1, 2])), &cset(&items)), 1);
+    assert_eq!(leaves(&ctup(&items), &cfrozen(&items)), 1);
+    assert_eq!(leaves(&cset(&items), &cfrozen(&items)), 1);
+    assert_eq!(leaves(&cset(&items), &cv(&json!([1, 2]))), 1);
+    assert_eq!(leaves(&cfrozen(&items), &ctup(&items)), 1);
+    // Python-equal members, not identical ones: `set([1, 1.0])` is `{1}`.
+    assert_eq!(leaves(&cv(&json!([1, 1.0])), &cset(&[json!(1)])), 1);
+    // A nested set member compares by membership too, one level down, for
+    // either set kind.
+    for nested in [cfrozen(&items), cset(&items)] {
+        assert_eq!(
+            leaves(
+                &CValue::Set(SetItems::new(vec![nested.clone()])),
+                &CValue::Set(SetItems::new(vec![nested])),
+            ),
+            1
+        );
+    }
+
+    // Reproduced whichever order the sequence is in: `onix` answers this by
+    // membership, where Python answers it by the set's iteration order.
+    assert_eq!(leaves(&cset(&items), &cv(&json!([2, 1]))), 1);
+
+    // Not reproduced: the entry additionally costs `new_value`'s own length.
+    assert_eq!(leaves(&cset(&items), &cfrozen(&[json!(1), json!(3)])), 3);
+}
+
+/// Python's `bool(a_set)` is emptiness, so a `type_changes` from a
+/// non-empty set to `true` is reproduced by coercion.
+#[test]
+fn a_set_coerces_to_its_own_truthiness() {
+    let leaves = super::distance::type_change_leaf_length;
+
+    assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!(true))), 1);
+    assert_eq!(leaves(&cfrozen(&[]), &cv(&json!(false))), 1);
+    // Every non-`bool` target refuses a set outright, as it does a list.
+    assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!(2))), 2);
+    assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!(2.5))), 2);
+    assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!("x"))), 2);
+}
+
+/// A frozenset holding an unhashable value cannot exist in Python, but the
+/// value model can express one; it still keys by its own content.
+#[test]
+fn a_frozenset_holding_an_unhashable_value_keeps_its_own_digest() {
+    let memo = IgnoreOrderMemo::new();
+    let with_list = CValue::FrozenSet(SetItems::new(vec![cv(&json!([1]))]));
+    let with_other_list = CValue::FrozenSet(SetItems::new(vec![cv(&json!([1.0]))]));
+
+    assert_ne!(
+        super::hash::item_key(&with_list, &memo),
+        super::hash::item_key(&with_other_list, &memo),
+        "an unhashable frozenset never inherits a Python-equal one's digest"
+    );
+}
+
+/// A member Python cannot hash — a list, a set or a dict — has no Python
+/// identity to compare by, so it keys structurally; only a directly-built
+/// value can carry one.
+#[test]
+fn an_unhashable_set_member_keys_structurally() {
+    let key = super::set_member_key;
+    let mut builder = crate::value::Builder::new();
+    let object = builder.object(vec![("a".to_string(), cv(&json!(1)))]);
+    let other_object = builder.object(vec![("a".to_string(), cv(&json!(2)))]);
+
+    assert_ne!(key(&cv(&json!([1]))), key(&cv(&json!([2]))));
+    assert_eq!(key(&cv(&json!([1]))), key(&cv(&json!([1]))));
+    assert_ne!(key(&cset(&[json!(1)])), key(&cset(&[json!(2)])));
+    assert_ne!(key(&object), key(&other_object));
+    assert_ne!(key(&cv(&json!([1]))), key(&ctup(&[json!(1)])));
+
+    // A nested unhashable value still keys the container it sits in.
+    assert_ne!(
+        key(&ctup(&[json!([1])])),
+        key(&ctup(&[json!([2])])),
+        "an unhashable element still distinguishes its tuple"
+    );
+
+    // A number too large for an `i64` keys apart from every other integer.
+    assert_ne!(
+        key(&CValue::Number(crate::value::Number::from_u64(u64::MAX))),
+        key(&cv(&json!(1)))
+    );
+}
+
+/// Two unhashable containers of different kinds are different members: a
+/// `list` and a `set` holding the same values are not Python-equal, so they
+/// must not share one identity even though neither can be hashed.
+#[test]
+fn unhashable_set_members_of_different_kinds_stay_distinct() {
+    let key = super::set_member_key;
+    let listed = |value: CValue| CValue::Tuple(Box::new([value]));
+
+    assert_ne!(
+        key(&listed(cv(&json!([1])))),
+        key(&listed(cset(&[json!(1)]))),
+        "a list and a set holding the same members are not one identity"
+    );
+    assert_ne!(
+        key(&listed(cv(&json!([1])))),
+        key(&listed(cfrozen(&[json!(1)])))
+    );
+
+    // The pair the missing kind tag made invisible, end to end.
+    let with_set = CValue::Set(SetItems::new(vec![listed(cset(&[json!(1)]))]));
+    let with_list = CValue::Set(SetItems::new(vec![listed(cv(&json!([1])))]));
+    assert_eq!(
+        crate::diff::diff(&with_set, &with_list)
+            .expect("shallow sets diff cleanly")
+            .to_json_value(),
+        json!({
+            "set_item_added": ["root[([1],)]"],
+            "set_item_removed": ["root[({1},)]"],
+        })
     );
 }
