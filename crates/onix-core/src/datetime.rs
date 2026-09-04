@@ -73,7 +73,7 @@ pub struct Date {
 impl Date {
     /// Builds a date, returning `None` if `month`/`day` are not a real
     /// calendar date (leap years included). An out-of-range month has no days
-    /// at all ([`days_in_month`] returns `0` for one), so the single `day`
+    /// at all (`days_in_month` returns `0` for one), so the single `day`
     /// bound below rejects it too.
     ///
     /// `year` is not range-checked. Python's own `date` spans years `1`
