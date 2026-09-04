@@ -535,29 +535,43 @@ def test_a_tuple_set_member_matches_by_position_where_deepdiff_ignores_order_and
     assert real_repeat == {}
 
 
-def test_a_tuple_set_member_matches_deepdiff_on_either_its_cache_or_content_identity() -> None:
-    """A tuple set member's identity checks both of DeepHash's two paths, not just one.
+def test_a_set_member_matches_deepdiff_by_the_per_node_cache_versus_content_decision() -> None:
+    """A set member's identity follows DeepHash's per-node cache/content decision.
 
-    `_diff_set` hashes a tuple set member through `DeepHash`, which is
-    genuinely two-tiered: two tuples share one digest outright when they are
-    fully Python-`==` equal (`==` is strict across naive/aware, so a datetime
-    difference blocks this shortcut), and *independently*, each tuple's own
-    per-element content digest can still coincide even when that shortcut
-    does not apply (`_prep_datetime` normalizes every datetime
-    unconditionally; `_prep_number` never collapses a number across types).
-    Reading only one of the two paths gets one of the four combinations below
-    wrong; onix checks both and matches on either.
+    `_diff_set` hashes each member through `DeepHash`, which decides at EVERY
+    node whether to reuse an earlier digest or build a fresh one: a node is
+    first looked up in a run-scoped cache keyed by the Python object (bare
+    numbers type-wrapped, so `1` and `1.0` never share an entry, but a
+    Python-equal container -- tuple or frozenset -- does; a naive datetime
+    never equals an aware one), and only on a miss is its content digest built
+    from the children's (already-cached) digests. So a member can miss the
+    cache at its outer tuple (a naive/aware sibling blocks it) yet still hit
+    the cache at an inner container, and the two outer content digests then
+    coincide once the datetimes normalize to one instant. A per-*member*
+    two-tier rule cannot model this; onix computes one digest per member
+    through the shared cache, exactly as DeepHash does. Every case asserts
+    onix's full output against real deepdiff==9.1.0 (run under TZ=UTC).
     """
     naive = datetime.datetime(2024, 1, 1)
     aware = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
 
     cases = [
         # (a, b, expect_empty)
-        ({(naive, 1)}, {(aware, 1.0)}, False),  # neither path agrees
-        ({(naive, 1)}, {(naive, 1.0)}, True),  # agrees via the cache path
-        ({(naive, 1)}, {(aware, 1)}, True),  # agrees via the content path
-        ({naive}, {aware}, True),  # bare member, content path only
-        ({naive, aware}, {aware}, True),  # both onix members match aware
+        # Inner container hits the cache, outer misses -> content coincides:
+        ({(naive, (1,))}, {(aware, (1.0,))}, True),
+        ({(naive, (True,))}, {(aware, (1,))}, True),
+        ({(naive, frozenset({True}))}, {(aware, frozenset({1}))}, True),
+        ({(naive, frozenset({1}))}, {(aware, frozenset({1.0}))}, True),
+        ({(naive, ((1,),))}, {(aware, ((1.0,),))}, True),
+        # A bare-number sibling is type-distinct with no shared cache entry:
+        ({(naive, 1)}, {(aware, 1.0)}, False),
+        # Whole outer tuple Python-equal -> a single cache hit:
+        ({(naive, 1)}, {(naive, 1.0)}, True),
+        # Outer misses (naive/aware), but the Int(1) content agrees:
+        ({(naive, 1)}, {(aware, 1)}, True),
+        # A bare calendar member matches by instant:
+        ({naive}, {aware}, True),
+        ({naive, aware}, {aware}, True),
     ]
     for a, b, expect_empty in cases:
         onix = DeepDiff(a, b).to_dict()
