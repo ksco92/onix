@@ -462,6 +462,17 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
         {date(2024, 1, 1)},
         {datetime(2024, 1, 1)},
     ),
+    # A tuple pairing a naive/aware datetime with a bool: the naive/aware
+    # pair blocks DeepHash's whole-tuple equality cache, so the tuple's
+    # content digest is what has to agree instead, and that digest's own
+    # bool element has its own ItemKey variant, not one that folds into a
+    # plain int/float. An unrelated second member on each side keeps the two
+    # sets themselves unequal as wholes, forcing the per-member comparison to
+    # run rather than short-circuiting on whole-set equality.
+    "set_tuple_datetime_and_bool_sibling_matches_via_content_path": (
+        {(datetime(2024, 1, 1, 10), True), 1},
+        {(datetime(2024, 1, 1, 10, tzinfo=UTC), True), 2},
+    ),
     # Nested one level inside a tuple or a frozenset item, a calendar value
     # renders with repr() instead -- the same rule a nested str() follows.
     "set_datetime_nested_in_tuple_item": ({(datetime(2024, 1, 1),)}, {"sentinel"}),

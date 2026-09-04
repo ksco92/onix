@@ -565,3 +565,25 @@ def test_a_tuple_set_member_matches_deepdiff_on_either_its_cache_or_content_iden
 
         assert onix == real, f"onix diverged from real DeepDiff for {a!r} vs {b!r}"
         assert bool(onix) == (not expect_empty), f"unexpected result for {a!r} vs {b!r}: {onix!r}"
+
+
+def test_a_bool_nested_in_a_tuple_set_member_is_its_own_identity_under_the_content_path() -> None:
+    """A `bool` sibling forces the content path the same way a differently-typed number does.
+
+    Every other test that exercises the content-digest path (the cache path
+    blocked by a naive/aware pair) pairs the calendar element with a plain
+    `int`/`float`; this pins the `bool` element on its own, since `bool` is
+    its own `ItemKey` variant rather than folding into `Number`'s `int`/
+    `float` cases.
+    """
+    naive = datetime.datetime(2024, 1, 1)
+    aware = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+
+    onix_same = DeepDiff({(naive, True)}, {(aware, True)}).to_dict()
+    real_same = RealDeepDiff({(naive, True)}, {(aware, True)}, verbose_level=2).to_dict()
+    assert onix_same == real_same == {}
+
+    onix_diff = DeepDiff({(naive, True)}, {(aware, False)}).to_dict()
+    real_diff = RealDeepDiff({(naive, True)}, {(aware, False)}, verbose_level=2).to_dict()
+    assert onix_diff == real_diff
+    assert onix_diff
