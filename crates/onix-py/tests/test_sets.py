@@ -347,26 +347,109 @@ def test_a_sets_report_does_not_depend_on_which_member_was_hashed_first() -> Non
 
 
 @pytest.mark.parametrize(
-    "member",
+    ("member", "rendered"),
     [
-        (datetime.datetime(2024, 1, 1),),
-        (datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),),
-        frozenset({datetime.date(2024, 1, 1)}),
-        (1, (datetime.datetime(2024, 1, 1),)),
-        datetime.date(2024, 1, 1),
+        (datetime.datetime(2024, 1, 1), "2024-01-01 00:00:00"),
+        (
+            datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+            "2024-01-01 00:00:00+00:00",
+        ),
+        (datetime.datetime(2024, 1, 1, microsecond=123456), "2024-01-01 00:00:00.123456"),
+        (datetime.date(2024, 1, 1), "2024-01-01"),
+        (
+            (datetime.datetime(2024, 1, 1),),
+            "(datetime.datetime(2024, 1, 1, 0, 0),)",
+        ),
+        (
+            (datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),),
+            "(datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone.utc),)",
+        ),
+        (
+            frozenset({datetime.date(2024, 1, 1)}),
+            "frozenset({datetime.date(2024, 1, 1)})",
+        ),
+        (
+            (1, (datetime.datetime(2024, 1, 1),)),
+            "(1, (datetime.datetime(2024, 1, 1, 0, 0),))",
+        ),
     ],
 )
-def test_a_calendar_value_anywhere_inside_a_set_member_is_refused(member: object) -> None:
-    """A datetime or date inside a set member is refused, not rendered with `str()`.
+def test_a_calendar_value_as_or_inside_a_set_member_matches_real_deepdiff(
+    member: object, rendered: str
+) -> None:
+    """A datetime/date set item renders with `str()`; nested one level, with `repr()`.
 
-    Real DeepDiff renders one through `repr()` there
-    (``root[(datetime.datetime(2024, 1, 1, 0, 0),)]``), which is issue #21's
-    business; until then the conversion refuses it rather than emitting the
-    `str()` form silently. The refusal is transitive, so nesting it deeper
-    does not slip past.
+    Top-level uses ``DateTime::python_str``/``Date::python_str`` (space
+    separator, no ``T``) — the one item kind whose ``str()`` and ``repr()``
+    genuinely differ. Nested inside a tuple or frozenset it renders the way
+    every other nested item does: Python's ``repr()``.
     """
-    with pytest.raises(TypeError, match=r"at root\[<set member>\]"):
-        DeepDiff({member}, {"sentinel"})
+    onix = DeepDiff({member}, {"sentinel"}).to_dict()
+    real = RealDeepDiff({member}, {"sentinel"}, verbose_level=2).to_dict()
+
+    assert onix["set_item_removed"] == [f"root[{rendered}]"]
+    assert onix["set_item_removed"] == list(real["set_item_removed"])
+
+
+def test_a_calendar_value_is_a_real_object_in_a_reported_set() -> None:
+    """A set holding a datetime and a date round-trips both as real objects."""
+    diff = DeepDiff({}, {"s": {datetime.datetime(2024, 1, 1), datetime.date(2024, 1, 2)}})
+    added = diff.to_dict()["dictionary_item_added"]["root['s']"]
+
+    assert added == {datetime.datetime(2024, 1, 1), datetime.date(2024, 1, 2)}
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        (
+            {datetime.datetime(2024, 1, 1), 1},
+            {datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc), 2},
+        ),
+        (
+            {(datetime.datetime(2024, 1, 1),), 1},
+            {(datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),), 2},
+        ),
+        (
+            {frozenset({datetime.datetime(2024, 1, 1)}), 1},
+            {frozenset({datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)}), 2},
+        ),
+    ],
+)
+def test_a_naive_and_aware_datetime_set_member_hash_match_at_one_instant(
+    a: set[object], b: set[object]
+) -> None:
+    """`_diff_set` hashes through `DeepHash`, which normalizes a naive value to UTC.
+
+    Unlike plain Python `==` (which never equates a naive and an aware
+    datetime), a set member's identity here follows `DeepHash._prep_datetime`
+    — matching at any nesting depth. Confirmed against `deepdiff==9.1.0`.
+
+    Each set also carries an unrelated second member (`1`/`2`) so the two
+    sides are not wholly equal: a single-member pair that hash-matches makes
+    the two *sets* structurally equal outright, which short-circuits before
+    ever calling `_diff_set`'s per-member identity comparison and would let
+    a broken identity function pass silently.
+    """
+    onix = DeepDiff(a, b).to_dict()
+    real = RealDeepDiff(a, b, verbose_level=2).to_dict()
+
+    assert onix == {"set_item_removed": ["root[1]"], "set_item_added": ["root[2]"]}
+    assert onix == real
+
+
+def test_a_date_and_a_datetime_set_member_never_hash_match() -> None:
+    """A date's DeepHash digest never collides with a datetime's, even at the same midnight."""
+    onix = DeepDiff({datetime.date(2024, 1, 1)}, {datetime.datetime(2024, 1, 1)}).to_dict()
+    real = RealDeepDiff(
+        {datetime.date(2024, 1, 1)}, {datetime.datetime(2024, 1, 1)}, verbose_level=2
+    ).to_dict()
+
+    assert onix == {
+        "set_item_removed": ["root[2024-01-01]"],
+        "set_item_added": ["root[2024-01-01 00:00:00]"],
+    }
+    assert onix == real
 
 
 def test_an_unhashable_container_anywhere_inside_a_set_member_is_refused() -> None:

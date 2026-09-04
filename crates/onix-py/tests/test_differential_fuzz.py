@@ -4,23 +4,28 @@ Runs through the actual `deepdiff_rs.DeepDiff` class (not the fast JSON-string
 path), so this exercises the Python-object-to-`Value` conversion layer itself,
 not just the diff engine underneath it.
 
-Six batches, each of `SEED_COUNT` seeded cases run twice (ordered and
-`ignore_order=True`): the JSON-shaped types; the same plus tuples, as
+Seven batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
+and `ignore_order=True`): the JSON-shaped types; the same plus tuples, as
 containers in their own right and as elements of lists, dicts and other
 tuples; the same plus sets and frozensets, likewise; the same plus naive and
 aware datetimes and dates anywhere in a nested value; flat, tightly clustered
 calendar lists, which put maximum pressure on difflib alignment and
 `ignore_order` pairing because near-identical candidates make every tie-break
-observable; and dict-wrapped calendar values against strings of themselves,
-which is the shape the `str()` coercion decides. Every batch compares
-`to_json()` (canonically, i.e. parsed, since neither tool promises a key
-order) *and* `to_dict()` by `==`, the comparison that can see a tuple, a set,
-a `datetime` or a `date` where the JSON one cannot.
+observable; dict-wrapped calendar values against strings of themselves, which
+is the shape the `str()` coercion decides; and, at `COMBINED_SEED_COUNT`
+cases, the full alphabet drawn together in one generator run — tuples, sets,
+frozensets, datetimes and dates all able to appear at any depth, including a
+calendar value as a bare or nested set item (issue #21's own combination).
+Every batch compares `to_json()` (canonically, i.e. parsed, since neither
+tool promises a key order) *and* `to_dict()` by `==`, the comparison that can
+see a tuple, a set, a `datetime` or a `date` where the JSON one cannot.
 
-The three calendar batches run under a pinned `TZ=UTC` — see `utc_timezone`.
+The three calendar batches and the combined batch run under a pinned
+`TZ=UTC` — see `utc_timezone`.
 
-The set batch makes two allowances, both for DeepDiff's own dependence on the
-process's set iteration order (see `tests/golden/README.md`):
+The set and combined batches make two allowances, both for DeepDiff's own
+dependence on the process's set iteration order (see
+`tests/golden/README.md`):
 
 - Anything that came out of a set is compared order-insensitively, since
   DeepDiff emits it in hash order and onix in its own canonical order.
@@ -83,6 +88,12 @@ SET_PROBABILITY: Final[float] = 0.4
 CALENDAR_SEED_BASE: Final[int] = 2_000_000
 CLUSTERED_SEED_BASE: Final[int] = 3_000_000
 STRINGIFIED_SEED_BASE: Final[int] = 4_000_000
+
+# The combined batch (issue #21): tuples, sets, frozensets, datetimes and dates drawn
+# together in one generator run, its own seed range, and its own (larger) count — the
+# ">=500 seeded cases" the issue's combined-goldens requirement asks for, at fuzz scale.
+COMBINED_SEED_BASE: Final[int] = 6_000_000
+COMBINED_SEED_COUNT: Final[int] = 500
 
 # The calendar batch's leaves: naive and aware datetimes across a bounded range,
 # plus bare dates. The offsets deliberately include one that is not a whole
@@ -275,7 +286,7 @@ def _generate_case(
     return a, b
 
 
-def _calendar_edge_mutations(rng: random.Random, value: JsonValue) -> JsonValue:
+def _calendar_edge_mutations(rng: random.Random, value: object) -> object:
     """
     Apply the two calendar-specific edits: an offset shift and a stringify.
 
@@ -286,12 +297,19 @@ def _calendar_edge_mutations(rng: random.Random, value: JsonValue) -> JsonValue:
     `'replace'` and `ignore_order` pairing paths rather than matching outright.
     The stringify (see `STRINGIFY_PROBABILITY`) puts a calendar value next to a
     string of itself, which is what exercises the `str()` coercion the
-    `type_changes` delta shape depends on.
+    `type_changes` delta shape depends on. The `set`/`frozenset` branch exists
+    for the combined batch (issue #21): the JSON-shaped and tuple batches never
+    produce one, so it is simply never taken there.
 
     :param rng: Seeded RNG.
     :param value: The value to edit.
     :return: The edited value.
     """
+    if isinstance(value, (set, frozenset)):
+        members = [_calendar_edge_mutations(rng, item) for item in value]
+
+        return frozenset(members) if isinstance(value, frozenset) else set(members)
+
     if isinstance(value, (list, tuple)):
         items = [_calendar_edge_mutations(rng, item) for item in value]
 
@@ -981,4 +999,164 @@ def test_differential_fuzz_with_sets_matches_real_deepdiff() -> None:
     assert not mismatches, (
         f"{len(mismatches)} of {SEED_COUNT * 2} set fuzz cases diverged from real DeepDiff "
         f"(showing up to 3): {mismatches[:3]}"
+    )
+
+
+def _gen_combined_hashable(rng: random.Random, depth: int) -> object:
+    """
+    Generate a set member drawing from the full supported alphabet, calendar values included.
+
+    Identical in shape to `_gen_hashable`, but its leaves are `_gen_calendar`'s
+    alphabet (scalars plus datetimes and dates) rather than bare scalars, and a
+    frozenset is capped at one member for the identical reason `_gen_hashable`'s
+    own doc gives — a multi-member frozenset's rendering inside a set item's path
+    depends on iteration order, which the two tools do not share.
+
+    :param rng: Seeded RNG.
+    :param depth: Remaining nesting budget.
+    :return: A hashable value, possibly a `datetime` or a `date`.
+    """
+    if depth <= 0 or rng.random() < 0.55:
+        return _gen_calendar(rng)
+
+    if rng.random() < 0.5:
+        return frozenset(
+            [_gen_combined_hashable(rng, depth - 1)] if rng.random() < 0.75 else []
+        )
+
+    return tuple(_gen_combined_hashable(rng, depth - 1) for _ in range(rng.randint(0, 3)))
+
+
+def _gen_combined_value(rng: random.Random, depth: int) -> object:
+    """
+    Generate a value drawing from the full supported alphabet in one generator run.
+
+    Lists, dicts, tuples, sets, frozensets, datetimes and dates can all appear
+    together at any depth — issue #21's "combined goldens" requirement, at fuzz
+    scale: mirrors `_gen_set_value`, with `_gen_calendar` in place of `_gen_scalar`
+    for its leaves.
+
+    :param rng: Seeded RNG.
+    :param depth: Remaining nesting budget.
+    :return: A random value built from the full supported alphabet.
+    """
+    if depth <= 0:
+        return _gen_calendar(rng)
+
+    kind = rng.random()
+
+    if kind < 0.25:
+        return _gen_calendar(rng)
+
+    if kind < 0.75:
+        if rng.random() < SET_PROBABILITY:
+            members = [_gen_combined_hashable(rng, depth - 1) for _ in range(rng.randint(0, 4))]
+
+            return frozenset(members) if rng.random() < 0.4 else set(members)
+
+        items = [_gen_combined_value(rng, depth - 1) for _ in range(rng.randint(0, 4))]
+
+        return tuple(items) if rng.random() < 0.3 else items
+
+    keys = rng.sample(DICT_KEYS, rng.randint(0, len(DICT_KEYS)))
+
+    return {key: _gen_combined_value(rng, depth - 1) for key in keys}
+
+
+def _mutate_combined_value(rng: random.Random, value: object) -> object:
+    """
+    Build a related-but-different copy of a combined-batch value.
+
+    Mirrors `_mutate_set_value`, drawing replacement members from the combined
+    alphabet (`_gen_combined_hashable`/`_gen_combined_value`) so a mutation can
+    turn a plain scalar into a calendar value and back, not only reshuffle ones
+    already present.
+
+    :param rng: Seeded RNG.
+    :param value: The value to derive a mutated copy from.
+    :return: A structurally related, partially mutated copy.
+    """
+    if isinstance(value, (set, frozenset)):
+        members = [
+            _gen_combined_hashable(rng, 2) if rng.random() < 0.4 else member for member in value
+        ]
+
+        if rng.random() < 0.3:
+            members.append(_gen_combined_hashable(rng, 2))
+
+        return frozenset(members) if isinstance(value, frozenset) else set(members)
+
+    if isinstance(value, (list, tuple)):
+        mutated = [
+            _gen_combined_value(rng, 2)
+            if rng.random() < 0.3
+            else _mutate_combined_value(rng, item)
+            for item in value
+        ]
+
+        return tuple(mutated) if isinstance(value, tuple) else mutated
+
+    if isinstance(value, dict):
+        mutated = {
+            key: _gen_combined_value(rng, 2) if rng.random() < 0.3 else item
+            for key, item in value.items()
+        }
+
+        if rng.random() < 0.3:
+            mutated[rng.choice(DICT_KEYS)] = _gen_combined_value(rng, 2)
+
+        return mutated
+
+    return _gen_combined_value(rng, 2)
+
+
+def _generate_combined_case(seed: int) -> tuple[object, object]:
+    """
+    Generate one seeded `(a, b)` pair drawing from the full supported alphabet.
+
+    Stacks every edge-mutation pass this module has for one type in isolation
+    (`_set_edge_mutations`'s kind flips and numeric retyping,
+    `_calendar_edge_mutations`'s offset shifts and stringify) onto a value that
+    can hold a tuple, a set, a frozenset, a datetime and a date all at once —
+    issue #21's combined-goldens requirement, at fuzz scale instead of by hand.
+
+    :param seed: The seed driving this case's RNG.
+    :return: A related-but-different `(a, b)` pair.
+    """
+    rng = random.Random(seed)
+    a = _gen_combined_value(rng, 3)
+    b = _mutate_combined_value(rng, a)
+    b = _set_edge_mutations(rng, b)
+    b = _calendar_edge_mutations(rng, b)
+
+    return a, b
+
+
+def test_differential_fuzz_with_the_combined_alphabet_matches_real_deepdiff(
+    utc_timezone: None,
+) -> None:
+    """
+    Run a sixth, >=500-case batch drawing the full alphabet in one generator.
+
+    Tuples, sets, frozensets, datetimes and dates all appear together at any
+    depth — including a calendar value as a bare or nested set member, the one
+    combination #18-#20 left out and #21 closes.
+
+    :param utc_timezone: Pins `TZ=UTC` — see that fixture.
+    """
+    mismatches = []
+
+    for seed in range(COMBINED_SEED_BASE, COMBINED_SEED_BASE + COMBINED_SEED_COUNT):
+        a, b = _generate_combined_case(seed)
+
+        for ignore_order in (False, True):
+            divergence = _diverges_with_sets(a, b, ignore_order)
+
+            if divergence is not None:
+                expected, actual = divergence
+                mismatches.append((seed, ignore_order, a, b, expected, actual))
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {COMBINED_SEED_COUNT * 2} combined-alphabet fuzz cases diverged "
+        f"from real DeepDiff (showing up to 3): {mismatches[:3]}"
     )
