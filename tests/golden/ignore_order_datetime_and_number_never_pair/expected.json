@@ -1,0 +1,8 @@
+{
+  "iterable_item_added": {
+    "root[1]": 5
+  },
+  "iterable_item_removed": {
+    "root[0]": "2024-01-01T10:00:00"
+  }
+}

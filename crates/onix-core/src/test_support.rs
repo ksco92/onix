@@ -6,6 +6,7 @@
 //! same `From` bridge the CLI and bindings use) rather than re-declaring the
 //! identical helpers in every test module.
 
+use crate::datetime::{Date, DateTime};
 use crate::value::{Number, Object, Value};
 
 /// Compact value from a borrowed `serde_json` value.
@@ -22,6 +23,35 @@ pub(crate) fn cvec(items: &[serde_json::Value]) -> Vec<Value> {
 /// a JSON literal cannot express, so tests that need a tuple build it here.
 pub(crate) fn ctup(items: &[serde_json::Value]) -> Value {
     Value::Tuple(cvec(items).into_boxed_slice())
+}
+
+/// Compact `date` value — the other shape a JSON literal cannot express.
+pub(crate) fn cdate(year: i32, month: u8, day: u8) -> Value {
+    Value::Date(Date::new(year, month, day).expect("test date is a real calendar date"))
+}
+
+/// Compact `datetime` value at midnight, naive unless `offset` is given.
+pub(crate) fn cdt(year: i32, month: u8, day: u8, offset: Option<i32>) -> Value {
+    cdt_at(year, month, day, 0, 0, 0, 0, offset)
+}
+
+/// Compact `datetime` value with every field spelled out.
+#[allow(clippy::too_many_arguments, reason = "one argument per datetime field")]
+pub(crate) fn cdt_at(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    microsecond: u32,
+    offset: Option<i32>,
+) -> Value {
+    let date = Date::new(year, month, day).expect("test date is a real calendar date");
+    Value::DateTime(
+        DateTime::new(date, hour, minute, second, microsecond, offset)
+            .expect("test datetime fields are in range"),
+    )
 }
 
 /// Compact [`Object`] from a `serde_json` map, built through the same

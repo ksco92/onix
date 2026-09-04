@@ -9,8 +9,11 @@ encoding that closes that gap, shared by every reader of the corpus:
   tagged value and decodes to the corresponding Python object.
 - **Any other** JSON object is plain data and decodes to a ``dict``, recursively.
 
-So ``{"$tuple": [1, 2]}`` is the tuple ``(1, 2)``, while ``{"$tuple": [1], "x": 2}`` and
-``{"other": 1}`` are ordinary dicts. The cost of the encoding is that a dict whose only
+So ``{"$tuple": [1, 2]}`` is the tuple ``(1, 2)``, ``{"$datetime": "2024-01-01T10:00:00+02:00"}``
+is that aware ``datetime`` and ``{"$date": "2024-01-01"}`` that ``date``, while
+``{"$tuple": [1], "x": 2}`` and ``{"other": 1}`` are ordinary dicts. The two calendar tags
+carry an ISO 8601 string — exactly what ``isoformat()`` produces and ``fromisoformat()``
+reads back, with the UTC offset present only for an aware value. The cost of the encoding is that a dict whose only
 key is literally one of the reserved names cannot be written as a golden fixture;
 :func:`encode_tags` refuses such a value rather than writing a file that would decode
 back into something else.
@@ -23,16 +26,30 @@ The Rust reader (``crates/onix-core/tests/golden.rs``) implements the identical 
 against the same fixtures.
 """
 
+import datetime
+from collections.abc import Callable
 from typing import Final
 
 TUPLE_TAG: Final[str] = "$tuple"
+DATETIME_TAG: Final[str] = "$datetime"
+DATE_TAG: Final[str] = "$date"
 
-# Every tag name the encoding reserves. Only TUPLE_TAG is implemented; the rest are
-# claimed here so a fixture can never use one as an ordinary dict key in the meantime,
+# Every tag name the encoding reserves. `$set`/`$frozenset` are not implemented yet; they
+# are claimed here so a fixture can never use one as an ordinary dict key in the meantime,
 # and so all three readers agree on the full set from the start.
 RESERVED_TAGS: Final[frozenset[str]] = frozenset(
-    {TUPLE_TAG, "$set", "$frozenset", "$datetime", "$date"}
+    {TUPLE_TAG, DATETIME_TAG, DATE_TAG, "$set", "$frozenset"}
 )
+
+# DeepDiff's own `to_json()` cannot serialize a `date` at all: `serialization.JSON_CONVERTOR`
+# has an entry for `datetime.datetime` (`isoformat()`) and none for `datetime.date`, so a
+# report carrying one raises TypeError. onix renders it as `YYYY-MM-DD` — a documented
+# superset (see tests/golden/README.md) — and passing this mapping to DeepDiff's own
+# `to_json(default_mapping=...)` makes it produce exactly the same bytes, so a golden case
+# holding a date still has real DeepDiff output as its spec.
+JSON_DEFAULT_MAPPING: Final[dict[type, Callable[[datetime.date], str]]] = {
+    datetime.date: datetime.date.isoformat
+}
 
 # A JSON-shaped value, plus the Python types the tags decode to. Named instead of
 # `typing.Any` per the python-coding-guide's ban on `Any`.
@@ -40,6 +57,8 @@ type TaggedValue = (
     dict[str, "TaggedValue"]
     | list["TaggedValue"]
     | tuple["TaggedValue", ...]
+    | datetime.datetime
+    | datetime.date
     | str
     | int
     | float
@@ -67,14 +86,21 @@ def encode_tags(value: TaggedValue) -> TaggedValue:
     """
     Encode a Python value into its JSON-writable tagged form.
 
-    :param value: The value to encode; tuples become tagged objects, everything else is
-        rebuilt unchanged.
+    :param value: The value to encode; tuples, datetimes and dates become tagged objects,
+        everything else is rebuilt unchanged.
     :raises ValueError: If a plain dict would encode to something a decoder would read
         back as a tagged value (its only key is a reserved name).
     :return: A value containing only JSON-expressible types.
     """
     if isinstance(value, tuple):
         return {TUPLE_TAG: [encode_tags(item) for item in value]}
+
+    # `datetime` is a `date` subclass, so it must be tested first.
+    if isinstance(value, datetime.datetime):
+        return {DATETIME_TAG: value.isoformat()}
+
+    if isinstance(value, datetime.date):
+        return {DATE_TAG: value.isoformat()}
 
     if isinstance(value, list):
         return [encode_tags(item) for item in value]
@@ -108,6 +134,12 @@ def decode_tags(value: TaggedValue) -> TaggedValue:
 
         if tag == TUPLE_TAG:
             return tuple(decode_tags(item) for item in value[tag])
+
+        if tag == DATETIME_TAG:
+            return datetime.datetime.fromisoformat(str(value[tag]))
+
+        if tag == DATE_TAG:
+            return datetime.date.fromisoformat(str(value[tag]))
 
         if tag is not None:
             raise NotImplementedError(f"the {tag!r} tag is reserved but not decodable yet")

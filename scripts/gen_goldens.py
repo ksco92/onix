@@ -8,13 +8,16 @@ For each hand-designed case in ``CASES`` this writes three files under
 ``tests/golden/<case_name>/``:
 
 - ``a.json`` / ``b.json``: the two inputs, exactly as fed to both DeepDiff and
-  (via the Rust golden test) onix. A value JSON cannot express — a tuple today,
-  sets and dates later — is written in the tagged encoding ``golden_tags``
-  defines, and every written file is read back and checked against the case it
-  came from before ``expected.json`` is generated.
-- ``expected.json``: ``json.loads(DeepDiff(a, b, verbose_level=2).to_json())``
-  re-dumped with ``sort_keys=True`` — the canonical spec onix's own report
-  must match.
+  (via the Rust golden test) onix. A value JSON cannot express is written in
+  the tagged encoding ``golden_tags`` defines, which marks each tag supported
+  or reserved, and every written file is read back and checked against the
+  case it came from before ``expected.json`` is generated.
+- ``expected.json``: ``json.loads(DeepDiff(a, b, verbose_level=2).to_json(
+  default_mapping=golden_tags.JSON_DEFAULT_MAPPING))`` re-dumped with
+  ``sort_keys=True`` — the canonical spec onix's own report must match. The
+  mapping is what lets a case hold a ``date``, which DeepDiff's stock
+  ``to_json()`` refuses to serialize; see ``golden_tags`` for why it renders
+  exactly what onix does.
 
 This is the ONLY source of the golden corpus: every file it writes is
 committed, and regenerating must reproduce them byte-for-byte (no timestamps,
@@ -30,11 +33,19 @@ out-of-scope DeepDiff quirk excluded from this corpus.
 
 import json
 import random
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Final
 
 from deepdiff import DeepDiff
-from golden_tags import TaggedValue, decode_tags, encode_tags
+from golden_tags import JSON_DEFAULT_MAPPING, TaggedValue, decode_tags, encode_tags
+
+UTC: Final[timezone] = timezone.utc
+PLUS_TWO: Final[timezone] = timezone(timedelta(hours=2))
+MINUS_FIVE: Final[timezone] = timezone(timedelta(hours=-5))
+# An offset that is not a whole number of minutes, which widens `isoformat()`'s
+# suffix from `+HH:MM` to `+HH:MM:SS`.
+PLUS_THIRTY_THIRTY: Final[timezone] = timezone(timedelta(seconds=1830))
 
 GOLDEN_ROOT = Path(__file__).resolve().parent.parent / "tests" / "golden"
 
@@ -244,6 +255,121 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
         [False, False, None, 2, 3.8, None],
         [None, False, -3, None, None, 3, 2, None],
     ),
+    # --- datetime and date -------------------------------------------
+    # DeepDiff compares two datetimes by instant and reports the pair
+    # NORMALIZED to UTC in values_changed (_diff_datetime assigns
+    # datetime_normalize's result back onto the level it reports).
+    "datetime_values_changed_normalized_to_utc": (
+        datetime(2024, 1, 1, 10),
+        datetime(2024, 1, 2, 10),
+    ),
+    # A naive value is stamped as UTC, not read in local time, so these two
+    # are one instant and the diff is empty.
+    "datetime_naive_and_aware_same_instant_are_equal": (
+        datetime(2024, 1, 1, 10),
+        datetime(2024, 1, 1, 10, tzinfo=UTC),
+    ),
+    "datetime_different_offsets_same_instant_are_equal": (
+        datetime(2024, 1, 1, 10, tzinfo=UTC),
+        datetime(2024, 1, 1, 12, tzinfo=PLUS_TWO),
+    ),
+    "datetime_microsecond_change": (
+        datetime(2024, 1, 1, 10, 0, 0, 123456),
+        datetime(2024, 1, 1, 10, 0, 0, 123457),
+    ),
+    # isoformat() prints microseconds only when they are non-zero, so this
+    # pins all three boundaries (0, 1, 999999) in one report.
+    "datetime_microsecond_rendering_boundaries": (
+        {
+            "zero": datetime(2024, 1, 1, 10),
+            "one": datetime(2024, 1, 1, 10, 0, 0, 1),
+            "max": datetime(2024, 1, 1, 10, 0, 0, 999999),
+        },
+        {
+            "zero": datetime(2024, 1, 2, 10, 0, 0, 1),
+            "one": datetime(2024, 1, 2, 10),
+            "max": datetime(2024, 1, 2, 10, 0, 0, 999999),
+        },
+    ),
+    "datetime_in_dict_values_changed": (
+        {"t": datetime(2024, 1, 1)},
+        {"t": datetime(2024, 1, 2)},
+    ),
+    # Every category other than a datetime-pair values_changed carries the
+    # RAW value: no offset suffix for a naive one, the original offset for an
+    # aware one.
+    "datetime_dictionary_item_added_reports_raw_value": (
+        {},
+        {"t": datetime(2024, 1, 1)},
+    ),
+    "datetime_dictionary_item_removed_reports_raw_value": (
+        {"t": datetime(2024, 1, 1, 10, tzinfo=MINUS_FIVE)},
+        {},
+    ),
+    "datetime_iterable_item_added_reports_raw_value": (
+        [datetime(2024, 1, 1)],
+        [datetime(2024, 1, 1), datetime(2024, 1, 2, 10, tzinfo=PLUS_THIRTY_THIRTY)],
+    ),
+    "datetime_iterable_item_removed_reports_raw_value": (
+        [datetime(2024, 1, 1), datetime(2024, 1, 2)],
+        [datetime(2024, 1, 1)],
+    ),
+    "datetime_vs_str_type_change_reports_raw_value": (
+        datetime(2024, 1, 1),
+        "2024-01-01",
+    ),
+    "datetime_vs_int_type_change": ({"t": datetime(2024, 1, 1)}, {"t": 5}),
+    # An offset with seconds in it: raw on the left of the pair (via the
+    # type_changes value), normalized to +00:00 in values_changed.
+    "datetime_offset_with_seconds_normalizes": (
+        datetime(2024, 1, 1, 10, tzinfo=PLUS_THIRTY_THIRTY),
+        datetime(2024, 1, 2, 10, tzinfo=PLUS_THIRTY_THIRTY),
+    ),
+    "datetime_negative_offset_normalizes": (
+        datetime(2024, 1, 1, 10, tzinfo=MINUS_FIVE),
+        datetime(2024, 1, 2, 10, tzinfo=MINUS_FIVE),
+    ),
+    "datetime_leap_day_and_year_boundary": (
+        {"leap": datetime(2024, 2, 29, 23, 59, 59), "eve": datetime(2023, 12, 31, 23, 59, 59)},
+        {"leap": datetime(2024, 3, 1), "eve": datetime(2024, 1, 1)},
+    ),
+    # datetime is in DeepDiff's `basic_types`, so a list of them takes the
+    # difflib/LCS path: a shifted list aligns and reports one insert plus one
+    # delete rather than three values_changed.
+    "list_lcs_datetime_shift": (
+        [datetime(2024, 1, 1), datetime(2024, 1, 2), datetime(2024, 1, 3)],
+        [datetime(2024, 1, 2), datetime(2024, 1, 3), datetime(2024, 1, 4)],
+    ),
+    # difflib matches with Python's own `==`, which never equates a naive
+    # datetime with an aware one — so this pair reaches the 'replace' opcode
+    # and is then compared by instant, reporting nothing at all.
+    "list_lcs_datetime_naive_vs_aware_same_instant_reports_nothing": (
+        [datetime(2024, 1, 1, 10), "anchor"],
+        [datetime(2024, 1, 1, 10, tzinfo=UTC), "anchor"],
+    ),
+    # ...while two aware values at one instant are Python-equal, so difflib
+    # matches them as 'equal' and never compares them at all.
+    "list_lcs_datetime_aware_same_instant_matches_as_equal": (
+        [datetime(2024, 1, 1, 10, tzinfo=UTC), 1],
+        [datetime(2024, 1, 1, 12, tzinfo=PLUS_TWO), 2],
+    ),
+    # An earlier delete drifts the datetime's index, so its 'replace'-opcode
+    # values_changed carries `new_path` alongside the normalized pair.
+    "list_lcs_datetime_new_path_on_index_drift": (
+        ["x", "y", datetime(2024, 1, 1, 10)],
+        ["y", datetime(2024, 1, 2, 12, tzinfo=PLUS_TWO)],
+    ),
+    # A `date` is its own type: never equal to a `datetime`, in either
+    # direction, and reported under the name `date`.
+    "date_values_changed": (date(2024, 1, 1), date(2024, 1, 2)),
+    "date_vs_datetime_type_change": (date(2024, 1, 1), datetime(2024, 1, 1)),
+    "date_in_dict_values_changed": ({"d": date(2024, 1, 1)}, {"d": date(2024, 3, 5)}),
+    "date_in_dict_added": ({}, {"d": date(2024, 1, 1)}),
+    "date_and_datetime_in_one_report": (
+        {"d": date(2024, 1, 1), "t": datetime(2024, 1, 1, 10)},
+        {"d": date(2024, 1, 2), "t": datetime(2024, 1, 2, 10)},
+    ),
+    "date_leap_day": (date(2024, 2, 29), date(2024, 3, 1)),
 }
 
 
@@ -486,6 +612,80 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
         ["anchor", {"d": 4, "e": 5, "f": 6}],
         {"ignore_order": True},
     ),
+    # --- datetime and date under ignore_order -------------------------
+    # DeepHash normalizes a datetime to UTC before hashing
+    # (_prep_datetime -> datetime_normalize), so a naive value and an aware
+    # one at the same instant hash-match and pair with no finding.
+    "ignore_order_datetime_naive_and_aware_hash_match": (
+        [datetime(2024, 1, 1, 10), "anchor"],
+        ["anchor", datetime(2024, 1, 1, 10, tzinfo=UTC)],
+        {"ignore_order": True},
+    ),
+    # The paired items recurse through the ordinary datetime comparison, so
+    # this values_changed carries the UTC-normalized pair and a new_path.
+    "ignore_order_datetime_pairing_new_path": (
+        [datetime(2024, 1, 1), datetime(2024, 1, 2)],
+        [datetime(2024, 1, 2), datetime(2024, 1, 3)],
+        {"ignore_order": True},
+    ),
+    # An unpaired item is reported raw, offset and all.
+    "ignore_order_datetime_added_and_removed_report_raw_values": (
+        [datetime(2024, 1, 1, 10, tzinfo=MINUS_FIVE)],
+        [datetime(2030, 6, 1, 10, tzinfo=PLUS_THIRTY_THIRTY), "anchor"],
+        {"ignore_order": True},
+    ),
+    "ignore_order_datetime_in_dicts": (
+        [{"t": datetime(2024, 1, 1)}, {"t": datetime(2024, 1, 2)}],
+        [{"t": datetime(2024, 1, 2)}, {"t": datetime(2024, 1, 3)}],
+        {"ignore_order": True},
+    ),
+    # `_prep_date` deliberately skips normalization and formats a bare
+    # `YYYY-MM-DD`, which can never equal `_prep_datetime`'s
+    # `YYYY-MM-DD HH:MM:SS+00:00` — so a date and a datetime at the same
+    # midnight never hash-match. They can still be *paired* by distance,
+    # because `get_numeric_types_distance` measures the mixed pair with
+    # `_get_date_distance` (datetime is a date subclass), which surfaces as a
+    # type_changes rather than an add plus a remove.
+    "ignore_order_date_and_datetime_never_hash_match": (
+        [date(2024, 1, 1), "anchor"],
+        ["anchor", datetime(2024, 1, 1)],
+        {"ignore_order": True},
+    ),
+    # A datetime shares no distance family with a number
+    # (`get_numeric_types_distance` finds no entry both are an isinstance of),
+    # so the structural fallback measures the pair as maximally far and the
+    # two stay unpaired.
+    "ignore_order_datetime_and_number_never_pair": (
+        [datetime(2024, 1, 1, 10), "anchor"],
+        ["anchor", 5],
+        {"ignore_order": True},
+    ),
+    # `str(datetime)`/`str(date)` are real strings, so `model.py`'s
+    # `new_t1 = new_type(change.t1)` reproduces the new value, the delta
+    # omits it, and the pair stays inside the pairing cutoff — a
+    # `type_changes` rather than an add plus a remove. The dict wrapper is
+    # what makes the rough length large enough for the distance to qualify.
+    "ignore_order_datetime_pairs_with_its_own_str": (
+        [{"a": datetime(2024, 1, 1)}],
+        [{"a": "2024-01-01 00:00:00"}],
+        {"ignore_order": True},
+    ),
+    "ignore_order_date_pairs_with_its_own_str": (
+        [{"a": date(2024, 1, 1)}],
+        [{"a": "2024-01-01"}],
+        {"ignore_order": True},
+    ),
+    # The control: the same values unwrapped are too far apart to pair.
+    "ignore_order_bare_datetime_and_its_str_are_too_far_to_pair": (
+        [datetime(2024, 1, 1)],
+        ["2024-01-01 00:00:00"],
+        {"ignore_order": True},
+    ),
+    "ignore_order_date_pairing": (
+        [date(2024, 1, 1), date(2024, 1, 2)],
+        [date(2024, 1, 2), date(2024, 1, 3)],
+        {"ignore_order": True},
+    ),
 }
 
 # Seeded-random ignore_order fuzz cases: the ignore_order_10k fixture
@@ -571,7 +771,9 @@ def main() -> None:
         for path, value in ((case_dir / "a.json", a), (case_dir / "b.json", b)):
             assert read_case_input(path) == value, f"{path} does not decode back to its case value"
 
-        expected = json.loads(DeepDiff(a, b, verbose_level=2, **kwargs).to_json())
+        expected = json.loads(
+            DeepDiff(a, b, verbose_level=2, **kwargs).to_json(default_mapping=JSON_DEFAULT_MAPPING)
+        )
         write_json(case_dir / "expected.json", expected)
 
     print(f"Wrote {len(all_cases)} golden cases to {GOLDEN_ROOT}")

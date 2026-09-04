@@ -13,8 +13,10 @@ Each subdirectory is one case:
 tests/golden/<case_name>/
 ├── a.json         # t1, as fed to both DeepDiff and onix
 ├── b.json         # t2
-├── expected.json  # json.loads(DeepDiff(t1, t2, verbose_level=2, **kwargs).to_json()),
-│                  # re-dumped with sort_keys=True
+├── expected.json  # json.loads(DeepDiff(t1, t2, verbose_level=2, **kwargs)
+│                  #   .to_json(default_mapping=golden_tags.JSON_DEFAULT_MAPPING)),
+│                  # re-dumped with sort_keys=True — the mapping is what lets a
+│                  # case hold a `date` (see "The `date` superset" below)
 └── options.json   # {"ignore_order": bool} — which DiffOptions onix diffs
                     # this case with; kwargs above mirrors it (currently the
                     # only option this corpus varies)
@@ -29,13 +31,16 @@ literal. A case that needs one writes it as a **tagged object**: a JSON object w
 | Tag | Decodes to | Status |
 | --- | --- | --- |
 | `$tuple` | `tuple` | supported |
+| `$datetime` | `datetime.datetime` | supported (ISO 8601 string, offset optional) |
+| `$date` | `datetime.date` | supported (ISO 8601 string) |
 | `$set` | `set` | reserved |
 | `$frozenset` | `frozenset` | reserved |
-| `$datetime` | `datetime.datetime` | reserved |
-| `$date` | `datetime.date` | reserved |
 
-So `{"$tuple": [1, 2]}` is the tuple `(1, 2)`, and `[{"$tuple": []}]` is a list
-holding the empty tuple. **Any other object is plain data**, including one that has a
+So `{"$tuple": [1, 2]}` is the tuple `(1, 2)`, `[{"$tuple": []}]` is a list
+holding the empty tuple, `{"$datetime": "2024-01-01T10:00:00+02:00"}` is that
+aware datetime and `{"$date": "2024-01-01"}` is that date. The two calendar
+tags carry exactly what `isoformat()` produces and `fromisoformat()` reads
+back, with the UTC offset present only for an aware value. **Any other object is plain data**, including one that has a
 reserved key alongside others (`{"$tuple": [1], "x": 2}` is a two-key dict). The
 reserved names are claimed all at once, before their types are supported, so a
 fixture can never use one as an ordinary dict key and then change meaning later; a
@@ -55,7 +60,25 @@ Two implementations of the rule, one per language, cover the corpus's three read
 
 **The product never interprets a tag.** `onix_core::Value`'s `Deserialize`,
 `deepdiff_rs.diff_json`, the `DeepDiff` class, and the CLI all read `{"$tuple": [1]}`
-as the one-key dict it literally is; each of those paths has a test pinning that.
+or `{"$datetime": "2024-01-01T00:00:00"}` as the one-key dict it literally is; each
+of those paths has a test pinning that.
+
+## The `date` superset
+
+DeepDiff's `serialization.JSON_CONVERTOR` maps `datetime.datetime` to
+`isoformat()` and has **no entry for `datetime.date`**, so its own `to_json()`
+raises `TypeError` on any report carrying a bare date. onix renders one as
+`YYYY-MM-DD` — the same bytes `date.isoformat()` gives — which is a deliberate
+superset, not a divergence: passing
+`default_mapping={datetime.date: datetime.date.isoformat}` to DeepDiff's own
+`to_json()` makes it produce byte-identical output, and that is exactly what
+`scripts/golden_tags.py`'s `JSON_DEFAULT_MAPPING` is, shared by the generator
+and by `crates/onix-py/tests/test_golden_parity.py`. So a date-carrying golden
+case still has real DeepDiff output as its spec.
+
+`crates/onix-py/tests/test_datetimes.py` additionally asserts date cases against
+DeepDiff's `to_dict()` — the rendering-free comparison — and pins the fact that
+DeepDiff's stock `to_json()` still raises.
 
 `crates/onix-core/tests/golden.rs` reads every case directory present here
 (there is no separate hand-maintained case list), runs
@@ -128,6 +151,24 @@ below): which numeric type a hashable tuple holds stops mattering once a
 Python-equal tuple has been hashed, while an unhashable one keeps its own
 digest.
 
+**Datetime and date cases (`datetime_*`, `date_*`, `list_lcs_datetime_*`,
+`ignore_order_date*`):** a datetime pair compares by *instant* with a naive
+value read as UTC, and a changed pair is reported **normalized to UTC** while
+every other category keeps the **raw** value (see "Normalized versus raw"
+below). The `isoformat()` rendering boundaries are pinned too: microseconds
+only when non-zero, an offset suffix only when aware, widening to `+HH:MM:SS`
+for an offset that is not a whole number of minutes. A `date` compares by
+value, is never equal to a `datetime` at the same midnight, and is reported
+under the type name `date`. A list of either takes the difflib path, since
+both are in DeepDiff's `helper.basic_types`; the cases cover a naive/aware
+same-instant pair reaching a `'replace'` opcode and reporting nothing, an
+aware pair matching as `'equal'` outright, and `new_path` on an index-drifted
+pair. Under `ignore_order`, they cover a naive and an aware value at one
+instant hash-matching, a paired change carrying `new_path`, unpaired items
+reported raw, a date and a datetime never hash-matching but still pairing by
+distance, and a calendar value pairing with a string of itself (which is what
+the `str()` coercion in the delta shape decides).
+
 **`ignore_order=True` (`ignore_order_*` cases):** pure shuffle, shuffle
 plus a changed/added/removed value, duplicate-multiplicity invisibility,
 nested-dict pairing, list-in-dict-in-list, mixed type changes, `[1]` vs
@@ -141,6 +182,23 @@ fuzz cases (`_generate_ignore_order_fuzz_cases`). See
 source-cited spec this implements; `scripts/differential_fuzz.py` is a
 separate, larger-scale (thousands of cases) fuzzer run during development,
 not part of this fixed corpus.
+
+## Normalized versus raw datetimes
+
+A `values_changed` produced by *comparing two datetimes* carries the pair
+normalized to UTC, so `10:00-05:00` is reported as `15:00+00:00`. Every other
+category carries the raw value, including the `values_changed` that
+`model.py`'s `mutual_add_removes_to_become_value_changes` post-pass folds a
+same-path add/remove pair into. The mechanism, with its source citations,
+is documented once in `crate::diff::datetime_diff`
+(`crates/onix-core/src/diff/scalar.rs`).
+`datetime_values_changed_normalized_to_utc` and
+`datetime_dictionary_item_added_reports_raw_value` pin the two sides.
+
+Hashing splits the same way: `DeepHash._prep_datetime` normalizes, so a naive
+and an aware value at one instant hash-match under `ignore_order`, while
+`_prep_date` does not and formats a bare `YYYY-MM-DD`, which can never collide
+with `_prep_datetime`'s `YYYY-MM-DD HH:MM:SS+00:00`.
 
 ## Known DeepDiff quirks
 
@@ -224,6 +282,41 @@ not part of this fixed corpus.
   case exercises it; the benchmark fixtures' integers stay well under
   this bound).
 
+- **`ignore_order` pairing among naive datetimes depends on the process's
+  local timezone in DeepDiff, but not in onix.** `distance.py`'s
+  `_get_datetime_distance` ranks a candidate pair through
+  `datetime.timestamp()`, which reads a *naive* value in the local timezone,
+  so real DeepDiff's pairing for a list mixing naive and aware datetimes is
+  machine-dependent. onix has no timezone database and reads a naive value as
+  UTC everywhere, matching `datetime_normalize`, the rule that decides every
+  reported *value*. The two agree exactly once the process timezone is UTC.
+  The full rationale lives in `distance_family`'s doc
+  (`crates/onix-core/src/ignore_order/distance.rs`); the fixture that pins the
+  comparison is `utc_timezone` in
+  `crates/onix-py/tests/test_differential_fuzz.py`. No golden case depends on
+  it: regeneration is byte-stable under any `TZ`.
+
+- **A datetime whose UTC form leaves year `1..=9999` cannot be compared to
+  another datetime.** Normalizing `9999-12-31T23:00-01:00` lands on year
+  10000, and real `astimezone(timezone.utc)` raises
+  `OverflowError: date value out of range` there, so DeepDiff raises rather
+  than reporting anything. onix raises too, as
+  `onix_core::Error::DateTimeOutOfRange`, surfaced to Python as a
+  `ValueError` naming the path.
+
+  *When* each tool reaches that point differs. On the ordered path only
+  `_diff_datetime` normalizes, so both tools raise only when two datetimes are
+  actually compared, and such a value added, removed, or type-changed against
+  a non-datetime reports its raw rendering in both. Under `ignore_order`,
+  `DeepHash._prep_datetime` normalizes every datetime it hashes (the same
+  normalization noted above), so real DeepDiff raises even for a value that is
+  merely added, removed, or shuffled; onix hashes by instant and reports it
+  raw. Keeping the deterministic report is this project's compatibility
+  policy: a crash is not a semantic worth reproducing. No golden case can hold
+  such a value either way, since the corpus records reports rather than
+  exceptions; `an_unnormalizable_datetime_under_ignore_order_is_reported_raw`
+  in `crates/onix-core/src/diff/tests.rs` pins onix's side.
+
 `crate::diff::object_diff` (the ordinary dict-vs-dict diff, used
 identically whether or not `ignore_order` is set) implements `DeepDiff`'s
 `threshold_to_diff_deeper=0.33` (`_diff_dict`, diff.py): a dict-vs-dict
@@ -245,8 +338,9 @@ this same real `object_diff` collapse, so no inflated leaf count can flip
 a pairing decision.
 
 Every other divergence found while building the corpus was fixed in `onix-core` to match
-`DeepDiff` exactly. The two path-rendering exceptions above and the
-list-LCS `2^53` limitation are the only accepted, documented exceptions —
+`DeepDiff` exactly. The two path-rendering exceptions above, the
+list-LCS `2^53` limitation and the naive-datetime pairing timezone above are the
+only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
 `scripts/differential_fuzz.py`) found zero *other* unexplained

@@ -17,7 +17,7 @@ use serde::de::value::{
 };
 
 use super::{Number, Object, Value};
-use crate::test_support::cv;
+use crate::test_support::{cdate, cdt, cdt_at, cv};
 
 /// The convenience alias for `serde`'s in-memory deserializer error type.
 type DeError = serde::de::value::Error;
@@ -491,4 +491,88 @@ fn deeply_nested_tuples_compare_and_drop_without_native_recursion() {
     handle
         .join()
         .expect("iterative equality and Drop complete on a small stack");
+}
+
+// --- datetimes and dates -------------------------------------------------
+
+#[test]
+fn a_datetime_renders_as_its_isoformat_string_but_is_never_equal_to_one() {
+    let value = cdt_at(2024, 1, 1, 10, 0, 0, 123_456, Some(-5 * 3600));
+
+    assert_eq!(
+        value.to_serde_json(),
+        serde_json::json!("2024-01-01T10:00:00.123456-05:00")
+    );
+    assert_ne!(
+        value,
+        cv(&serde_json::json!("2024-01-01T10:00:00.123456-05:00"))
+    );
+    assert!(format!("{value:?}").contains("DateTime"));
+}
+
+#[test]
+fn a_date_renders_as_its_isoformat_string_but_is_never_equal_to_one() {
+    let value = cdate(2024, 1, 1);
+
+    assert_eq!(value.to_serde_json(), serde_json::json!("2024-01-01"));
+    assert_ne!(value, cv(&serde_json::json!("2024-01-01")));
+    assert!(format!("{value:?}").contains("Date"));
+}
+
+#[test]
+fn datetime_equality_is_by_instant_and_reads_a_naive_value_as_utc() {
+    let naive = cdt_at(2024, 1, 1, 10, 0, 0, 0, None);
+    let utc = cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(0));
+    let plus_two = cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600));
+    let later = cdt_at(2024, 1, 1, 11, 0, 0, 0, Some(0));
+
+    assert_eq!(naive, utc);
+    assert_eq!(utc, plus_two);
+    assert_ne!(utc, later);
+}
+
+#[test]
+fn a_date_is_never_equal_to_a_datetime_at_the_same_midnight() {
+    assert_ne!(cdate(2024, 1, 1), cdt(2024, 1, 1, None));
+    assert_ne!(cdate(2024, 1, 1), cdate(2024, 1, 2));
+    assert_eq!(cdate(2024, 1, 1), cdate(2024, 1, 1));
+}
+
+#[test]
+fn json_parsing_never_produces_a_datetime_or_a_date() {
+    // Same contract the tuple tag has: the corpus's `$datetime`/`$date`
+    // encoding is decoded by test-only code, and every product parse path
+    // must read one as the ordinary dict it literally is.
+    let parsed: Value =
+        serde_json::from_str(r#"{"$datetime": "2024-01-01T00:00:00", "$date": "2024-01-01"}"#)
+            .expect("valid JSON");
+    let datetime_only: Value =
+        serde_json::from_str(r#"{"$datetime": "2024-01-01T00:00:00"}"#).expect("valid JSON");
+
+    assert!(matches!(parsed, Value::Object(_)));
+    assert!(matches!(datetime_only, Value::Object(_)));
+    assert_eq!(
+        datetime_only.to_serde_json(),
+        serde_json::json!({"$datetime": "2024-01-01T00:00:00"})
+    );
+}
+
+#[test]
+fn calendar_values_nested_in_deep_containers_drop_without_native_recursion() {
+    // A datetime is a leaf, so `take_children` must contribute nothing for
+    // one — a wrong arm here would leave the work-stack unbalanced on
+    // exactly the shapes the iterative `Drop` exists for.
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            const DEPTH: usize = 100_000;
+            let mut value = cdt(2024, 1, 1, Some(0));
+            for _ in 0..DEPTH {
+                value = Value::Array(vec![value, cdate(2024, 1, 1)].into_boxed_slice());
+            }
+            drop(value);
+        })
+        .expect("thread spawns");
+
+    assert!(handle.join().is_ok());
 }

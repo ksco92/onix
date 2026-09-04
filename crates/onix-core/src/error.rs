@@ -37,6 +37,28 @@ pub enum Error {
         /// The configured maximum depth that was exceeded.
         max_depth: usize,
     },
+    /// Comparing two datetimes needs both normalized to UTC (see
+    /// [`crate::datetime`]), and for one of this pair the normalized value
+    /// falls outside the `1..=9999` year range a Python `datetime` can hold
+    /// — at most one day past either end, reachable only from an extreme
+    /// aware value such as `9999-12-31T23:00-01:00`.
+    ///
+    /// Real `DeepDiff` raises `OverflowError: date value out of range` on
+    /// exactly this pair, so there is no report to produce.
+    ///
+    /// On the ordered path only `_diff_datetime` normalizes, so both tools
+    /// raise only when two datetimes are actually compared. Under
+    /// `ignore_order`, `deephash.py::_prep_datetime` normalizes *every*
+    /// datetime it hashes, so real `DeepDiff` raises for such a value even
+    /// when it is merely added, removed, or shuffled, where onix hashes by
+    /// instant and reports it raw — a documented divergence under the
+    /// project's compatibility policy (a crash is not a semantic to
+    /// reproduce), not a gap.
+    DateTimeOutOfRange {
+        /// The DeepDiff-style path (e.g. `"root['a']"`) of the pair that
+        /// could not be normalized.
+        path: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -48,6 +70,13 @@ impl fmt::Display for Error {
                     "diffing at {path} would exceed the configured maximum recursion \
                      depth ({max_depth}), counting both the traversal needed to reach it \
                      and the nesting of any value recorded there"
+                )
+            }
+            Error::DateTimeOutOfRange { path } => {
+                write!(
+                    f,
+                    "comparing the datetimes at {path} needs both normalized to UTC, and the \
+                     result falls outside the year range a datetime can hold (1 through 9999)"
                 )
             }
         }
@@ -79,6 +108,16 @@ mod tests {
         };
         let b = a.clone();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn datetime_out_of_range_display_includes_the_path_and_the_year_bounds() {
+        let error = Error::DateTimeOutOfRange {
+            path: "root['t']".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("root['t']"));
+        assert!(message.contains("9999"));
     }
 
     #[test]

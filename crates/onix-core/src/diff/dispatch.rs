@@ -13,7 +13,10 @@ use crate::ignore_order::IgnoreOrderMemo;
 use crate::path::{PathSegment, render_path};
 use crate::report::Report;
 
-use super::{DiffOptions, array_diff, numeric_diff, object_diff, scalar_diff, type_change_report};
+use super::{
+    DiffOptions, array_diff, datetime_diff, numeric_diff, object_diff, scalar_diff,
+    type_change_report,
+};
 
 /// The recursive core of [`diff_with_max_depth()`]: identical dispatch, but
 /// carrying the path and depth accumulated so far, so that nested findings
@@ -49,6 +52,12 @@ pub(crate) fn diff_at(
             numeric_diff(path, old, new, a, b, depth, opts.max_depth)
         }
         (Value::Str(old), Value::Str(new)) => {
+            scalar_diff(path, old == new, a, b, depth, opts.max_depth)
+        }
+        (Value::DateTime(old), Value::DateTime(new)) => {
+            datetime_diff(path, *old, *new, depth, opts.max_depth)
+        }
+        (Value::Date(old), Value::Date(new)) => {
             scalar_diff(path, old == new, a, b, depth, opts.max_depth)
         }
         (Value::Array(old), Value::Array(new)) | (Value::Tuple(old), Value::Tuple(new)) => {
@@ -105,7 +114,12 @@ pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
                 stack.extend(items.iter().map(|item| (item, depth + 1)));
             }
             Value::Object(map) => stack.extend(map.values().map(|item| (item, depth + 1))),
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_) => {}
+            Value::Null
+            | Value::Bool(_)
+            | Value::Number(_)
+            | Value::Str(_)
+            | Value::DateTime(_)
+            | Value::Date(_) => {}
         }
     }
 

@@ -1,0 +1,10 @@
+{
+  "type_changes": {
+    "root[0]['a']": {
+      "new_type": "str",
+      "new_value": "2024-01-01 00:00:00",
+      "old_type": "datetime",
+      "old_value": "2024-01-01T00:00:00"
+    }
+  }
+}

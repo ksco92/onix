@@ -3,10 +3,11 @@
 //! [`super::diff_at`] dispatches to whenever a pair is not two dicts or two
 //! arrays.
 
+use crate::datetime::DateTime;
 use crate::value::{Number, Value};
 
 use crate::error::Error;
-use crate::path::PathSegment;
+use crate::path::{PathSegment, render_path};
 use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
 
 use super::check_value_depth;
@@ -25,6 +26,8 @@ pub(crate) fn python_type_name(value: &Value) -> &'static str {
         Value::Number(n) if n.is_f64() => "float",
         Value::Number(_) => "int",
         Value::Str(_) => "str",
+        Value::DateTime(_) => "datetime",
+        Value::Date(_) => "date",
         Value::Array(_) => "list",
         Value::Tuple(_) => "tuple",
         Value::Object(_) => "dict",
@@ -95,6 +98,59 @@ pub(crate) fn scalar_diff(
         },
     );
     Ok(report)
+}
+/// Diffs two datetimes, which `DeepDiff` compares by *instant* after
+/// normalizing each to UTC (`_diff_datetime` -> `datetime_normalize`, with a
+/// naive value stamped as UTC rather than read in local time).
+///
+/// The normalization is not just a comparison step: `_diff_datetime` assigns
+/// the normalized values back onto the level it then reports, so a
+/// `values_changed` entry carries the pair *as UTC* — `10:00-05:00` is
+/// reported as `15:00+00:00`. This is the one place in the engine a reported
+/// value differs from the input value; every other category (`type_changes`,
+/// the added/removed categories, and the `values_changed` that
+/// `Report::merge_mutual_add_removes` folds a same-path add/remove pair into)
+/// carries the raw value, because it never passes through this function.
+pub(crate) fn datetime_diff(
+    path: &[PathSegment],
+    old: DateTime,
+    new: DateTime,
+    depth: usize,
+    max_depth: usize,
+) -> Result<Report, Error> {
+    let (old, new) = normalized_pair(path, old, new)?;
+
+    scalar_diff(
+        path,
+        old == new,
+        &Value::DateTime(old),
+        &Value::DateTime(new),
+        depth,
+        max_depth,
+    )
+}
+/// Normalizes both sides of a datetime comparison to UTC, or reports
+/// [`Error::DateTimeOutOfRange`] at `path` when one of them has no
+/// normalized form — see [`DateTime::to_utc`] for the boundary and why real
+/// `DeepDiff` raises there too.
+///
+/// # Errors
+///
+/// Returns [`Error::DateTimeOutOfRange`] if either value's UTC wall clock
+/// leaves the `1..=9999` year range.
+pub(crate) fn normalized_pair(
+    path: &[PathSegment],
+    old: DateTime,
+    new: DateTime,
+) -> Result<(DateTime, DateTime), Error> {
+    let out_of_range = || Error::DateTimeOutOfRange {
+        path: render_path(path),
+    };
+
+    Ok((
+        old.to_utc().ok_or_else(out_of_range)?,
+        new.to_utc().ok_or_else(out_of_range)?,
+    ))
 }
 /// Diffs two same-JSON-variant numbers, first checking whether one is an int
 /// and the other a float (a `type_changes` finding, regardless of numeric
