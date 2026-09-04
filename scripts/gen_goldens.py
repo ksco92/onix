@@ -466,12 +466,49 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
     # pair blocks DeepHash's whole-tuple equality cache, so the tuple's
     # content digest is what has to agree instead, and that digest's own
     # bool element has its own ItemKey variant, not one that folds into a
-    # plain int/float. An unrelated second member on each side keeps the two
-    # sets themselves unequal as wholes, forcing the per-member comparison to
-    # run rather than short-circuiting on whole-set equality.
-    "set_tuple_datetime_and_bool_sibling_matches_via_content_path": (
+    # plain int/float. The bool DIFFERS across sides (True vs False), so the
+    # two tuples must NOT match: pinning the bool's own value here is what a
+    # `Bool(b) -> Bool(true)` mutation of the content path fails (it would make
+    # False read as True and the tuples spuriously match). An unrelated second
+    # member on each side keeps the two sets unequal as wholes regardless,
+    # forcing the per-member comparison to run rather than short-circuiting on
+    # whole-set equality.
+    "set_tuple_datetime_and_bool_sibling_differs_via_content_path": (
         {(datetime(2024, 1, 1, 10), True), 1},
-        {(datetime(2024, 1, 1, 10, tzinfo=UTC), True), 2},
+        {(datetime(2024, 1, 1, 10, tzinfo=UTC), False), 2},
+    ),
+    # DeepHash decides cache-versus-content at EVERY node, not once per whole
+    # member: hashing a node first tries a run-scoped cache keyed by the Python
+    # object (so a Python-equal nested tuple/frozenset shares one digest, but a
+    # naive datetime never shares with an aware one), and only on a miss builds
+    # a content digest from the children's (already-cached) digests. So a member
+    # can miss the cache at its outer tuple (a naive/aware sibling blocks it)
+    # yet its inner container still hits the cache, and the two outer content
+    # digests coincide once the datetimes normalize to one instant. Each of
+    # these five is `{}` in real deepdiff==9.1.0 (TZ=UTC, verbose_level=2) and
+    # was a spurious removal+addition before the per-node model; the bare-number
+    # sibling counterpart (set_tuple_datetime_and_bool_sibling_differs...) stays
+    # a genuine change, because a bare number is type-distinct with no shared
+    # cache entry.
+    "set_tuple_datetime_and_nested_tuple_share_inner_cache": (
+        {(datetime(2024, 1, 1), (1,))},
+        {(datetime(2024, 1, 1, tzinfo=UTC), (1.0,))},
+    ),
+    "set_tuple_datetime_and_nested_tuple_bool_share_inner_cache": (
+        {(datetime(2024, 1, 1), (True,))},
+        {(datetime(2024, 1, 1, tzinfo=UTC), (1,))},
+    ),
+    "set_tuple_datetime_and_nested_frozenset_bool_share_inner_cache": (
+        {(datetime(2024, 1, 1), frozenset({True}))},
+        {(datetime(2024, 1, 1, tzinfo=UTC), frozenset({1}))},
+    ),
+    "set_tuple_datetime_and_nested_frozenset_float_share_inner_cache": (
+        {(datetime(2024, 1, 1), frozenset({1}))},
+        {(datetime(2024, 1, 1, tzinfo=UTC), frozenset({1.0}))},
+    ),
+    "set_tuple_datetime_and_doubly_nested_tuple_share_inner_cache": (
+        {(datetime(2024, 1, 1), ((1,),))},
+        {(datetime(2024, 1, 1, tzinfo=UTC), ((1.0,),))},
     ),
     # Nested one level inside a tuple or a frozenset item, a calendar value
     # renders with repr() instead -- the same rule a nested str() follows.
