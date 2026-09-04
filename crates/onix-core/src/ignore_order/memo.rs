@@ -127,9 +127,20 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use super::fxhash::HashMap;
 use super::hash::{ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId};
+
+/// A `(removed, added)` container-pair distance-cache key. Each side is an
+/// [`Rc`] so recording the pair costs two refcount bumps rather than two deep
+/// clones of the items' structural keys -- the pairing of `A` added against `R`
+/// removed containers records `A * R` of these, so a deep clone here scaled the
+/// cache with `pairs * record_size` and drove the `ignore_order` peak on
+/// set/tuple/datetime-bearing records to ~9x the ordered diff (issue #31). The
+/// `Rc` derives the same `Hash`/`Eq` as the key it points at, so cross-nesting
+/// dedup of two distinct-but-equal keys is unchanged.
+type DistanceKey = (Rc<ItemKey>, Rc<ItemKey>);
 
 /// The per-top-level-diff caches described in this module's doc: container-pair
 /// [`rough_distance`] results keyed by the `(removed, added)` [`ItemKey`]
@@ -141,7 +152,7 @@ use super::hash::{ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepI
 ///
 /// [`rough_distance`]: super::distance::rough_distance
 pub(crate) struct IgnoreOrderMemo {
-    cache: RefCell<HashMap<(ItemKey, ItemKey), f64>>,
+    cache: RefCell<HashMap<DistanceKey, f64>>,
     /// Interns each distinct hashable-tuple identity to its place in
     /// `tuple_digests`, so a nested tuple can be named by one [`TupleId`]
     /// inside its parent's identity instead of by a copy of its own.
@@ -204,12 +215,12 @@ impl IgnoreOrderMemo {
     }
 
     /// The cached distance for `key`, if present.
-    pub(crate) fn get(&self, key: &(ItemKey, ItemKey)) -> Option<f64> {
+    pub(crate) fn get(&self, key: &DistanceKey) -> Option<f64> {
         self.cache.borrow().get(key).copied()
     }
 
     /// Records `value` for `key` (moving the already-cloned key in).
-    pub(crate) fn put(&self, key: (ItemKey, ItemKey), value: f64) {
+    pub(crate) fn put(&self, key: DistanceKey, value: f64) {
         self.cache.borrow_mut().insert(key, value);
     }
 

@@ -668,8 +668,20 @@ pub(crate) struct HashedList<'a> {
     /// Distinct keys, in first-occurrence (ascending original index) order
     /// — this is `SetOrdered(full_t{1,2}_hashtable.keys())`'s own iteration
     /// order (a Python dict's insertion order).
-    pub(crate) distinct_order: Vec<ItemKey>,
-    info: HashMap<ItemKey, (usize, &'a Value)>,
+    ///
+    /// Each key sits behind an [`Rc`] so the one copy this table holds is
+    /// *shared* with [`Self::info`], with the `hashes_added`/`hashes_removed`
+    /// slices filtered out of it, and — the reason it matters for memory —
+    /// with the distance memo's `(removed, added)` cache keys: pairing a list
+    /// of `A` added against `R` removed containers records `A * R` cache
+    /// entries, and cloning a whole record's structural key into each of them
+    /// (rather than bumping a refcount) is what drove the `ignore_order` peak
+    /// on set/tuple/datetime-bearing records to ~9x the ordered diff's. `Rc`
+    /// derives the same `Hash`/`Eq` as the key it points at, so the cache
+    /// still dedups two distinct-but-equal keys across nesting levels exactly
+    /// as before.
+    pub(crate) distinct_order: Vec<Rc<ItemKey>>,
+    info: HashMap<Rc<ItemKey>, (usize, &'a Value)>,
 }
 
 impl<'a> HashedList<'a> {
@@ -680,12 +692,12 @@ impl<'a> HashedList<'a> {
     /// builds its two hashtables against one shared `hashes` dict.
     pub(crate) fn build(items: &'a [Value], memo: &IgnoreOrderMemo) -> Self {
         let mut distinct_order = Vec::new();
-        let mut info: HashMap<ItemKey, (usize, &'a Value)> = HashMap::default();
+        let mut info: HashMap<Rc<ItemKey>, (usize, &'a Value)> = HashMap::default();
 
         for (idx, item) in items.iter().enumerate() {
-            let key = item_key(item, memo);
+            let key = Rc::new(item_key(item, memo));
 
-            if let std::collections::hash_map::Entry::Vacant(entry) = info.entry(key.clone()) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = info.entry(Rc::clone(&key)) {
                 distinct_order.push(key);
                 entry.insert((idx, item));
             }

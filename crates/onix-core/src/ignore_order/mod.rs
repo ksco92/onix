@@ -160,6 +160,8 @@ use crate::path::PathSegment;
 use crate::report::Report;
 
 use fxhash::{HashMap, HashSet};
+use std::rc::Rc;
+
 use hash::{HashedList, ItemKey};
 use pairing::compute_pairs;
 
@@ -208,13 +210,13 @@ pub(crate) fn ignore_order_array_diff(
     let t1 = HashedList::build(a, memo);
     let t2 = HashedList::build(b, memo);
 
-    let hashes_added: Vec<ItemKey> = t2
+    let hashes_added: Vec<Rc<ItemKey>> = t2
         .distinct_order
         .iter()
         .filter(|key| !t1.contains(key))
         .cloned()
         .collect();
-    let hashes_removed: Vec<ItemKey> = t1
+    let hashes_removed: Vec<Rc<ItemKey>> = t1
         .distinct_order
         .iter()
         .filter(|key| !t2.contains(key))
@@ -238,7 +240,7 @@ pub(crate) fn ignore_order_array_diff(
     };
 
     let mut report = Report::new();
-    let mut consumed_removed: HashSet<ItemKey> = HashSet::default();
+    let mut consumed_removed: HashSet<Rc<ItemKey>> = HashSet::default();
 
     for added_key in &hashes_added {
         let (new_idx, new_value) = t2.get(added_key);

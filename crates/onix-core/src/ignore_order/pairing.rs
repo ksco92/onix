@@ -7,6 +7,7 @@
 //! [`compute_pairs`]'s own doc.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use crate::diff::DiffOptions;
 
@@ -36,13 +37,13 @@ pub(crate) const CUTOFF_DISTANCE_FOR_PAIRS: f64 = 0.3;
 /// themselves.
 #[derive(Default)]
 struct AddedCandidates {
-    buckets: HashMap<Distance, Vec<ItemKey>>,
+    buckets: HashMap<Distance, Vec<Rc<ItemKey>>>,
 }
 
 impl AddedCandidates {
     /// Appends `removed_hash` to the bucket for `dist`, creating it if this
     /// is the first candidate at this exact distance for this added hash.
-    fn push(&mut self, dist: Distance, removed_hash: ItemKey) {
+    fn push(&mut self, dist: Distance, removed_hash: Rc<ItemKey>) {
         self.buckets.entry(dist).or_default().push(removed_hash);
     }
 }
@@ -84,16 +85,16 @@ impl AddedCandidates {
 /// side — see [`ignore_order_array_diff`] — so the reverse direction is
 /// never constructed).
 pub(crate) fn compute_pairs(
-    hashes_added: &[ItemKey],
-    hashes_removed: &[ItemKey],
+    hashes_added: &[Rc<ItemKey>],
+    hashes_removed: &[Rc<ItemKey>],
     t1: &HashedList<'_>,
     t2: &HashedList<'_>,
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> HashMap<ItemKey, ItemKey> {
-    let mut most_in_common_pairs: HashMap<ItemKey, AddedCandidates> = HashMap::default();
-    let mut distances_to_from_hashes: BTreeMap<Distance, Vec<ItemKey>> = BTreeMap::new();
+) -> HashMap<Rc<ItemKey>, Rc<ItemKey>> {
+    let mut most_in_common_pairs: HashMap<Rc<ItemKey>, AddedCandidates> = HashMap::default();
+    let mut distances_to_from_hashes: BTreeMap<Distance, Vec<Rc<ItemKey>>> = BTreeMap::new();
 
     for added_key in hashes_added {
         let (_, added_value) = t2.get(added_key);
@@ -149,8 +150,8 @@ pub(crate) fn compute_pairs(
         }
     }
 
-    let mut used: HashSet<ItemKey> = HashSet::default();
-    let mut pairs: HashMap<ItemKey, ItemKey> = HashMap::default();
+    let mut used: HashSet<Rc<ItemKey>> = HashSet::default();
+    let mut pairs: HashMap<Rc<ItemKey>, Rc<ItemKey>> = HashMap::default();
 
     for (&dist, from_hashes) in &mut distances_to_from_hashes {
         while let Some(from_hash) = from_hashes.pop() {
