@@ -510,6 +510,19 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
         {(datetime(2024, 1, 1), ((1,),))},
         {(datetime(2024, 1, 1, tzinfo=UTC), ((1.0,),))},
     ),
+    # The naive/aware difference is BELOW the member's own root -- the member is
+    # `((datetime,),)`, and the datetimes sit one tuple deeper. The content
+    # digest is built through the shared cache at every node, so the inner
+    # `(naive,)` and `(aware,)` normalize to one instant and collapse, and the
+    # two outer members match; only the `x`/`y` distractors (added so the two
+    # sets are not equal as wholes) are reported. `{}` for the members in real
+    # deepdiff==9.1.0; a regression that named a nested container by a
+    # Python-identity id rather than its content digest reported these members
+    # as a spurious removal+addition.
+    "set_nested_tuple_naive_aware_collapses_below_the_member_root": (
+        {((datetime(2024, 1, 1),),), "x"},
+        {((datetime(2024, 1, 1, tzinfo=UTC),),), "y"},
+    ),
     # Nested one level inside a tuple or a frozenset item, a calendar value
     # renders with repr() instead -- the same rule a nested str() follows.
     "set_datetime_nested_in_tuple_item": ({(datetime(2024, 1, 1),)}, {"sentinel"}),

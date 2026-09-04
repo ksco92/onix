@@ -581,6 +581,43 @@ def test_a_set_member_matches_deepdiff_by_the_per_node_cache_versus_content_deci
         assert bool(onix) == (not expect_empty), f"unexpected result for {a!r} vs {b!r}: {onix!r}"
 
 
+def test_a_naive_aware_difference_below_a_member_root_collapses_at_every_depth() -> None:
+    """The per-node content digest collapses a naive/aware difference nested at any depth.
+
+    The cases above all put the naive/aware (or int/float) difference at the
+    member's own top level, where the member's own content digest is compared.
+    These put it one, two, or three levels BELOW the member's root: the digest
+    is built through the shared cache at every node, so a nested `(naive, ...)`
+    and `(aware, ...)` normalize to one instant, collapse to one id, and the
+    members that contain them match -- only the `x`/`y` distractors (which keep
+    the two sets unequal as wholes, so the comparison genuinely runs) are
+    reported. Each asserts onix's full output against real deepdiff==9.1.0.
+    """
+    n = datetime.datetime(2024, 1, 1)
+    a = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+
+    nested_cases = [
+        ({((n,),), "x"}, {((a,),), "y"}),
+        ({(1, (n,)), "x"}, {(1, (a,)), "y"}),
+        ({(1, frozenset({n})), "x"}, {(1, frozenset({a})), "y"}),
+        ({frozenset({(n,)}), "x"}, {frozenset({(a,)}), "y"}),
+        ({(9, (n, (1,))), "x"}, {(9, (a, (1.0,))), "y"}),
+        ({(9, (n, (1,))), "x"}, {(9, (a, (1,))), "y"}),
+        ({(((n,),),), "x"}, {(((a,),),), "y"}),
+        ({(8, (9, (n, (1,)))), "x"}, {(8, (9, (a, (1.0,)))), "y"}),
+        ({(n, (n, 1)), "x"}, {(a, (a, 1)), "y"}),
+    ]
+    for left, right, in nested_cases:
+        onix = DeepDiff(left, right).to_dict()
+        real = RealDeepDiff(left, right, verbose_level=2).to_dict()
+
+        assert onix == real, f"onix diverged from real DeepDiff for {left!r} vs {right!r}"
+        assert onix == {
+            "set_item_removed": ["root['x']"],
+            "set_item_added": ["root['y']"],
+        }, f"expected only the x/y distractors for {left!r} vs {right!r}: {onix!r}"
+
+
 def test_a_bool_nested_in_a_tuple_set_member_is_its_own_identity_under_the_content_path() -> None:
     """A `bool` sibling forces the content path the same way a differently-typed number does.
 
