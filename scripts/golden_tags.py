@@ -73,7 +73,17 @@ type TaggedValue = (
 )
 
 # What a Python set can hold: hashable values only, so no dict, list or set.
-type SetMember = tuple["SetMember", ...] | frozenset["SetMember"] | str | int | float | bool | None
+type SetMember = (
+    tuple["SetMember", ...]
+    | frozenset["SetMember"]
+    | datetime.datetime
+    | datetime.date
+    | str
+    | int
+    | float
+    | bool
+    | None
+)
 
 
 def _sole_tag(value: dict[str, TaggedValue]) -> str | None:
@@ -315,9 +325,6 @@ def _order_key(value: object) -> tuple[object, ...]:
     """
     Build the sort key :func:`canonical_set_order` compares by.
 
-    Calendar values are deliberately absent: a `datetime` or `date` cannot be a set
-    member yet (the bindings refuse one), so no set this ever sorts can hold one.
-
     :param value: Any value.
     :raises TypeError: If `value` is of a kind no set can hold.
     :return: A tuple ordering `value` against any other by kind, then by value.
@@ -356,4 +363,34 @@ def _order_key(value: object) -> tuple[object, ...]:
     if isinstance(value, dict):
         return (9, [(key, _order_key(item)) for key, item in sorted(value.items())])
 
+    # `datetime` before `date`: every `datetime` is a `date` in Python.
+    if isinstance(value, datetime.datetime):
+        return (10, _datetime_instant(value))
+
+    if isinstance(value, datetime.date):
+        return (11, value.toordinal())
+
     raise TypeError(f"no canonical order defined for {type(value).__name__}")
+
+
+def _datetime_instant(value: datetime.datetime) -> tuple[int, bool, int]:
+    """
+    Build a `datetime`'s ordering key: its UTC instant, then whether it is aware.
+
+    The Python twin of ``onix_core::datetime::DateTime::instant`` plus
+    ``crate::value``'s aware/naive tie-break: a naive value is read as UTC (matching
+    ``datetime_normalize``'s default), so this ranks by microseconds since the epoch
+    with the offset already applied, then by awareness (naive first) and finally by the
+    raw offset — the same order two datetimes at one instant fall back on in
+    ``onix_core::value::canonical_cmp``.
+
+    :param value: A `datetime`, naive or aware.
+    :return: A tuple ordering `value` against any other `datetime` the same way onix does.
+    """
+    offset = value.utcoffset() or datetime.timedelta()
+    naive = value.replace(tzinfo=None) - offset
+    epoch = datetime.datetime(1970, 1, 1)
+    delta = naive - epoch
+    micros = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+    return (micros, value.tzinfo is not None, int(offset.total_seconds()))

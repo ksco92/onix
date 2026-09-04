@@ -1,0 +1,8 @@
+{
+  "set_item_added": [
+    "root['sentinel']"
+  ],
+  "set_item_removed": [
+    "root[(datetime.datetime(2024, 1, 1, 0, 0),)]"
+  ]
+}

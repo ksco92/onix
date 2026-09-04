@@ -1,0 +1,14 @@
+{
+  "set_item_added": [
+    "root['tags'][4]"
+  ],
+  "set_item_removed": [
+    "root['tags'][1]"
+  ],
+  "values_changed": {
+    "root['when']": {
+      "new_value": "2024-01-02T00:00:00+00:00",
+      "old_value": "2024-01-01T00:00:00+00:00"
+    }
+  }
+}
