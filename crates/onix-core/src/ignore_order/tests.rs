@@ -2951,12 +2951,22 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
     })
 }
 
-/// Rebuilds `value` into a structurally-equal twin by a *different* construction
-/// path: every set/frozenset from its members in reversed order and every dict
-/// from its entries in reversed order (both re-canonicalized on build), so the
-/// twin is equal by the value model's rules yet was never built the same way as
-/// the original — the property `dist_key_hash_equal_for_equal_values` needs to
-/// have any power. Recurses over proptest-bounded depth (safe).
+/// Rebuilds `value` into a twin that is equal by [`Value`]'s rules but differs
+/// **structurally**, so the hash-agreement property has real power. The
+/// load-bearing arms are the two places `Value` equality is coarser than
+/// structure:
+///
+/// - a **datetime** is re-expressed at the same instant with different fields —
+///   a naive value (read as UTC) becomes aware `+00:00`, and an aware value's
+///   wall clock and offset shift together by one hour (e.g. `12:00+00:00` ->
+///   `13:00+01:00`), which `Value::eq` compares equal by instant;
+/// - a **signed zero** flips sign (`+0.0` <-> `-0.0`), which `Value::eq`
+///   compares equal though the bit patterns differ.
+///
+/// Set/frozenset members and dict entries are also reversed before rebuilding
+/// (they re-canonicalize to the same stored order, so this is only a
+/// construction-path check, not where the power comes from). Recurses over
+/// proptest-bounded depth (safe).
 fn structural_twin(value: &CValue) -> CValue {
     match value {
         CValue::Array(items) => CValue::Array(
@@ -2991,6 +3001,45 @@ fn structural_twin(value: &CValue) -> CValue {
             entries.reverse();
             crate::value::Builder::new().object(entries)
         }
+        CValue::DateTime(dt) => {
+            let date = dt.date();
+            match dt.utc_offset_seconds() {
+                None => cdt_at(
+                    date.year(),
+                    date.month(),
+                    date.day(),
+                    dt.hour(),
+                    dt.minute(),
+                    dt.second(),
+                    dt.microsecond(),
+                    Some(0),
+                ),
+                Some(offset) => {
+                    let (hour, offset) = if dt.hour() < 23 {
+                        (dt.hour() + 1, offset + 3600)
+                    } else {
+                        (dt.hour() - 1, offset - 3600)
+                    };
+                    cdt_at(
+                        date.year(),
+                        date.month(),
+                        date.day(),
+                        hour,
+                        dt.minute(),
+                        dt.second(),
+                        dt.microsecond(),
+                        Some(offset),
+                    )
+                }
+            }
+        }
+        CValue::Number(n) if n.is_f64() => {
+            let f = n.as_f64().expect("is_f64 guarantees as_f64");
+            let flipped = if f == 0.0 { -f } else { f };
+            CValue::Number(
+                crate::value::Number::from_f64(flipped).expect("finite float stays finite"),
+            )
+        }
         scalar => scalar.clone(),
     }
 }
@@ -2999,10 +3048,13 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
 
     /// Over generated nested shapes spanning every equality class (see
-    /// `arb_cvalue`), a value hashes identically to a structural twin built by
-    /// an independent path ([`structural_twin`], which reverses set members and
-    /// dict entries before re-canonicalizing). Guards the `DistKey` `Hash`/`Eq`
-    /// agreement the memo's soundness depends on.
+    /// `arb_cvalue`), a value hashes identically to a [`structural_twin`] that
+    /// is `Value`-equal but structurally different: an equal-instant datetime
+    /// at a different offset and a sign-flipped zero (the two places `Value`
+    /// equality is coarser than structure), plus reversed set/dict order.
+    /// Guards the `DistKey` `Hash`/`Eq` agreement the memo's soundness depends
+    /// on — a hash that mixed in the UTC offset or the raw signed-zero bits
+    /// would fail here.
     #[test]
     fn dist_key_hash_equal_for_equal_values(value in arb_cvalue()) {
         let twin = structural_twin(&value);
