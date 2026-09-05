@@ -794,7 +794,7 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
 /// `MemberContent::UnhashableDict` key a dict identically.
 ///
 /// This is the reason `ObjectKey` itself carries no `#[derive(Hash)]`: like
-/// [`Value`](crate::value::Value), its equality is this crate's own
+/// [`Value`], its equality is this crate's own
 /// structural rule, not a field-by-field derive, so a generic `HashMap`/
 /// `HashSet` cannot key by it directly — every place this crate needs a
 /// content hash of one goes through this function (or `hash_value`'s own
