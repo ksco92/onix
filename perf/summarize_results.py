@@ -417,12 +417,12 @@ def render_fixture_matrix(report: Report) -> str:
         "## Fixture matrix",
         "",
         "Generated deterministically by `perf/generate_fixtures.py` (fixed seed "
-        f"`{report.base_seed}`, recorded there — regeneration is byte-identical; see that "
+        f"`{report.base_seed}`, recorded there: regeneration is byte-identical, see that "
         "file's module docstring for the verification command). ~5% values "
         "changed, ~2% added, ~2% removed between each fixture's `a`/`b` pair, "
         "except `identical_1m` (byte-identical copy), `startup_trivial` "
-        "(`{}` vs `{}`), and `ignore_order_10k` (pure shuffle + ~5% "
-        "value-changed, no add/remove — see `ignore_order.rs`).",
+        "(`{}` vs `{}`), and `ignore_order_10k` (pure shuffle plus ~5% "
+        "value-changed, no add/remove; see `ignore_order.rs`).",
         "",
         "| Fixture | What it stresses | Input size (a+b) |",
         "|---|---|---|",
@@ -452,19 +452,19 @@ sampling, same command sequence every invocation of `run_bench.sh`.
 | very heavy (~1-1.5min/diff on this machine) | `nested_uniform_d6_b10`, `api_payloads` | 0 | 3 |
 
 The two "very heavy" fixtures use only 3 runs (no warmup) purely for total
-harness runtime — a single deepdiff diff-only call already takes over a
+harness runtime: a single deepdiff diff-only call already takes over a
 minute at that size; onix's own run count is unaffected by this (it is not
 what makes those fixtures slow) but hyperfine measures both commands
 together in one comparison sweep.
 
 Three independent measurement passes run per fixture, each using this same
 warmup/run tier: the correctness precheck (one run per tool, not tallied
-above — its only job is the byte-identical canonical-JSON comparison), the
+above, whose only job is the byte-identical canonical-JSON comparison), the
 diff-only timing sample loop (the tier's full warmup+runs, feeding the
 Headline table's medians below), and the hyperfine sweep (also the tier's
 full warmup+runs, feeding wall clock/CPU/RSS). Diff-only timing is
-deliberately its own pass, not reused from the precheck or hyperfine runs
-— this harness always reports a median over N runs, never a single
+deliberately its own pass, not reused from the precheck or hyperfine runs.
+This harness always reports a median over N runs, never a single
 sample, and hyperfine's own runs don't expose per-run stderr to extract
 `diff_ns` from.
 """
@@ -481,18 +481,18 @@ def render_correctness_section(report: Report) -> str:
 **Every fixture below reached this file only after its onix and DeepDiff
 outputs were canonicalized (`jq -S`, matching `crates/onix-core/tests/golden.rs`'s
 own "sorted-keys, order-sensitive-arrays" notion of canonical equality) and
-found byte-identical.** `run_bench.sh` aborts the entire run — no
-`RESULTS.md` gets written at all — the moment any fixture's outputs
-diverge — a perf number on divergent output is void.
+found byte-identical.** `run_bench.sh` aborts the entire run (no
+`RESULTS.md` gets written at all) the moment any fixture's outputs
+diverge: a perf number on divergent output is void.
 
-All {len(report.rows)} fixtures in the matrix matched on this run —
+All {len(report.rows)} fixtures in the matrix matched on this run,
 `ignore_order_10k` included: it's a real `onix --ignore-order`
 vs. `DeepDiff(..., ignore_order=True)` comparison, not a deepdiff-only
 baseline, and it clears the exact same precheck as every other fixture.
 It's also an all-numeric flat list, so it never reaches the disclosed,
 pre-existing `threshold_to_diff_deeper` dict-vs-dict divergence already
-tracked by `crates/onix-core/tests/golden.rs`'s `KNOWN_DIVERGENT_CASES`
-— no special-casing was needed here.
+tracked by `crates/onix-core/tests/golden.rs`'s `KNOWN_DIVERGENT_CASES`;
+no special-casing was needed here.
 
 `api_payloads` wraps each scalar in its `tags` and `metadata.flags` lists
 in a single-key dict. An earlier concern was a divergence on the default
@@ -500,8 +500,8 @@ in a single-key dict. An earlier concern was a divergence on the default
 match for lists of *hashable* scalars, which onix's then-simpler
 index-aligned list algorithm did not mirror, so two same-length
 low-cardinality scalar lists sharing values at different offsets could
-diverge. That gap is closed — `crates/onix-core/src/lcs.rs` now dispatches
-scalar-only lists to the same LCS/`difflib` matching DeepDiff uses — and
+diverge. That gap is closed: `crates/onix-core/src/lcs.rs` now dispatches
+scalar-only lists to the same LCS/`difflib` matching DeepDiff uses, and
 differential testing confirms both tools agree without the wrapping. It is
 retained only so the generated fixture byte-matches the shape these
 published measurements used.
@@ -517,14 +517,14 @@ def render_headline_table(report: Report) -> str:
         "## Headline: diff-only time + peak RSS",
         "",
         "Diff-only time excludes process startup and JSON parsing on both "
-        "sides (self-instrumented — onix via `--timing`'s `diff_ns`, "
+        "sides (self-instrumented: onix via `--timing`'s `diff_ns`, "
         "deepdiff via `time.perf_counter_ns()` around only the `DeepDiff(...)` "
         "call). **Each cell is the MEDIAN over N tier-appropriate runs "
         "(the same warmup/run counts as the run-procedure table above), "
-        "shown with its observed min-max spread — never a single sample** "
+        "shown with its observed min-max spread, never a single sample** "
         "(this harness's own rule: report medians and σ, never single runs). Peak RSS "
         "is the median of hyperfine's per-run `memory_usage_byte` (verified "
-        'against `/usr/bin/time -l`\'s "maximum resident set size" — '
+        'against `/usr/bin/time -l`\'s "maximum resident set size", '
         "identical value on this machine) over the full process, same runs "
         "as the wall-clock sweep.",
         "",
@@ -537,7 +537,7 @@ def render_headline_table(report: Report) -> str:
         threshold_mark = "✅" if row.meets_threshold else "❌"
 
         if row.is_slower:
-            threshold_mark += " **(onix SLOWER — see note below)**"
+            threshold_mark += " **(onix SLOWER, see note below)**"
 
         onix_cell = fmt_seconds_with_spread(
             ns_to_s(row.onix_diff_only.median_ns),
@@ -597,8 +597,8 @@ def render_cpu_and_allocation_table(report: Report) -> str:
         "deepdiff's traced-allocation peak during the diff call only; onix's "
         "equivalent (a counting global allocator behind a bench-only "
         "feature) is a **documented TODO**, not implemented "
-        "(marked nice-to-have, not required) — see the Deferred work "
-        "note at the end of this file.",
+        "(marked nice-to-have, not required; see the Deferred work "
+        "note at the end of this file).",
         "",
         "| Fixture | onix CPU (user+sys) | deepdiff CPU (user+sys) | deepdiff tracemalloc peak |",
         "|---|---|---|---|",
@@ -635,7 +635,7 @@ invocation, so it also includes `uv`'s own subprocess-launch and
 environment-resolution overhead (typically ~10-30ms on a cached
 environment) on top of pure interpreter+import cost. This number is real
 and reproducible as measured, but is not a pure "Python interpreter +
-`import deepdiff`" figure — a bare-interpreter comparison would show a
+`import deepdiff`" figure: a bare-interpreter comparison would show a
 smaller gap.
 
 | | onix | deepdiff (via `uv run`) |
@@ -660,7 +660,7 @@ def render_ignore_order_design_notes(report: Report) -> str:
     return f"""## Design notes: `ignore_order_10k` (the ignore_order headline comparison)
 
 `ignore_order_10k` is diffed by both tools with `--ignore-order`
-(`DeepDiff(..., ignore_order=True)` / `onix diff --ignore-order`) — a real
+(`DeepDiff(..., ignore_order=True)` / `onix diff --ignore-order`), a real
 two-tool comparison like every other fixture (see the Headline table
 above for its row: {fmt_ratio(row.diff_only_speedup)} diff-only, this run).
 This was DeepDiff's own documented headline slowness (its `O(changed²)`
@@ -673,11 +673,11 @@ gap:
   by [`crate::ignore_order::numeric_distance`] alone (closed-form
   arithmetic), never touching the structural fallback that would
   otherwise pay for `PathSegment` allocations, `Value` clones, and
-  `BTreeMap` inserts per candidate — replicating DeepDiff's own
+  `BTreeMap` inserts per candidate: replicating DeepDiff's own
   per-candidate object-construction cost in Rust would have defeated the
   point of this port.
 - **Every item is hashed exactly once per list** (`HashedList::build`),
-  not recomputed per candidate comparison — the
+  not recomputed per candidate comparison: the
   `O(hashes_added × hashes_removed)` candidate loop only ever does `O(1)`
   hash-map lookups against already-computed keys.
 - **A from-scratch, dependency-free `FxHasher`** (this crate's own quality
@@ -686,10 +686,10 @@ gap:
   DoS-resistance is a real per-call cost: switching the input-keyed maps to
   it slowed this shape's diff by a measurable margin, so `FxHash` is kept
   and the residual hash-flooding exposure on attacker-controlled keys is
-  documented as an accepted trade-off — see `ignore_order.rs`'s own doc.
+  documented as an accepted trade-off (see `ignore_order.rs`'s own doc).
 
 The cost is dominated by `O(change_n²)` (the candidate-pairing loop), not
-`O(n²)` — matching real `DeepDiff`'s own documented cost anatomy (see
+`O(n²)`, matching real `DeepDiff`'s own documented cost anatomy (see
 `crate::ignore_order`'s own module doc for the full, source-cited
 scaling-signature analysis; not re-run here, since it validates the
 algorithm's asymptotic behavior, not this fixture's specific numbers).
@@ -704,13 +704,13 @@ def render_energy_section() -> str:
     if energy["available"]:
         return """## Energy
 
-`sudo powermetrics` sampling ran successfully on this machine — see
+`sudo powermetrics` sampling ran successfully on this machine, see
 `perf/bench_raw/powermetrics_onix.txt` for the raw sampler output (not
 committed; regenerate via `perf/run_bench.sh` with passwordless `sudo`
 available).
 """
 
-    return f"""## Energy (best-effort — fell back to the documented proxy)
+    return f"""## Energy (best-effort: fell back to the documented proxy)
 
 `sudo powermetrics` needs root; `sudo -n true` failed non-interactively in
 this environment (the common case for a headless/sandboxed run), so energy
@@ -760,7 +760,7 @@ def render_derived_economics(report: Report) -> str:
 MB of input processed per CPU-second (higher is better), and an estimated
 cost for 1 million `api_payloads`-sized diffs on **{INSTANCE_LABEL}**
 (${INSTANCE_PRICE_PER_HOUR_USD}/hour on-demand; source:
-instances.vantage.sh/aws/ec2/r7i.large, accessed {INSTANCE_PRICE_DATE}) —
+instances.vantage.sh/aws/ec2/r7i.large, accessed {INSTANCE_PRICE_DATE}).
 CPU-seconds (user+sys), not wall clock, is what a shared/serverless
 CPU-billed instance actually bills.
 
@@ -817,7 +817,7 @@ def render_go_no_go(report: Report) -> str:
         lines.append(
             f"- **⚠️ onix is SLOWER (diff-only) than deepdiff on: {names}.** "
             "This is a finding to flag prominently, not a "
-            "caveat to bury — see the note directly below.",
+            "caveat to bury (see the note directly below).",
         )
     else:
         lines.append("- **No fixture where onix is slower (diff-only) than deepdiff.**")
@@ -827,8 +827,8 @@ def render_go_no_go(report: Report) -> str:
         "diff-only speedup and memory ratio bottom out on `flat_dict_1m` (1M "
         "unique keys). The compact model stores each object as a sorted "
         "key/value slice looked up by binary search, so at this size the "
-        "dominant cost is key `memcmp` during lookup — worse cache behavior "
-        "than a `BTreeMap` descent — and unique keys defeat the interner. It "
+        "dominant cost is key `memcmp` during lookup (worse cache behavior "
+        "than a `BTreeMap` descent), and unique keys defeat the interner. It "
         "is an accepted constant-factor representation tradeoff: the same "
         "compact layout is what earns the large memory wins on realistic "
         "record and nested data.",
@@ -840,7 +840,7 @@ def render_go_no_go(report: Report) -> str:
     lines.append("")
     lines.append(
         "This is an **upper "
-        "bound**, not the product validation — onix here diffs data the "
+        "bound**, not the product validation: onix here diffs data the "
         "CLI stream-parses straight from JSON text into the compact "
         "`onix_core::Value`, with no intermediate `serde_json` tree and no "
         "FFI or Python-object conversion cost on this path's ledger. The decision-relevant "
@@ -866,7 +866,7 @@ empirically probed while building this fixture (see
 
 - **Real DeepDiff 9.1.0** (default `sys.getrecursionlimit() == 1000`) on
   this single-chain dict shape raises `RecursionError` starting at
-  **~depth 495** — probed at 495 (succeeds) and 496 (fails) on this
+  **~depth 495**: probed at 495 (succeeds) and 496 (fails) on this
   machine, but this is a Python C-stack-depth limit, not a pure
   Python-frame-count one, so the exact boundary can shift by a few levels
   run to run depending on intervening C-stack usage. Treat "~495" as an
@@ -874,12 +874,12 @@ empirically probed while building this fixture (see
 - **`onix-cli`'s actual ceiling is much lower and IS exact: 126**, and it
   fails to *parse*, not diff. `onix-cli` parses with `serde_json`'s default
   (non-`unbounded_depth`) parser, which hard-caps at 128 levels of *parser*
-  recursion — completely independent of `onix_core::diff_with_max_depth`'s
+  recursion, completely independent of `onix_core::diff_with_max_depth`'s
   own `--max-depth`/`DEFAULT_MAX_DEPTH` guard (512 by default), which never
   even gets exercised here because parsing fails first. This is documented
   in `onix-cli`'s own rustdoc (the `run` function's "Stack safety on
   adversarially deep input" section, `crates/onix-cli/src/run.rs`) as
-  expected behavior, not a bug — but it means **onix's real depth ceiling
+  expected behavior, not a bug. It means **onix's real depth ceiling
   for JSON-file input is `serde_json`'s 128, not the 512 the CLI flag
   suggests**, and it is the *tighter* of the two tools' ceilings, not the
   looser ~500 originally anticipated.
@@ -897,22 +897,22 @@ def render_deferred_work_note() -> str:
 
 **Fixture matrix scaled down from the original full table** (this benchmark
 was explicitly scoped to build "a scalable, representative subset", not the
-full matrix — but here is every cut, not just the headline one):
+full matrix, but here is every cut, not just the headline one):
 
 - **`flat_list_5m`** (the originally envisioned 5-million-item list,
-  "throughput, memory") — **not built at all**. Only `flat_list_100k` is in this run's
+  "throughput, memory"): **not built at all**. Only `flat_list_100k` is in this run's
   matrix; a multi-million-item list fixture is a candidate follow-up if
   finer-grained throughput data at that scale is ever needed.
 - **`api_payloads`** capped at 50,000 records rather than the originally
   suggested ~50-200MB (see the actual measured size in the Fixture matrix
-  table above) — see `perf/generate_fixtures.py`'s `API_PAYLOAD_RECORD_COUNT`
+  table above); see `perf/generate_fixtures.py`'s `API_PAYLOAD_RECORD_COUNT`
   comment: at 100k records deepdiff's diff-only call already took ~3
   minutes, which made the full deterministic harness (every fixture run
   multiple times) impractical to run in one sitting; 50k records already
-  makes deepdiff take ~90 seconds per diff — "meaningfully long" per the
+  makes deepdiff take ~90 seconds per diff, "meaningfully long" per the
   brief's own bar.
 - **`deep_narrow_dN`** at depth 120, not the originally-envisioned 20k
-  (nor even the ~500 fallback) — see the "Finding: onix's practical
+  (nor even the ~500 fallback); see the "Finding: onix's practical
   depth ceiling is lower than expected" section above for why.
 
 Also deferred, unrelated to matrix scale:
@@ -922,11 +922,11 @@ Also deferred, unrelated to matrix scale:
   only indirectly, via peak RSS and the (already dramatic) CPU-time gap.
   Left for follow-up if the allocation-churn detail is ever
   decision-relevant.
-- **Criterion micro-benches**: not implemented here —
+- **Criterion micro-benches**: not implemented here.
   `run_bench.sh`'s cross-language sweep was the priority; a
   per-fixture-shape Criterion suite inside `onix-core` is a natural
   follow-up once the cross-language number exists to compare against.
-- **Energy sampling**: see the Energy section above — CPU-seconds is the
+- **Energy sampling**: see the Energy section above. CPU-seconds is the
   documented fallback proxy; a real Joules/diff number needs a manual
   `sudo` run by the repository owner (exact command provided there).
 """
@@ -961,9 +961,9 @@ def main() -> None:
     report = build_report()
 
     sections = [
-        "# onix vs. DeepDiff — benchmark results\n",
-        "Generated entirely by `perf/run_bench.sh` (via `perf/summarize_results.py`) "
-        "— every number below traces back to a real, timestamped run captured under "
+        "# onix vs. DeepDiff: benchmark results\n",
+        "Generated entirely by `perf/run_bench.sh` (via `perf/summarize_results.py`). "
+        "Every number below traces back to a real, timestamped run captured under "
         "`perf/bench_raw/` (gitignored; regenerate with `perf/run_bench.sh`). "
         "No number here was hand-written.\n",
         render_environment_header(load_json(RAW_DIR / "env.json")),
