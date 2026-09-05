@@ -38,7 +38,7 @@ From source:
 ```sh
 cd crates/onix-py
 uv tool install maturin              # the build tool (skip if already installed)
-uv sync --group test                 # creates .venv, installs pytest + pinned deepdiff
+uv sync --group test                 # creates .venv, installs pytest, pinned deepdiff, and pyarrow/polars/duckdb for the table-diff tests
 uv run --group test maturin develop --release
 ```
 
@@ -128,7 +128,7 @@ amount type_changed Int32 Int64
 note added None Utf8
 ```
 
-Type comparison uses the full Arrow type, including timestamp unit and timezone and decimal precision and scale; nullability is ignored (but reported in each record), and a dictionary-encoded column is compared as its value type, so a dictionary-encoded string and a plain string are the same type. `diff.schema_arrow` is the same result as an Arrow table: it implements `__arrow_c_stream__`, so `polars.DataFrame(diff.schema_arrow)` and `pandas` consume it directly, and `diff.schema_arrow.to_pyarrow()` returns a `pyarrow.Table`.
+Type comparison uses the full logical Arrow type, including timestamp unit and timezone and decimal precision and scale; nullability is ignored (but reported in each record). Physical encodings that carry the same logical type are treated as equal, so the same table read through different libraries does not report spurious type changes — applied recursively through `List`/`Struct`/`Map` children: a dictionary-encoded type compares as its value type (dictionary-encoded string == plain string, `list<dictionary>` == `list<string>`), `Utf8View`/`LargeUtf8` as `Utf8`, `BinaryView`/`LargeBinary` as `Binary`, and `LargeList`/`ListView`/`LargeListView` as `List`. This is what makes `diff_tables(pl.DataFrame, pa.Table)` report identical results whether a string column arrives as polars' `Utf8View` or pyarrow's `Utf8`. Column names must be unique on each side; a repeated name raises `ValueError`. `diff.schema_arrow` is the same result as an Arrow table: it implements `__arrow_c_stream__`, so `polars.DataFrame(diff.schema_arrow)` and `pandas` consume it directly, and `diff.schema_arrow.to_pyarrow()` returns a `pyarrow.Table`.
 
 `pyarrow` is optional: install it with `pip install deepdiff-rs[arrow]`. It is needed only for `to_pyarrow()` and for passing pyarrow objects in — importing `deepdiff_rs` and diffing polars or DuckDB tables need it not at all. Passing an object that implements neither Arrow protocol raises `TypeError`; calling `to_pyarrow()` without pyarrow installed raises `ImportError` naming the extra.
 
@@ -144,6 +144,7 @@ Type comparison uses the full Arrow type, including timestamp unit and timezone 
 - Adversarially deep input raises `MaxDepthError` instead of crashing: the default `max_depth` is 512 and the hard ceiling is `MAX_DEPTH_CEILING` (20,000). See [`crates/onix-py/src/guard.rs`](crates/onix-py/src/guard.rs).
 - `ignore_order` pairing is `O(N^2)` in unpaired elements per side and carries a polynomial cost in both time and memory with input depth; it has no `max_passes`/`max_diffs` cutoff, so bound the size and depth of untrusted input yourself. See [`crates/onix-core/src/ignore_order/mod.rs`](crates/onix-core/src/ignore_order/mod.rs).
 - A `values_changed` between two multi-line strings runs a `difflib`-style `O(N*M)` line diff on the default path with no opt-out, worst when changes are spread evenly through the text (about 35 s for a heavily edited 1 MB string and growing quadratically, so a few megabytes is minutes), so bound the size of untrusted strings yourself. See [`crates/onix-core/src/unified_diff.rs`](crates/onix-core/src/unified_diff.rs).
+- In `diff_tables`, a column name containing an embedded NUL byte (`\0`) arrives truncated at the NUL through the Arrow C Data Interface, and the report shows the truncated name; such names are rare in practice.
 - Output is byte-identical to DeepDiff except for the cases listed above and two path-rendering quirks; [`tests/golden/README.md`](tests/golden/README.md) enumerates every accepted exception, including integers past `2^53` (the limit of exact `f64` representation) inside ordered scalar lists and `ignore_order` pairing among naive datetimes, which DeepDiff ranks using the *process's local timezone* while onix reads a naive value as UTC everywhere.
 
 ## Performance

@@ -68,7 +68,8 @@ just the public API surface.
 
 **Coverage scope.** `onix-cli` is held to the same 95% bar as `onix-core`
 (its `diff` subcommand has unit tests in `crates/onix-cli/src/tests.rs` and
-end-to-end tests in `crates/onix-cli/tests/cli.rs`). `onix-py` is excluded
+end-to-end tests in `crates/onix-cli/tests/cli.rs`). `onix-arrow` is held to
+the same bar (its schema-diff logic is unit-tested in-crate). `onix-py` is excluded
 from the line-coverage denominator: it is a `cdylib` whose logic is
 Python-object conversion and PyO3 glue, only meaningfully exercised by calling
 the compiled wheel from real Python, so `make python-test` is its coverage
@@ -197,21 +198,19 @@ version, run `uv cache clean` first so the reinstall cannot serve a cached
 pre-fix binary.
 
 The Arrow table-diff tests are part of the same suite
-(`tests/test_table_diff.py`). They feed the same data through pyarrow, polars,
-and DuckDB and assert identical results, so `uv sync --group test` installs all
-three (they are test-only, never runtime, dependencies); `pyarrow` is also the
-optional `arrow` extra. To run only them:
+(`tests/test_table_diff.py` — its module docstring explains what each group
+covers). `uv sync --group test` installs pyarrow, polars, and DuckDB, which
+those tests need but which `diff_tables` itself does not (they are test-only,
+never runtime, dependencies); `pyarrow` is also the optional `arrow` extra. To
+run only them:
 
 ```sh
 cd crates/onix-py
 uv run --group test pytest tests/test_table_diff.py -q
 ```
 
-One test spawns a subprocess with `pyarrow` made unimportable, proving
-`import deepdiff_rs` and `diff_tables` on a DuckDB table work without pyarrow
-and that `to_pyarrow()` then raises a clear `ImportError`. The pure-Rust schema
-logic lives in `crates/onix-arrow` and is covered by `cargo test` /
-`make check` like the other Rust crates.
+The pure-Rust schema logic lives in `crates/onix-arrow` and is covered by
+`cargo test` / `make check` like the other Rust crates.
 
 ## Benchmarking
 
@@ -268,8 +267,8 @@ every scale, and the oracle's value-comparison semantics; nothing under
 
 ## Mutation testing
 
-`make mutants` runs [`cargo-mutants`](https://mutants.rs/) against `onix-core`
-and `onix-cli` (the two crates coverage holds to the 95% bar). It is the
+`make mutants` runs [`cargo-mutants`](https://mutants.rs/) against `onix-core`,
+`onix-cli`, and `onix-arrow` (the crates coverage holds to the 95% bar). It is the
 coverage gate's honest sibling: 95% line coverage proves every line ran, not
 that a test would notice if that line's logic were wrong. It is slow by design
 (one rebuild and re-test per mutant), so it runs periodically, not on every

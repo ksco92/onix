@@ -103,10 +103,12 @@ allow = [
     # Added for the Arrow table-diff dependency tree (onix-arrow / onix-py's
     # pyo3-arrow bridge). Both are OSI-approved / FSF-Free permissive licenses,
     # the same permissive family already accepted above:
-    # "BSD-2-Clause" (numpy and zerocopy/zerocopy-derive, the latter reached
-    # via ahash under the arrow crates) and "CC0-1.0" (tiny-keccak, a
-    # compile-time-only proc-macro dependency of const-random under ahash;
-    # not shipped in the wheel).
+    # "BSD-2-Clause" is required by numpy (pulled in by pyo3-arrow); zerocopy
+    # and zerocopy-derive also list it but are dual-licensed (MIT/Apache-2.0)
+    # and were already resolved under the pre-existing allowances, so numpy is
+    # what this entry admits. "CC0-1.0" is required by tiny-keccak, a
+    # compile-time-only proc-macro dependency of const-random under ahash (not
+    # shipped in the wheel).
     "BSD-2-Clause",
     "CC0-1.0",
 ]
