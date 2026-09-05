@@ -68,12 +68,11 @@
 //!
 //! [`diff_cells`] reports, for every changed row, which cells differ, as one
 //! output row per differing cell: the key columns, then `column`, `old_value`,
-//! `new_value`, and `change`. Output rows are ordered by the canonical string
-//! rendering of the key columns (lexicographic, nulls first), then by
-//! left-schema column order. A cell is reported changed **if and only if its
-//! [`hash_cell`] contribution differs** between the two matched rows — the
-//! same helper the row hash is built from, so the cell list and the
-//! row-changed decision can never drift. Each reported cell is labelled:
+//! `new_value`, and `change` (see [`diff_cells`] for the exact output order).
+//! A cell is reported changed **if and only if its [`hash_cell`] contribution
+//! differs** between the two matched rows — the same helper the row hash is
+//! built from, so the cell list and the row-changed decision can never drift.
+//! Each reported cell is labelled:
 //!
 //! - `became_null`/`became_non_null` when exactly one side is null;
 //! - `type_changed` when both are non-null and the two sides' types are not
