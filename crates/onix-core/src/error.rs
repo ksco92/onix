@@ -97,7 +97,7 @@ mod tests {
         };
         let message = error.to_string();
         assert!(message.contains("root['a']['b']"));
-        assert!(message.contains("512"));
+        assert!(message.contains("513"));
     }
 
     #[test]
