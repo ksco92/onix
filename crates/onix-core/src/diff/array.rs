@@ -22,9 +22,9 @@ use super::{
 /// `_diff_iterable_in_order` dispatch exactly (see the parent `diff` module's
 /// "List diffing" doc section for the full, empirically-verified spec):
 ///
-/// - **When every element of *both* `a` and `b` is a JSON scalar** (null,
-///   bool, number, or string — `DeepDiff`'s "basic hashable" check, see
-///   [`crate::lcs::all_basic_scalars`]), an LCS/`difflib`-style "cheapest
+/// - **When every element of *both* `a` and `b` is a scalar** (null, bool,
+///   number, string, plus datetime and date — `DeepDiff`'s "basic hashable"
+///   check, see [`crate::lcs::all_basic_scalars`]), an LCS/`difflib`-style "cheapest
 ///   edit" match ([`lcs_array_diff`]) is tried first. `DeepDiff` only trusts
 ///   that match unconditionally when it produces at most one finding;
 ///   otherwise it *also* computes the plain index-aligned result below and
