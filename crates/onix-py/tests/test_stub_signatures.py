@@ -71,9 +71,19 @@ def _class_members(node: ast.ClassDef) -> dict[str, ast.FunctionDef]:
     return {n.name: n for n in node.body if isinstance(n, ast.FunctionDef)}
 
 
+def _stub_constants(module: ast.Module) -> set[str]:
+    """Names of module-level annotated assignments (``NAME: type``) in the stub."""
+    return {
+        node.target.id
+        for node in module.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+
+
 MODULE = _stub_module()
 FUNCTIONS = _stub_functions(MODULE)
 CLASSES = _stub_classes(MODULE)
+CONSTANTS = _stub_constants(MODULE)
 
 
 def test_stub_declares_the_whole_public_surface() -> None:
@@ -86,7 +96,7 @@ def test_stub_declares_the_whole_public_surface() -> None:
     module_names = {
         n for n in dir(deepdiff_rs) if (not n.startswith("_") or n == "__version__") and n != "deepdiff_rs"
     }
-    stub_names = set(FUNCTIONS) | set(CLASSES) | {"MAX_DEPTH_CEILING", "__version__"}
+    stub_names = set(FUNCTIONS) | set(CLASSES) | CONSTANTS
     assert module_names == stub_names
     assert isinstance(deepdiff_rs.MAX_DEPTH_CEILING, int)
     assert isinstance(deepdiff_rs.__version__, str)
