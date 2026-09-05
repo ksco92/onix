@@ -279,19 +279,17 @@ cargo install cargo-mutants --locked
 make mutants
 ```
 
-**Standing result.** `make mutants` enumerates a deterministic **1251** mutants
-(20 in `onix-cli`, 980 in `onix-core`, 251 in `onix-arrow`). In `onix-arrow`,
+**Standing result.** `make mutants` enumerates a deterministic **1256** mutants
+(20 in `onix-cli`, 980 in `onix-core`, 256 in `onix-arrow`). In `onix-arrow`,
 a standalone `cargo mutants -p onix-arrow` on a quiet machine reports 193
-caught, 46 non-compiling (`Default`-substitution on types without a usable
-`Default`), 9 timeouts, and 3 missed. The 9 timeouts are mutant-induced
+caught, 53 non-compiling (`Default`-substitution on types without a usable
+`Default`), 9 timeouts, and 1 missed. The 9 timeouts are mutant-induced
 infinite loops the tests reach (the decimal trailing-zero reduction in
 `hash_decimal`, and the merge-join cursor advance in `classify`) — detected as
-hangs, not silent survivors. All 3 missed are equivalent mutants: the
-`num_rows() > 0 -> >= 0` push guards in `materialize_side` and in the per-cell
-diff's `collect_changed` are output-neutral because `concat_batches` ignores
-empty batches, and dropping `value_domain`'s `Null` arm is dead because a
-`Null`-typed column always takes the per-cell null branch and never consults its
-value domain. In `onix-core`/`onix-cli`
+hangs, not silent survivors. The 1 missed is an equivalent mutant: the
+`num_rows() > 0 -> >= 0` guard in `push_filtered` (shared by both materialize
+passes) is output-neutral because `concat_batches` ignores empty batches. In
+`onix-core`/`onix-cli`
 every viable mutant is caught except equivalent mutants confined to five
 documented spots (`onix-core/src/lcs.rs`;
 the `> 1` threshold in `onix-core/src/diff/array.rs`, provably output-neutral;

@@ -18,36 +18,27 @@ make mutants        # cargo mutants --package onix-core --package onix-cli --pac
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **1251** mutants (20 in `onix-cli`,
-980 in `onix-core`, 251 in `onix-arrow`). A standalone `cargo mutants -p
-onix-arrow` on a quiet machine reports, for the 251 `onix-arrow` mutants
-(185 in `row_diff.rs`, 38 in `schema.rs`, 17 in `table_diff.rs`, 4 in `lib.rs`,
-4 in `error.rs`, 3 in `options.rs`): **193 caught, 46 unviable, 9 timeout, 3
-missed**. The 46 unviable are `Default`-substitution mutants on types without a
+`make mutants` enumerates a deterministic **1256** mutants (20 in `onix-cli`,
+980 in `onix-core`, 256 in `onix-arrow`). A standalone `cargo mutants -p
+onix-arrow` on a quiet machine reports, for the 256 `onix-arrow` mutants
+(190 in `row_diff.rs`, 38 in `schema.rs`, 17 in `table_diff.rs`, 4 in `lib.rs`,
+4 in `error.rs`, 3 in `options.rs`): **193 caught, 53 unviable, 9 timeout, 1
+missed**. The 53 unviable are `Default`-substitution mutants on types without a
 usable `Default`. The 9 timeouts are mutant-induced infinite loops the tests
 reach — the trailing-zero reduction loop in `hash_decimal` (`==`/`/=` mutants)
 and the two cursor-advance loops in `classify` (the `<`/`==`/`+=` mutants) —
-detected as hangs, not silent survivors. All 3 missed are genuine equivalent
-mutants:
+detected as hangs, not silent survivors. The 1 missed is a genuine equivalent
+mutant: `row_diff.rs`'s `push_filtered` (the shared filter-and-push helper of
+both the added/removed and the per-cell materialize passes) guards
+`if selected.num_rows() > 0` before pushing a batch to `concat_batches`, and
+`> 0 -> >= 0` only adds empty batches, which `concat_batches` ignores, so the
+output is identical.
 
-- `row_diff.rs`'s `materialize_side` guards `if selected.num_rows() > 0` before
-  pushing a batch to `concat_batches`, and `> 0 -> >= 0` only adds empty
-  batches, which `concat_batches` ignores, so the output is identical (the
-  keyed-hash `finish` combine that was an equivalent in an earlier revision is
-  gone — the 128-bit hash is now a single `siphasher` `SipHasher13`, not two
-  combined 64-bit hashers).
-- `row_diff.rs`'s `collect_changed` carries the identical
-  `if selected.num_rows() > 0` push guard for the changed rows of the per-cell
-  diff, equivalent under `> 0 -> >= 0` for the same reason.
-- `row_diff.rs`'s `value_domain` `delete match arm DataType::Null`: a
-  `Null`-typed column is all-null by definition, so the per-cell diff always
-  takes the null branch for it and never reaches the both-non-null branch that
-  consults the value domain — `value_domain(Null)`'s result is dead, so dropping
-  the arm (folding `Null` into the string domain) changes no output. Every other
-  `value_domain` arm is pinned by
-  `each_value_domain_paired_with_a_string_is_type_changed`, which pairs each
-  domain against a `Utf8` column and asserts the change is `type_changed`
-  (dropping any of those arms would mislabel it `value_changed`).
+`value_domain`'s arms are each pinned: `each_value_domain_paired_with_a_string_is_type_changed`
+pairs every domain against a `Utf8` column and asserts `type_changed` (dropping
+an arm would mislabel it `value_changed`), and the `Null` arm is caught because
+its catch-all is `unreachable!` — dropping it panics on the `Null`-typed column
+`only_the_differing_cells_of_a_changed_row_are_reported` diffs.
 
 Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
@@ -170,7 +161,7 @@ timeout.
 
 The `onix-core` + `onix-cli` portion of the enumeration is deterministic at
 **1000** mutants (`cargo mutants --list`; hash.rs 37, memo.rs 14, lcs.rs 111 of
-them); with `onix-arrow`'s 251 the top-line total is 1251, as recorded above. The last full
+them); with `onix-arrow`'s 256 the top-line total is 1256, as recorded above. The last full
 representative run classified the previous 986-mutant enumeration as **890
 caught, 75 unviable, 15 missed, 6 timeout** — the survivors confined to the
 documented equivalent/uncompilable kinds: the `lcs.rs` LCS spots (missed plus

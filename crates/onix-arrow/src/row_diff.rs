@@ -2320,6 +2320,48 @@ mod tests {
     }
 
     #[test]
+    fn mixed_int_and_float_column_renders_each_in_its_own_type() {
+        // Int64 vs Float64 share the Number domain but are not both floats, so
+        // each side renders in its own type — 3 stays "3", not "3.0".
+        let got = one_column_diff(
+            DataType::Int64,
+            Arc::new(Int64Array::from(vec![3])),
+            DataType::Float64,
+            Arc::new(Float64Array::from(vec![3.5])),
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].4, "value_changed");
+        assert_eq!(got[0].2.as_deref(), Some("3"));
+        assert_eq!(got[0].3.as_deref(), Some("3.5"));
+    }
+
+    #[test]
+    fn aware_timestamp_key_column_is_rendered_for_ordering() {
+        // An aware-timestamp key exercises the key renderer's zone strip: without
+        // it the formatter fails on the named zone and the whole diff errors.
+        let sch = schema(vec![
+            Field::new(
+                "k",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("v", DataType::Int64, true),
+        ]);
+        let build = |v: i64| -> MemoryInput {
+            reader(
+                &sch,
+                vec![
+                    Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
+                    Arc::new(Int64Array::from(vec![Some(v)])),
+                ],
+            )
+        };
+        let diff = diff_rows(&build(1), &build(2), &sch, &sch, &["k".to_string()]).unwrap();
+        assert_eq!(diff.counts.cells_changed, 1);
+        assert_eq!(diff.cells_changed.schema().field(0).name(), "k");
+    }
+
+    #[test]
     fn each_value_domain_paired_with_a_string_is_type_changed() {
         // A column of each non-string, non-null value domain on the left against
         // a Utf8 column on the right is a type change (the domains differ). Pins
