@@ -288,13 +288,10 @@ impl Value {
 /// shortest-round-trip `repr()` [`crate::path::python_repr`] uses for a
 /// float *value* — so a report embedding one of these four kinds as a
 /// nested key matches real `DeepDiff`'s own `to_json()` byte-for-byte. A
-/// non-finite `float` key renders as the bare `NaN`/`Infinity`/`-Infinity`
-/// token text a *value* of the same bits would get, rather than reproducing
-/// a confirmed real `DeepDiff` bug where `stringify_param`'s
-/// `repr()`-then-`ast.literal_eval` round trip fails on `"nan"`/`"inf"` and
-/// silently collapses the key to `None` — per this crate's compatibility
-/// policy (crash-or-garble → pick the simpler, deterministic behavior, and
-/// document it).
+/// non-finite `float` key renders as the bare token text a *value* of the
+/// same bits would get, rather than reproducing a real `DeepDiff` bug that
+/// garbles it to `None` — see `tests/golden/README.md`'s "Known `DeepDiff`
+/// quirks" section.
 ///
 /// A `datetime`, `date`, or `tuple` key has no such rule to match: Python's
 /// `json.dumps` (and so `DeepDiff.to_json()`) *raises* `TypeError` rather

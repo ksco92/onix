@@ -42,9 +42,7 @@ def test_int_below_i64_min_raises_value_error() -> None:
         DeepDiff(-(2**63) - 1, 0)
 
 
-# float finiteness — non-finite floats convert (see test_non_finite.py for
-# the comparison/hashing/JSON-rendering behavior this MVP scope note used to
-# gate on rejecting them).
+# float finiteness: non-finite floats convert; see test_non_finite.py.
 
 
 def test_nan_float_is_accepted() -> None:
