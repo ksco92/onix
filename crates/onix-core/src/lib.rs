@@ -61,7 +61,7 @@ pub mod value;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-pub use datetime::{Date, DateTime};
+pub use datetime::{Date, DateTime, Time, TimeDelta};
 pub use diff::{DEFAULT_MAX_DEPTH, DiffOptions, diff, diff_with_max_depth, diff_with_options};
 pub use error::Error;
 pub use report::Report;

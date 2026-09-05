@@ -1,0 +1,15 @@
+{
+  "$set": [
+    {
+      "$frozenset": [
+        {
+          "$timedelta": {
+            "days": 0,
+            "microseconds": 0,
+            "seconds": 1
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,8 @@
 use super::IgnoreOrderMemo;
 use crate::diff::DiffOptions;
-use crate::test_support::{cdate, cdt, cdt_at, cfrozen, cobj, cset, ctup, cv, cvec};
+use crate::test_support::{
+    cdate, cdt, cdt_at, cfrozen, cobj, cset, ctime, ctimedelta, ctup, cv, cvec,
+};
 use crate::value::{SetItems, Value as CValue};
 use serde_json::json;
 
@@ -1886,6 +1888,68 @@ fn a_datetime_leaf_counts_as_changed_only_when_the_instants_differ() {
 }
 
 #[test]
+fn a_time_leaf_counts_as_changed_only_by_plain_time_equality() {
+    let opts = DiffOptions::default();
+    let memo = IgnoreOrderMemo::new();
+    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+
+    // Two aware values at the same offset-adjusted instant: equal.
+    assert_eq!(
+        count(
+            &ctime(10, 0, 0, 0, Some(0)),
+            &ctime(12, 0, 0, 0, Some(2 * 3600))
+        ),
+        0
+    );
+    // A naive value is never equal to an aware one, unlike a datetime.
+    assert_eq!(
+        count(&ctime(10, 0, 0, 0, None), &ctime(10, 0, 0, 0, Some(0))),
+        1
+    );
+    assert_eq!(
+        count(&ctime(10, 0, 0, 0, None), &ctime(10, 0, 0, 0, None)),
+        0
+    );
+    assert_eq!(
+        count(&ctime(10, 0, 0, 0, None), &ctime(11, 0, 0, 0, None)),
+        1
+    );
+}
+
+#[test]
+fn dist_key_hashes_time_and_timedelta_leaves_consistently_with_equality() {
+    // `DistKey`'s `Hash` (backing the ignore_order distance memo) must run
+    // its `Value::Time`/`Value::TimeDelta` arms and agree with `Eq` --
+    // guards `hash_value`'s own match arms for both.
+    assert_eq!(
+        dist_hash(&ctime(10, 0, 0, 0, Some(0))),
+        dist_hash(&ctime(12, 0, 0, 0, Some(2 * 3600)))
+    );
+    assert_ne!(
+        dist_hash(&ctime(10, 0, 0, 0, None)),
+        dist_hash(&ctime(10, 0, 0, 0, Some(0)))
+    );
+    assert_eq!(
+        dist_hash(&ctimedelta(0, 1, 0)),
+        dist_hash(&ctimedelta(0, 1, 0))
+    );
+    assert_ne!(
+        dist_hash(&ctimedelta(0, 1, 0)),
+        dist_hash(&ctimedelta(0, 2, 0))
+    );
+}
+
+#[test]
+fn a_timedelta_leaf_counts_as_changed_only_when_the_exact_value_differs() {
+    let opts = DiffOptions::default();
+    let memo = IgnoreOrderMemo::new();
+    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+
+    assert_eq!(count(&ctimedelta(0, 1, 0), &ctimedelta(0, 1, 0)), 0);
+    assert_eq!(count(&ctimedelta(0, 1, 0), &ctimedelta(0, 2, 0)), 1);
+}
+
+#[test]
 fn a_date_and_a_datetime_pair_by_ordinal_distance_in_either_direction() {
     // `get_numeric_types_distance` walks `TYPES_TO_DIST_FUNC` in order and
     // matches the mixed pair on its `datetime.date` entry, because `datetime`
@@ -1935,6 +1999,36 @@ fn a_calendar_value_is_truthy_when_a_type_change_coerces_it_to_bool() {
     assert_eq!(leaf(&cdate(2024, 1, 1), &cv(&json!(true))), 1);
     assert_eq!(leaf(&cdt(2024, 1, 1, None), &cv(&json!(false))), 2);
     assert_eq!(leaf(&cdt(2024, 1, 1, None), &cv(&json!("x"))), 2);
+}
+
+#[test]
+fn a_time_is_truthy_and_a_timedelta_is_truthy_only_when_non_zero() {
+    // `bool(time(...))` is always True (confirmed against real Python — the
+    // historical "midnight is falsy" quirk was removed). `bool(timedelta(...))`
+    // is False only for the exact-zero duration.
+    let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
+
+    assert_eq!(leaf(&ctime(0, 0, 0, 0, None), &cv(&json!(true))), 1);
+    assert_eq!(leaf(&ctime(0, 0, 0, 0, None), &cv(&json!(false))), 2);
+    assert_eq!(leaf(&ctimedelta(0, 0, 0), &cv(&json!(false))), 1);
+    assert_eq!(leaf(&ctimedelta(0, 0, 0), &cv(&json!(true))), 2);
+    assert_eq!(leaf(&ctimedelta(0, 1, 0), &cv(&json!(true))), 1);
+    assert_eq!(leaf(&ctimedelta(0, 1, 0), &cv(&json!(false))), 2);
+}
+
+#[test]
+fn a_time_or_timedelta_pairs_with_its_own_str_via_type_change_coercion() {
+    // `str(time)`/`str(timedelta)` are ordinary strings Python produces
+    // happily, so `new_type(old_value)` reproduces the new value and the
+    // delta omits it — see `coerce_to_python_str`'s doc.
+    let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
+    let t = ctime(10, 30, 0, 0, None);
+    let d = ctimedelta(0, 1, 0);
+
+    assert_eq!(leaf(&t, &cv(&json!("10:30:00"))), 1);
+    assert_eq!(leaf(&t, &cv(&json!("not it"))), 2);
+    assert_eq!(leaf(&d, &cv(&json!("0:00:01"))), 1);
+    assert_eq!(leaf(&d, &cv(&json!("not it"))), 2);
 }
 
 #[test]

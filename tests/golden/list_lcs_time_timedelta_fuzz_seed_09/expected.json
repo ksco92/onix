@@ -1,0 +1,13 @@
+{
+  "iterable_item_added": {
+    "root[1]": "10:30:00.123456"
+  },
+  "type_changes": {
+    "root[0]": {
+      "new_type": "time",
+      "new_value": "23:59:59.999999",
+      "old_type": "str",
+      "old_value": "anchor"
+    }
+  }
+}

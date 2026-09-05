@@ -1,0 +1,10 @@
+[
+  "anchor",
+  {
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 0,
+      "seconds": 2
+    }
+  }
+]

@@ -28,6 +28,8 @@ pub(crate) fn python_type_name(value: &Value) -> &'static str {
         Value::Str(_) => "str",
         Value::DateTime(_) => "datetime",
         Value::Date(_) => "date",
+        Value::Time(_) => "time",
+        Value::TimeDelta(_) => "timedelta",
         Value::Array(_) => "list",
         Value::Tuple(_) => "tuple",
         Value::Set(_) => "set",

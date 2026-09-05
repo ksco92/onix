@@ -1,0 +1,10 @@
+{
+  "type_changes": {
+    "root['t']": {
+      "new_type": "int",
+      "new_value": 1,
+      "old_type": "timedelta",
+      "old_value": "0:00:01"
+    }
+  }
+}

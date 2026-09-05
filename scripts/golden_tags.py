@@ -2,18 +2,23 @@
 
 A golden case's ``a.json``/``b.json`` are plain JSON files, but the values they stand
 for are Python objects, and several of the types DeepDiff diffs (``tuple``, ``set``,
-``frozenset``, ``datetime``, ``date``) have no JSON literal. This module defines the one
-encoding that closes that gap, shared by every reader of the corpus:
+``frozenset``, ``datetime``, ``date``, ``time``, ``timedelta``) have no JSON literal. This
+module defines the one encoding that closes that gap, shared by every reader of the corpus:
 
 - A JSON object with **exactly one** key, and that key one of :data:`RESERVED_TAGS`, is a
   tagged value and decodes to the corresponding Python object.
 - **Any other** JSON object is plain data and decodes to a ``dict``, recursively.
 
 So ``{"$tuple": [1, 2]}`` is the tuple ``(1, 2)``, ``{"$datetime": "2024-01-01T10:00:00+02:00"}``
-is that aware ``datetime`` and ``{"$date": "2024-01-01"}`` that ``date``, while
-``{"$tuple": [1], "x": 2}`` and ``{"other": 1}`` are ordinary dicts. The two calendar tags
-carry an ISO 8601 string — exactly what ``isoformat()`` produces and ``fromisoformat()``
-reads back, with the UTC offset present only for an aware value. The cost of the encoding is that a dict whose only
+is that aware ``datetime``, ``{"$date": "2024-01-01"}`` that ``date`` and ``{"$time":
+"10:00:00+02:00"}`` that aware ``time``, while ``{"$tuple": [1], "x": 2}`` and ``{"other": 1}``
+are ordinary dicts. The three calendar tags carry an ISO 8601 string — exactly what
+``isoformat()`` produces and ``fromisoformat()`` reads back, with the UTC offset present only
+for an aware value. ``$timedelta`` carries Python's own already-normalized ``{"days": D,
+"seconds": S, "microseconds": U}`` triple instead of a single number: a flattened total-
+microsecond count overflows even a 64-bit integer at Python's own extreme
+``days=999_999_999`` (see ``onix_core::datetime::TimeDelta``'s own doc), where the three
+components never do. The cost of the encoding is that a dict whose only
 key is literally one of the reserved names cannot be written as a golden fixture;
 :func:`encode_tags` refuses such a value rather than writing a file that would decode
 back into something else.
@@ -36,22 +41,29 @@ SET_TAG: Final[str] = "$set"
 FROZENSET_TAG: Final[str] = "$frozenset"
 DATETIME_TAG: Final[str] = "$datetime"
 DATE_TAG: Final[str] = "$date"
+TIME_TAG: Final[str] = "$time"
+TIMEDELTA_TAG: Final[str] = "$timedelta"
 
-# Every tag name the encoding reserves. All five are implemented; the list is still
+# Every tag name the encoding reserves. All seven are implemented; the list is still
 # fixed here so a fixture can never use one as an ordinary dict key, and so all three
 # readers agree on the full set.
 RESERVED_TAGS: Final[frozenset[str]] = frozenset(
-    {TUPLE_TAG, SET_TAG, FROZENSET_TAG, DATETIME_TAG, DATE_TAG}
+    {TUPLE_TAG, SET_TAG, FROZENSET_TAG, DATETIME_TAG, DATE_TAG, TIME_TAG, TIMEDELTA_TAG}
 )
 
-# DeepDiff's own `to_json()` cannot serialize a `date` at all: `serialization.JSON_CONVERTOR`
-# has an entry for `datetime.datetime` (`isoformat()`) and none for `datetime.date`, so a
-# report carrying one raises TypeError. onix renders it as `YYYY-MM-DD` — a documented
-# superset (see tests/golden/README.md) — and passing this mapping to DeepDiff's own
+# DeepDiff's own `to_json()` cannot serialize a `date`, `time` or `timedelta` at all:
+# `serialization.JSON_CONVERTOR` has an entry for `datetime.datetime` (`isoformat()`) and none
+# for the other three, so a report carrying one raises TypeError. onix renders a `date`/`time`
+# as `isoformat()`'s own bytes and a `timedelta` as `str()`'s — documented supersets (see
+# tests/golden/README.md) — and passing this mapping to DeepDiff's own
 # `to_json(default_mapping=...)` makes it produce exactly the same bytes, so a golden case
-# holding a date still has real DeepDiff output as its spec.
-JSON_DEFAULT_MAPPING: Final[dict[type, Callable[[datetime.date], str]]] = {
-    datetime.date: datetime.date.isoformat
+# holding any of the three still has real DeepDiff output as its spec.
+type _Renderable = datetime.date | datetime.time | datetime.timedelta
+
+JSON_DEFAULT_MAPPING: Final[dict[type, Callable[[_Renderable], str]]] = {
+    datetime.date: datetime.date.isoformat,
+    datetime.time: datetime.time.isoformat,
+    datetime.timedelta: str,
 }
 
 # A JSON-shaped value, plus the Python types the tags decode to. Named instead of
@@ -64,6 +76,8 @@ type TaggedValue = (
     | frozenset["SetMember"]
     | datetime.datetime
     | datetime.date
+    | datetime.time
+    | datetime.timedelta
     | str
     | int
     | float
@@ -77,6 +91,8 @@ type SetMember = (
     | frozenset["SetMember"]
     | datetime.datetime
     | datetime.date
+    | datetime.time
+    | datetime.timedelta
     | str
     | int
     | float
@@ -119,6 +135,18 @@ def encode_tags(value: TaggedValue) -> TaggedValue:
 
     if isinstance(value, datetime.date):
         return {DATE_TAG: value.isoformat()}
+
+    if isinstance(value, datetime.time):
+        return {TIME_TAG: value.isoformat()}
+
+    if isinstance(value, datetime.timedelta):
+        return {
+            TIMEDELTA_TAG: {
+                "days": value.days,
+                "seconds": value.seconds,
+                "microseconds": value.microseconds,
+            }
+        }
 
     # Written in onix's canonical set order rather than the live set's own iteration
     # order, which is hash order and, for `str` members, PYTHONHASHSEED-dependent. onix
@@ -174,6 +202,19 @@ def decode_tags(value: TaggedValue) -> TaggedValue:
 
         if tag == DATE_TAG:
             return datetime.date.fromisoformat(str(value[tag]))
+
+        if tag == TIME_TAG:
+            return datetime.time.fromisoformat(str(value[tag]))
+
+        if tag == TIMEDELTA_TAG:
+            payload = value[tag]
+            if not isinstance(payload, dict):
+                raise TypeError(f"the {TIMEDELTA_TAG!r} tag's payload must be an object")
+            return datetime.timedelta(
+                days=int(payload["days"]),
+                seconds=int(payload["seconds"]),
+                microseconds=int(payload["microseconds"]),
+            )
 
         if tag is not None:
             raise NotImplementedError(f"the {tag!r} tag is reserved but not decodable yet")
@@ -368,6 +409,12 @@ def _order_key(value: object) -> tuple[object, ...]:
     if isinstance(value, datetime.date):
         return (11, value.toordinal())
 
+    if isinstance(value, datetime.time):
+        return (12, _time_sort_key(value))
+
+    if isinstance(value, datetime.timedelta):
+        return (13, (value.days, value.seconds, value.microseconds))
+
     raise TypeError(f"no canonical order defined for {type(value).__name__}")
 
 
@@ -392,3 +439,26 @@ def _datetime_instant(value: datetime.datetime) -> tuple[int, bool, int]:
     micros = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
 
     return (micros, value.tzinfo is not None, int(offset.total_seconds()))
+
+
+def _time_sort_key(value: datetime.time) -> tuple[bool, int, int]:
+    """
+    Build a `time`'s ordering key: naive first, then by the offset-adjusted
+    micros-of-day, then by the raw offset.
+
+    The Python twin of ``onix_core::datetime::Time::sort_instant`` plus
+    ``crate::value::canonical_cmp``'s own tie-break for `Time` -- unlike
+    :func:`_datetime_instant`, a naive value is NOT read as if it were UTC
+    (real `time.__eq__` never does that; see `crate::datetime`'s module doc),
+    so its own micros-of-day is used unadjusted.
+
+    :param value: A `time`, naive or aware.
+    :return: A tuple ordering `value` against any other `time` the same way onix does.
+    """
+    offset = value.utcoffset()
+    wall_micros = (
+        (value.hour * 3600 + value.minute * 60 + value.second) * 1_000_000 + value.microsecond
+    )
+    offset_seconds = int(offset.total_seconds()) if offset is not None else 0
+
+    return (offset is not None, wall_micros - offset_seconds * 1_000_000, offset_seconds)

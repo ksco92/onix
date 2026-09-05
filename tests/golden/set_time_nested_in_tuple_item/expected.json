@@ -1,0 +1,8 @@
+{
+  "set_item_added": [
+    "root['sentinel']"
+  ],
+  "set_item_removed": [
+    "root[(datetime.time(10, 30),)]"
+  ]
+}

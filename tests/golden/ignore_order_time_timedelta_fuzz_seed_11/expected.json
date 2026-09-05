@@ -1,0 +1,9 @@
+{
+  "iterable_item_added": {
+    "root[0]": "23:59:59.999999",
+    "root[1]": "12:00:00+02:00"
+  },
+  "iterable_item_removed": {
+    "root[3]": "-1 day, 1:00:00"
+  }
+}

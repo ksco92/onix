@@ -158,14 +158,17 @@ pub fn quote_key(key: &str) -> String {
 ///   escaping of any kind** — `{"it's"}` renders `root['it's']`, where the
 ///   *dict key* `"it's"` renders `root["it's"]`. The two rules genuinely
 ///   differ; confirmed against `deepdiff==9.1.0`.
-/// - A `datetime`/`date` item renders via Python's own `str()` for that
-///   type — [`crate::datetime::DateTime::python_str`]/
-///   [`crate::datetime::Date::python_str`], e.g. `{datetime(2024, 1, 1)}`
-///   renders `root[2024-01-01 00:00:00]` and `{date(2024, 1, 1)}` renders
-///   `root[2024-01-01]` — **not** `repr()`, unlike every other item kind:
-///   Python's `str()` and `repr()` agree for `None`/`bool`/number/`tuple`/
-///   `frozenset`, but a calendar value is the one type this model holds
-///   where they genuinely differ. Confirmed against `deepdiff==9.1.0`.
+/// - A `datetime`/`date`/`time`/`timedelta` item renders via Python's own
+///   `str()` for that type — [`crate::datetime::DateTime::python_str`]/
+///   [`crate::datetime::Date::python_str`]/[`crate::datetime::Time::python_str`]/
+///   [`crate::datetime::TimeDelta::python_str`], e.g. `{datetime(2024, 1, 1)}`
+///   renders `root[2024-01-01 00:00:00]`, `{date(2024, 1, 1)}` renders
+///   `root[2024-01-01]`, `{time(1, 0)}` renders `root[01:00:00]` and
+///   `{timedelta(seconds=1)}` renders `root[0:00:01]` — **not** `repr()`,
+///   unlike every other item kind: Python's `str()` and `repr()` agree for
+///   `None`/`bool`/number/`tuple`/`frozenset`, but these four calendar types
+///   are the ones this model holds where they genuinely differ. Confirmed
+///   against `deepdiff==9.1.0`.
 /// - Every other item is rendered by Python's `str()`, which for the
 ///   remaining types a set can hold is `repr()` ([`python_repr`]) — so a
 ///   `str` *or a calendar value* nested **inside** a tuple or frozenset item
@@ -189,15 +192,18 @@ pub fn set_item_repr(item: &Value) -> String {
         Value::Str(s) => format!("'{s}'"),
         Value::DateTime(value) => value.python_str(),
         Value::Date(value) => value.python_str(),
+        Value::Time(value) => value.python_str(),
+        Value::TimeDelta(value) => value.python_str(),
         other => python_repr(other),
     }
 }
 
 /// Renders `value` as Python's `repr()` would.
 ///
-/// `repr()` and `str()` agree on every type this model holds (Python only
-/// separates them for `str` itself, and a container's `str()` uses `repr()`
-/// for its elements either way), so this one function covers both sides of
+/// `repr()` and `str()` agree on every type this model holds except
+/// [`set_item_repr`]'s five special-cased kinds (`str` itself, and the four
+/// calendar types); a container's `str()` uses `repr()` for its elements
+/// either way, so this one function covers both sides of
 /// [`set_item_repr`]'s rule.
 ///
 /// A `set`/`frozenset` renders its members in the crate's canonical set
@@ -256,6 +262,8 @@ fn write_repr_head<'a>(out: &mut String, stack: &mut Vec<Work<'a>>, value: &'a V
                 value.day()
             );
         }
+        Value::Time(value) => out.push_str(&time_repr(*value)),
+        Value::TimeDelta(value) => out.push_str(&timedelta_repr(*value)),
         Value::Array(items) => push_sequence(out, stack, items, "[", "]"),
         Value::Tuple(items) => {
             let close = if items.len() == 1 { ",)" } else { ")" };
@@ -304,12 +312,40 @@ fn datetime_repr(value: crate::datetime::DateTime) -> String {
         let _ = write!(out, ", {}", value.microsecond());
     }
 
-    match value.utc_offset_seconds() {
-        None => {}
-        // Python's own `timezone.utc` singleton reprs by name; every other
-        // fixed offset reprs as the `timedelta` it was built from, which
-        // normalizes a negative offset into whole days plus seconds.
-        Some(0) => out.push_str(", tzinfo=datetime.timezone.utc"),
+    out.push_str(&tzinfo_repr_suffix(value.utc_offset_seconds()));
+    out.push(')');
+    out
+}
+
+/// Python's `repr()` for a `time` — [`datetime_repr`]'s twin minus the date
+/// fields, sharing its exact same trailing-field-omission and tzinfo-suffix
+/// rules (see that function's doc); the form a `time` takes *inside* a set
+/// item (a bare top-level one uses [`crate::datetime::Time::python_str`]
+/// instead — see [`set_item_repr`]'s doc).
+fn time_repr(value: crate::datetime::Time) -> String {
+    let mut out = format!("datetime.time({}, {}", value.hour(), value.minute());
+
+    if value.second() != 0 || value.microsecond() != 0 {
+        let _ = write!(out, ", {}", value.second());
+    }
+    if value.microsecond() != 0 {
+        let _ = write!(out, ", {}", value.microsecond());
+    }
+
+    out.push_str(&tzinfo_repr_suffix(value.utc_offset_seconds()));
+    out.push(')');
+    out
+}
+
+/// The `tzinfo=...` suffix [`datetime_repr`] and [`time_repr`] both append —
+/// empty for a naive value; Python's own `timezone.utc` singleton reprs by
+/// name for a zero offset, and every other fixed offset reprs as the
+/// `timedelta` it was built from, normalizing a negative offset into whole
+/// days plus seconds.
+fn tzinfo_repr_suffix(offset: Option<i32>) -> String {
+    match offset {
+        None => String::new(),
+        Some(0) => ", tzinfo=datetime.timezone.utc".to_string(),
         Some(offset) => {
             let (days, seconds) = div_rem_euclid(i64::from(offset), SECONDS_PER_DAY);
             let day_part = if days == 0 {
@@ -317,15 +353,35 @@ fn datetime_repr(value: crate::datetime::DateTime) -> String {
             } else {
                 format!("days={days}, ")
             };
-            let _ = write!(
-                out,
-                ", tzinfo=datetime.timezone(datetime.timedelta({day_part}seconds={seconds}))"
-            );
+            format!(", tzinfo=datetime.timezone(datetime.timedelta({day_part}seconds={seconds}))")
         }
     }
+}
 
-    out.push(')');
-    out
+/// Python's `repr()` for a `timedelta`: `datetime.timedelta(days=D,
+/// seconds=S, microseconds=U)`, each field present only when non-zero, and
+/// `datetime.timedelta(0)` (a bare positional zero, not `days=0`) when all
+/// three are — verified against real Python across zero, negative and
+/// multi-field durations.
+fn timedelta_repr(value: crate::datetime::TimeDelta) -> String {
+    let (days, seconds, microseconds) = (value.days(), value.seconds(), value.microseconds());
+
+    if days == 0 && seconds == 0 && microseconds == 0 {
+        return "datetime.timedelta(0)".to_string();
+    }
+
+    let mut fields = Vec::with_capacity(3);
+    if days != 0 {
+        fields.push(format!("days={days}"));
+    }
+    if seconds != 0 {
+        fields.push(format!("seconds={seconds}"));
+    }
+    if microseconds != 0 {
+        fields.push(format!("microseconds={microseconds}"));
+    }
+
+    format!("datetime.timedelta({})", fields.join(", "))
 }
 
 /// Writes one set's repr: `empty` when it has no members, otherwise
@@ -546,7 +602,7 @@ mod tests {
     use super::{
         PathSegment, escape_non_printable, python_repr, quote_key, render_path, set_item_repr,
     };
-    use crate::test_support::{cdate, cdt_at};
+    use crate::test_support::{cdate, cdt_at, ctime, ctimedelta};
     use crate::value::{Builder, Number, SetItems, Value};
 
     #[test]
@@ -956,6 +1012,28 @@ mod tests {
                  tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=68400)))",
             ),
             (cdate(2024, 1, 1), "datetime.date(2024, 1, 1)"),
+            (ctime(0, 0, 0, 0, None), "datetime.time(0, 0)"),
+            (ctime(10, 30, 0, 0, None), "datetime.time(10, 30)"),
+            (ctime(10, 30, 5, 0, None), "datetime.time(10, 30, 5)"),
+            (ctime(10, 30, 5, 7, None), "datetime.time(10, 30, 5, 7)"),
+            (ctime(0, 0, 0, 7, None), "datetime.time(0, 0, 0, 7)"),
+            (
+                ctime(0, 0, 0, 0, Some(0)),
+                "datetime.time(0, 0, tzinfo=datetime.timezone.utc)",
+            ),
+            (
+                ctime(0, 0, 0, 0, Some(-18000)),
+                "datetime.time(0, 0, \
+                 tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=68400)))",
+            ),
+            (ctimedelta(0, 0, 0), "datetime.timedelta(0)"),
+            (ctimedelta(1, 0, 0), "datetime.timedelta(days=1)"),
+            (ctimedelta(0, 1, 0), "datetime.timedelta(seconds=1)"),
+            (ctimedelta(0, 0, 1), "datetime.timedelta(microseconds=1)"),
+            (
+                ctimedelta(2, 11_045, 6),
+                "datetime.timedelta(days=2, seconds=11045, microseconds=6)",
+            ),
         ];
         for (value, expected) in cases {
             assert_eq!(

@@ -1,0 +1,23 @@
+{
+  "micro": {
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 1,
+      "seconds": 0
+    }
+  },
+  "one_day": {
+    "$timedelta": {
+      "days": 1,
+      "microseconds": 0,
+      "seconds": 0
+    }
+  },
+  "zero": {
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 0,
+      "seconds": 0
+    }
+  }
+}

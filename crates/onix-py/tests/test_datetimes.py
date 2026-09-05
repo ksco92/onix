@@ -14,6 +14,7 @@ import datetime
 import zoneinfo
 
 import pytest
+from conftest import _normalize_types
 from deepdiff import DeepDiff as RealDeepDiff
 
 from deepdiff_rs import DeepDiff as OnixDeepDiff
@@ -22,29 +23,6 @@ from deepdiff_rs import diff_json
 UTC = datetime.timezone.utc
 PLUS_TWO = datetime.timezone(datetime.timedelta(hours=2))
 MINUS_FIVE = datetime.timezone(datetime.timedelta(hours=-5))
-
-
-def _normalize_types(value: object) -> object:
-    """
-    Replace any Python type object in a report with its name.
-
-    Real DeepDiff's `to_dict()` reports a `type_changes` entry's types as the type
-    objects themselves, where `deepdiff_rs` reports their names — a documented gap
-    of this MVP, normalized away here so it does not mask the values under test.
-
-    :param value: A report, or any part of one.
-    :return: The same value with type objects replaced by their names.
-    """
-    if isinstance(value, dict):
-        return {key: _normalize_types(item) for key, item in value.items()}
-
-    if isinstance(value, list):
-        return [_normalize_types(item) for item in value]
-
-    if isinstance(value, type):
-        return value.__name__
-
-    return value
 
 
 @pytest.mark.parametrize(

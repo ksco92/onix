@@ -80,6 +80,14 @@ enum DistanceFamily {
     DateTime { timestamp: f64, ordinal: f64 },
     /// `datetime.date` -> `_get_date_distance`, i.e. `date.toordinal()`.
     Date(f64),
+    /// `datetime.time` -> `_get_time_distance`, i.e.
+    /// `time_to_seconds(time)` — real `DeepDiff` never pairs a `time`
+    /// against anything but another `time` (see `TYPES_TO_DIST_FUNC`: no
+    /// entry lets a `time` `isinstance`-match a `date`/`datetime`/number).
+    Time(f64),
+    /// `datetime.timedelta` -> `_get_timedelta_distance`, i.e.
+    /// `timedelta.total_seconds()` — likewise never cross-paired.
+    TimeDelta(f64),
 }
 
 /// The distance family `value` belongs to, or `None` for a container.
@@ -113,6 +121,8 @@ fn distance_family(value: &Value) -> Option<DistanceFamily> {
             ordinal: value.date().ordinal() as f64,
         }),
         Value::Date(value) => Some(DistanceFamily::Date(value.ordinal() as f64)),
+        Value::Time(value) => Some(DistanceFamily::Time(value.hash_seconds_of_day() as f64)),
+        Value::TimeDelta(value) => Some(DistanceFamily::TimeDelta(value.total_seconds())),
         Value::Null
         | Value::Str(_)
         | Value::Array(_)
@@ -146,6 +156,8 @@ fn family_distance(removed: &Value, added: &Value, cutoff: f64) -> Option<f64> {
         (DistanceFamily::DateTime { ordinal: r, .. }, DistanceFamily::Date(a)) => (r, a),
         (DistanceFamily::Date(r), DistanceFamily::DateTime { ordinal: a, .. }) => (r, a),
         (DistanceFamily::Date(r), DistanceFamily::Date(a)) => (r, a),
+        (DistanceFamily::Time(r), DistanceFamily::Time(a)) => (r, a),
+        (DistanceFamily::TimeDelta(r), DistanceFamily::TimeDelta(a)) => (r, a),
         _ => return None,
     };
 
@@ -192,7 +204,9 @@ pub(crate) fn rough_length(value: &Value) -> usize {
         | Value::Number(_)
         | Value::Str(_)
         | Value::DateTime(_)
-        | Value::Date(_) => 1,
+        | Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeDelta(_) => 1,
         Value::Array(items) | Value::Tuple(items) => {
             1 + items.iter().map(rough_length).sum::<usize>()
         }
@@ -224,9 +238,13 @@ pub(crate) fn rough_length(value: &Value) -> usize {
 pub(crate) fn item_length(value: &Value) -> usize {
     match value {
         Value::Null => 0,
-        Value::Bool(_) | Value::Number(_) | Value::Str(_) | Value::DateTime(_) | Value::Date(_) => {
-            1
-        }
+        Value::Bool(_)
+        | Value::Number(_)
+        | Value::Str(_)
+        | Value::DateTime(_)
+        | Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeDelta(_) => 1,
         Value::Array(items) | Value::Tuple(items) => items.iter().map(item_length).sum(),
         Value::Set(items) | Value::FrozenSet(items) => items.iter().map(item_length).sum(),
         Value::Object(map) => item_length_of_map(map),
@@ -295,6 +313,10 @@ pub(crate) fn count_diff_leaves(
         // either way, and this is a pairing heuristic, not a report.
         (Value::DateTime(x), Value::DateTime(y)) => usize::from(x.instant() != y.instant()),
         (Value::Date(x), Value::Date(y)) => usize::from(x != y),
+        // Plain `_diff_time` equality (see `crate::datetime`'s module doc),
+        // matching `diff_at`'s own dispatch for `Time`.
+        (Value::Time(x), Value::Time(y)) => usize::from(!crate::datetime::times_equal(*x, *y)),
+        (Value::TimeDelta(x), Value::TimeDelta(y)) => usize::from(x != y),
         (Value::Number(x), Value::Number(y)) => {
             if x.is_f64() == y.is_f64() {
                 usize::from(!crate::diff::numbers_equal(x, y))
@@ -479,6 +501,8 @@ fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value>
         Value::Null
         | Value::DateTime(_)
         | Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeDelta(_)
         | Value::Array(_)
         | Value::Tuple(_)
         | Value::Set(_)
@@ -499,8 +523,15 @@ fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value>
 fn is_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
-        // `bool(datetime(...))`/`bool(date(...))` is always True.
-        Value::DateTime(_) | Value::Date(_) => true,
+        // `bool(datetime(...))`/`bool(date(...))`/`bool(time(...))` is
+        // always True (confirmed against real Python — `time`'s historical
+        // "midnight is falsy" quirk was removed).
+        Value::DateTime(_) | Value::Date(_) | Value::Time(_) => true,
+        // `bool(timedelta(...))` is `False` only for the exact-zero
+        // duration.
+        Value::TimeDelta(value) => {
+            value.days() != 0 || value.seconds() != 0 || value.microseconds() != 0
+        }
         Value::Bool(b) => *b,
         Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
         Value::Str(s) => !s.is_empty(),
@@ -520,6 +551,8 @@ fn coerce_to_f64(value: &Value) -> Option<f64> {
         Value::Null
         | Value::DateTime(_)
         | Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeDelta(_)
         | Value::Array(_)
         | Value::Tuple(_)
         | Value::Set(_)
@@ -557,6 +590,8 @@ fn coerce_to_i64(value: &Value) -> Option<i64> {
         Value::Null
         | Value::DateTime(_)
         | Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeDelta(_)
         | Value::Array(_)
         | Value::Tuple(_)
         | Value::Set(_)
@@ -600,11 +635,14 @@ fn coerce_to_i64(value: &Value) -> Option<i64> {
 fn coerce_to_python_str(value: &Value) -> Option<String> {
     match value {
         Value::Null => Some("None".to_string()),
-        // `str(datetime)`/`str(date)` are ordinary strings Python produces
-        // happily, so this coercion really can reproduce a `type_changes`
-        // pair's new value — see `DateTime::python_str`.
+        // `str(datetime)`/`str(date)`/`str(time)`/`str(timedelta)` are
+        // ordinary strings Python produces happily, so this coercion really
+        // can reproduce a `type_changes` pair's new value — see
+        // `DateTime::python_str`.
         Value::DateTime(value) => Some(value.python_str()),
         Value::Date(value) => Some(value.python_str()),
+        Value::Time(value) => Some(value.python_str()),
+        Value::TimeDelta(value) => Some(value.python_str()),
         Value::Array(_)
         | Value::Tuple(_)
         | Value::Set(_)

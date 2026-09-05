@@ -8,8 +8,8 @@ Eight batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
 and `ignore_order=True`): the JSON-shaped types; the same plus tuples, as
 containers in their own right and as elements of lists, dicts and other
 tuples; the same plus sets and frozensets, likewise; the same plus naive and
-aware datetimes and dates anywhere in a nested value; flat, tightly clustered
-calendar lists, which put maximum pressure on difflib alignment and
+aware datetimes, dates, times and timedeltas anywhere in a nested value; flat,
+tightly clustered calendar lists, which put maximum pressure on difflib alignment and
 `ignore_order` pairing because near-identical candidates make every tie-break
 observable; dict-wrapped calendar values against strings of themselves, which
 is the shape the `str()` coercion decides; at `COMBINED_SEED_COUNT`
@@ -70,6 +70,7 @@ from collections.abc import Iterator
 from typing import Final
 
 import pytest
+from conftest import _normalize_types
 from deepdiff import DeepDiff as RealDeepDiff
 from golden_tags import JSON_DEFAULT_MAPPING, canonical_set_order
 
@@ -158,6 +159,11 @@ DATE_PROBABILITY: Final[float] = 0.25
 NAIVE_PROBABILITY: Final[float] = 0.4
 CALENDAR_LEAF_PROBABILITY: Final[float] = 0.6
 
+# How often a calendar leaf is a `time` or `timedelta` instead of a
+# `date`/`datetime`, each its own cascading `rng` draw like DATE_PROBABILITY.
+TIME_PROBABILITY: Final[float] = 0.15
+TIMEDELTA_PROBABILITY: Final[float] = 0.15
+
 # Two edits that only the tuple batch applies, both aimed at shapes this slice
 # turns on and that kind-preserving mutation alone can never produce: flipping
 # a sequence between list and tuple while keeping its items, and re-typing a
@@ -222,13 +228,35 @@ def _gen_scalar(rng: random.Random, scalars: list[JsonValue] | None = None) -> J
 
 def _gen_calendar(rng: random.Random) -> JsonValue:
     """
-    Pick a random `date`, or a random naive or aware `datetime`.
+    Pick a random `date`, `time`, `timedelta`, or a random naive or aware `datetime`.
 
     :param rng: Seeded RNG.
     :return: A calendar value, or a plain scalar for the rest of the alphabet.
     """
     if rng.random() >= CALENDAR_LEAF_PROBABILITY:
         return _gen_scalar(rng)
+
+    if rng.random() < TIMEDELTA_PROBABILITY:
+        return datetime.timedelta(
+            seconds=rng.randrange(-CALENDAR_SPAN_SECONDS, CALENDAR_SPAN_SECONDS),
+            microseconds=rng.choice(MICROSECONDS),
+        )
+
+    if rng.random() < TIME_PROBABILITY:
+        seconds_of_day = rng.randrange(86_400)
+        wall_clock = datetime.time(
+            seconds_of_day // 3600,
+            seconds_of_day // 60 % 60,
+            seconds_of_day % 60,
+            rng.choice(MICROSECONDS),
+        )
+
+        if rng.random() < NAIVE_PROBABILITY:
+            return wall_clock
+
+        offset = rng.choice(UTC_OFFSETS)
+
+        return wall_clock.replace(tzinfo=datetime.timezone(datetime.timedelta(seconds=offset)))
 
     value = CALENDAR_EPOCH + datetime.timedelta(
         seconds=rng.randrange(CALENDAR_SPAN_SECONDS), microseconds=rng.choice(MICROSECONDS)
@@ -363,7 +391,10 @@ def _calendar_edge_mutations(rng: random.Random, value: object) -> object:
     `'replace'` and `ignore_order` pairing paths rather than matching outright.
     The stringify (see `STRINGIFY_PROBABILITY`) puts a calendar value next to a
     string of itself, which is what exercises the `str()` coercion the
-    `type_changes` delta shape depends on. The `set`/`frozenset` branch exists
+    `type_changes` delta shape depends on — `time`/`timedelta` take only this
+    edit (`str()`, since neither has an `isoformat()`/offset-shift analogue
+    worth the added complexity here; both are covered directly by the golden
+    corpus and `test_times.py`/`test_timedeltas.py`). The `set`/`frozenset` branch exists
     for the combined batch (issue #21): the JSON-shaped and tuple batches never
     produce one, so it is simply never taken there.
 
@@ -383,6 +414,9 @@ def _calendar_edge_mutations(rng: random.Random, value: object) -> object:
 
     if isinstance(value, dict):
         return {key: _calendar_edge_mutations(rng, item) for key, item in value.items()}
+
+    if isinstance(value, (datetime.time, datetime.timedelta)) and rng.random() < STRINGIFY_PROBABILITY:
+        return str(value)
 
     if isinstance(value, datetime.date) and rng.random() < STRINGIFY_PROBABILITY:
         return str(value) if rng.random() < 0.5 else value.isoformat()
@@ -444,34 +478,6 @@ def _tuple_edge_mutations(rng: random.Random, value: JsonValue, in_tuple: bool =
 
     if in_tuple and isinstance(value, (bool, int, float)) and rng.random() < RETYPE_PROBABILITY:
         return _retype_number(rng, value)
-
-    return value
-
-
-def _normalize_types(value: JsonValue | type) -> JsonValue:
-    """
-    Replace any Python type object in a report with its name.
-
-    Real DeepDiff's `to_dict()` reports a `type_changes` entry's `old_type`/
-    `new_type` as the type objects themselves, where `deepdiff_rs` reports the
-    names its `to_json()` uses (`"tuple"`, `"list"`, ...). That one difference
-    is a documented gap of this MVP, so it is normalized away here rather than
-    swamping every other comparison this test exists to make.
-
-    :param value: A report, or any part of one.
-    :return: The same value with type objects replaced by their names.
-    """
-    if isinstance(value, dict):
-        return {key: _normalize_types(item) for key, item in value.items()}
-
-    if isinstance(value, list):
-        return [_normalize_types(item) for item in value]
-
-    if isinstance(value, tuple):
-        return tuple(_normalize_types(item) for item in value)
-
-    if isinstance(value, type):
-        return value.__name__
 
     return value
 

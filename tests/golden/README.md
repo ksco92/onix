@@ -37,15 +37,23 @@ literal. A case that needs one writes it as a **tagged object**: a JSON object w
 | `$frozenset` | `frozenset` | supported |
 | `$datetime` | `datetime.datetime` | supported (ISO 8601 string, offset optional) |
 | `$date` | `datetime.date` | supported (ISO 8601 string) |
+| `$time` | `datetime.time` | supported (ISO 8601 string, offset optional) |
+| `$timedelta` | `datetime.timedelta` | supported (`{"days": D, "seconds": S, "microseconds": U}`) |
 
 So `{"$tuple": [1, 2]}` is the tuple `(1, 2)`, `{"$set": [1, 2]}` is the set
 `{1, 2}`, `[{"$tuple": []}]` is a list holding the empty tuple,
-`{"$datetime": "2024-01-01T10:00:00+02:00"}` is that aware datetime and
-`{"$date": "2024-01-01"}` is that date. The two calendar tags carry exactly
-what `isoformat()` produces and `fromisoformat()` reads back, with the UTC
-offset present only for an aware value; a set's members are always *written* in
-the canonical order documented below, which is what makes a fixture holding one
-byte-identical between runs. **Any other object is plain data**, including one that has a
+`{"$datetime": "2024-01-01T10:00:00+02:00"}` is that aware datetime,
+`{"$date": "2024-01-01"}` is that date and `{"$time": "10:00:00+02:00"}` is
+that aware time. The three calendar-string tags carry exactly what
+`isoformat()` produces and `fromisoformat()` reads back, with the UTC offset
+present only for an aware value. `$timedelta` carries Python's own
+already-normalized `(days, seconds, microseconds)` triple as an object
+instead of one ISO string, because a single flattened microsecond count
+overflows even a 64-bit integer at Python's own extreme `days=999_999_999`
+(see `onix_core::datetime::TimeDelta`'s own doc); a set's members are always
+*written* in the canonical order documented below, which is what makes a
+fixture holding one byte-identical between runs. **Any other object is
+plain data**, including one that has a
 reserved key alongside others (`{"$tuple": [1], "x": 2}` is a two-key dict). The
 reserved names are claimed all at once, before their types are supported, so a
 fixture can never use one as an ordinary dict key and then change meaning later; a
@@ -84,6 +92,22 @@ case still has real DeepDiff output as its spec.
 `crates/onix-py/tests/test_datetimes.py` additionally asserts date cases against
 DeepDiff's `to_dict()` — the rendering-free comparison — and pins the fact that
 DeepDiff's stock `to_json()` still raises.
+
+## The `time`/`timedelta` superset
+
+The same gap, for the same reason: `JSON_CONVERTOR` has no entry for
+`datetime.time` or `datetime.timedelta` either, so DeepDiff's stock
+`to_json()` raises `TypeError` on a report carrying either. onix renders a
+`time` as `time.isoformat()`'s own bytes (the same shape a `datetime`'s
+own time portion takes) and a `timedelta` as `str(timedelta)`'s — there
+being no `timedelta.isoformat()` to mirror instead, `str()` is the natural,
+deterministic choice. `JSON_DEFAULT_MAPPING` carries both mappings
+alongside `date`'s, so a golden case holding either still has real DeepDiff
+output as its spec, the identical mechanism the `date` superset uses.
+
+`crates/onix-py/tests/test_times.py`/`test_timedeltas.py` additionally
+assert cases against DeepDiff's `to_dict()` and pin the fact that DeepDiff's
+stock `to_json()` still raises for both.
 
 `crates/onix-core/tests/golden.rs` reads every case directory present here
 (there is no separate hand-maintained case list), runs
@@ -206,6 +230,36 @@ instant hash-matching, a paired change carrying `new_path`, unpaired items
 reported raw, a date and a datetime never hash-matching but still pairing by
 distance, and a calendar value pairing with a string of itself (which is what
 the `str()` coercion in the delta shape decides).
+
+**Time and timedelta cases (`time_*`, `timedelta_*`, `list_lcs_time_*`,
+`list_lcs_timedelta_*`, `ignore_order_time_*`, `ignore_order_timedelta_*`,
+`set_time_*`, `set_timedelta_*`):** unlike a `datetime`, real `_diff_time`
+(the function DeepDiff uses for `time`, `date` **and** `timedelta` alike)
+never normalizes, so a `time`/`timedelta` `values_changed` always carries
+the **raw** pair. A naive `time` is **never** equal to an aware one — no
+"read naive as UTC" rule applies — while two aware values compare by an
+offset-adjusted micros-of-day at full microsecond precision. A `timedelta`
+compares by its exact `(days, seconds, microseconds)`. Both are in
+DeepDiff's `helper.basic_types`, so a list of either takes the difflib
+path; because a naive/aware `time` pair is never Python-equal, it reaches a
+`'replace'` opcode and, unlike the analogous `datetime` case, **is**
+reported (`list_lcs_time_naive_vs_aware_reports_a_change` — the one place
+`time` and `datetime` genuinely diverge in this corpus). Under
+`ignore_order`, `time` hashes through a genuine, confirmed `DeepHash`
+quirk: `time_to_seconds` drops **both** the microsecond and any offset
+before hashing, so a microsecond-only or an offset-only difference
+hash-matches even though the ordinary comparison calls the pair different
+(`ignore_order_time_microsecond_only_difference_hash_matches`,
+`ignore_order_time_offset_only_difference_hash_matches`); `timedelta`
+hashes exactly, with no such truncation
+(`ignore_order_timedelta_exact_hashing_no_truncation`). Neither type ever
+pairs with a number, and `time` never pairs with a `date`/`datetime`
+(`TYPES_TO_DIST_FUNC` never `isinstance`-matches a `time` against either).
+Fifteen seeded fuzz cases each cover the ordered
+(`list_lcs_time_timedelta_fuzz_seed_*`) and `ignore_order`
+(`ignore_order_time_timedelta_fuzz_seed_*`) paths.
+`crates/onix-core/src/datetime.rs`'s module doc is the full, source-cited
+spec.
 
 **Multi-line string cases (`multiline_string_*`,
 `ignore_order_multiline_string_*`):** at `verbose_level=2` DeepDiff adds a
@@ -562,6 +616,23 @@ generated — so it is pinned in `test_sets.py` instead.
   exceptions; `an_unnormalizable_datetime_under_ignore_order_is_reported_raw`
   in `crates/onix-core/src/diff/tests.rs` pins onix's side.
 
+- **A `time` hashes by whole seconds-of-day under `ignore_order`, dropping
+  the microsecond and any offset entirely.** `DeepHash._prep_datetime`
+  (the function real `DeepDiff` reuses for `time`, since `helper.times =
+  (datetime.datetime, datetime.time, np_datetime64)`) calls
+  `datetime_normalize`, which for a `time` returns `time_to_seconds(obj)` —
+  `(hour*60+minute)*60+second` — and nothing else, never reading
+  `utcoffset()` at all. So two times equal only in whole seconds-of-day
+  hash-match under `ignore_order` even when the ordinary (exact,
+  offset-adjusted) comparison would call them different — live-confirmed
+  against `deepdiff==9.1.0`: a microsecond-only or an offset-only
+  difference both report `{}` in a list under `ignore_order=True`. This is
+  a real, faithfully-reproduced `DeepHash` quirk, not a port bug; see
+  `onix_core::ignore_order::hash`'s `hash_seconds_of_day` doc and the
+  `ignore_order_time_microsecond_only_difference_hash_matches`/
+  `ignore_order_time_offset_only_difference_hash_matches` golden cases. A
+  `timedelta` has no analogous quirk: `_prep_number` hashes it exactly.
+
 - **A `str` containing a lone (unpaired) surrogate code point raises
   `ValueError` at conversion, on either side, before either value is
   compared.** A Python `str` can legally hold an unpaired surrogate (e.g.
@@ -624,7 +695,8 @@ Every other divergence found while building the corpus was fixed in `onix-core` 
 `DeepDiff` exactly. The path-rendering collision exception, the multi-member
 nested-`frozenset`-rendering exception (both above), the three
 set-iteration-order differences, the list-LCS `2^53` limitation, the
-naive-datetime pairing timezone above, the lone-surrogate `ValueError` just
+naive-datetime pairing timezone above, the `time` seconds-of-day hashing
+quirk under `ignore_order` above, the lone-surrogate `ValueError` just
 described, and the Unicode-version `str`-repr divergence documented under
 "Pinned versions" above are the only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across

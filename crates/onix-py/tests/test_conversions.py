@@ -143,16 +143,49 @@ def test_date_is_accepted_and_compared_by_value() -> None:
     }
 
 
-def test_time_raises_type_error() -> None:
-    """A time (unsupported in this MVP) raises TypeError naming the type."""
-    with pytest.raises(TypeError, match=r"diffing: time at root"):
-        DeepDiff(datetime.time(10), datetime.time(11))
+def test_time_is_accepted_and_reports_the_raw_pair() -> None:
+    """A time converts and diffs; unlike a datetime, the report carries the raw pair."""
+    diff = DeepDiff(datetime.time(10), datetime.time(11))
+
+    assert diff.to_dict() == {
+        "values_changed": {
+            "root": {"old_value": datetime.time(10), "new_value": datetime.time(11)}
+        }
+    }
 
 
-def test_timedelta_raises_type_error() -> None:
-    """A timedelta (unsupported in this MVP) raises TypeError naming the type."""
-    with pytest.raises(TypeError, match=r"diffing: timedelta at root"):
-        DeepDiff(datetime.timedelta(days=1), datetime.timedelta(days=2))
+def test_timedelta_is_accepted_and_reports_real_timedelta_objects() -> None:
+    """A timedelta converts and diffs, reporting real timedelta objects."""
+    diff = DeepDiff(datetime.timedelta(days=1), datetime.timedelta(days=2))
+
+    assert diff.to_dict() == {
+        "values_changed": {
+            "root": {
+                "old_value": datetime.timedelta(days=1),
+                "new_value": datetime.timedelta(days=2),
+            }
+        }
+    }
+
+
+def test_time_subclass_raises_type_error_naming_the_class() -> None:
+    """DeepDiff reports a value under its own type name, so a `time` subclass is refused."""
+
+    class Clock(datetime.time):
+        pass
+
+    with pytest.raises(TypeError, match="Clock"):
+        DeepDiff(Clock(10), datetime.time(10))
+
+
+def test_timedelta_subclass_raises_type_error_naming_the_class() -> None:
+    """The same rule for a `timedelta` subclass."""
+
+    class Duration(datetime.timedelta):
+        pass
+
+    with pytest.raises(TypeError, match="Duration"):
+        DeepDiff(Duration(days=1), datetime.timedelta(days=1))
 
 
 def test_datetime_subclass_raises_type_error_naming_the_class() -> None:

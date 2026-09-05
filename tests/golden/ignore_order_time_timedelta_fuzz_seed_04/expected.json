@@ -1,0 +1,16 @@
+{
+  "iterable_item_added": {
+    "root[0]": "00:00:00"
+  },
+  "values_changed": {
+    "root[0]": {
+      "new_path": "root[4]",
+      "new_value": "0:00:00.000001",
+      "old_value": "1 day, 0:00:00"
+    },
+    "root[5]": {
+      "new_value": "-1 day, 1:00:00",
+      "old_value": "12:00:00+02:00"
+    }
+  }
+}

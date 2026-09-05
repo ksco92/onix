@@ -40,7 +40,7 @@ out-of-scope DeepDiff quirk excluded from this corpus.
 import json
 import random
 import unicodedata
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Final
 
@@ -448,6 +448,99 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
         {"d": date(2024, 1, 2), "t": datetime(2024, 1, 2, 10)},
     ),
     "date_leap_day": (date(2024, 2, 29), date(2024, 3, 1)),
+    # --- time and timedelta (issue #61) ----------------------------------
+    # `_diff_time` (real DeepDiff's function for time, date AND timedelta
+    # alike) is a plain `!=` with no normalization step, unlike
+    # `_diff_datetime` -- so a values_changed entry here carries the RAW
+    # pair, never a normalized one.
+    "time_values_changed": (time(10, 30), time(12, 0)),
+    "time_vs_datetime_type_change": (time(10, 30), datetime(2024, 1, 1, 10, 30)),
+    "time_vs_date_type_change": (time(10, 30), date(2024, 1, 1)),
+    "time_in_dict_values_changed": ({"t": time(10, 30)}, {"t": time(12, 0)}),
+    "time_in_dict_added": ({}, {"t": time(10, 30)}),
+    "time_in_dict_removed": ({"t": time(10, 30, tzinfo=MINUS_FIVE)}, {}),
+    # Unlike a datetime, a naive time is NEVER equal to an aware one --
+    # real `time.__eq__` never reads a naive value as if it were UTC.
+    "time_naive_vs_aware_same_hms_are_different": (time(10, 0), time(10, 0, tzinfo=UTC)),
+    # Two aware times at the same offset-adjusted instant ARE equal, at
+    # full microsecond precision (only the ignore_order hash truncates).
+    "time_aware_different_offsets_same_instant_are_equal": (
+        time(10, 0, tzinfo=UTC),
+        time(12, 0, tzinfo=PLUS_TWO),
+    ),
+    "time_microsecond_change": (time(10, 0, 0, 123_456), time(10, 0, 0, 123_457)),
+    # isoformat() always shows seconds (unlike datetime.isoformat()) and
+    # microseconds only when non-zero.
+    "time_microsecond_rendering_boundaries": (
+        {"zero": time(10, 0), "one": time(10, 0, 0, 1), "max": time(10, 0, 0, 999_999)},
+        {"zero": time(11, 0, 0, 1), "one": time(11, 0), "max": time(11, 0, 0, 999_999)},
+    ),
+    "time_offset_with_seconds_renders_widened_suffix": (
+        time(10, 0, tzinfo=PLUS_THIRTY_THIRTY),
+        time(11, 0, tzinfo=PLUS_THIRTY_THIRTY),
+    ),
+    # `time` is in DeepDiff's `basic_types`, so a list of them takes the
+    # difflib/LCS path.
+    "list_lcs_time_shift": (
+        [time(1, 0), time(2, 0), time(3, 0)],
+        [time(2, 0), time(3, 0), time(4, 0)],
+    ),
+    # difflib matches with Python's own `==`, which -- unlike datetime --
+    # never equates a naive time with an aware one, so this pair reaches
+    # the 'replace' opcode and IS reported (the opposite of the analogous
+    # datetime golden case, since `_diff_time` never normalizes).
+    "list_lcs_time_naive_vs_aware_reports_a_change": (
+        [time(10, 0), "anchor"],
+        [time(10, 0, tzinfo=UTC), "anchor"],
+    ),
+    # ...while two aware values at one instant are Python-equal, so difflib
+    # matches them as 'equal' and never compares them at all.
+    "list_lcs_time_aware_same_instant_matches_as_equal": (
+        [time(10, 0, tzinfo=UTC), 1],
+        [time(12, 0, tzinfo=PLUS_TWO), 2],
+    ),
+    "timedelta_values_changed": (
+        timedelta(days=1, seconds=3600),
+        timedelta(days=2),
+    ),
+    "timedelta_vs_int_type_change": ({"t": timedelta(seconds=1)}, {"t": 1}),
+    "timedelta_vs_str_type_change_reports_raw_value": (timedelta(seconds=1), "0:00:01"),
+    "timedelta_in_dict_values_changed": (
+        {"t": timedelta(0)},
+        {"t": timedelta(days=1)},
+    ),
+    "timedelta_in_dict_added": ({}, {"t": timedelta(seconds=1)}),
+    "timedelta_negative_and_zero": (timedelta(0), timedelta(seconds=-1)),
+    "timedelta_rendering_boundaries": (
+        {
+            "zero": timedelta(0),
+            "one_day": timedelta(days=1),
+            "micro": timedelta(microseconds=1),
+        },
+        {
+            "zero": timedelta(seconds=1),
+            "one_day": timedelta(days=-1),
+            "micro": timedelta(0),
+        },
+    ),
+    "list_lcs_timedelta_shift": (
+        [timedelta(seconds=1), timedelta(seconds=2), timedelta(seconds=3)],
+        [timedelta(seconds=2), timedelta(seconds=3), timedelta(seconds=4)],
+    ),
+    "time_and_timedelta_in_one_report": (
+        {"t": time(10, 30), "d": timedelta(seconds=1)},
+        {"t": time(12, 0), "d": timedelta(seconds=2)},
+    ),
+    # A `time`/`timedelta` set item renders with str() (space/no quotes),
+    # like datetime/date -- and str() genuinely differs from repr() for both.
+    "set_time_naive_item": ({time(10, 30)}, {"sentinel"}),
+    "set_time_aware_item": ({time(10, 30, tzinfo=UTC)}, {"sentinel"}),
+    "set_timedelta_item": ({timedelta(days=1, seconds=3600)}, {"sentinel"}),
+    "set_time_nested_in_tuple_item": ({(time(10, 30),)}, {"sentinel"}),
+    "set_timedelta_nested_in_frozenset_item": (
+        {frozenset({timedelta(seconds=1)})},
+        {"sentinel"},
+    ),
     # --- datetime and date as set members (issue #21) -------------------
     # A set item is rendered with str() (space separator), unlike every
     # other item kind (rendered with repr()) -- and a calendar value is the
@@ -653,6 +746,77 @@ def _generate_fuzz_cases() -> dict[str, tuple[TaggedValue, TaggedValue]]:
         a = [rng.choice(_FUZZ_ALPHABET) for _ in range(len_a)]
         b = [rng.choice(_FUZZ_ALPHABET) for _ in range(len_b)]
         cases[f"list_lcs_fuzz_seed_{i:02d}"] = (a, b)
+
+    return cases
+
+
+# Seeded-random time/timedelta cases (issue #61's differential-fuzz
+# requirement): a small, deterministic alphabet biased toward the shapes
+# whose comparison/hashing rules are the trickiest (naive vs aware at the
+# same wall-clock and at the same offset-adjusted instant, microsecond-only
+# and offset-only differences). Bare scalars in a plain list, never nested
+# in a hashable container, per the differential-fuzz-alphabet convention.
+_TIME_FUZZ_SEED = 0xDA7E_71ED
+_TIME_FUZZ_CASE_COUNT = 15
+_TIME_FUZZ_ALPHABET: Final[list[TaggedValue]] = [
+    time(0, 0),
+    time(10, 30),
+    time(10, 30, 0, 123_456),
+    time(10, 30, tzinfo=UTC),
+    time(10, 30, tzinfo=PLUS_TWO),
+    time(12, 0, tzinfo=PLUS_TWO),
+    time(23, 59, 59, 999_999),
+    timedelta(0),
+    timedelta(seconds=1),
+    timedelta(days=1),
+    timedelta(days=-1, seconds=3600),
+    timedelta(microseconds=1),
+    "anchor",
+]
+
+
+def _generate_time_timedelta_fuzz_cases() -> dict[str, tuple[TaggedValue, TaggedValue]]:
+    """
+    Generate the seeded-random time/timedelta ordered-list golden cases.
+
+    :return: A mapping of case name to `(a, b)`, deterministic across runs.
+    """
+    rng = random.Random(_TIME_FUZZ_SEED)
+    cases: dict[str, tuple[TaggedValue, TaggedValue]] = {}
+
+    for i in range(_TIME_FUZZ_CASE_COUNT):
+        len_a = rng.randint(0, 8)
+        len_b = rng.randint(0, 8)
+        a = [rng.choice(_TIME_FUZZ_ALPHABET) for _ in range(len_a)]
+        b = [rng.choice(_TIME_FUZZ_ALPHABET) for _ in range(len_b)]
+        cases[f"list_lcs_time_timedelta_fuzz_seed_{i:02d}"] = (a, b)
+
+    return cases
+
+
+def _generate_time_timedelta_ignore_order_fuzz_cases() -> (
+    dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]]
+):
+    """
+    Generate the seeded-random time/timedelta ignore_order golden cases.
+
+    :return: A mapping of case name to `(a, b, {"ignore_order": True})`, deterministic across
+        runs.
+    """
+    rng = random.Random(_TIME_FUZZ_SEED + 1)
+    cases: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {}
+
+    for i in range(_TIME_FUZZ_CASE_COUNT):
+        # Draw at least one element so every seeded case exercises a time
+        # or timedelta.
+        size = rng.randint(1, 8)
+        a = [rng.choice(_TIME_FUZZ_ALPHABET) for _ in range(size)]
+        b = list(a)
+        rng.shuffle(b)
+        change_n = rng.randint(0, size)
+        for index in rng.sample(range(size), change_n):
+            b[index] = rng.choice(_TIME_FUZZ_ALPHABET)
+        cases[f"ignore_order_time_timedelta_fuzz_seed_{i:02d}"] = (a, b, {"ignore_order": True})
 
     return cases
 
@@ -1033,6 +1197,71 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
         [{"id": 2, "v": "q"}, {"id": 1, "v": "x\nz"}],
         {"ignore_order": True},
     ),
+    # --- time and timedelta under ignore_order (issue #61) --------------
+    # `DeepHash._prep_datetime` reduces a time to `time_to_seconds`,
+    # dropping BOTH the microsecond and any offset entirely (a genuine,
+    # confirmed quirk) -- so a microsecond-only difference hash-matches
+    # under ignore_order even though the ordinary `!=` comparison (and a
+    # real Python set's own hash/eq) would call the two different.
+    "ignore_order_time_microsecond_only_difference_hash_matches": (
+        [time(10, 30, 0, 123_456), "anchor"],
+        ["anchor", time(10, 30, 0, 999_999)],
+        {"ignore_order": True},
+    ),
+    # An offset-only difference (same wall-clock h:m:s) hash-matches too,
+    # for the identical reason -- `time_to_seconds` never reads `utcoffset()`.
+    "ignore_order_time_offset_only_difference_hash_matches": (
+        [time(10, 30), "anchor"],
+        ["anchor", time(10, 30, tzinfo=PLUS_TWO)],
+        {"ignore_order": True},
+    ),
+    # The paired items still recurse through the ordinary (exact) time
+    # comparison, so a genuine h:m:s difference IS reported.
+    "ignore_order_time_pairing_new_path": (
+        [time(1, 0), time(2, 0)],
+        [time(2, 0), time(3, 0)],
+        {"ignore_order": True},
+    ),
+    "ignore_order_time_added_and_removed_report_raw_values": (
+        [time(10, 0, tzinfo=MINUS_FIVE)],
+        [time(23, 0, tzinfo=PLUS_THIRTY_THIRTY), "anchor"],
+        {"ignore_order": True},
+    ),
+    # A time never shares a distance family with a datetime/date/number
+    # (`TYPES_TO_DIST_FUNC` never isinstance-matches `time` against any of
+    # them), so the structural fallback keeps them unpaired.
+    "ignore_order_time_and_datetime_never_pair": (
+        [time(10, 30), "anchor"],
+        ["anchor", datetime(2024, 1, 1, 10, 30)],
+        {"ignore_order": True},
+    ),
+    # `_prep_number` hashes a timedelta EXACTLY (no truncation), unlike
+    # `time` -- a one-second difference never hash-matches.
+    "ignore_order_timedelta_exact_hashing_no_truncation": (
+        [timedelta(seconds=1), "anchor"],
+        ["anchor", timedelta(seconds=2)],
+        {"ignore_order": True},
+    ),
+    "ignore_order_timedelta_pairing_new_path": (
+        [timedelta(seconds=1), timedelta(seconds=2)],
+        [timedelta(seconds=2), timedelta(seconds=3)],
+        {"ignore_order": True},
+    ),
+    "ignore_order_timedelta_and_number_never_pair": (
+        [timedelta(seconds=1), "anchor"],
+        ["anchor", 5],
+        {"ignore_order": True},
+    ),
+    "ignore_order_time_in_dicts": (
+        [{"t": time(1, 0)}, {"t": time(2, 0)}],
+        [{"t": time(2, 0)}, {"t": time(3, 0)}],
+        {"ignore_order": True},
+    ),
+    "combined_dict_with_time_and_timedelta_values_under_ignore_order": (
+        {"t": time(10, 30), "d": {1, 2, 3}},
+        {"t": time(12, 0), "d": {2, 3, 4}},
+        {"ignore_order": True},
+    ),
 }
 
 # Seeded-random ignore_order fuzz cases: the ignore_order_10k fixture
@@ -1098,12 +1327,18 @@ def main() -> None:
     )
 
     ordered_cases: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {
-        name: (a, b, {}) for name, (a, b) in {**CASES, **_generate_fuzz_cases()}.items()
+        name: (a, b, {})
+        for name, (a, b) in {
+            **CASES,
+            **_generate_fuzz_cases(),
+            **_generate_time_timedelta_fuzz_cases(),
+        }.items()
     }
     all_cases: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {
         **ordered_cases,
         **IGNORE_ORDER_CASES,
         **_generate_ignore_order_fuzz_cases(),
+        **_generate_time_timedelta_ignore_order_fuzz_cases(),
     }
 
     for name, (a, b, kwargs) in all_cases.items():

@@ -1,0 +1,10 @@
+{
+  "type_changes": {
+    "root": {
+      "new_type": "date",
+      "new_value": "2024-01-01",
+      "old_type": "time",
+      "old_value": "10:30:00"
+    }
+  }
+}

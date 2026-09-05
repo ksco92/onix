@@ -11,7 +11,7 @@
 //! regenerates those files; it only reads them.
 //!
 //! The two input files carry Python values JSON cannot express (a tuple, a
-//! set, a frozenset, a datetime or a date) in the tagged encoding
+//! set, a frozenset, a datetime, a date, a time or a timedelta) in the tagged encoding
 //! `tests/golden/README.md` documents, decoded
 //! here by [`decode_tagged`] — the Rust half of the same rule
 //! `scripts/golden_tags.py` implements for the corpus's Python readers. This
@@ -92,7 +92,15 @@ fn case_options(case_dir: &Path) -> onix_core::DiffOptions {
 /// `scripts/golden_tags.py`'s `RESERVED_TAGS`. Every one of them decodes
 /// today; the list is still fixed here so a fixture cannot quietly use one
 /// as an ordinary dict key.
-const RESERVED_TAGS: &[&str] = &["$tuple", "$set", "$frozenset", "$datetime", "$date"];
+const RESERVED_TAGS: &[&str] = &[
+    "$tuple",
+    "$set",
+    "$frozenset",
+    "$datetime",
+    "$date",
+    "$time",
+    "$timedelta",
+];
 
 /// Decodes one parsed fixture value into the engine's own value model,
 /// turning a tagged object — a JSON object with exactly one key, that key one
@@ -115,6 +123,10 @@ fn decode_tagged(value: &Value, builder: &mut onix_core::value::Builder) -> onix
                 onix_core::Value::DateTime(parse_datetime(tag_text(map, "$datetime")))
             }
             Some("$date") => onix_core::Value::Date(parse_date(tag_text(map, "$date"))),
+            Some("$time") => onix_core::Value::Time(parse_time(tag_text(map, "$time"))),
+            Some("$timedelta") => {
+                onix_core::Value::TimeDelta(parse_timedelta(map.get("$timedelta")))
+            }
             Some("$set") => onix_core::Value::Set(decode_set_members(map, "$set", builder)),
             Some("$frozenset") => {
                 onix_core::Value::FrozenSet(decode_set_members(map, "$frozenset", builder))
@@ -210,22 +222,7 @@ fn parse_date(text: &str) -> onix_core::Date {
 fn parse_datetime(text: &str) -> onix_core::DateTime {
     let parsed = || {
         let (date_text, time_text) = text.split_once('T')?;
-        let sign_at = time_text.rfind(['+', '-']);
-        let (clock_text, offset) = match sign_at {
-            None => (time_text, None),
-            Some(index) => (
-                &time_text[..index],
-                Some(parse_offset(&time_text[index..])?),
-            ),
-        };
-        let (clock_text, microsecond) = match clock_text.split_once('.') {
-            None => (clock_text, 0),
-            Some((clock, fraction)) => (clock, fraction.parse().ok()?),
-        };
-        let mut fields = clock_text.split(':');
-        let hour = fields.next()?.parse().ok()?;
-        let minute = fields.next()?.parse().ok()?;
-        let second = fields.next()?.parse().ok()?;
+        let (hour, minute, second, microsecond, offset) = parse_clock_fields(time_text)?;
 
         onix_core::DateTime::new(
             parse_date(date_text),
@@ -237,6 +234,57 @@ fn parse_datetime(text: &str) -> onix_core::DateTime {
         )
     };
     parsed().unwrap_or_else(|| panic!("not an ISO 8601 datetime: {text:?}"))
+}
+
+/// Parses the `HH:MM:SS[.ffffff][±HH:MM[:SS]]` payload of a `$time` tag —
+/// Python's `time.isoformat()`, the same clock shape [`parse_datetime`]
+/// parses after its `T` separator (see [`parse_clock_fields`]).
+fn parse_time(text: &str) -> onix_core::Time {
+    let parsed = || {
+        let (hour, minute, second, microsecond, offset) = parse_clock_fields(text)?;
+        onix_core::Time::new(hour, minute, second, microsecond, offset)
+    };
+    parsed().unwrap_or_else(|| panic!("not an ISO 8601 time: {text:?}"))
+}
+
+/// Parses one `HH:MM:SS[.ffffff][±HH:MM[:SS]]` clock string — the shared
+/// core of [`parse_datetime`] (applied to the text after its `T`) and
+/// [`parse_time`] (applied to the whole payload).
+fn parse_clock_fields(clock_text: &str) -> Option<(u8, u8, u8, u32, Option<i32>)> {
+    let sign_at = clock_text.rfind(['+', '-']);
+    let (clock_text, offset) = match sign_at {
+        None => (clock_text, None),
+        Some(index) => (
+            &clock_text[..index],
+            Some(parse_offset(&clock_text[index..])?),
+        ),
+    };
+    let (clock_text, microsecond) = match clock_text.split_once('.') {
+        None => (clock_text, 0),
+        Some((clock, fraction)) => (clock, fraction.parse().ok()?),
+    };
+    let mut fields = clock_text.split(':');
+    let hour = fields.next()?.parse().ok()?;
+    let minute = fields.next()?.parse().ok()?;
+    let second = fields.next()?.parse().ok()?;
+
+    Some((hour, minute, second, microsecond, offset))
+}
+
+/// Parses the `{"days": D, "seconds": S, "microseconds": U}` payload of a
+/// `$timedelta` tag — Python's own already-normalized `timedelta` triple
+/// (see `scripts/golden_tags.py`'s module doc for why a single flattened
+/// number is not used).
+fn parse_timedelta(payload: Option<&Value>) -> onix_core::TimeDelta {
+    let parsed = || {
+        let map = payload?.as_object()?;
+        onix_core::TimeDelta::new(
+            map.get("days")?.as_i64()?,
+            map.get("seconds")?.as_i64()?,
+            map.get("microseconds")?.as_i64()?,
+        )
+    };
+    parsed().unwrap_or_else(|| panic!("not a valid $timedelta payload: {payload:?}"))
 }
 
 /// Parses a `±HH:MM[:SS]` UTC-offset suffix into whole seconds.
