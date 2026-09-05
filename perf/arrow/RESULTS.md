@@ -27,10 +27,9 @@ develop --release`), which already pins deepdiff_rs, pyarrow, polars, and duckdb
 own test suite; `bench_tables.py` itself lives in `perf/arrow/` and only imports its
 directory-local `generate_fixtures`/`oracle_duckdb` modules plus those four libraries.
 
-Two sibling implementer sessions were building unrelated onix branches concurrently on this
-machine. `ps aux` was checked immediately before both timed runs below and showed no `cargo`/
-`maturin` compilation in progress at either point (only `uv pip install` package installs in
-their own worktrees), so no build contended for CPU during either timed sweep.
+Two other builds of unrelated onix branches ran concurrently on this machine; each timed run
+started only after `ps` showed no `cargo` or `maturin` process (only `uv pip install` package
+installs in other worktrees were active), so no build contended for CPU during either timed sweep.
 
 ## Fixture pair
 
