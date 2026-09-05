@@ -92,15 +92,19 @@ pub use table_diff::{TableDiff, TableDiffSummary};
 /// error.
 ///
 /// The value, 128, is far above any real Arrow schema (nesting beyond a
-/// handful of levels is exotic; a hundred is unheard of) yet small enough that
-/// the deepest permitted recursion stays well within a small thread stack: at
-/// a measured worst case near 2.8 KiB per level (nested structs overflow an
-/// 8 MiB stack around depth 3,000 once the FFI import, the comparison, and the
-/// drop are counted together), 128 levels is on the order of 360 KiB, safe
-/// even on the 512 KiB stacks worker threads sometimes use. The Python
-/// bindings additionally run the whole operation — the recursive FFI import
-/// and the drop of the imported types included — on a large stack-sized worker
-/// thread, so this bound is the clean-error ceiling rather than the sole
+/// handful of levels is exotic; a hundred is unheard of). The per-level native
+/// stack cost of those recursive walks is measured by a committed example,
+/// `crates/onix-arrow/examples/type_stack_cost.rs` (`cargo run -p onix-arrow
+/// --example type_stack_cost`, and `--release`), which builds a type nested to
+/// a given depth and binary-searches the deepest one that survives a
+/// clone + `Display` + drop on a fixed-size stack. The worst case is nested
+/// structs in a debug build (the profile `cargo test` uses) at roughly
+/// 5.0 KiB per level; release is roughly 0.7 KiB. So 128 levels costs on the
+/// order of 640 KiB debug / 90 KiB release. The Python bindings run the whole
+/// operation — the recursive FFI import and the drop of the imported types
+/// included — on the large stack-sized worker thread `crate::guard` sizes for
+/// the JSON path (hundreds of MiB), which clears the debug worst case by
+/// roughly 500x, so this bound is the clean-error ceiling rather than the sole
 /// backstop.
 pub const MAX_NESTING_DEPTH: usize = 128;
 

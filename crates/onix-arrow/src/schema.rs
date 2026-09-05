@@ -71,13 +71,15 @@ pub struct SchemaChange {
 ///   encodings routinely);
 /// - `Utf8View` and `LargeUtf8` become `Utf8`, `BinaryView`/`LargeBinary`
 ///   become `Binary`;
-/// - every list variant (`List`/`LargeList`/`ListView`/`LargeListView`)
-///   becomes `List`, and its element field's name and nullability are dropped
-///   (canonicalized to `item`, nullable), because producers disagree on both
-///   (`DuckDB` names the element `l`, pyarrow `item`, Parquet `element`);
-/// - a `Map`, and a `LargeList<Struct<key, value>>` (how polars re-exports an
-///   Arrow map), both become one canonical `Map` shape, so a map column
-///   compares equal across libraries.
+/// - every variable-length list variant (`List`/`LargeList`/`ListView`/
+///   `LargeListView`) becomes `List`, and its element field's name and
+///   nullability are dropped (canonicalized to `item`, nullable), because
+///   producers disagree on both (`DuckDB` names the element `l`, pyarrow
+///   `item`, Parquet `element`); a `FixedSizeList` keeps its width but has its
+///   element normalized the same way;
+/// - a `Map`, and the specific `LargeList<Struct<key, value>>` polars
+///   re-exports an Arrow map as (see [`map_entries`]), both become one
+///   canonical `Map` shape, so a map column compares equal across libraries.
 ///
 /// Every other parameter — timestamp unit and timezone, decimal precision and
 /// scale — is preserved and counts as a difference. Nullability never counts
@@ -91,17 +93,21 @@ fn normalized_type(data_type: &DataType) -> DataType {
         DataType::Dictionary(_, value) => normalized_type(value),
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => DataType::Utf8,
         DataType::Binary | DataType::LargeBinary | DataType::BinaryView => DataType::Binary,
-        DataType::List(field)
-        | DataType::LargeList(field)
-        | DataType::ListView(field)
-        | DataType::LargeListView(field) => match map_entries(field.data_type()) {
+        // Only a `LargeList` whose element carries polars' map signature is
+        // read as a map; a plain pyarrow `List` (or any other list variant) of
+        // a struct stays a list, so a genuine `list<struct{key, value}>` and a
+        // real `map` remain distinguishable. See [`map_entries`].
+        DataType::LargeList(field) => match map_entries(field) {
             Some((key, value)) => canonical_map(key, value),
-            None => DataType::List(Arc::new(Field::new(
-                "item",
-                normalized_type(field.data_type()),
-                true,
-            ))),
+            None => canonical_list(field.data_type()),
         },
+        DataType::List(field) | DataType::ListView(field) | DataType::LargeListView(field) => {
+            canonical_list(field.data_type())
+        }
+        DataType::FixedSizeList(field, size) => DataType::FixedSizeList(
+            Arc::new(Field::new("item", normalized_type(field.data_type()), true)),
+            *size,
+        ),
         DataType::Map(entries, _) => {
             if let DataType::Struct(fields) = entries.data_type()
                 && fields.len() == 2
@@ -118,6 +124,12 @@ fn normalized_type(data_type: &DataType) -> DataType {
         ),
         other => other.clone(),
     }
+}
+
+/// The canonical `List` a variable-length list variant normalizes to: element
+/// name and nullability dropped, element type normalized.
+fn canonical_list(element: &DataType) -> DataType {
+    DataType::List(Arc::new(Field::new("item", normalized_type(element), true)))
 }
 
 /// The one canonical shape both an Arrow `Map` and polars'
@@ -142,13 +154,23 @@ fn canonical_map(key: &DataType, value: &DataType) -> DataType {
     )
 }
 
-/// If `element` is a two-field struct named `key`/`value` — the element type of
-/// a `LargeList` that polars produces for an Arrow map — returns the key and
-/// value types so it can be treated as a map. `None` for any other element.
-fn map_entries(element: &DataType) -> Option<(&DataType, &DataType)> {
-    if let DataType::Struct(fields) = element
+/// If `element` is the element field of a polars Arrow-map export — a struct of
+/// exactly two fields named `key` (nullable, as polars emits it) and `value` —
+/// returns the key and value types so the enclosing `LargeList` is treated as a
+/// map. `None` otherwise, so an ordinary list of a two-field struct is left as
+/// a list.
+///
+/// This is deliberately narrow: it matches the exact signature polars produces
+/// for an Arrow `Map` (a `LargeList` of a nullable-keyed `key`/`value` struct)
+/// rather than any list of a `key`/`value` struct, so a genuine
+/// `list<struct{key, value}>` from another producer is not silently rewritten
+/// to a map. A residual ambiguity remains — a `LargeList` a user builds by hand
+/// with that exact struct shape is read as a map — which the README documents.
+fn map_entries(element: &FieldRef) -> Option<(&DataType, &DataType)> {
+    if let DataType::Struct(fields) = element.data_type()
         && fields.len() == 2
         && fields[0].name() == "key"
+        && fields[0].is_nullable()
         && fields[1].name() == "value"
     {
         return Some((fields[0].data_type(), fields[1].data_type()));
@@ -610,6 +632,97 @@ mod tests {
         let changes = diff_schemas(&left, &right).unwrap();
 
         assert_eq!(changes.len(), 1, "a list of points is not a map");
+        assert_eq!(changes[0].change, ChangeKind::TypeChanged);
+    }
+
+    #[test]
+    fn plain_list_of_key_value_struct_is_not_a_map() {
+        // A genuine (non-LargeList) list of a key/value struct must stay a list
+        // and read as a type change against a real map, not silently equal.
+        let kv = || {
+            DataType::Struct(
+                vec![
+                    Field::new("key", DataType::Utf8, true),
+                    Field::new("value", DataType::Int32, true),
+                ]
+                .into(),
+            )
+        };
+        let left = schema(vec![Field::new("m", list_of(kv()), true)]);
+        let right = schema(vec![Field::new("m", map_with(DataType::Int32), true)]);
+        let changes = diff_schemas(&left, &right).unwrap();
+
+        assert_eq!(changes.len(), 1, "a plain list of pairs is not a map");
+        assert_eq!(changes[0].change, ChangeKind::TypeChanged);
+    }
+
+    #[test]
+    fn large_list_with_non_null_key_struct_is_not_a_map() {
+        // polars emits the map key as nullable; a LargeList of a key/value
+        // struct with a NON-null key is not polars' map export and stays a list.
+        let kv_non_null = DataType::Struct(
+            vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("value", DataType::Int64, true),
+            ]
+            .into(),
+        );
+        let large_list =
+            DataType::LargeList(std::sync::Arc::new(Field::new("item", kv_non_null, true)));
+        let left = schema(vec![Field::new("m", large_list, true)]);
+        let right = schema(vec![Field::new("m", map_with(DataType::Int64), true)]);
+        let changes = diff_schemas(&left, &right).unwrap();
+
+        assert_eq!(
+            changes.len(),
+            1,
+            "a non-null-keyed large list is not polars' map"
+        );
+        assert_eq!(changes[0].change, ChangeKind::TypeChanged);
+    }
+
+    #[test]
+    fn fixed_size_list_normalizes_element_encoding_and_keeps_width() {
+        let left = schema(vec![Field::new(
+            "v",
+            DataType::FixedSizeList(
+                std::sync::Arc::new(Field::new("item", DataType::Utf8View, true)),
+                2,
+            ),
+            true,
+        )]);
+        let right = schema(vec![Field::new(
+            "v",
+            DataType::FixedSizeList(
+                std::sync::Arc::new(Field::new("l", DataType::Utf8, false)),
+                2,
+            ),
+            true,
+        )]);
+        assert!(diff_schemas(&left, &right).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fixed_size_list_width_change_is_a_type_change() {
+        let left = schema(vec![Field::new(
+            "v",
+            DataType::FixedSizeList(
+                std::sync::Arc::new(Field::new("item", DataType::Int64, true)),
+                2,
+            ),
+            true,
+        )]);
+        let right = schema(vec![Field::new(
+            "v",
+            DataType::FixedSizeList(
+                std::sync::Arc::new(Field::new("item", DataType::Int64, true)),
+                3,
+            ),
+            true,
+        )]);
+        let changes = diff_schemas(&left, &right).unwrap();
+
+        assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].change, ChangeKind::TypeChanged);
     }
 
