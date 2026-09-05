@@ -415,7 +415,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--left", type=Path, required=True, help="Base (a) parquet file.")
     parser.add_argument("--right", type=Path, required=True, help="Changed (b) parquet file.")
-    parser.add_argument("--key", action="append", required=True, dest="key_columns", help="Key column(s); repeatable for a composite key.")
+    parser.add_argument(
+        "--key", action="append", required=True, dest="key_columns", help="Key column(s); repeatable for a composite key.",
+    )
     parser.add_argument("--out", type=Path, required=True, help="Output directory for the result parquet files.")
     args = parser.parse_args()
 
