@@ -70,10 +70,26 @@ pub enum TableDiffError {
         /// The maximum nesting depth allowed.
         max_depth: usize,
     },
+    /// A non-key column has an Arrow type the row diff cannot hash by value.
+    /// Only scalar columns are diffed by row; a nested column (list, struct,
+    /// map, union, and the like) is out of scope and refused rather than
+    /// silently mis-compared.
+    UnsupportedRowType {
+        /// The column whose type is unsupported.
+        column: String,
+        /// The unsupported Arrow type, rendered.
+        data_type: String,
+    },
+    /// A batch could not be read from an input reader, or a temporary spool
+    /// file could not be written or re-read, while diffing rows.
+    Read {
+        /// The underlying error's message.
+        message: String,
+    },
     /// A member of [`crate::TableDiff`] that a later version fills in was
-    /// asked for before that version exists. Schema diffing is complete in
-    /// this version; row-level results (`rows_added`, `rows_removed`,
-    /// `cells_changed`, `duplicate_keys`) are not.
+    /// asked for before that version exists. The per-cell changes
+    /// (`cells_changed`) arrive with a later version; `rows_added`,
+    /// `rows_removed`, and `duplicate_keys` are available.
     NotImplemented {
         /// The name of the member that is not implemented yet.
         feature: &'static str,
@@ -100,10 +116,17 @@ impl fmt::Display for TableDiffError {
                 "column {column:?} has an Arrow type nested deeper than the maximum of \
                  {max_depth}; diffing it could overflow the native stack, so it is refused"
             ),
+            TableDiffError::UnsupportedRowType { column, data_type } => write!(
+                f,
+                "column {column:?} has Arrow type {data_type}, which the row diff cannot \
+                 compare by value; only scalar columns are supported (nested columns are \
+                 out of scope)"
+            ),
+            TableDiffError::Read { message } => write!(f, "failed to read table data: {message}"),
             TableDiffError::NotImplemented { feature } => write!(
                 f,
                 "{feature} is not implemented in this version; \
-                 only the schema diff is available yet"
+                 the per-cell changes arrive in a later version"
             ),
         }
     }

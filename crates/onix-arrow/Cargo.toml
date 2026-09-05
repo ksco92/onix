@@ -19,5 +19,17 @@ workspace = true
 # needs no `ffi` feature.
 arrow-schema = "=59.3.0"
 arrow-array = "=59.3.0"
+# `arrow-cast` decodes dictionary-encoded columns to their value type before
+# hashing, and casts a right-only duplicate key's columns to the left key
+# types; `arrow-select` filters and concatenates the output row batches. The
+# row diff re-reads each side through the caller's re-openable `TableInput`, so
+# no IPC spooling lives here — the Python bindings own that.
+arrow-cast = "=59.3.0"
+arrow-select = "=59.3.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+proptest = "1"
+# `half::f16` builds a Float16 test column; the same version arrow-array uses.
+half = "2"
