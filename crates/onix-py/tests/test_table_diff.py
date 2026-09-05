@@ -11,6 +11,7 @@ the pyarrow import.
 
 import decimal
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -20,7 +21,7 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
-from deepdiff_rs import diff_tables
+from deepdiff_rs import MaxDepthError, diff_tables
 
 # Helpers
 
@@ -704,6 +705,136 @@ def test_to_pyarrow_propagates_a_broken_pyarrow() -> None:
         capture_output=True,
         text=True,
         check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("OK")
+
+
+# Deep-nesting safety tests
+#
+# Arrow type nesting is attacker-controlled. Importing, comparing, and dropping
+# a deeply nested type all recurse on the native stack and would SIGSEGV the
+# interpreter; diff_tables must instead raise MaxDepthError. Each case runs in a
+# subprocess so a regression is a non-zero exit (a failed assertion), not a dead
+# test session -- and the first test is the control proving that mechanism
+# actually catches a native crash.
+
+
+def _run_isolated(program: str) -> subprocess.CompletedProcess:
+    """
+    Run a program in a subprocess so a native crash surfaces as a non-zero return code.
+
+    :param program: Python source; it should print OK and exit 0 on success.
+    :return: The completed subprocess.
+    """
+    return subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(program)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_subprocess_harness_detects_a_native_crash() -> None:
+    """Control: a genuine SIGSEGV makes the subprocess exit non-zero, so the guard tests below mean something."""
+    result = _run_isolated(
+        """
+        import ctypes
+
+        ctypes.string_at(0)  # null dereference -> SIGSEGV
+        print("SHOULD NOT REACH")
+        """,
+    )
+
+    assert result.returncode != 0
+    assert "SHOULD NOT REACH" not in result.stdout
+
+
+def test_deeply_nested_type_raises_max_depth_error_not_a_crash() -> None:
+    """A column nested well past the bound raises MaxDepthError and the process stays alive.
+
+    The depth here (500) is comfortably past the bound while cheap to import; the exact boundary is
+    pinned in the onix-arrow unit tests, which build far deeper types natively (no Arrow C import,
+    which is superlinear in depth).
+    """
+    result = _run_isolated(
+        """
+        import pyarrow as pa
+        from deepdiff_rs import diff_tables, MaxDepthError
+
+        t = pa.int64()
+        for _ in range(500):
+            t = pa.struct([pa.field("f", t)])
+        schema = pa.schema([pa.field("id", pa.int64()), pa.field("deep", t)])
+        left = schema.empty_table()
+        right = schema.empty_table()
+
+        try:
+            diff_tables(left, right, key=["id"])
+        except MaxDepthError:
+            print("OK")
+        else:
+            raise AssertionError("expected MaxDepthError")
+        """,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("OK")
+
+
+def test_max_depth_error_is_a_value_error_subclass() -> None:
+    """MaxDepthError raised by diff_tables is catchable as ValueError."""
+    left = pa.schema([pa.field("id", pa.int64())]).empty_table()
+    depth = 200
+    inner = pa.int64()
+    for _ in range(depth):
+        inner = pa.struct([pa.field("f", inner)])
+    right = pa.schema([pa.field("id", pa.int64()), pa.field("deep", inner)]).empty_table()
+
+    assert issubclass(MaxDepthError, ValueError)
+    with pytest.raises(MaxDepthError):
+        diff_tables(left, right, key=["id"])
+
+
+# Machine-dependence tests
+
+
+def test_duckdb_session_timezone_labelling_is_documented_and_workaround_works() -> None:
+    """DuckDB labels TIMESTAMPTZ with the session time zone on Arrow export; SET TimeZone='UTC' makes it deterministic.
+
+    Runs under TZ=America/New_York in a subprocess so the behavior is pinned regardless of the host
+    time zone: without the workaround the timestamp column reads as a type change against a UTC
+    column, and with `SET TimeZone='UTC'` it does not.
+    """
+    program = textwrap.dedent(
+        """
+        import pyarrow as pa
+        import duckdb
+        from deepdiff_rs import diff_tables
+
+        pa_utc = pa.table({
+            "id": pa.array([1], pa.int64()),
+            "ts": pa.array([0], pa.timestamp("us", tz="UTC")),
+        })
+
+        rel = duckdb.sql("SELECT CAST(1 AS BIGINT) AS id, TIMESTAMPTZ '2020-01-01 00:00:00+00' AS ts")
+        changed = {r["column"] for r in diff_tables(rel, pa_utc, key=["id"]).schema}
+        assert changed == {"ts"}, changed
+
+        duckdb.sql("SET TimeZone='UTC'")
+        rel_utc = duckdb.sql("SELECT CAST(1 AS BIGINT) AS id, TIMESTAMPTZ '2020-01-01 00:00:00+00' AS ts")
+        assert diff_tables(rel_utc, pa_utc, key=["id"]).schema == []
+
+        print("OK")
+        """,
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "TZ": "America/New_York"},
     )
 
     assert result.returncode == 0, result.stderr

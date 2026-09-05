@@ -44,18 +44,35 @@ type ImportedReader = RecordBatchIterator<Box<dyn RecordBatchReader + Send>>;
 #[pyfunction]
 #[pyo3(signature = (left, right, *, key))]
 pub(crate) fn diff_tables(
+    py: Python<'_>,
     left: &Bound<'_, PyAny>,
     right: &Bound<'_, PyAny>,
     key: &Bound<'_, PyAny>,
 ) -> PyResult<TableDiff> {
     let key = extract_key(key)?;
-    let left_reader = import_reader(left)?;
-    let right_reader = import_reader(right)?;
-    let options = TableDiffOptions::new(key);
-    let core =
-        core_diff_tables(left_reader, right_reader, &options).map_err(|e| map_table_error(&e))?;
+    // Importing the two objects builds their Arrow `DataType` trees through
+    // pyo3-arrow's recursive FFI, and dropping those trees is recursive too;
+    // both, plus onix-arrow's own recursive comparison, are native-stack sinks
+    // on adversarially deep nesting. Run the whole import/diff/drop on the
+    // stack-sized worker thread (re-acquiring the GIL there) so no nesting can
+    // overflow the calling thread — the same hardening the JSON path uses.
+    // onix-arrow additionally refuses nesting past `MAX_NESTING_DEPTH` with a
+    // `MaxDepthError`, so a clean error arrives well before even the worker's
+    // large stack is at risk.
+    let left = left.clone().unbind();
+    let right = right.clone().unbind();
 
-    TableDiff::from_core(&core)
+    crate::guard::run_on_worker(py, move || {
+        Python::attach(|py| {
+            let left_reader = import_reader(left.bind(py))?;
+            let right_reader = import_reader(right.bind(py))?;
+            let options = TableDiffOptions::new(key);
+            let core = core_diff_tables(left_reader, right_reader, &options)
+                .map_err(|e| map_table_error(&e))?;
+
+            TableDiff::from_core(&core)
+        })
+    })?
 }
 
 /// Extracts the key column list, rejecting a bare string (which would
@@ -99,6 +116,7 @@ fn map_table_error(error: &TableDiffError) -> PyErr {
     let message = error.to_string();
     match error {
         TableDiffError::NotImplemented { .. } => PyNotImplementedError::new_err(message),
+        TableDiffError::MaxDepthExceeded { .. } => crate::errors::MaxDepthError::new_err(message),
         _ => PyValueError::new_err(message),
     }
 }
