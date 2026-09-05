@@ -24,7 +24,7 @@ use super::fxhash::HashMap;
 /// [`ItemKey`] cannot serve here. It is deliberately order- and
 /// repetition-*insensitive* for a list/tuple (its `List`/`Tuple` payload is a
 /// [`BTreeSet`], matching `DeepHash`'s item-matching rules), but the distance a
-/// candidate pair is ranked by reads multiplicity — [`super::rough_length`]
+/// candidate pair is ranked by reads multiplicity — [`super::distance::rough_length`]
 /// counts every repeated element, and the trial diff's leaf count depends on
 /// each list's first-occurrence representative — so two values that share an
 /// `ItemKey` can have genuinely different distances. Keying the memo by

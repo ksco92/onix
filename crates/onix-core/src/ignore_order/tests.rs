@@ -2584,7 +2584,7 @@ fn set_and_list_member_interning_scales_near_linearly() {
     }
 }
 
-// --- distance-memo repetition-collision regression (issue #31 round 2) ---
+// --- distance-memo repetition-collision regression (issue #31) ---
 
 /// Two sibling subtrees whose list elements share an `ItemKey` (order- and
 /// repetition-insensitive) but differ in element repetition have different
@@ -2694,8 +2694,9 @@ fn arb_repeating_siblings_pair() -> impl Strategy<Value = (serde_json::Value, se
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(800))]
 
-    /// Targeted at issue #31 round 2: over dicts of single-element lists
-    /// wrapping repetition-varying lists — the shape where sibling candidates
+    /// Targeted at the repetition-collision regression (issue #31): over dicts
+    /// of single-element lists wrapping repetition-varying lists — the shape
+    /// where sibling candidates
     /// share an `ItemKey` but not a distance, and where those distances
     /// straddle the 0.3 pairing cutoff — the distance memo must still change no
     /// decision. Fails on the pre-fix `ItemKey`-keyed cache.
@@ -2770,7 +2771,7 @@ fn distance_memo_only_caches_container_pairs_when_enabled() {
     );
 }
 
-// --- DistKey hashing stack safety (issue #31 round 3) -------------------
+// --- DistKey hashing stack safety (issue #31) -------------------------
 
 /// [`DistKey`]'s `Hash` walks the value with an explicit stack, never native
 /// recursion, so hashing a distance-cache key can never overflow the native

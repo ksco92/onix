@@ -21,8 +21,9 @@
 //! candidate that embeds it (a depth-25 nested list dropped from tens of
 //! seconds to milliseconds). A *polynomial* (super-linear) cost in nesting
 //! depth remains, though, in **both time and memory**: the memo holds one
-//! entry per distinct container pair, keyed by the full recursive `ItemKey`,
-//! so a caller diffing untrusted input must bound its nesting *depth* as well
+//! entry per distinct container pair, keyed by [`hash::DistKey`] (a value's
+//! exact structural identity), each holding a shared [`Rc`] to that value, so a
+//! caller diffing untrusted input must bound its nesting *depth* as well
 //! as its *width* — a few-KB input nested many hundreds of levels deep still
 //! costs seconds and hundreds of MB, all under the default `max_depth`.
 //! (Scalar candidate pairs never recurse and bypass the memo entirely, so

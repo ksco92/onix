@@ -41,16 +41,13 @@
 //!   result depends only on content too.
 //!
 //! Caching is therefore decision-neutral **as long as the key distinguishes
-//! every value pair whose distance differs**. [`ItemKey`] does not: it is
-//! order- and repetition-*insensitive* for a list/tuple (a `BTreeSet`
-//! payload), while `rough_length` and the trial diff read multiplicity, so
-//! two lists that share an `ItemKey` — `[3, 4]` and `[3]*8 + [4]*8` — have
-//! different distances yet keyed one cache slot (issue #31). The key is
-//! therefore a [`super::hash::DistKey`], a value's exact structural identity
-//! ([`crate::value::Value`]'s own repetition- and order-preserving
-//! `PartialEq`); two entries collide only when their distance is provably
-//! equal. Verified empirically by the with/without differential test in
-//! `super::tests` (including a repetition-only sibling divergence).
+//! every value pair whose distance differs** — which is exactly why the cache
+//! is keyed by [`super::hash::DistKey`] (a value's exact structural identity),
+//! not by the order- and repetition-insensitive `ItemKey` that conflated
+//! repetition-differing values into one slot (issue #31); see `DistKey`'s own
+//! doc for that rationale. Verified empirically by the with/without
+//! differential test in `super::tests` (including a repetition-only sibling
+//! divergence).
 //!
 //! # Tuple digests
 //!
