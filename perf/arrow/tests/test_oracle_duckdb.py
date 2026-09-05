@@ -46,7 +46,7 @@ def test_oracle_output_files_have_expected_columns(tmp_path: Path) -> None:
     run(fixture_dir / "a.parquet", fixture_dir / "b.parquet", ["id"], out_dir)
 
     cells_changed = pq.read_schema(out_dir / "cells_changed.parquet")
-    assert cells_changed.names == ["id", "column", "old_value", "new_value"]
+    assert cells_changed.names == ["id", "column", "old_value", "new_value", "change"]
 
     duplicate_keys = pq.read_schema(out_dir / "duplicate_keys.parquet")
     assert duplicate_keys.names == ["id", "left_count", "right_count"]
@@ -82,7 +82,7 @@ def test_null_becomes_non_null_is_reported_as_a_changed_cell(tmp_path: Path) -> 
     changed = pq.read_table(tmp_path / "oracle" / "cells_changed.parquet").to_pylist()
 
     assert summary["cells_changed"] == 1
-    assert changed == [{"id": 1, "column": "value", "old_value": None, "new_value": "now set"}]
+    assert changed == [{"id": 1, "column": "value", "old_value": None, "new_value": "now set", "change": "became_non_null"}]
 
 
 def test_two_nulls_compare_equal_and_are_not_reported(tmp_path: Path) -> None:
@@ -150,7 +150,7 @@ def test_null_keyed_row_with_a_different_value_yields_one_cell_change(tmp_path: 
     assert summary["rows_added"] == 0
     assert summary["rows_removed"] == 0
     assert summary["cells_changed"] == 1
-    assert changed == [{"id": None, "column": "value", "old_value": "x", "new_value": "y"}]
+    assert changed == [{"id": None, "column": "value", "old_value": "x", "new_value": "y", "change": "value_changed"}]
 
 
 def test_null_key_duplicated_on_both_sides_combines_counts(tmp_path: Path) -> None:
@@ -214,7 +214,7 @@ def test_different_sub_millisecond_instant_is_a_changed_cell_rendered_correctly(
 
     assert summary["cells_changed"] == 1
     assert changed == [
-        {"id": 1, "column": "ts", "old_value": "2024-01-01 12:00:00.0005+00", "new_value": "2024-01-01 12:00:00.001+00"},
+        {"id": 1, "column": "ts", "old_value": "2024-01-01 12:00:00.0005+00", "new_value": "2024-01-01 12:00:00.001+00", "change": "value_changed"},
     ]
 
 
@@ -233,7 +233,7 @@ def test_unusual_column_names_on_key_and_non_key_columns(tmp_path: Path) -> None
     assert summary["rows_added"] == 0
     assert summary["rows_removed"] == 0
     assert summary["cells_changed"] == 1
-    assert changed == [{key_col: 2, "column": value_col, "old_value": "y", "new_value": "changed"}]
+    assert changed == [{key_col: 2, "column": value_col, "old_value": "y", "new_value": "changed", "change": "value_changed"}]
 
 
 # Path quoting: file/directory names that could break an unquoted SQL literal
@@ -252,7 +252,7 @@ def test_path_with_single_quote_and_space_does_not_break_the_query(tmp_path: Pat
     changed = pq.read_table(out_dir / "cells_changed.parquet").to_pylist()
 
     assert summary["cells_changed"] == 1
-    assert changed == [{"id": 2, "column": "value", "old_value": "y", "new_value": "changed"}]
+    assert changed == [{"id": 2, "column": "value", "old_value": "y", "new_value": "changed", "change": "value_changed"}]
 
 
 def test_schema_diff_reports_removed_column(tmp_path: Path) -> None:
