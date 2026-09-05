@@ -14,13 +14,20 @@
 //! | `int` | `Number` | must fit in `i64` or `u64`; see below |
 //! | `float` | `Number` | must be finite; see below |
 //! | `str` | `Str` | must be encodable as UTF-8; see below |
-//! | `dict` (`str` keys only) | `Object` | keys interned across the whole walk |
-//! | `list` | `Array` | |
-//! | `tuple` | `Tuple` | exactly `tuple`; every subclass is rejected, see below |
-//! | `set` | `Set` | exactly `set`; members restricted, see below |
-//! | `frozenset` | `FrozenSet` | exactly `frozenset`; members restricted, see below |
-//! | `datetime.datetime` | `DateTime` | exactly `datetime`; naive or any `tzinfo`, see below |
-//! | `datetime.date` | `Date` | exactly `date` |
+//! | `dict` (`str` keys only), or a subclass | `Object` | keys interned across the whole walk |
+//! | `list`, or a subclass | `Array` | |
+//! | `tuple`, or a subclass (including a `namedtuple`) | `Tuple` | diffed positionally even for a `namedtuple`, see below |
+//! | `set`, or a subclass | `Set` | members restricted, see below |
+//! | `frozenset`, or a subclass | `FrozenSet` | members restricted, see below |
+//! | `datetime.datetime`, or a subclass (e.g. pandas `Timestamp`) | `DateTime` | naive or any `tzinfo`, see below |
+//! | `datetime.date`, or a subclass | `Date` | |
+//!
+//! A subclass instance converts and compares exactly like the base type —
+//! see the "Subclasses" section below — except as a `set`/`frozenset`
+//! *member*, where only the exact `tuple`/`frozenset`/`datetime`/`date` type
+//! is accepted (a `list`/`dict`/`set` subclass, or a `tuple`/`frozenset`
+//! subclass including a `namedtuple`, reaching a set member is refused the
+//! same way any other unsupported type is).
 //!
 //! Every other type raises a Python exception instead of converting:
 //!
@@ -41,20 +48,62 @@
 //!   [`PyValueError`]: the value model carries an offset in seconds.
 //! - A `set`/`frozenset` member that is not one of the types this MVP allows
 //!   a set to hold (`None`, `bool`, `int`, `float`, `str`, `tuple`,
-//!   `frozenset`, `datetime`, `date`) raises [`PyTypeError`] naming the
-//!   member's type and its path. A plain `list` or `dict` cannot reach a set
-//!   member at all — Python itself refuses `{[1]}` with `TypeError:
-//!   unhashable type: 'list'` — but a `list`/`dict` *subclass* that defines
-//!   `__hash__` can, and real `DeepDiff` would report it under that
-//!   subclass's own name — the same reason a `tuple` subclass is refused
-//!   below — so it stays refused here too, including nested inside an
-//!   otherwise-allowed container: `{(datetime(2024, 1, 1),)}` converts, but
-//!   `{(HashableList([1]),)}` does not, for a `list` subclass `HashableList`
-//!   defining `__hash__`.
+//!   `frozenset`, `datetime`, `date`, or a `datetime`/`date` subclass)
+//!   raises [`PyTypeError`] naming the member's type and its path. A plain
+//!   `list` or `dict` cannot reach a set member at all — Python itself
+//!   refuses `{[1]}` with `TypeError: unhashable type: 'list'` — but a
+//!   `list`/`dict`/`set` subclass that defines `__hash__` can, and real
+//!   `DeepDiff` would report it under that subclass's own name; a
+//!   `tuple`/`frozenset` subclass (including a `namedtuple`) has no such
+//!   obstacle at all — so all of these stay refused here, including nested
+//!   inside an otherwise-allowed container: `{(datetime(2024, 1, 1),)}`
+//!   converts, but `{(HashableList([1]),)}` does not, for a `list` subclass
+//!   `HashableList` defining `__hash__`.
 //! - Any other unrecognized type (`datetime.time`, `datetime.timedelta`,
 //!   custom objects, …) raises [`PyTypeError`] naming the type and the exact
 //!   path it was found at (e.g. `"unsupported type for diffing: complex at
 //!   root['a'][2]"`).
+//!
+//! # Subclasses
+//!
+//! `DeepDiff` reports every value under `type(obj).__name__`, so a subclass
+//! of a supported type — a `datetime`/`date` subclass (pandas' `Timestamp`
+//! is the common one), a `list`/`tuple`/`set`/`frozenset`/`dict` subclass, or
+//! a `namedtuple` (a `tuple` subclass with named fields) — is never a plain
+//! instance of the base type there, even when every field matches: a
+//! subclass-vs-base pair is a `type_changes` finding naming the two concrete
+//! classes, confirmed against real `deepdiff==9.1.0`. This conversion checks
+//! the *exact* type first (the common, and cheapest, case), falling through
+//! to a second, non-exact `isinstance`-style cast that additionally records
+//! `type(obj).__name__` for a subclass — see [`onix_core::value::Typed`]'s
+//! doc (the "Subclass type names" section) for how that name flows through
+//! the rest of the value model and diff engine, and why every other
+//! matching identity in the crate (`SetItems` dedup, `crate::lcs`'s
+//! scalar-list matching, `crate::ignore_order`'s hashing) needs no change at
+//! all to stay class-agnostic, matching Python's own subclass-oblivious
+//! `__eq__`/`__hash__` for these types.
+//!
+//! A `namedtuple` is accepted as an ordinary `tuple` subclass and diffed
+//! **positionally** (`root[0][1]`, not `root[0].y`) — real `DeepDiff` instead
+//! walks a `namedtuple`'s fields by name (`deephash.py`'s `_prep_tuple`),
+//! producing `attribute_added`/`attribute_removed`/dotted-path findings this
+//! crate has no machinery for. Reproducing that shape would need a second,
+//! name-keyed diffing path threaded through the whole engine for one
+//! single-source special case; this is a documented divergence (see
+//! `tests/golden/README.md`), not an approximation of the field-walking
+//! shape — the class name itself still carries through, so a namedtuple
+//! type change against a plain tuple (or a different namedtuple type) still
+//! names the concrete classes correctly.
+//!
+//! [`crate::deepdiff::DeepDiff::to_dict`] cannot reconstruct the original
+//! subclass *instance* for a `datetime`/`date` subclass: once a value has
+//! passed through the compact model there is no reference to the original
+//! class left to rebuild one from, so it renders back as the plain base
+//! type its fields describe — the same simplification already documented
+//! below for the `zoneinfo`/`pytz` `tzinfo` round trip. `list`/`tuple`
+//! subclasses/`namedtuple`s render back as a plain `list`/`tuple` for the
+//! same reason (a `dict`/`set`/`frozenset` subclass renders back as its
+//! base type too).
 //!
 //! # Datetimes and dates
 //!
@@ -67,12 +116,10 @@
 //! `DeepDiff` compares datetimes by instant and reports a `values_changed`
 //! pair normalized to UTC regardless.
 //!
-//! Both casts are **exact**: `datetime` is itself a `date` subclass, so an
-//! inexact check in either direction would misread one as the other, and
-//! `DeepDiff` reports every value under its own `type(obj).__name__` — a
-//! subclass such as `pandas.Timestamp` is never a plain `datetime` there, so
-//! it is refused like any other unsupported type rather than silently
-//! diffed as one.
+//! The exact-type cast runs first: `datetime` is itself a `date` subclass,
+//! so an inexact check in either direction would misread one as the other,
+//! and checking `datetime` (both exact and subclass) before `date` is what
+//! keeps a `datetime`/`Timestamp` from ever being misclassified as a `date`.
 //!
 //! A `tuple` converts to [`onix_core::Value::Tuple`], which the engine
 //! diffs positionally exactly like a list while still reporting a
@@ -82,18 +129,7 @@
 //! [`onix_core::Value::FrozenSet`]. Its members are compared, and rendered,
 //! without reference to the order they were iterated in — see
 //! [`onix_core::value::SetItems`], and `tests/golden/README.md`'s "Set
-//! iteration order" section for where that leaves `DeepDiff` behind. Like a
-//! `tuple`, only the exact type converts.
-//!
-//! A `tuple` **subclass** is not converted, and raises [`PyTypeError`] naming
-//! the class like any other unsupported type. `DeepDiff` reports a value's
-//! `type(obj).__name__`, so a subclass never compares as a plain `tuple`
-//! there: `DeepDiff(Pair((1, 2)), (1, 2))` is a `type_changes` from `Pair` to
-//! `tuple`, where converting the subclass as a tuple would report no
-//! difference at all. A `namedtuple` diverges further still — `DeepDiff`
-//! walks its *fields* (`deephash.py`'s `_prep_tuple`), reporting `root.y`
-//! rather than `root[1]` — and is refused by the same rule, needing no check
-//! of its own.
+//! iteration order" section for where that leaves `DeepDiff` behind.
 //!
 //! # Key interning
 //!
@@ -130,9 +166,11 @@
 //! intentionally a little stricter than `onix_core::diff_with_max_depth`'s
 //! guarantee that two *equal* inputs of any depth always diff cleanly,
 //! because equality can't be known yet at conversion time.
+use std::sync::Arc;
+
 use onix_core::datetime::{Date as CDate, DateTime as CDateTime};
 use onix_core::path::{PathSegment, render_path};
-use onix_core::value::{Builder, Entries, SetItems};
+use onix_core::value::{Builder, Entries, SetItems, Typed};
 use onix_core::{Number as CNumber, Value as CValue};
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -180,13 +218,21 @@ impl<'py> SeqIter<'py> {
         }
     }
 
-    /// Wraps this sequence's finished items in the matching value shape.
-    fn build(&self, items: Vec<CValue>) -> CValue {
+    /// Wraps this sequence's finished items in the matching value shape,
+    /// attaching `class_name` (`None` for the exact base type) — see the
+    /// module doc's "Subclasses" section.
+    fn build(&self, items: Vec<CValue>, class_name: Option<Arc<str>>) -> CValue {
         match self {
-            SeqIter::List(_) => CValue::Array(items.into_boxed_slice()),
-            SeqIter::Tuple(_) => CValue::Tuple(items.into_boxed_slice()),
-            SeqIter::Set(_) => CValue::Set(SetItems::new(items)),
-            SeqIter::FrozenSet(_) => CValue::FrozenSet(SetItems::new(items)),
+            SeqIter::List(_) => {
+                CValue::Array(Typed::with_class_name(items.into_boxed_slice(), class_name))
+            }
+            SeqIter::Tuple(_) => {
+                CValue::Tuple(Typed::with_class_name(items.into_boxed_slice(), class_name))
+            }
+            SeqIter::Set(_) => CValue::Set(SetItems::new(items).with_type_name(class_name)),
+            SeqIter::FrozenSet(_) => {
+                CValue::FrozenSet(SetItems::new(items).with_type_name(class_name))
+            }
         }
     }
 
@@ -215,11 +261,18 @@ enum Frame<'py> {
         /// true for a set's own members, and for the elements of any
         /// container nested inside one (see the module doc).
         restricted: bool,
+        /// The subclass name this sequence's own container carries (`None`
+        /// for the exact base type) — see the module doc's "Subclasses"
+        /// section. Unrelated to `restricted`, which is about the
+        /// *elements*', not this container's own, type.
+        class_name: Option<Arc<str>>,
     },
     Dict {
         remaining: BoundDictIterator<'py>,
         built: Vec<(String, CValue)>,
         current_key: String,
+        /// See [`Frame::Seq::class_name`].
+        class_name: Option<Arc<str>>,
     },
 }
 
@@ -232,11 +285,15 @@ enum Step<'py> {
     Seq {
         iter: SeqIter<'py>,
         first: Bound<'py, PyAny>,
+        /// See [`Frame::Seq::class_name`].
+        class_name: Option<Arc<str>>,
     },
     Dict {
         iter: BoundDictIterator<'py>,
         first_key: String,
         first_value: Bound<'py, PyAny>,
+        /// See [`Frame::Seq::class_name`].
+        class_name: Option<Arc<str>>,
     },
 }
 
@@ -260,6 +317,15 @@ enum Step<'py> {
 /// the same way `{HashableList([1])}` would be. A `datetime`/`date` is
 /// accepted either way: [`onix_core::path::set_item_repr`] defines how one
 /// renders as a set item, top-level or nested.
+///
+/// A `tuple`/`frozenset` **subclass** — including a `namedtuple`, a `tuple`
+/// subclass — reaching a set member is refused the same way a `list`/`dict`
+/// subclass is: only the *exact* base type is accepted there (see the
+/// module doc's "Subclasses" section for why this member-position
+/// restriction is unaffected by the general subclass support this function
+/// otherwise adds). A `datetime`/`date` subclass has no such restriction —
+/// it converts identically whether or not it sits inside a set member,
+/// exactly like the base type already does.
 fn classify<'py>(
     current: &Bound<'py, PyAny>,
     path: &[PathSegment],
@@ -289,49 +355,99 @@ fn classify<'py>(
         return Ok(Step::Done(CValue::Str(s.into_owned().into_boxed_str())));
     }
 
-    // Exact, and `datetime` before `date`: see the module doc. A `date` cast
-    // that was not exact would swallow every `datetime` too. Both convert
-    // the same way whether or not they sit inside a set member — the
-    // rendering rule that decides is entirely `onix_core::path`'s, not this
-    // conversion's.
+    // `datetime` before `date`: see the module doc — every `datetime` is
+    // also a `date` at the C level, so checking `date` first would swallow
+    // every `datetime` too. The exact-type branch runs first so the common
+    // case pays only one cast; a subclass (pandas' `Timestamp` is the
+    // common one) falls through to the second, non-exact branch and carries
+    // its own class name — see the module doc's "Subclasses" section. Both
+    // convert the same way whether or not they sit inside a set member.
     if current.cast_exact::<PyDateTime>().is_ok() {
-        return Ok(Step::Done(datetime_to_value(current, path)?));
+        return Ok(Step::Done(datetime_to_value(current, path, None)?));
+    }
+    if current.cast::<PyDateTime>().is_ok() {
+        return Ok(Step::Done(datetime_to_value(
+            current,
+            path,
+            Some(class_name(current)),
+        )?));
     }
 
     if current.cast_exact::<PyDate>().is_ok() {
-        return Ok(Step::Done(CValue::Date(date_fields(current, path)?)));
+        return Ok(Step::Done(CValue::Date(Typed::new(date_fields(
+            current, path,
+        )?))));
+    }
+    if current.cast::<PyDate>().is_ok() {
+        return Ok(Step::Done(CValue::Date(Typed::with_class_name(
+            date_fields(current, path)?,
+            Some(class_name(current)),
+        ))));
     }
 
+    if !set_member && let Ok(list) = current.cast_exact::<PyList>() {
+        return Ok(seq_step(SeqIter::List(list.iter()), None));
+    }
     if !set_member && let Ok(list) = current.cast::<PyList>() {
-        return Ok(seq_step(SeqIter::List(list.iter())));
+        return Ok(seq_step(
+            SeqIter::List(list.iter()),
+            Some(class_name(current)),
+        ));
     }
 
-    // Exact, unlike the casts above: a tuple subclass is reported under its
-    // own type name by `DeepDiff` and so is refused here (see the module
-    // doc), which the fall-through to `unsupported_type_error` below does.
     if let Ok(tuple) = current.cast_exact::<PyTuple>() {
-        return Ok(seq_step(SeqIter::Tuple(tuple.iter())));
+        return Ok(seq_step(SeqIter::Tuple(tuple.iter()), None));
+    }
+    // Non-exact, unlike the branch above: a `tuple` subclass — including a
+    // `namedtuple` — carries its own class name and compares as a plain
+    // `tuple` otherwise (see the module doc's "Subclasses" section), except
+    // as a set member, where only the exact type is accepted (see this
+    // function's own doc).
+    if !set_member && let Ok(tuple) = current.cast::<PyTuple>() {
+        return Ok(seq_step(
+            SeqIter::Tuple(tuple.iter()),
+            Some(class_name(current)),
+        ));
     }
 
-    // Exact, for the same reason a tuple is: `DeepDiff` reports a subclass
-    // under its own type name, never as a plain `set`/`frozenset`.
     if let Ok(set) = current.cast_exact::<PySet>() {
-        return Ok(seq_step(SeqIter::Set(set.iter())));
+        return Ok(seq_step(SeqIter::Set(set.iter()), None));
+    }
+    // Non-exact: a `set` subclass, refused as a set member like `tuple`
+    // above (a plain `set` is itself unhashable and so can never actually
+    // reach here as a member; a hashable subclass could, and is refused the
+    // same way for consistency).
+    if !set_member && let Ok(set) = current.cast::<PySet>() {
+        return Ok(seq_step(
+            SeqIter::Set(set.iter()),
+            Some(class_name(current)),
+        ));
     }
 
     if let Ok(frozen) = current.cast_exact::<PyFrozenSet>() {
-        return Ok(seq_step(SeqIter::FrozenSet(frozen.iter())));
+        return Ok(seq_step(SeqIter::FrozenSet(frozen.iter()), None));
+    }
+    if !set_member && let Ok(frozen) = current.cast::<PyFrozenSet>() {
+        return Ok(seq_step(
+            SeqIter::FrozenSet(frozen.iter()),
+            Some(class_name(current)),
+        ));
     }
 
     if !set_member && let Ok(dict) = current.cast::<PyDict>() {
+        let class_name = current
+            .cast_exact::<PyDict>()
+            .is_err()
+            .then(|| class_name(current));
         let mut iter = dict.iter();
 
         return Ok(match next_dict_entry(&mut iter, path)? {
-            None => Step::Done(builder.object(Vec::new())),
+            None => Step::Done(builder.object_with_type_name(Vec::new(), class_name)),
             Some((first_key, first_value)) => Step::Dict {
                 iter,
                 first_key,
                 first_value,
+                class_name,
             },
         });
     }
@@ -345,11 +461,17 @@ fn classify<'py>(
 
 /// Starts one sequence: an empty one is finished outright, a non-empty one
 /// hands its first element back for conversion with the rest parked in the
-/// returned iterator.
-fn seq_step(mut iter: SeqIter<'_>) -> Step<'_> {
+/// returned iterator. `class_name` is the subclass name the finished
+/// container carries (`None` for the exact base type) — see the module
+/// doc's "Subclasses" section.
+fn seq_step(mut iter: SeqIter<'_>, class_name: Option<Arc<str>>) -> Step<'_> {
     match iter.next() {
-        None => Step::Done(iter.build(Vec::new())),
-        Some(first) => Step::Seq { iter, first },
+        None => Step::Done(iter.build(Vec::new(), class_name)),
+        Some(first) => Step::Seq {
+            iter,
+            first,
+            class_name,
+        },
     }
 }
 
@@ -390,6 +512,7 @@ fn advance_frame<'py>(
             mut remaining,
             mut built,
             restricted,
+            class_name,
         } => {
             built.push(value);
 
@@ -405,16 +528,18 @@ fn advance_frame<'py>(
                             remaining,
                             built,
                             restricted,
+                            class_name,
                         },
                     }
                 }
-                None => Advance::Done(remaining.build(built)),
+                None => Advance::Done(remaining.build(built, class_name)),
             })
         }
         Frame::Dict {
             mut remaining,
             mut built,
             current_key,
+            class_name,
         } => {
             built.push((current_key, value));
 
@@ -429,10 +554,13 @@ fn advance_frame<'py>(
                             remaining,
                             built,
                             current_key: key,
+                            class_name,
                         },
                     })
                 }
-                None => Ok(Advance::Done(builder.object(built))),
+                None => Ok(Advance::Done(
+                    builder.object_with_type_name(built, class_name),
+                )),
             }
         }
     }
@@ -465,7 +593,11 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
 
             match classify(&current, &path, &mut builder, set_member)? {
                 Step::Done(value) => finished = Some(value),
-                Step::Seq { iter, first } => {
+                Step::Seq {
+                    iter,
+                    first,
+                    class_name,
+                } => {
                     let child_depth = depth + 1;
                     // Transitive: a set's members are restricted, and so is
                     // everything inside a container that is itself restricted.
@@ -480,6 +612,7 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
                         remaining: iter,
                         built: Vec::with_capacity(capacity),
                         restricted,
+                        class_name,
                     });
                     pending = Some((first, child_depth, restricted));
                     continue;
@@ -488,6 +621,7 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
                     iter,
                     first_key,
                     first_value,
+                    class_name,
                 } => {
                     let child_depth = depth + 1;
                     path.push(PathSegment::Key(first_key.clone()));
@@ -496,6 +630,7 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
                         remaining: iter,
                         built: Vec::with_capacity(capacity),
                         current_key: first_key,
+                        class_name,
                     });
                     pending = Some((first_value, child_depth, false));
                     continue;
@@ -591,9 +726,15 @@ fn date_fields(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<CDate> 
     CDate::new(year, month, day).ok_or_else(|| out_of_range_error("date", path))
 }
 
-/// Converts an exact `datetime.datetime` — see [`date_fields`] for why the
-/// fields are read as attributes.
-fn datetime_to_value(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<CValue> {
+/// Converts a `datetime.datetime` (exact or a subclass) — see
+/// [`date_fields`] for why the fields are read as attributes. `class_name`
+/// is the subclass name to attach (`None` for the exact base type) — see
+/// the module doc's "Subclasses" section.
+fn datetime_to_value(
+    obj: &Bound<'_, PyAny>,
+    path: &[PathSegment],
+    class_name: Option<Arc<str>>,
+) -> PyResult<CValue> {
     let date = date_fields(obj, path)?;
     let hour: u8 = obj.getattr("hour")?.extract()?;
     let minute: u8 = obj.getattr("minute")?.extract()?;
@@ -602,7 +743,7 @@ fn datetime_to_value(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<C
     let offset = utc_offset_seconds(obj, path)?;
 
     CDateTime::new(date, hour, minute, second, microsecond, offset)
-        .map(CValue::DateTime)
+        .map(|dt| CValue::DateTime(Typed::with_class_name(dt, class_name)))
         .ok_or_else(|| out_of_range_error("datetime", path))
 }
 
@@ -703,9 +844,9 @@ fn max_depth_error(max_depth: usize, path: &[PathSegment]) -> PyErr {
 fn unsupported_type_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
     PyTypeError::new_err(format!(
         "unsupported type for diffing: {} at {}; only \
-         None/bool/int/float/str/dict[str, ...]/list/tuple/set/frozenset/datetime/date are \
-         supported in this MVP (time, timedelta, subclasses of tuple/set/frozenset including \
-         namedtuples, datetime and date subclasses, and custom objects are not)",
+         None/bool/int/float/str/dict[str, ...]/list/tuple/set/frozenset/datetime/date, and \
+         subclasses of dict/list/tuple/set/frozenset/datetime/date (including namedtuples), are \
+         supported in this MVP (time, timedelta, and custom objects are not)",
         type_name(obj),
         render_path(path),
     ))
@@ -717,7 +858,8 @@ fn unsupported_type_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr
 fn unhashable_member_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
     PyTypeError::new_err(format!(
         "unsupported type for a set member: {} at {}; a set member must be \
-         None/bool/int/float/str/tuple/frozenset/datetime/date",
+         None/bool/int/float/str/tuple/frozenset/datetime/date, or a datetime/date subclass \
+         (a tuple/frozenset subclass, including a namedtuple, is not accepted as a set member)",
         type_name(obj),
         render_path(path),
     ))
@@ -727,6 +869,12 @@ fn type_name(obj: &Bound<'_, PyAny>) -> String {
     obj.get_type()
         .name()
         .map_or_else(|_| "<unknown type>".to_string(), |name| name.to_string())
+}
+
+/// `type_name`, as the `Arc<str>` [`Typed`]/[`SetItems`]/`onix_core::value::Object`
+/// carry for a subclass instance — see the module doc's "Subclasses" section.
+fn class_name(obj: &Bound<'_, PyAny>) -> Arc<str> {
+    Arc::from(type_name(obj))
 }
 
 /// Which Python sequence [`value_to_pyobject`] rebuilds a run of items into
@@ -799,8 +947,16 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                 CValue::Bool(b) => RenderStep::Done(b.into_py_any(py)?),
                 CValue::Number(n) => RenderStep::Done(number_to_pyobject(py, n)?),
                 CValue::Str(s) => RenderStep::Done(s.as_ref().into_py_any(py)?),
-                CValue::DateTime(value) => RenderStep::Done(datetime_to_pyobject(py, *value)?),
-                CValue::Date(value) => RenderStep::Done(date_to_pyobject(py, *value)?),
+                // Renders back as the plain base type, never the original
+                // subclass instance (there is nothing left to reconstruct
+                // one from once the value has passed through the compact
+                // model) — the same simplification the module doc's
+                // "Datetimes and dates" section already documents for a
+                // `zoneinfo`/`pytz` `tzinfo`.
+                CValue::DateTime(value) => {
+                    RenderStep::Done(datetime_to_pyobject(py, value.value())?)
+                }
+                CValue::Date(value) => RenderStep::Done(date_to_pyobject(py, value.value())?),
                 CValue::Array(items) => {
                     start_sequence(py, SeqKind::List, items, &mut stack, &mut pending)?
                 }

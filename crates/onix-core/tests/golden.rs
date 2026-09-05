@@ -107,14 +107,17 @@ fn decode_tagged(value: &Value, builder: &mut onix_core::value::Builder) -> onix
             items
                 .iter()
                 .map(|item| decode_tagged(item, builder))
-                .collect(),
+                .collect::<Box<[_]>>()
+                .into(),
         ),
         Value::Object(map) => match sole_tag(map) {
-            Some("$tuple") => onix_core::Value::Tuple(decode_tagged_items(map, "$tuple", builder)),
-            Some("$datetime") => {
-                onix_core::Value::DateTime(parse_datetime(tag_text(map, "$datetime")))
+            Some("$tuple") => {
+                onix_core::Value::Tuple(decode_tagged_items(map, "$tuple", builder).into())
             }
-            Some("$date") => onix_core::Value::Date(parse_date(tag_text(map, "$date"))),
+            Some("$datetime") => {
+                onix_core::Value::DateTime(parse_datetime(tag_text(map, "$datetime")).into())
+            }
+            Some("$date") => onix_core::Value::Date(parse_date(tag_text(map, "$date")).into()),
             Some("$set") => onix_core::Value::Set(decode_set_members(map, "$set", builder)),
             Some("$frozenset") => {
                 onix_core::Value::FrozenSet(decode_set_members(map, "$frozenset", builder))

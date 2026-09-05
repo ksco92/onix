@@ -3,7 +3,7 @@
 //! the parent `diff` module's "List diffing" doc section for the full,
 //! empirically-verified spec this implements.
 
-use crate::value::Value;
+use crate::value::{Value, class_name};
 
 use crate::error::Error;
 use crate::ignore_order::{self, IgnoreOrderMemo};
@@ -12,8 +12,8 @@ use crate::path::PathSegment;
 use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
 
 use super::{
-    DiffOptions, check_traversal_depth, check_value_depth, diff_at, normalized_pair,
-    python_type_name, scoped,
+    DiffOptions, check_traversal_depth, check_value_depth, diff_at, effective_type_name,
+    normalized_pair, python_type_name, scoped,
 };
 
 /// Diffs two lists (JSON arrays) at `path`, `depth` levels deep.
@@ -178,17 +178,36 @@ fn insert_lcs_pair_finding(
             new_segments
         });
 
-        if let (Value::DateTime(old_value), Value::DateTime(new_value)) = (old_value, new_value) {
-            let (old_value, new_value) = normalized_pair(path, *old_value, *new_value)?;
+        if let (Value::DateTime(old_typed), Value::DateTime(new_typed)) = (old_value, new_value) {
+            // A `datetime` subclass (e.g. pandas `Timestamp`) still reports
+            // `type_changes` against a base `datetime` (or a differently
+            // named subclass) even at equal value — see `Typed`'s doc — so
+            // this must gate before the normalize-and-compare path below,
+            // which only ever produces `values_changed`.
+            if old_typed.class_name() != new_typed.class_name() {
+                report.insert_type_change(
+                    path.clone(),
+                    TypeChangeEntry {
+                        old_type: effective_type_name(old_value),
+                        new_type: effective_type_name(new_value),
+                        old_value: old_value.clone(),
+                        new_value: new_value.clone(),
+                        new_path,
+                    },
+                );
+                return Ok(());
+            }
 
-            if old_value != new_value {
+            let (old_norm, new_norm) = normalized_pair(path, old_typed.value(), new_typed.value())?;
+
+            if old_norm != new_norm {
                 report.insert_values_changed(
                     path.clone(),
                     ValuesChangedEntry {
                         // Datetimes are never strings, so `_diff_str` never runs.
                         diff: None,
-                        old_value: Value::DateTime(old_value),
-                        new_value: Value::DateTime(new_value),
+                        old_value: Value::DateTime(old_norm.into()),
+                        new_value: Value::DateTime(new_norm.into()),
                         new_path,
                     },
                 );
@@ -197,7 +216,9 @@ fn insert_lcs_pair_finding(
             return Ok(());
         }
 
-        if python_type_name(old_value) == python_type_name(new_value) {
+        if python_type_name(old_value) == python_type_name(new_value)
+            && class_name(old_value) == class_name(new_value)
+        {
             report.insert_values_changed(
                 path.clone(),
                 ValuesChangedEntry {
@@ -211,8 +232,8 @@ fn insert_lcs_pair_finding(
             report.insert_type_change(
                 path.clone(),
                 TypeChangeEntry {
-                    old_type: python_type_name(old_value).to_string(),
-                    new_type: python_type_name(new_value).to_string(),
+                    old_type: effective_type_name(old_value),
+                    new_type: effective_type_name(new_value),
                     old_value: old_value.clone(),
                     new_value: new_value.clone(),
                     new_path,

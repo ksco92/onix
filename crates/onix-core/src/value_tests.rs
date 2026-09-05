@@ -28,9 +28,14 @@ type DeError = serde::de::value::Error;
 
 #[test]
 fn value_is_compact() {
+    // Grew from 32 to 40 bytes with subclass-name tracking (`Typed<T>` on
+    // `DateTime`/`Date`/`Array`/`Tuple` adds one `Option<Arc<str>>`, niche-
+    // optimized to 16 bytes) — the cost of carrying a subclass's own class
+    // name (e.g. pandas `Timestamp`) through the value model; see
+    // `crate::value::Typed`'s doc.
     let size = std::mem::size_of::<Value>();
     println!("size_of::<Value>() = {size} bytes");
-    assert!(size <= 32, "Value must be <= 32 bytes, got {size}");
+    assert!(size <= 40, "Value must be <= 40 bytes, got {size}");
 }
 
 // --- number distinction edges -------------------------------------------
@@ -340,7 +345,7 @@ fn deep_equality_does_not_overflow_native_stack() {
             let build = |leaf: Value| {
                 let mut value = leaf;
                 for _ in 0..DEPTH {
-                    value = Value::Array(vec![value].into_boxed_slice());
+                    value = Value::Array(vec![value].into_boxed_slice().into());
                 }
                 value
             };
@@ -375,7 +380,7 @@ fn deeply_nested_values_drop_without_native_recursion() {
 
             let mut nested_arrays = Value::Null;
             for _ in 0..DEPTH {
-                nested_arrays = Value::Array(vec![nested_arrays].into_boxed_slice());
+                nested_arrays = Value::Array(vec![nested_arrays].into_boxed_slice().into());
             }
             drop(nested_arrays);
 
@@ -425,23 +430,60 @@ fn builder_default_matches_new() {
     assert_eq!(value.to_serde_json().to_string(), r#"{"k":null}"#);
 }
 
+#[test]
+fn builder_object_with_type_name_attaches_a_dict_subclass_name() {
+    use super::Builder;
+
+    let mut builder = Builder::new();
+    let value = builder.object_with_type_name(
+        vec![("a".to_owned(), Value::Number(Number::from_u64(1)))],
+        Some(Arc::from("MyDict")),
+    );
+
+    let Value::Object(map) = &value else {
+        panic!("object_with_type_name always builds an Object");
+    };
+    assert_eq!(map.type_name(), Some("MyDict"));
+    // Renders and compares exactly like a plain object built the same way,
+    // save for the class name — the "compare as base type" half of the
+    // contract (see `Typed`'s doc).
+    assert_eq!(value.to_serde_json().to_string(), r#"{"a":1}"#);
+
+    let plain = builder.object(vec![("a".to_owned(), Value::Number(Number::from_u64(1)))]);
+    let Value::Object(plain_map) = &plain else {
+        panic!("object always builds an Object");
+    };
+    assert_eq!(plain_map.type_name(), None);
+}
+
 // --- tuples --------------------------------------------------------------
 
 #[test]
 fn a_tuple_renders_as_a_json_array_but_is_never_equal_to_one() {
-    let tuple =
-        Value::Tuple(vec![Value::from(serde_json::json!(1)), Value::Null].into_boxed_slice());
+    let tuple = Value::Tuple(
+        vec![Value::from(serde_json::json!(1)), Value::Null]
+            .into_boxed_slice()
+            .into(),
+    );
 
     assert_eq!(tuple.to_serde_json(), serde_json::json!([1, null]));
     assert_ne!(tuple, cv(&serde_json::json!([1, null])));
     assert_eq!(
         tuple,
-        Value::Tuple(vec![Value::from(serde_json::json!(1)), Value::Null].into_boxed_slice())
+        Value::Tuple(
+            vec![Value::from(serde_json::json!(1)), Value::Null]
+                .into_boxed_slice()
+                .into()
+        )
     );
     // Same length, different item: the tuple arm's own inequality path.
     assert_ne!(
         tuple,
-        Value::Tuple(vec![Value::from(serde_json::json!(1)), Value::Bool(true)].into_boxed_slice())
+        Value::Tuple(
+            vec![Value::from(serde_json::json!(1)), Value::Bool(true)]
+                .into_boxed_slice()
+                .into()
+        )
     );
     assert!(format!("{tuple:?}").contains("Tuple"));
 }
@@ -474,7 +516,7 @@ fn deeply_nested_tuples_compare_and_drop_without_native_recursion() {
             let build = |leaf: Value| {
                 let mut value = leaf;
                 for _ in 0..DEPTH {
-                    value = Value::Tuple(vec![value].into_boxed_slice());
+                    value = Value::Tuple(vec![value].into_boxed_slice().into());
                 }
                 value
             };
@@ -570,7 +612,7 @@ fn calendar_values_nested_in_deep_containers_drop_without_native_recursion() {
             const DEPTH: usize = 100_000;
             let mut value = cdt(2024, 1, 1, Some(0));
             for _ in 0..DEPTH {
-                value = Value::Array(vec![value, cdate(2024, 1, 1)].into_boxed_slice());
+                value = Value::Array(vec![value, cdate(2024, 1, 1)].into_boxed_slice().into());
             }
             drop(value);
         })

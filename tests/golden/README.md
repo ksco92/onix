@@ -493,20 +493,35 @@ generated — so it is pinned in `test_sets.py` instead.
   `set_tuple_item_python_equality` and `set_frozenset_item_python_equality`
   cases.
 
-- **Tuple, set and frozenset subclasses, including namedtuples, are refused.** `DeepDiff` reports
-  every value under its own `type(obj).__name__`, so a subclass is never a plain
-  `tuple` there: `DeepDiff(Pair((1, 2)), (1, 2))` is a `type_changes` from `Pair`
-  to `tuple`, and a `namedtuple` diverges further still (`DeepDiff` walks its
-  *fields*, reporting `root[0].x` with the class name as the type). This MVP has
-  neither a per-class type name nor a field-walking conversion, and diffing a
-  subclass as a plain tuple would silently report *no* difference where `DeepDiff`
-  reports one — so the conversion raises `TypeError` naming the class, like any
-  other unsupported type. The same rule and the same reason apply to a `set` or
-  `frozenset` subclass. `crates/onix-py/tests/test_tuples.py` and
-  `crates/onix-py/tests/test_sets.py` assert both the refusal and the real tool's
-  own output. No golden case uses one: the corpus's
-  fixtures are JSON files, and the tagged encoding above deliberately has no tag
-  for "an arbitrary class".
+- **A `namedtuple` is diffed positionally, not by field.** `DeepDiff` reports
+  every value under its own `type(obj).__name__`, and for a `namedtuple`
+  specifically it also walks the value's *fields* (`deephash.py`'s
+  `_prep_tuple`), reporting `root[0].x` rather than `root[0][0]`. `onix`
+  accepts a `namedtuple` as an ordinary `tuple` subclass — carrying its own
+  class name into a `type_changes` entry exactly like any other tuple
+  subclass — but diffs its contents positionally, the same way it diffs
+  every other tuple. Reproducing the field-walking shape would need a
+  second, name-keyed diffing path threaded through the whole engine for one
+  single-source special case; this is a documented, permanent divergence,
+  not an approximation of it. `crates/onix-py/tests/test_tuples.py` asserts
+  both onix's positional output and the real tool's field-walking one side
+  by side. No golden case uses a `namedtuple`: the corpus's fixtures are
+  JSON files, and the tagged encoding above deliberately has no tag for one.
+
+- **Every other subclass — `list`/`tuple`/`set`/`frozenset`/`dict`, and a
+  `datetime`/`date` subclass such as pandas' `Timestamp` — is accepted and
+  compares exactly as its base type**, carrying its own class name into a
+  `type_changes` entry: a subclass instance is never a plain instance of
+  the base type to `DeepDiff` (`type(obj).__name__` decides), even when
+  every field matches, matching real `DeepDiff`'s behavior exactly — see
+  `crates/onix-core/src/value.rs`'s `Typed` doc for the full mechanism and
+  `crates/onix-py/src/convert.rs`'s module doc for the conversion rules
+  (including the one restriction that remains: a `tuple`/`frozenset`
+  subclass, including a `namedtuple`, is not accepted as a `set` member).
+  `crates/onix-py/tests/test_tuples.py`, `test_sets.py`,
+  `test_datetimes.py` and `test_conversions.py` assert this against the
+  real tool. No golden case uses a subclass, for the same tagged-encoding
+  reason as above.
 
 - **`to_dict()` reports a `type_changes` entry's types as names, not classes.**
   Real `DeepDiff` puts the type objects themselves (`<class 'tuple'>`) in

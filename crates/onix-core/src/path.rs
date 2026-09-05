@@ -246,7 +246,7 @@ fn write_repr_head<'a>(out: &mut String, stack: &mut Vec<Work<'a>>, value: &'a V
         Value::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
         Value::Number(n) => out.push_str(&number_repr(n)),
         Value::Str(s) => out.push_str(&python_repr_str(s)),
-        Value::DateTime(value) => out.push_str(&datetime_repr(*value)),
+        Value::DateTime(value) => out.push_str(&datetime_repr(value.value())),
         Value::Date(value) => {
             let _ = write!(
                 out,
@@ -694,33 +694,35 @@ mod tests {
     /// `set_str_inside_tuple_item`).
     #[test]
     fn str_nested_in_a_tuple_item_uses_python_repr() {
-        let tuple = Value::Tuple(Box::new([Value::Str("it's".into())]));
+        let tuple = Value::Tuple(Box::new([Value::Str("it's".into())]).into());
         assert_eq!(set_item_repr(&tuple), r#"("it's",)"#);
 
-        let both = Value::Tuple(Box::new([Value::Str("it's \"x\"".into())]));
+        let both = Value::Tuple(Box::new([Value::Str("it's \"x\"".into())]).into());
         assert_eq!(set_item_repr(&both), r#"('it\'s "x"',)"#);
     }
 
     #[test]
     fn python_repr_renders_every_container_kind() {
-        let inner = Value::Tuple(Box::new([Value::Number(Number::from_u64(1))]));
+        let inner = Value::Tuple(Box::new([Value::Number(Number::from_u64(1))]).into());
         assert_eq!(python_repr(&inner), "(1,)");
         assert_eq!(
-            python_repr(&Value::Tuple(Box::new([
-                Value::Number(Number::from_u64(1)),
-                Value::Number(Number::from_u64(2)),
-            ]))),
+            python_repr(&Value::Tuple(
+                Box::new([
+                    Value::Number(Number::from_u64(1)),
+                    Value::Number(Number::from_u64(2)),
+                ])
+                .into()
+            )),
             "(1, 2)"
         );
-        assert_eq!(python_repr(&Value::Tuple(Box::new([]))), "()");
+        assert_eq!(python_repr(&Value::Tuple(Box::new([]).into())), "()");
         assert_eq!(
-            python_repr(&Value::Array(Box::new([
-                Value::Null,
-                Value::Str("a".into()),
-            ]))),
+            python_repr(&Value::Array(
+                Box::new([Value::Null, Value::Str("a".into())]).into()
+            )),
             "[None, 'a']"
         );
-        assert_eq!(python_repr(&Value::Array(Box::new([]))), "[]");
+        assert_eq!(python_repr(&Value::Array(Box::new([]).into())), "[]");
     }
 
     /// A set renders its members in the crate's canonical order, whatever
@@ -782,13 +784,19 @@ mod tests {
     /// handling one level.
     #[test]
     fn python_repr_nests_containers() {
-        let value = Value::Tuple(Box::new([
-            Value::Number(Number::from_u64(1)),
-            Value::Tuple(Box::new([
-                Value::Number(Number::from_u64(2)),
-                Value::FrozenSet(SetItems::new(vec![Value::Str("x".into())])),
-            ])),
-        ]));
+        let value = Value::Tuple(
+            Box::new([
+                Value::Number(Number::from_u64(1)),
+                Value::Tuple(
+                    Box::new([
+                        Value::Number(Number::from_u64(2)),
+                        Value::FrozenSet(SetItems::new(vec![Value::Str("x".into())])),
+                    ])
+                    .into(),
+                ),
+            ])
+            .into(),
+        );
         assert_eq!(python_repr(&value), "(1, (2, frozenset({'x'})))");
     }
 
@@ -796,9 +804,9 @@ mod tests {
     /// stack tolerates renders instead of aborting the process.
     #[test]
     fn python_repr_of_a_very_deep_nest_does_not_overflow_the_stack() {
-        let mut value = Value::Tuple(Box::new([]));
+        let mut value = Value::Tuple(Box::new([]).into());
         for _ in 0..100_000 {
-            value = Value::Tuple(Box::new([value]));
+            value = Value::Tuple(Box::new([value]).into());
         }
 
         let rendered = python_repr(&value);
@@ -824,7 +832,7 @@ mod tests {
             ("héllo世界", "'héllo世界'"),
         ];
         for (input, expected) in cases {
-            let item = Value::Tuple(Box::new([Value::Str(input.into())]));
+            let item = Value::Tuple(Box::new([Value::Str(input.into())]).into());
             assert_eq!(
                 python_repr(&item),
                 format!("({expected},)"),
