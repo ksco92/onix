@@ -30,6 +30,30 @@ from deepdiff_rs import DeepDiff, diff_json
 FLOAT_CASE_COUNT: Final[int] = 1_000_000
 FLOAT_BATCH_SIZE: Final[int] = 5_000
 
+# How many BMP code points are rendered per diff call in the str-repr
+# differential below (one call per batch keeps the full sweep fast).
+BMP_BATCH_SIZE: Final[int] = 2_000
+
+# A deterministic sample covering every general category the full BMP sweep
+# below cannot reach: characters that need the `\UXXXXXXXX` (8 hex digit)
+# escape width, or none at all. A printable letter, symbol and combining
+# mark (left bare, matching Python `repr()`), plus `Format`, two
+# `PrivateUse` and three `Unassigned` code points (escaped) — see path.rs's
+# `is_non_printable`.
+SUPPLEMENTARY_SAMPLE: Final[list[int]] = [
+    0x10000,  # Lo, printable
+    0x1F600,  # So, printable (emoji)
+    0x30000,  # Lo, printable
+    0xE01EF,  # Mn, printable (combining, astral)
+    0xE0001,  # Cf, non-printable
+    0xF0000,  # Co, non-printable (private-use plane)
+    0x10FFFD,  # Co, non-printable (private-use plane)
+    0x2FFFE,  # Cn, non-printable (unassigned noncharacter)
+    0x3FFFD,  # Cn, non-printable (unassigned)
+    0x40000,  # Cn, non-printable (unassigned)
+    0x10FFFF,  # Cn, non-printable (last valid code point)
+]
+
 
 def test_set_items_are_reported_as_added_and_removed_paths() -> None:
     """The two set categories are lists of path strings, sorted by onix."""
@@ -202,6 +226,50 @@ def test_float_set_item_paths_match_python_repr_over_a_million_bit_patterns() ->
         f"{len(mismatches)} of {checked} floats rendered differently "
         f"(showing up to 3): {mismatches[:3]}"
     )
+
+
+def _rendered_tuple_str_paths(strings: list[str]) -> list[str]:
+    """
+    Render a batch of one-element ``(s,)`` tuple set items, one diff per batch.
+
+    :param strings: Distinct single-character strings.
+    :return: The rendered ``set_item_removed`` entries, sorted.
+    """
+    items = {(s,) for s in strings}
+    return sorted(DeepDiff(items, {("sentinel",)}).to_dict()["set_item_removed"])
+
+
+def test_str_inside_tuple_matches_python_repr_over_the_full_bmp() -> None:
+    """A `str` nested inside a tuple set item escapes exactly like Python `repr()`.
+
+    Every BMP code point except the lone-surrogate range, which is refused
+    before rendering (see test_conversions.py's surrogate tests).
+    """
+    code_points = [cp for cp in range(0x10000) if not 0xD800 <= cp <= 0xDFFF]
+    mismatches: list[tuple[str, str]] = []
+
+    for start in range(0, len(code_points), BMP_BATCH_SIZE):
+        batch = code_points[start : start + BMP_BATCH_SIZE]
+        strings = [chr(cp) for cp in batch]
+        expected = sorted(f"root[{(s,)!r}]" for s in strings)
+        rendered = _rendered_tuple_str_paths(strings)
+        mismatches.extend(pair for pair in zip(expected, rendered) if pair[0] != pair[1])
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {len(code_points)} BMP code points rendered "
+        f"differently (showing up to 3): {mismatches[:3]}"
+    )
+
+
+def test_str_inside_tuple_matches_python_repr_beyond_the_bmp() -> None:
+    """The `\\UXXXXXXXX` escape width, and printable astral text left bare.
+
+    See `SUPPLEMENTARY_SAMPLE`'s doc for which category each entry covers.
+    """
+    strings = [chr(cp) for cp in SUPPLEMENTARY_SAMPLE]
+    expected = sorted(f"root[{(s,)!r}]" for s in strings)
+
+    assert _rendered_tuple_str_paths(strings) == expected
 
 
 def test_a_set_holding_an_unhashable_subclass_is_refused() -> None:

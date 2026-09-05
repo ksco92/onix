@@ -608,19 +608,11 @@ nested array pair now measures a nested dict-vs-dict candidate through
 this same real `object_diff` collapse, so no inflated leaf count can flip
 a pairing decision.
 
-One more accepted limitation lives in `onix_core::path::python_repr`, which
-ports Python's `repr()` for the strings nested inside a tuple or frozenset set
-item: it escapes every non-printable code point below `U+0100` (the complete set
-in that range) and passes everything above through literally, where Python also
-escapes the non-printable ones (zero-width joiners, unassigned code points).
-Reproducing those would mean carrying a Unicode category table; the port is
-exact for all of ASCII and all printable text.
-
 Every other divergence found while building the corpus was fixed in `onix-core` to match
 `DeepDiff` exactly. The two path-rendering exceptions above, the three
-set-iteration-order differences, the `repr()` gap just described, the
-list-LCS `2^53` limitation, the naive-datetime pairing timezone above, and the
-lone-surrogate `ValueError` just described are the only accepted, documented exceptions —
+set-iteration-order differences, the list-LCS `2^53` limitation, the
+naive-datetime pairing timezone above, and the lone-surrogate `ValueError`
+just described are the only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
 `scripts/differential_fuzz.py`) found zero *other* unexplained

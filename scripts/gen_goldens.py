@@ -295,6 +295,13 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
     # A `str` nested inside a tuple item IS escaped (Python `repr`), unlike a
     # top-level one — the two halves of the rule in one case.
     "set_str_inside_tuple_item": ({("it's",)}, {"x"}),
+    # Non-printable code points above U+0100, one per category: U+200B (Cf,
+    # zero width space), U+2028 (Zl, line separator), U+E000 (Co, private
+    # use) and U+0378 (Cn, unassigned in Unicode 16.0.0).
+    "set_str_inside_tuple_item_non_printable_above_u0100": (
+        {("\u200b\u2028\ue000\u0378",)},
+        {"x"},
+    ),
     "set_frozenset_items": ({frozenset({1, 2})}, {frozenset({1, 3})}),
     "set_empty_frozenset_item": ({frozenset()}, {1}),
     # Only a *bare* number is type-wrapped, so a container Python's `==`
