@@ -66,7 +66,8 @@ fn make_record(
             Value::Number(Number::from_i64(i64::try_from(i % 2000).unwrap() - 1000)),
             Value::Number(Number::from_i64(i64::try_from(i % 400).unwrap() - 200)),
         ]
-        .into_boxed_slice(),
+        .into_boxed_slice()
+        .into(),
     );
 
     let mut tags: Vec<Value> = (0..=(i % 4))
@@ -85,7 +86,7 @@ fn make_record(
             "name".to_owned(),
             Value::Str(Box::from(format!("typed_{i:07}"))),
         ),
-        ("created_at".to_owned(), Value::DateTime(dt)),
+        ("created_at".to_owned(), Value::DateTime(dt.into())),
         ("coordinate".to_owned(), coordinate),
         ("tags".to_owned(), Value::Set(SetItems::new(tags))),
     ];
@@ -119,8 +120,8 @@ fn build_case(wide: usize) -> (Value, Value) {
         i += step;
     }
     (
-        Value::Array(a.into_boxed_slice()),
-        Value::Array(b.into_boxed_slice()),
+        Value::Array(a.into_boxed_slice().into()),
+        Value::Array(b.into_boxed_slice().into()),
     )
 }
 

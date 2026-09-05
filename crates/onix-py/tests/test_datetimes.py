@@ -13,6 +13,7 @@ Two things this file pins that the golden corpus cannot:
 import datetime
 import zoneinfo
 
+import pandas as pd
 import pytest
 from deepdiff import DeepDiff as RealDeepDiff
 
@@ -220,3 +221,78 @@ def test_a_calendar_value_pairs_with_its_own_str_under_ignore_order() -> None:
 
         assert _normalize_types(OnixDeepDiff(a, b, ignore_order=True).to_dict()) == expected
         assert "type_changes" in expected
+
+
+# datetime/date subclasses: accepted, compared as the base type, own class name reported
+
+
+def test_a_timestamp_pair_is_accepted_and_compared_by_instant() -> None:
+    """`pandas.Timestamp`, a `datetime` subclass, diffs exactly like a plain `datetime`."""
+    a, b = pd.Timestamp("2024-01-01 10:00:00"), pd.Timestamp("2024-01-01 11:00:00")
+
+    expected = _normalize_types(RealDeepDiff(a, b, verbose_level=2).to_dict())
+    assert _normalize_types(OnixDeepDiff(a, b).to_dict()) == expected
+    assert expected == {
+        "values_changed": {
+            "root": {
+                "old_value": datetime.datetime(2024, 1, 1, 10, tzinfo=UTC),
+                "new_value": datetime.datetime(2024, 1, 1, 11, tzinfo=UTC),
+            }
+        }
+    }
+
+    # Equal-instant Timestamps of the same class report nothing, same as two
+    # equal plain datetimes.
+    assert OnixDeepDiff(a, a).to_dict() == {}
+
+
+def test_a_timestamp_versus_a_plain_datetime_is_a_type_change_even_at_equal_value() -> None:
+    """A subclass instance never compares as its base type, even with identical fields."""
+    stamp = pd.Timestamp("2024-01-01 10:00:00")
+    plain = datetime.datetime(2024, 1, 1, 10, 0, 0)
+
+    expected = _normalize_types(RealDeepDiff(stamp, plain, verbose_level=2).to_dict())
+    actual = _normalize_types(OnixDeepDiff(stamp, plain).to_dict())
+
+    assert actual == expected
+    assert expected["type_changes"]["root"]["old_type"] == "Timestamp"
+    assert expected["type_changes"]["root"]["new_type"] == "datetime"
+
+
+def test_a_date_subclass_is_accepted_and_compared_by_value() -> None:
+    """A `date` subclass diffs like a plain `date`, and reports its own name in a type change."""
+
+    class Day(datetime.date):
+        pass
+
+    same_type = OnixDeepDiff(Day(2024, 1, 1), Day(2024, 1, 2))
+    assert same_type.to_dict() == {
+        "values_changed": {
+            "root": {"old_value": Day(2024, 1, 1), "new_value": Day(2024, 1, 2)}
+        }
+    }
+
+    cross_type = OnixDeepDiff(Day(2024, 1, 1), datetime.date(2024, 1, 1))
+    expected = _normalize_types(
+        RealDeepDiff(Day(2024, 1, 1), datetime.date(2024, 1, 1), verbose_level=2).to_dict()
+    )
+    assert _normalize_types(cross_type.to_dict()) == expected
+    assert expected["type_changes"]["root"]["old_type"] == "Day"
+    assert expected["type_changes"]["root"]["new_type"] == "date"
+
+
+def test_a_timestamp_renders_back_as_a_plain_datetime_not_the_original_subclass() -> None:
+    """
+    `to_dict()` cannot reconstruct the original subclass instance.
+
+    Once a value has passed through the compact model there is nothing left
+    to rebuild a `Timestamp` from — it renders back as the plain
+    `datetime.datetime` its fields describe, the same simplification already
+    documented for the `zoneinfo`/`pytz` round trip.
+    """
+    stamp = pd.Timestamp("2024-01-01 10:00:00")
+    result = OnixDeepDiff({}, {"t": stamp}).to_dict()
+    rendered = result["dictionary_item_added"]["root['t']"]
+
+    assert rendered == stamp
+    assert type(rendered) is datetime.datetime  # noqa: E721 - asserting the exact runtime type

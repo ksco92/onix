@@ -3,7 +3,7 @@ use crate::error::Error;
 use crate::path::PathSegment;
 use crate::report::Report;
 use crate::test_support::{cdate, cdt, cdt_at, cfrozen, cnum, cobj, cset, ctup, cv};
-use crate::value::{Object as CObject, SetItems, Value as CValue};
+use crate::value::{Object as CObject, SetItems, Typed, Value as CValue};
 use serde_json::{Map, Number, Value, json};
 
 // Thin wrappers routing each `serde_json`-literal-based test through the real
@@ -1229,7 +1229,7 @@ fn threshold_collapse_rejects_a_deep_side_on_a_constrained_stack_instead_of_cras
             let deep = {
                 let mut value = CValue::from(json!(1));
                 for _ in 0..RECURSION_OVERFLOW_DEPTH {
-                    value = CValue::Array(vec![value].into_boxed_slice());
+                    value = CValue::Array(vec![value].into_boxed_slice().into());
                 }
                 value
             };
@@ -2002,7 +2002,11 @@ fn a_tuple_element_disqualifies_a_list_from_lcs_matching() {
     // list falls back to index-aligned comparison (a type change at index 0
     // plus a removed tail), exactly like a nested list or dict element.
     let report = super::diff(
-        &CValue::Array(vec![ctup(&[json!(1), json!(2)]), cv(&json!(3))].into_boxed_slice()),
+        &CValue::Array(
+            vec![ctup(&[json!(1), json!(2)]), cv(&json!(3))]
+                .into_boxed_slice()
+                .into(),
+        ),
         &cv(&json!([3])),
     )
     .unwrap();
@@ -2039,7 +2043,7 @@ fn a_tuple_never_equals_a_list_with_the_same_items() {
 fn tuple_nesting_counts_toward_the_value_depth_guard() {
     // Tuples nest exactly like arrays, so `deeper_than` must see through
     // them: `((1,),)` is depth 2.
-    let nested = CValue::Tuple(vec![ctup(&[json!(1)])].into_boxed_slice());
+    let nested = CValue::Tuple(vec![ctup(&[json!(1)])].into_boxed_slice().into());
     assert!(super::dispatch::deeper_than(&nested, 1));
     assert!(!super::dispatch::deeper_than(&nested, 2));
 }
@@ -2050,7 +2054,7 @@ fn a_dict_value_that_is_a_too_deep_tuple_errors_instead_of_being_cloned() {
     // same as to an array-shaped one.
     let mut deep = CValue::Null;
     for _ in 0..5 {
-        deep = CValue::Tuple(vec![deep].into_boxed_slice());
+        deep = CValue::Tuple(vec![deep].into_boxed_slice().into());
     }
     let b = CValue::Object(CObject::from_pairs(vec![(std::sync::Arc::from("a"), deep)]));
     let error = super::diff_with_max_depth(&cv(&json!({})), &b, 4).unwrap_err();
@@ -2174,7 +2178,8 @@ fn a_list_of_datetimes_takes_the_difflib_path() {
                 cdt(2024, 1, 2, None),
                 cdt(2024, 1, 3, None),
             ]
-            .into_boxed_slice(),
+            .into_boxed_slice()
+            .into(),
         ),
         &CValue::Array(
             vec![
@@ -2182,7 +2187,8 @@ fn a_list_of_datetimes_takes_the_difflib_path() {
                 cdt(2024, 1, 3, None),
                 cdt(2024, 1, 4, None),
             ]
-            .into_boxed_slice(),
+            .into_boxed_slice()
+            .into(),
         ),
     )
     .unwrap();
@@ -2211,14 +2217,16 @@ fn a_naive_and_aware_pair_matched_by_difflib_replace_reports_nothing_at_a_drifte
                 cv(&json!("y")),
                 cdt_at(2024, 1, 1, 10, 0, 0, 0, None),
             ]
-            .into_boxed_slice(),
+            .into_boxed_slice()
+            .into(),
         ),
         &CValue::Array(
             vec![
                 cv(&json!("y")),
                 cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600)),
             ]
-            .into_boxed_slice(),
+            .into_boxed_slice()
+            .into(),
         ),
     )
     .unwrap();
@@ -2240,14 +2248,16 @@ fn a_datetime_pair_matched_by_difflib_replace_is_normalized_and_keeps_new_path()
                 cv(&json!("y")),
                 cdt_at(2024, 1, 1, 10, 0, 0, 0, None),
             ]
-            .into_boxed_slice(),
+            .into_boxed_slice()
+            .into(),
         ),
         &CValue::Array(
             vec![
                 cv(&json!("y")),
                 cdt_at(2024, 1, 2, 12, 0, 0, 0, Some(2 * 3600)),
             ]
-            .into_boxed_slice(),
+            .into_boxed_slice()
+            .into(),
         ),
     )
     .unwrap();
@@ -2330,7 +2340,7 @@ fn an_unnormalizable_datetime_under_ignore_order_is_reported_raw() {
         ignore_order: true,
         ..super::DiffOptions::default()
     };
-    let list = |items: Vec<CValue>| CValue::Array(items.into_boxed_slice());
+    let list = |items: Vec<CValue>| CValue::Array(items.into_boxed_slice().into());
 
     let added = super::diff_with_options(
         &list(vec![cv(&json!(1))]),
@@ -2459,6 +2469,216 @@ fn python_type_name_names_both_set_kinds() {
     assert_eq!(super::python_type_name(&cfrozen(&[])), "frozenset");
 }
 
+// --- subclass type names: a class-name mismatch is a type change even at
+// --- equal content, and a shared class name diffs like the base type ---
+
+#[test]
+fn a_datetime_subclass_versus_the_base_type_is_a_type_change_at_equal_value() {
+    let base = cdt(2024, 1, 1, None);
+    let CValue::DateTime(typed) = &base else {
+        panic!("cdt always builds a DateTime");
+    };
+    let subclass = CValue::DateTime(Typed::with_class_name(
+        typed.value(),
+        Some(std::sync::Arc::from("Timestamp")),
+    ));
+
+    let report = super::diff(&subclass, &base).unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "Timestamp", "new_type": "datetime",
+            "old_value": "2024-01-01T00:00:00", "new_value": "2024-01-01T00:00:00",
+        }}})
+    );
+}
+
+#[test]
+fn two_datetime_subclasses_of_the_same_class_diff_by_instant() {
+    let name = || Some(std::sync::Arc::from("Timestamp"));
+    let a = CValue::DateTime(Typed::with_class_name(
+        crate::datetime::DateTime::new(
+            crate::datetime::Date::new(2024, 1, 1).unwrap(),
+            0,
+            0,
+            0,
+            0,
+            None,
+        )
+        .unwrap(),
+        name(),
+    ));
+    let b = CValue::DateTime(Typed::with_class_name(
+        crate::datetime::DateTime::new(
+            crate::datetime::Date::new(2024, 1, 2).unwrap(),
+            0,
+            0,
+            0,
+            0,
+            None,
+        )
+        .unwrap(),
+        name(),
+    ));
+
+    let report = super::diff(&a, &b).unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"values_changed": {"root": {
+            "old_value": "2024-01-01T00:00:00+00:00", "new_value": "2024-01-02T00:00:00+00:00",
+        }}})
+    );
+}
+
+/// The class-name gate on an LCS `'replace'`-opcode pairwise comparison
+/// ([`crate::diff::array::insert_lcs_pair_finding`]'s own class-name check,
+/// distinct from `diff_at`'s dispatch-level gate the tests above exercise):
+/// two single-element scalar-only lists never match as an `'equal'` opcode
+/// here (the dates differ), so the pair is reached through the `'replace'`
+/// path instead.
+#[test]
+fn a_datetime_subclass_inside_an_lcs_replace_pair_is_a_type_change() {
+    let base_a = cdt(2024, 1, 1, None);
+    let base_b = cdt(2024, 1, 2, None);
+    let CValue::DateTime(typed_a) = &base_a else {
+        panic!("cdt always builds a DateTime");
+    };
+    let subclass_a = CValue::DateTime(Typed::with_class_name(
+        typed_a.value(),
+        Some(std::sync::Arc::from("Timestamp")),
+    ));
+
+    let a = CValue::Array(vec![subclass_a].into_boxed_slice().into());
+    let b = CValue::Array(vec![base_b].into_boxed_slice().into());
+
+    let report = super::diff(&a, &b).unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "Timestamp", "new_type": "datetime",
+            "old_value": "2024-01-01T00:00:00", "new_value": "2024-01-02T00:00:00",
+        }}})
+    );
+}
+
+#[test]
+fn a_date_subclass_versus_the_base_type_is_a_type_change_at_equal_value() {
+    let base = cdate(2024, 1, 1);
+    let CValue::Date(typed) = &base else {
+        panic!("cdate always builds a Date");
+    };
+    let subclass = CValue::Date(Typed::with_class_name(
+        typed.value(),
+        Some(std::sync::Arc::from("Day")),
+    ));
+
+    let report = super::diff(&subclass, &base).unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "Day", "new_type": "date",
+            "old_value": "2024-01-01", "new_value": "2024-01-01",
+        }}})
+    );
+}
+
+#[test]
+fn a_tuple_subclass_versus_the_base_type_is_a_type_change_at_equal_value() {
+    let base = ctup(&[json!(1), json!(2)]);
+    let CValue::Tuple(items) = &base else {
+        panic!("ctup always builds a Tuple");
+    };
+    let subclass = CValue::Tuple(Typed::with_class_name(
+        items.to_vec().into_boxed_slice(),
+        Some(std::sync::Arc::from("Pair")),
+    ));
+
+    let report = super::diff(&subclass, &base).unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "Pair", "new_type": "tuple",
+            "old_value": [1, 2], "new_value": [1, 2],
+        }}})
+    );
+}
+
+#[test]
+fn two_tuple_subclasses_of_the_same_class_diff_positionally() {
+    let name = || Some(std::sync::Arc::from("Pair"));
+    let a = CValue::Tuple(Typed::with_class_name(
+        Box::new([cv(&json!(1)), cv(&json!(2))]),
+        name(),
+    ));
+    let b = CValue::Tuple(Typed::with_class_name(
+        Box::new([cv(&json!(1)), cv(&json!(3))]),
+        name(),
+    ));
+
+    let report = super::diff(&a, &b).unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"values_changed": {"root[1]": {"old_value": 2, "new_value": 3}}})
+    );
+}
+
+#[test]
+fn a_set_subclass_versus_the_base_type_is_a_type_change_at_equal_value() {
+    let base = cset(&[json!(1)]);
+    let subclass = CValue::Set(
+        SetItems::new(vec![cv(&json!(1))]).with_type_name(Some(std::sync::Arc::from("MySet"))),
+    );
+
+    let report = super::diff(&subclass, &base).unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "MySet", "new_type": "set",
+            "old_value": [1], "new_value": [1],
+        }}})
+    );
+}
+
+#[test]
+fn two_set_subclasses_of_the_same_class_diff_by_membership() {
+    let name = || Some(std::sync::Arc::from("MySet"));
+    let a = CValue::Set(SetItems::new(vec![cv(&json!(1)), cv(&json!(2))]).with_type_name(name()));
+    let b = CValue::Set(SetItems::new(vec![cv(&json!(1)), cv(&json!(3))]).with_type_name(name()));
+
+    let report = super::diff(&a, &b).unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"set_item_added": ["root[3]"], "set_item_removed": ["root[2]"]})
+    );
+}
+
+#[test]
+fn an_object_subclass_versus_the_base_type_is_a_type_change_at_equal_value() {
+    let entries = vec![(std::sync::Arc::from("a"), cv(&json!(1)))];
+    let base = CValue::Object(CObject::from_pairs(entries.clone()));
+    let subclass = CValue::Object(
+        CObject::from_pairs(entries).with_type_name(Some(std::sync::Arc::from("MyDict"))),
+    );
+
+    let report = super::diff(&subclass, &base).unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "MyDict", "new_type": "dict",
+            "old_value": {"a": 1}, "new_value": {"a": 1},
+        }}})
+    );
+}
+
 /// A set element disqualifies its list from the difflib match, the way a
 /// nested list or a tuple element does (golden:
 /// `set_element_disqualifies_list_lcs`).
@@ -2473,12 +2693,11 @@ fn a_set_element_disqualifies_a_list_from_the_lcs_match() {
 /// real `DeepDiff`'s does. Both orders give two removals and one addition.
 #[test]
 fn a_sets_report_does_not_depend_on_its_member_order() {
-    let float_tuple = CValue::Tuple(Box::new([ctup(&[json!(1.0)])]));
-    let int_tuple = CValue::Tuple(Box::new([ctup(&[json!(1)]), cv(&json!(0))]));
-    let b = CValue::Set(SetItems::new(vec![CValue::Tuple(Box::new([ctup(&[
-        json!(1),
-        json!(1),
-    ])]))]));
+    let float_tuple = CValue::Tuple(Box::new([ctup(&[json!(1.0)])]).into());
+    let int_tuple = CValue::Tuple(Box::new([ctup(&[json!(1)]), cv(&json!(0))]).into());
+    let b = CValue::Set(SetItems::new(vec![CValue::Tuple(
+        Box::new([ctup(&[json!(1), json!(1)])]).into(),
+    )]));
 
     let expected = json!({
         "set_item_added": ["root[((1, 1),)]"],
@@ -2506,7 +2725,7 @@ fn a_set_versus_list_type_change_does_not_depend_on_order() {
         ignore_order: true,
         ..super::DiffOptions::default()
     };
-    let listed = |value: CValue| CValue::Array(Box::new([value]));
+    let listed = |value: CValue| CValue::Array(Box::new([value]).into());
     let members = || vec![cv(&json!(75)), cv(&json!(47))];
     let mut reversed = members();
     reversed.reverse();
@@ -2556,7 +2775,7 @@ fn a_too_deep_set_item_reports_max_depth_exceeded() {
     let deep = |nesting: usize| {
         let mut value = ctup(&[json!(1)]);
         for _ in 1..nesting {
-            value = CValue::Tuple(Box::new([value]));
+            value = CValue::Tuple(Box::new([value]).into());
         }
         CValue::Set(SetItems::new(vec![value]))
     };

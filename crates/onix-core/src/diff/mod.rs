@@ -228,7 +228,7 @@ pub(crate) use object::object_diff;
 #[cfg(test)]
 pub(crate) use options::diff_with_options_memo;
 pub(crate) use scalar::{
-    datetime_diff, normalized_pair, numbers_equal, numeric_diff, python_type_name, scalar_diff,
-    type_change_report,
+    datetime_diff, effective_type_name, normalized_pair, numbers_equal, numeric_diff,
+    python_type_name, scalar_diff, type_change_report,
 };
 pub(crate) use set::set_diff;

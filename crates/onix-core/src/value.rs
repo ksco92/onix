@@ -65,6 +65,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -113,22 +114,191 @@ pub enum Value {
     /// A string, stored as an exactly-sized `Box<str>` (no spare capacity).
     Str(Box<str>),
     /// A Python `datetime.datetime` — see [`DateTime`], and this type's own
-    /// doc for why it is a variant rather than a pre-rendered string.
-    DateTime(DateTime),
-    /// A Python `datetime.date` — see [`Date`].
-    Date(Date),
-    /// An array, stored as an exactly-sized `Box<[Value]>`.
-    Array(Box<[Value]>),
+    /// doc for why it is a variant rather than a pre-rendered string. Wrapped
+    /// in [`Typed`] so a `datetime` subclass (e.g. pandas `Timestamp`)
+    /// carries its own class name — see this module's "Subclass type names"
+    /// section.
+    DateTime(Typed<DateTime>),
+    /// A Python `datetime.date` — see [`Date`]. See [`Value::DateTime`]'s
+    /// doc for the [`Typed`] wrapper.
+    Date(Typed<Date>),
+    /// An array, stored as an exactly-sized `Box<[Value]>` — wrapped in
+    /// [`Typed`] for a `list` subclass, see this module's "Subclass type
+    /// names" section.
+    Array(Typed<Box<[Value]>>),
     /// A Python tuple, stored exactly like [`Value::Array`] but kept as a
-    /// distinct variant — see this type's own doc for why.
-    Tuple(Box<[Value]>),
-    /// A Python `set`, stored as canonically ordered [`SetItems`].
+    /// distinct variant — see this type's own doc for why. Also carries a
+    /// [`Typed`] class name for a `tuple` subclass, including a
+    /// `namedtuple` — see this module's "Subclass type names" section for
+    /// how a `namedtuple` is diffed.
+    Tuple(Typed<Box<[Value]>>),
+    /// A Python `set`, stored as canonically ordered [`SetItems`], which
+    /// carries its own optional class name for a `set` subclass — see this
+    /// module's "Subclass type names" section.
     Set(SetItems),
     /// A Python `frozenset`, stored exactly like [`Value::Set`] but kept as
     /// a distinct variant — see this type's own doc for why.
     FrozenSet(SetItems),
-    /// An object: key-sorted, exactly-sized entries (see [`Object`]).
+    /// An object: key-sorted, exactly-sized entries (see [`Object`]), which
+    /// carries its own optional class name for a `dict` subclass — see this
+    /// module's "Subclass type names" section.
     Object(Object),
+}
+
+/// Wraps a value together with the concrete Python class it came from, when
+/// that class is a *subclass* of the type this [`Value`] variant represents
+/// (`None` for the exact base type — `datetime`, `date`, `list`, or
+/// `tuple`).
+///
+/// # Subclass type names
+///
+/// `DeepDiff` reports every value under `type(obj).__name__`, so a subclass
+/// instance — a `datetime`/`date` subclass (pandas' `Timestamp` is the
+/// common case), a `list`/`tuple`/`set`/`frozenset`/`dict` subclass, or a
+/// `namedtuple` (a `tuple` subclass with named fields) — never compares as
+/// its bare base type there: a subclass instance equal in every field to a
+/// base-type instance of the same shape still reports a `type_changes`
+/// finding naming the two concrete classes, confirmed against real
+/// `deepdiff==9.1.0` at the root, inside a dict value, and at a plain
+/// (non-scalar-list) array index — every place `diff_at` (the recursive
+/// dispatch core in `crate::diff`) recurses through its own per-pair
+/// dispatch. This wrapper (on
+/// [`Value::DateTime`]/[`Value::Date`]/[`Value::Array`]/[`Value::Tuple`],
+/// and the equivalent `type_name` field on [`SetItems`]/[`Object`] for
+/// `set`/`frozenset`/`dict`) carries that class name through the value
+/// model so the diff engine and [`crate::report`] can reproduce it.
+///
+/// A subclass instance otherwise compares, hashes, and renders *exactly*
+/// like its base type — this is the "compare as base type" half of the
+/// contract, confirmed against `DeepDiff` too: a `set`/list/tuple of
+/// subclass-vs-base values that are otherwise equal never reports a
+/// difference (Python's own `__eq__`/`__hash__` for these types already
+/// ignore the subclass), and neither does `DeepDiff`'s hash-based
+/// `ignore_order`/set-membership matching. So [`Typed`]'s own [`PartialEq`]
+/// deliberately compares only the wrapped value, ignoring the class name —
+/// every place a class-name difference *is* significant ([`Value`]'s own
+/// structural equality, and `diff_at`'s dispatch) checks it separately, via
+/// the crate-private `class_name` function. This is why every matching-identity path in the
+/// crate — [`SetItems`] dedup/ordering, `crate::lcs`'s scalar-list matching,
+/// and `crate::ignore_order`'s hashing — needs no change at all to stay
+/// class-agnostic: none of them consult a class name in the first place.
+///
+/// A `namedtuple` is accepted as an ordinary `tuple` subclass and diffed
+/// **positionally** (`root[1]`, not `root.y`) — `DeepDiff` instead walks a
+/// `namedtuple`'s fields by name (`root.y`, and `attribute_added`/
+/// `attribute_removed` for a plain object with dynamic attributes, which is
+/// out of scope here). Reproducing the attribute-path walk would need a
+/// second, name-keyed diffing shape threaded through the whole engine for a
+/// single-source special case; this is a documented divergence (see
+/// `tests/golden/README.md`), not an approximation of the real shape.
+///
+/// A subclass instance is not accepted as a *member* of a `set`/`frozenset`
+/// (the existing exact-type restriction in `crate::value` at the
+/// `onix-py` boundary is unchanged there) — out of scope for this type, see
+/// its own module doc.
+#[derive(Debug, Clone)]
+pub struct Typed<T> {
+    inner: T,
+    class_name: Option<Arc<str>>,
+}
+
+impl<T> Typed<T> {
+    /// Wraps `inner` with no subclass name (the exact base type).
+    #[must_use]
+    pub fn new(inner: T) -> Self {
+        Self {
+            inner,
+            class_name: None,
+        }
+    }
+
+    /// Wraps `inner` with an explicit subclass name (`None` for the exact
+    /// base type, matching [`Typed::new`]).
+    #[must_use]
+    pub fn with_class_name(inner: T, class_name: Option<Arc<str>>) -> Self {
+        Self { inner, class_name }
+    }
+
+    /// The subclass name this value carries, or `None` for the exact base
+    /// type.
+    #[must_use]
+    pub fn class_name(&self) -> Option<&str> {
+        self.class_name.as_deref()
+    }
+
+    /// Unwraps into the inner value, discarding the class name.
+    pub(crate) fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<T: Copy> Typed<T> {
+    /// A copy of the wrapped value, discarding the class name — for the
+    /// small `Copy` payloads ([`DateTime`], [`Date`]) that call sites need
+    /// to move out of a `Typed<T>` reference.
+    #[must_use]
+    pub fn value(&self) -> T {
+        self.inner
+    }
+}
+
+impl<T> Deref for Typed<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T: Default> Default for Typed<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T> From<T> for Typed<T> {
+    fn from(inner: T) -> Self {
+        Self::new(inner)
+    }
+}
+
+/// A fixed-size boxed array (`Box::new([a, b, c])`, the common test-literal
+/// shape for [`Value::Array`]/[`Value::Tuple`]) unsize-coerces to
+/// `Box<[Value]>` on assignment, so it can build a [`Typed<Box<[Value]>>`]
+/// the same way a `Vec<Value>`'s `.into_boxed_slice()` does.
+impl<const N: usize> From<Box<[Value; N]>> for Typed<Box<[Value]>> {
+    fn from(items: Box<[Value; N]>) -> Self {
+        let items: Box<[Value]> = items;
+        Self::new(items)
+    }
+}
+
+/// Content-only equality: deliberately ignores `class_name` — see
+/// [`Typed`]'s own doc for why matching identity is class-agnostic
+/// throughout the crate.
+impl<T: PartialEq> PartialEq for Typed<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+/// The subclass name `value` carries, or `None` for the exact base type —
+/// `None` for every [`Value`] variant that cannot carry one at all (`Null`,
+/// `Bool`, `Number`, `Str`). The one place every one of [`Typed`]'s and
+/// [`SetItems`]'/[`Object`]'s `class_name`/`type_name` accessors is read
+/// together, so `diff_at`'s (`crate::diff`'s recursive dispatch core)
+/// type-change gate and [`Value`]'s own structural equality (below) share
+/// one definition.
+#[must_use]
+pub(crate) fn class_name(value: &Value) -> Option<&str> {
+    match value {
+        Value::DateTime(t) => t.class_name(),
+        Value::Date(t) => t.class_name(),
+        Value::Array(t) | Value::Tuple(t) => t.class_name(),
+        Value::Set(items) | Value::FrozenSet(items) => items.type_name(),
+        Value::Object(map) => map.type_name(),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_) => None,
+    }
 }
 
 /// Delegates to the iterative `structural_eq`. The result is exactly what a
@@ -197,12 +367,13 @@ fn from_serde(value: serde_json::Value, interner: &mut Interner) -> Value {
         serde_json::Value::Bool(b) => Value::Bool(b),
         serde_json::Value::Number(n) => Value::Number(Number::from_serde(&n)),
         serde_json::Value::String(s) => Value::Str(s.into_boxed_str()),
-        serde_json::Value::Array(items) => Value::Array(
+        serde_json::Value::Array(items) => Value::Array(Typed::new(
             items
                 .into_iter()
                 .map(|item| from_serde(item, interner))
-                .collect(),
-        ),
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )),
         serde_json::Value::Object(map) => {
             let pairs = map
                 .into_iter()
@@ -240,7 +411,7 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
     match value {
         Value::Array(items) | Value::Tuple(items) => {
             let taken = std::mem::take(items);
-            stack.extend(taken.into_vec());
+            stack.extend(taken.into_inner().into_vec());
         }
         Value::Set(items) | Value::FrozenSet(items) => {
             let taken = std::mem::take(&mut items.items);
@@ -275,6 +446,16 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
 fn structural_eq(a: &Value, b: &Value) -> bool {
     let mut stack: Vec<(&Value, &Value)> = vec![(a, b)];
     while let Some((a, b)) = stack.pop() {
+        // `DeepDiff` reports a subclass-vs-base pair as a `type_changes`
+        // finding even when every field matches (see [`Typed`]'s doc), so
+        // two otherwise-identical values with different class names are not
+        // structurally equal — checked once here rather than per-arm below,
+        // since it applies identically to all six variants that can carry a
+        // class name and is a no-op (`None == None`) for the rest.
+        if class_name(a) != class_name(b) {
+            return false;
+        }
+
         match (a, b) {
             (Value::Null, Value::Null) => {}
             (Value::Bool(x), Value::Bool(y)) => {
@@ -515,6 +696,12 @@ pub struct SetItems {
     /// The members. Invariants, both established by [`SetItems::new`]: in
     /// ascending [`canonical_cmp`] order, and no two structurally equal.
     items: Box<[Value]>,
+    /// The `set`/`frozenset` subclass name this value came from, or `None`
+    /// for the exact base type — see [`Typed`]'s "Subclass type names" doc
+    /// section (this field is that same concept, plain rather than wrapped,
+    /// since [`SetItems::new`] already has its own constructor function to
+    /// hide it behind).
+    type_name: Option<Arc<str>>,
 }
 
 impl SetItems {
@@ -572,6 +759,7 @@ impl SetItems {
         if items.len() < 2 {
             return Self {
                 items: items.into_boxed_slice(),
+                type_name: None,
             };
         }
 
@@ -580,7 +768,24 @@ impl SetItems {
 
         Self {
             items: items.into_boxed_slice(),
+            type_name: None,
         }
+    }
+
+    /// Attaches a `set`/`frozenset` subclass name (`None` for the exact base
+    /// type), for a caller (`onix-py`'s converter) that already has a
+    /// built [`SetItems`] and knows which concrete class it came from.
+    #[must_use]
+    pub fn with_type_name(mut self, type_name: Option<Arc<str>>) -> Self {
+        self.type_name = type_name;
+        self
+    }
+
+    /// The subclass name this set carries, or `None` for the exact base
+    /// type.
+    #[must_use]
+    pub fn type_name(&self) -> Option<&str> {
+        self.type_name.as_deref()
     }
 }
 
@@ -761,6 +966,10 @@ pub struct Object {
     /// Key-sorted, duplicate-free entries. Invariant: strictly ascending by
     /// key string (enforced by [`Object::from_pairs`]).
     entries: Box<[(Arc<str>, Value)]>,
+    /// The `dict` subclass name this value came from, or `None` for the
+    /// exact base type — see [`SetItems`]'s own `type_name` field doc; the
+    /// same reasoning applies here.
+    type_name: Option<Arc<str>>,
 }
 
 impl Object {
@@ -784,7 +993,24 @@ impl Object {
         }
         Self {
             entries: entries.into_boxed_slice(),
+            type_name: None,
         }
+    }
+
+    /// Attaches a `dict` subclass name (`None` for the exact base type), for
+    /// a caller (`onix-py`'s converter) that already has a built [`Object`]
+    /// and knows which concrete class it came from.
+    #[must_use]
+    pub fn with_type_name(mut self, type_name: Option<Arc<str>>) -> Self {
+        self.type_name = type_name;
+        self
+    }
+
+    /// The subclass name this object carries, or `None` for the exact base
+    /// type.
+    #[must_use]
+    pub fn type_name(&self) -> Option<&str> {
+        self.type_name.as_deref()
     }
 
     /// Returns the value for `key`, or `None` if the object has no such key.
@@ -946,11 +1172,34 @@ impl Builder {
     /// [`From`] and [`Deserialize`].
     #[must_use]
     pub fn object(&mut self, entries: Vec<(String, Value)>) -> Value {
+        Value::Object(self.build_object(entries))
+    }
+
+    /// [`Builder::object`], additionally attaching a `dict` subclass name
+    /// (`None` for the exact base type) — the entry point `onix-py`'s
+    /// converter uses for a `dict` subclass, see [`Object::with_type_name`]
+    /// and [`Typed`]'s "Subclass type names" doc section. A separate method
+    /// rather than an added parameter on [`Builder::object`] because every
+    /// other caller of that method never has a subclass name to attach.
+    #[must_use]
+    pub fn object_with_type_name(
+        &mut self,
+        entries: Vec<(String, Value)>,
+        type_name: Option<Arc<str>>,
+    ) -> Value {
+        Value::Object(self.build_object(entries).with_type_name(type_name))
+    }
+
+    /// The shared body of [`Builder::object`]/[`Builder::object_with_type_name`]:
+    /// interns each key against this builder's session and sorts into the
+    /// canonical ascending key-string order, without yet deciding whether
+    /// the result carries a subclass name.
+    fn build_object(&mut self, entries: Vec<(String, Value)>) -> Object {
         let pairs = entries
             .into_iter()
             .map(|(key, value)| (self.interner.intern(&key), value))
             .collect();
-        Value::Object(Object::from_pairs(pairs))
+        Object::from_pairs(pairs)
     }
 }
 
@@ -1068,7 +1317,7 @@ impl<'de> Visitor<'de> for ValueVisitor<'_> {
         })? {
             items.push(item);
         }
-        Ok(Value::Array(items.into_boxed_slice()))
+        Ok(Value::Array(items.into_boxed_slice().into()))
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Value, A::Error>

@@ -6,7 +6,7 @@
 //! See the parent `diff` module's doc for the full recursion-depth hardening
 //! (its "Hardening" section) this file implements.
 
-use crate::value::{Object, Value};
+use crate::value::{Object, Value, class_name};
 
 use crate::error::Error;
 use crate::ignore_order::IgnoreOrderMemo;
@@ -17,6 +17,18 @@ use super::{
     DiffOptions, array_diff, datetime_diff, numeric_diff, object_diff, scalar_diff, set_diff,
     type_change_report,
 };
+
+/// Whether `a` and `b` — already known to be the same [`Value`] variant —
+/// carry different subclass names, per [`class_name`]. `diff_at` checks
+/// this before recursing into any of the six variants that can carry one
+/// (`DateTime`, `Date`, `Array`, `Tuple`, `Set`/`FrozenSet`, `Object`): a
+/// mismatch means `DeepDiff` would report `type_changes` here even though
+/// the values are the same JSON-ish shape — see
+/// [`crate::value::Typed`]'s doc for why (and why every other matching
+/// identity in the crate stays class-agnostic instead).
+fn same_class(a: &Value, b: &Value) -> bool {
+    class_name(a) == class_name(b)
+}
 
 /// The recursive core of [`diff_with_max_depth()`](super::diff_with_max_depth): identical dispatch, but
 /// carrying the path and depth accumulated so far, so that nested findings
@@ -55,18 +67,40 @@ pub(crate) fn diff_at(
             scalar_diff(path, old == new, a, b, depth, opts.max_depth)
         }
         (Value::DateTime(old), Value::DateTime(new)) => {
-            datetime_diff(path, *old, *new, depth, opts.max_depth)
+            if same_class(a, b) {
+                datetime_diff(path, old.value(), new.value(), depth, opts.max_depth)
+            } else {
+                type_change_report(path, a, b, depth, opts.max_depth)
+            }
         }
         (Value::Date(old), Value::Date(new)) => {
-            scalar_diff(path, old == new, a, b, depth, opts.max_depth)
+            if same_class(a, b) {
+                scalar_diff(path, old == new, a, b, depth, opts.max_depth)
+            } else {
+                type_change_report(path, a, b, depth, opts.max_depth)
+            }
         }
         (Value::Array(old), Value::Array(new)) | (Value::Tuple(old), Value::Tuple(new)) => {
-            array_diff(path, old, new, depth, opts, memo)
+            if same_class(a, b) {
+                array_diff(path, old, new, depth, opts, memo)
+            } else {
+                type_change_report(path, a, b, depth, opts.max_depth)
+            }
         }
         (Value::Set(old), Value::Set(new)) | (Value::FrozenSet(old), Value::FrozenSet(new)) => {
-            set_diff(path, old, new, depth, opts, memo)
+            if same_class(a, b) {
+                set_diff(path, old, new, depth, opts, memo)
+            } else {
+                type_change_report(path, a, b, depth, opts.max_depth)
+            }
         }
-        (Value::Object(old), Value::Object(new)) => object_diff(path, old, new, depth, opts, memo),
+        (Value::Object(old), Value::Object(new)) => {
+            if same_class(a, b) {
+                object_diff(path, old, new, depth, opts, memo)
+            } else {
+                type_change_report(path, a, b, depth, opts.max_depth)
+            }
+        }
         _ => type_change_report(path, a, b, depth, opts.max_depth),
     }
 }

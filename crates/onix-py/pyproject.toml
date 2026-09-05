@@ -47,13 +47,16 @@ Repository = "https://github.com/ksco92/onix"
 # DuckDB and assert identical results, which needs all three installed to run
 # but none of them installed to use diff_tables. pyarrow is both the `arrow`
 # extra and a test dependency (the tests exercise to_pyarrow() and pyarrow
-# inputs).
+# inputs). pandas is test-only too: it supplies `pandas.Timestamp`, the
+# `datetime.datetime` subclass the subclass-support tests probe against real
+# DeepDiff (never a runtime dependency of the package itself).
 test = [
     "pytest>=8",
     "deepdiff==9.1.0 ; python_version >= '3.10'",
     "pyarrow>=14",
     "polars>=1",
     "duckdb>=1",
+    "pandas>=2",
 ]
 
 [tool.pytest.ini_options]
