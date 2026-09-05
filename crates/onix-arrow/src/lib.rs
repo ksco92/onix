@@ -154,8 +154,13 @@ pub const MAX_NESTING_DEPTH: usize = 128;
 ///   the same name.
 /// - [`TableDiffError::KeyColumnMissing`] if a key column is absent from
 ///   either input's schema, naming the column and the side.
-/// - [`TableDiffError::UnsupportedRowType`] if a key column's type cannot be
-///   hashed by value (a nested key).
+/// - [`TableDiffError::KeyTypeMismatch`] if a key column's normalized type
+///   differs across the two inputs (a primary key that changed type is refused,
+///   not coerced).
+/// - [`TableDiffError::UnsupportedRowType`] if a key column's type, or any
+///   non-nested column's type on either side, cannot be hashed by value — a
+///   nested key, a run-end-encoded column, or a type combination Arrow cannot
+///   build.
 /// - [`TableDiffError::Read`] if a batch cannot be read from either input.
 pub fn diff_tables(
     left: &impl TableInput,
@@ -310,6 +315,23 @@ mod tests {
             diff_tables(&left, &right, &options),
             Err(TableDiffError::UnsupportedRowType { column, .. }) if column == "k"
         ));
+    }
+
+    #[test]
+    fn unhashable_and_type_mismatched_key_reports_type_mismatch() {
+        // A key that is both unhashable (a nested list on the left) and
+        // type-changed across sides: the type-mismatch refusal is checked first,
+        // so it wins over the unhashable-column refusal. Pins that priority.
+        let list = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
+        let left = reader(vec![Field::new("id", list, true)]);
+        let right = reader(vec![Field::new("id", DataType::Int64, false)]);
+        let options = TableDiffOptions::new(vec!["id".to_string()]);
+        assert_eq!(
+            diff_tables(&left, &right, &options),
+            Err(TableDiffError::KeyTypeMismatch {
+                column: "id".to_string(),
+            })
+        );
     }
 
     #[test]
