@@ -336,6 +336,18 @@ def test_duration_unit_change_at_the_same_span_emits_no_record() -> None:
     assert _one_cell(pa.duration("s"), timedelta(seconds=1), pa.duration("ms"), timedelta(seconds=1)) == []
 
 
+def test_extreme_duration_renders_without_a_sentinel() -> None:
+    """A duration past chrono's range renders as a real value, never arrow's '<invalid>' sentinel."""
+    left = pa.table({"id": pa.array([1], pa.int64()), "d": pa.array([9_300_000_000_000_000], pa.duration("s"))})
+    right = pa.table({"id": pa.array([1], pa.int64()), "d": pa.array([9_400_000_000_000_000], pa.duration("s"))})
+    cells = _table(diff_tables(left, right, key=["id"]).cells_changed()).to_pylist()
+    assert len(cells) == 1
+    assert cells[0]["change"] == "value_changed"
+    assert cells[0]["old_value"] != cells[0]["new_value"]
+    assert "invalid" not in cells[0]["old_value"]
+    assert "invalid" not in cells[0]["new_value"]
+
+
 def test_decimal_scale_change_is_no_record_when_equal_and_value_changed_when_not() -> None:
     """A decimal scale change at an equal value emits nothing; a differing value is value_changed."""
     assert _one_cell(pa.decimal128(10, 2), decimal.Decimal("1.00"), pa.decimal128(10, 4), decimal.Decimal("1.0000")) == []
