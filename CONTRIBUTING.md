@@ -230,6 +230,23 @@ uv run --group test python benchmarks/bench_bindings.py
 subprocess isolation, the median-of-11 sampling, and the live-object fixture
 choices.
 
+The Arrow table-diff benchmark fixtures and their DuckDB oracle live under
+`perf/arrow/`, with their own `pyproject.toml` and `perf` dependency group
+(`pyarrow`, `duckdb`, `pytest`) and a committed `uv.lock`, separate from
+`crates/onix-py`'s `test` group:
+
+```sh
+cd perf/arrow
+uv sync --group perf
+uv run --group perf generate_fixtures.py --rows 100000 --out fixtures/100k
+uv run --group perf oracle_duckdb.py --left fixtures/100k/a.parquet --right fixtures/100k/b.parquet --key id --out /tmp/oracle_100k
+uv run --group perf pytest tests -q
+```
+
+`perf/arrow/README.md` covers the mutation mix, measured sizes/timings at
+every scale, and the oracle's value-comparison semantics; nothing under
+`perf/arrow/fixtures/` is committed.
+
 ## Mutation testing
 
 `make mutants` runs [`cargo-mutants`](https://mutants.rs/) against `onix-core`
