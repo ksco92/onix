@@ -1,0 +1,10 @@
+{
+  "values_changed": {
+    "root[0]['v']": {
+      "diff": "--- \n+++ \n@@ -1,2 +1,2 @@\n x\n-y\n+z",
+      "new_path": "root[1]['v']",
+      "new_value": "x\nz",
+      "old_value": "x\ny"
+    }
+  }
+}

@@ -55,6 +55,7 @@ mod ignore_order;
 mod lcs;
 pub mod path;
 pub mod report;
+mod unified_diff;
 pub mod value;
 
 #[cfg(test)]

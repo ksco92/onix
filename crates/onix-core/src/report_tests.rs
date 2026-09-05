@@ -36,6 +36,7 @@ fn values_changed_entry_is_not_empty_and_serializes_exactly() {
     report.insert_values_changed(
         Vec::new(),
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!(1)),
             new_value: cv(&json!(2)),
             new_path: None,
@@ -102,6 +103,7 @@ fn both_categories_present_omits_neither() {
     report.insert_values_changed(
         key_path("b"),
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!("x")),
             new_value: cv(&json!("y")),
             new_path: None,
@@ -178,6 +180,7 @@ fn all_six_categories_present_omits_none() {
     report.insert_values_changed(
         key_path("b"),
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!("x")),
             new_value: cv(&json!("y")),
             new_path: None,
@@ -222,6 +225,7 @@ fn finding_count_sums_every_category_distinctly() {
         report.insert_values_changed(
             index_path(i),
             ValuesChangedEntry {
+                diff: None,
                 old_value: cv(&json!("x")),
                 new_value: cv(&json!("y")),
                 new_path: None,
@@ -299,6 +303,7 @@ fn multiple_paths_in_same_category_are_sorted_by_path() {
     report.insert_values_changed(
         key_path("b"),
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!(1)),
             new_value: cv(&json!(2)),
             new_path: None,
@@ -307,6 +312,7 @@ fn multiple_paths_in_same_category_are_sorted_by_path() {
     report.insert_values_changed(
         key_path("a"),
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!(3)),
             new_value: cv(&json!(4)),
             new_path: None,
@@ -328,6 +334,7 @@ fn retag_new_path_swaps_prefix_segment_and_keeps_suffix() {
     report.insert_values_changed(
         vec![PathSegment::Index(0), PathSegment::Key("x".to_string())],
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!(1)),
             new_value: cv(&json!(2)),
             new_path: None,
@@ -380,6 +387,7 @@ fn retag_new_path_composes_with_an_already_set_new_path() {
     report.insert_values_changed(
         vec![PathSegment::Index(0), PathSegment::Index(2)],
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!(1)),
             new_value: cv(&json!(2)),
             new_path: Some(vec![PathSegment::Index(0), PathSegment::Index(1)]),
@@ -404,6 +412,7 @@ fn inserting_the_same_structural_path_twice_panics_in_debug() {
     report.insert_values_changed(
         key_path("a"),
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!(1)),
             new_value: cv(&json!(2)),
             new_path: None,
@@ -412,6 +421,7 @@ fn inserting_the_same_structural_path_twice_panics_in_debug() {
     report.insert_values_changed(
         key_path("a"),
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!(3)),
             new_value: cv(&json!(4)),
             new_path: None,
@@ -463,6 +473,7 @@ fn two_structural_paths_rendering_identically_collapse_without_panicking() {
     report.insert_values_changed(
         flat,
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!(1)),
             new_value: cv(&json!(2)),
             new_path: None,
@@ -471,6 +482,7 @@ fn two_structural_paths_rendering_identically_collapse_without_panicking() {
     report.insert_values_changed(
         nested,
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!(10)),
             new_value: cv(&json!(20)),
             new_path: None,
@@ -495,6 +507,7 @@ fn to_value_preserves_a_tuple_that_to_json_value_flattens_to_an_array() {
     report.insert_values_changed(
         index_path(0),
         ValuesChangedEntry {
+            diff: None,
             old_value: ctup(&[json!(1)]),
             new_value: cv(&json!([1])),
             new_path: None,
@@ -550,6 +563,7 @@ fn the_two_renderings_agree_on_every_category() {
     report.insert_values_changed(
         index_path(0),
         ValuesChangedEntry {
+            diff: None,
             old_value: cv(&json!(1)),
             new_value: cv(&json!(2)),
             new_path: Some(index_path(3)),
@@ -571,6 +585,32 @@ fn the_two_renderings_agree_on_every_category() {
     report.insert_iterable_item_removed(index_path(8), ctup(&[]));
 
     assert_eq!(report.to_json_value(), report.to_value().to_serde_json());
+}
+
+#[test]
+fn a_values_changed_diff_field_appears_in_both_renderings() {
+    let mut report = Report::new();
+    report.insert_values_changed(
+        Vec::new(),
+        ValuesChangedEntry {
+            diff: Some("--- \n+++ \n@@ -1,2 +1,2 @@\n-a\n-b\n+c\n+d".to_string()),
+            old_value: cv(&json!("a\nb")),
+            new_value: cv(&json!("c\nd")),
+            new_path: None,
+        },
+    );
+
+    let expected = json!({
+        "values_changed": {
+            "root": {
+                "new_value": "c\nd",
+                "old_value": "a\nb",
+                "diff": "--- \n+++ \n@@ -1,2 +1,2 @@\n-a\n-b\n+c\n+d",
+            }
+        }
+    });
+    assert_eq!(report.to_json_value(), expected);
+    assert_eq!(report.to_value().to_serde_json(), expected);
 }
 
 // --- set categories ------------------------------------------------------

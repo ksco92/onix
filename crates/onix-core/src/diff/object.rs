@@ -85,6 +85,8 @@ pub(crate) fn object_diff(
         report.insert_values_changed(
             path.clone(),
             ValuesChangedEntry {
+                // Both sides are dicts here, never strings, so no `diff`.
+                diff: None,
                 old_value,
                 new_value,
                 new_path: None,

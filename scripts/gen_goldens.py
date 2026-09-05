@@ -544,6 +544,64 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
         {"x": (1, datetime(2024, 1, 1))},
         {"x": {1, 2}},
     ),
+    # Multi-line string values: at verbose_level=2 DeepDiff adds a `diff`
+    # field (a difflib.unified_diff of the two strings) to a values_changed
+    # entry whenever both values are strings and one contains a newline
+    # (_diff_str in deepdiff/diff.py). See crates/onix-core/src/unified_diff.rs.
+    "multiline_string_values_changed_at_root": ("a\nb", "c\nd"),
+    "multiline_string_in_dict_value": (
+        {"k": "line1\nline2"},
+        {"k": "line1\nline3"},
+    ),
+    # A newline on only one side still triggers the field; both sides are
+    # split with splitlines().
+    "multiline_string_newline_on_old_side_only": ("a\nb", "cd"),
+    "multiline_string_newline_on_new_side_only": ("ab", "c\nd"),
+    # A plain single-line string change gets no diff field at all.
+    "singleline_string_change_has_no_diff_field": ({"a": "ab"}, {"a": "cd"}),
+    # splitlines() treats \r\n as one boundary and \r as its own.
+    "multiline_string_crlf_boundary": ("a\r\nb", "a\r\nc"),
+    "multiline_string_bare_cr_splits_once_a_newline_triggers": (
+        "a\rb\nc",
+        "x\ry\nz",
+    ),
+    # Leading and trailing newlines: a leading newline is a blank first
+    # line; a trailing newline is dropped by splitlines().
+    "multiline_string_leading_and_trailing_newlines": ("\na\nb\n", "\nc\nd\n"),
+    # The strings differ only by a trailing newline, which splitlines()
+    # drops, so unified_diff is empty and no diff field is added — but a
+    # values_changed entry is still reported.
+    "multiline_string_trailing_newline_only_has_no_diff_field": (
+        {"a": "a\nb"},
+        {"a": "a\nb\n"},
+    ),
+    # Identical multi-line strings produce no entry at all.
+    "multiline_string_identical_no_entry": ({"k": "a\nb"}, {"k": "a\nb"}),
+    # Two far-apart changes become two hunks, each with up to 3 context
+    # lines (difflib's default n=3).
+    "multiline_string_two_hunks": (
+        "\n".join("L%d" % i for i in range(20)),
+        "\n".join(
+            "CHANGED1" if i == 1 else "CHANGED15" if i == 15 else "L%d" % i
+            for i in range(20)
+        ),
+    ),
+    # A multi-line string of 250+ lines with a popular repeated line: unlike
+    # ordered LIST comparison (autojunk=False), difflib's unified_diff uses
+    # the stdlib default (autojunk=True), which purges a line occurring more
+    # than len/100 + 1 times, changing the alignment. This pins that the
+    # string-diff path reproduces it.
+    "multiline_string_autojunk_scale": (
+        "\n".join("dup" if i % 3 == 0 else "a%d" % i for i in range(250)),
+        "\n".join("dup" if i % 3 == 0 else "b%d" % i for i in range(250)),
+    ),
+    # A 200-line popular run (purged by autojunk) sits before a shared block
+    # that is shifted by one line, so difflib re-bridges the match backward
+    # over the purged lines — the extension step's backward direction.
+    "multiline_string_autojunk_backward_extension": (
+        "\n".join(["P"] * 200 + ["u%d" % i for i in range(50)] + ["tail_a"]),
+        "\n".join(["head_b"] + ["P"] * 200 + ["u%d" % i for i in range(50)]),
+    ),
 }
 
 
@@ -924,6 +982,15 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
     "combined_list_of_tuples_containing_datetimes_under_ignore_order": (
         [(datetime(2024, 1, 1), 1), (datetime(2024, 1, 2), 2)],
         [(datetime(2024, 1, 2), 2), (datetime(2024, 1, 3), 3)],
+        {"ignore_order": True},
+    ),
+    # A multi-line string inside ignore_order lists: the two dicts pair by
+    # distance, recursion into the changed `v` value runs _diff_str, and the
+    # pairing crosses indices so the entry also carries a new_path. This is
+    # the ignore_order path's own route to the diff field.
+    "ignore_order_multiline_string_paired_dicts_new_path": (
+        [{"id": 1, "v": "x\ny"}, {"id": 2, "v": "q"}],
+        [{"id": 2, "v": "q"}, {"id": 1, "v": "x\nz"}],
         {"ignore_order": True},
     ),
 }

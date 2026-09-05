@@ -4,7 +4,7 @@ Runs through the actual `deepdiff_rs.DeepDiff` class (not the fast JSON-string
 path), so this exercises the Python-object-to-`Value` conversion layer itself,
 not just the diff engine underneath it.
 
-Seven batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
+Eight batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
 and `ignore_order=True`): the JSON-shaped types; the same plus tuples, as
 containers in their own right and as elements of lists, dicts and other
 tuples; the same plus sets and frozensets, likewise; the same plus naive and
@@ -12,10 +12,12 @@ aware datetimes and dates anywhere in a nested value; flat, tightly clustered
 calendar lists, which put maximum pressure on difflib alignment and
 `ignore_order` pairing because near-identical candidates make every tie-break
 observable; dict-wrapped calendar values against strings of themselves, which
-is the shape the `str()` coercion decides; and, at `COMBINED_SEED_COUNT`
+is the shape the `str()` coercion decides; at `COMBINED_SEED_COUNT`
 cases, the full alphabet drawn together in one generator run — tuples, sets,
 frozensets, datetimes and dates all able to appear at any depth, including a
-calendar value as a bare or nested set item (issue #21's own combination).
+calendar value as a bare or nested set item (issue #21's own combination);
+and multi-line strings, whose str->str changes reach DeepDiff's `_diff_str`
+and the `diff` field it adds at `verbose_level=2` (issue #28).
 Every batch compares `to_json()` (canonically, i.e. parsed, since neither
 tool promises a key order) *and* `to_dict()` by `==`, the comparison that can
 see a tuple, a set, a `datetime` or a `date` where the JSON one cannot.
@@ -113,6 +115,30 @@ STRINGIFIED_SEED_BASE: Final[int] = 4_000_000
 # ">=500 seeded cases" the issue's combined-goldens requirement asks for, at fuzz scale.
 COMBINED_SEED_BASE: Final[int] = 6_000_000
 COMBINED_SEED_COUNT: Final[int] = 500
+
+# The multi-line string batch (issue #28): values whose leaves are often
+# strings carrying newlines and other line boundaries, so that a str->str
+# change reaches DeepDiff's `_diff_str` and the `diff` field it adds. Its own
+# seed range keeps it independent of the batches above.
+MULTILINE_SEED_BASE: Final[int] = 7_000_000
+
+# The leaf alphabet the multi-line batch draws from: strings that split into
+# several lines (some sharing a prefix/suffix so difflib keeps context, some
+# repeating a line so grouping is exercised), CRLF and bare-CR joins,
+# leading/trailing and doubled newlines, an exotic Unicode boundary, plus a
+# few plain scalars so type_changes and no-diff single-line changes appear too.
+MULTILINE_STRINGS: Final[list[str]] = [
+    "a\nb", "a\nc", "c\nd", "line1\nline2", "line1\nline3",
+    "x\ny\nz", "x\nY\nz", "\nlead\nmore", "trail\nend\n", "a\n\nb",
+    "a\r\nb\r\nc", "a\r\nb\r\nd", "mixed\rCR\nLF", "para sep end\ntail",
+    "one\ntwo\nthree\nfour\nfive\nsix\nseven",
+    "one\ntwo\nthree\nCHANGED\nfive\nsix\nseven",
+    "same\nsame\nsame\nsame", "same\ndiff\nsame\nsame",
+    "", "single-line", "another single line",
+]
+MULTILINE_ALPHABET: Final[list[JsonValue]] = [
+    *MULTILINE_STRINGS, None, True, False, 0, 1, 1.5,
+]
 
 # The calendar batch's leaves: naive and aware datetimes across a bounded range,
 # plus bare dates. The offsets deliberately include one that is not a whole
@@ -1291,4 +1317,106 @@ def test_differential_fuzz_with_the_combined_alphabet_matches_real_deepdiff(
     assert not mismatches, (
         f"{len(mismatches)} of {COMBINED_SEED_COUNT * 2} combined-alphabet fuzz cases diverged "
         f"from real DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+def _gen_multiline_leaf(rng: random.Random) -> JsonValue:
+    """
+    Pick a leaf from the multi-line alphabet.
+
+    :param rng: Seeded RNG.
+    :return: A string (often multi-line) or a plain scalar.
+    """
+    return rng.choice(MULTILINE_ALPHABET)
+
+
+def _gen_multiline_value(rng: random.Random, depth: int) -> JsonValue:
+    """
+    Generate a random value whose leaves are drawn from the multi-line alphabet.
+
+    :param rng: Seeded RNG.
+    :param depth: Remaining nesting budget.
+    :return: A random value built from lists, dicts and multi-line-string leaves.
+    """
+    if depth <= 0:
+        return _gen_multiline_leaf(rng)
+
+    kind = rng.random()
+
+    if kind < 0.5:
+        return _gen_multiline_leaf(rng)
+
+    if kind < 0.8:
+        length = rng.randint(0, 4)
+
+        return [_gen_multiline_value(rng, depth - 1) for _ in range(length)]
+
+    keys = rng.sample(DICT_KEYS, rng.randint(0, len(DICT_KEYS)))
+
+    return {key: _gen_multiline_value(rng, depth - 1) for key in keys}
+
+
+def _mutate_multiline_value(rng: random.Random, value: JsonValue) -> JsonValue:
+    """
+    Build a related-but-different copy, replacing leaves from the same alphabet.
+
+    Replacement values come from the multi-line alphabet too (unlike the base
+    `_mutate`, which draws from the plain scalars), so a paired position often
+    changes from one multi-line string to another — the shape that reaches
+    `_diff_str`'s `diff` field.
+
+    :param rng: Seeded RNG.
+    :param value: The value to derive a mutated copy from.
+    :return: A structurally related, partially mutated copy.
+    """
+    if isinstance(value, list):
+        mutated = list(value)
+        rng.shuffle(mutated)
+
+        for index in range(len(mutated)):
+            if rng.random() < 0.4:
+                mutated[index] = _gen_multiline_value(rng, 2)
+
+        return mutated
+
+    if isinstance(value, dict):
+        mutated = dict(value)
+
+        for key in list(mutated):
+            if rng.random() < 0.4:
+                mutated[key] = _gen_multiline_value(rng, 2)
+
+        if rng.random() < 0.3:
+            mutated[rng.choice(DICT_KEYS)] = _gen_multiline_value(rng, 2)
+
+        return mutated
+
+    return _gen_multiline_value(rng, 2)
+
+
+def test_differential_fuzz_with_multiline_strings_matches_real_deepdiff() -> None:
+    """
+    Run an eighth SEED_COUNT-case batch whose leaves are often multi-line strings.
+
+    This is issue #28's own corpus: a str->str change carrying a newline is
+    where DeepDiff adds the `diff` field (a difflib.unified_diff of the two),
+    both ordered and under ignore_order.
+    """
+    mismatches = []
+
+    for seed in range(MULTILINE_SEED_BASE, MULTILINE_SEED_BASE + SEED_COUNT):
+        rng = random.Random(seed)
+        a = _gen_multiline_value(rng, 3)
+        b = _mutate_multiline_value(rng, a)
+
+        for ignore_order in (False, True):
+            divergence = _diverges(a, b, ignore_order)
+
+            if divergence is not None:
+                expected, actual = divergence
+                mismatches.append((seed, ignore_order, a, b, expected, actual))
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} multi-line string fuzz cases diverged from "
+        f"real DeepDiff (showing up to 3): {mismatches[:3]}"
     )

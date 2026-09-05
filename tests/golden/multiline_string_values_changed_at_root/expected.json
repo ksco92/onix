@@ -1,0 +1,9 @@
+{
+  "values_changed": {
+    "root": {
+      "diff": "--- \n+++ \n@@ -1,2 +1,2 @@\n-a\n-b\n+c\n+d",
+      "new_value": "c\nd",
+      "old_value": "a\nb"
+    }
+  }
+}

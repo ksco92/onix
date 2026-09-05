@@ -1,6 +1,13 @@
+// Portions of this module reimplement algorithms from CPython 3.14.6's
+// `difflib` standard-library module (`SequenceMatcher` and its autojunk
+// heuristic), used under the PSF License Agreement version 2. See
+// THIRD-PARTY-NOTICES.md at the repository root.
 //! A faithful, from-scratch port of Python's `difflib.SequenceMatcher`
-//! opcode algorithm, restricted to the one configuration `DeepDiff` actually
-//! uses for ordered-list comparison: `isjunk=None, autojunk=False`.
+//! opcode algorithm, in the two configurations this engine needs: always
+//! `isjunk=None`, and `autojunk` either off ([`compute_opcodes`], for
+//! `DeepDiff`'s ordered-list comparison) or on ([`grouped_opcodes`], for the
+//! multi-line string diff `unified_diff` produces — see
+//! [`mod@crate::unified_diff`]).
 //!
 //! This module is deliberately *pure*: it knows nothing about
 //! [`crate::report::Report`], [`crate::path::PathSegment`], or recursion
@@ -24,19 +31,28 @@
 //! surprising matching-equality and `new_path` details this module's
 //! algorithm alone doesn't explain.
 //!
-//! # No junk, no autojunk
+//! # Junk and autojunk
 //!
-//! `DeepDiff` always constructs its matcher with `isjunk=None` and
-//! `autojunk=False` (`deepdiff/diff.py::_diff_ordered_iterable_by_difflib`).
-//! `autojunk` is `difflib`'s *default-on* heuristic that treats an
-//! element appearing in more than 1% of a ≥200-item sequence as "popular"
-//! and excludes it from matching — `DeepDiff` explicitly opts out, so this
-//! port implements no such thing, and there is no ≥200-item behavior change
-//! to replicate (confirmed empirically against real `deepdiff==9.1.0` with a
-//! 250-item, one-popular-value fixture: the popular value matches exactly
-//! like any other). Skipping junk/autojunk also sidesteps `SequenceMatcher`'s
-//! own two-pass junk-then-popular pruning of its `b2j` index, considerably
-//! simplifying this port relative to the full standard-library algorithm.
+//! `isjunk` is always `None` here — both call sites pass it — so this port
+//! never builds a `bjunk` set and `SequenceMatcher`'s junk-specific branches
+//! (its `b2j` junk pruning and its two junk-extension loops) are all dead.
+//!
+//! `autojunk`, by contrast, differs by call site. It is `difflib`'s
+//! *default-on* heuristic that treats an element appearing in more than 1%
+//! of a ≥200-element sequence as "popular" and drops it from the `b2j`
+//! index. `DeepDiff` explicitly opts out for ordered-list comparison
+//! (`autojunk=False`; `deepdiff/diff.py::_diff_ordered_iterable_by_difflib`),
+//! so [`compute_opcodes`] disables it — confirmed empirically against real
+//! `deepdiff==9.1.0` with a 250-item, one-popular-value fixture: the popular
+//! value matches exactly like any other. But `_diff_str` diffs two strings
+//! with a plain `difflib.unified_diff`, whose `SequenceMatcher(None, a, b)`
+//! keeps `difflib`'s default (`autojunk=True`), so [`grouped_opcodes`]
+//! enables it; a 250-line string with a popular line genuinely aligns
+//! differently, and matching it is what byte-parity on the `diff` field
+//! requires. [`build_b2j`] performs the popular-element purge and
+//! [`find_longest_match`]'s extension step re-bridges a run across a purged
+//! element (the standard-library step this port omits when autojunk is off,
+//! where it is provably a no-op — see [`find_longest_match`]).
 
 use std::collections::HashMap;
 
@@ -258,49 +274,62 @@ struct Match {
 
 /// Finds the longest matching block within `a[alo..ahi]` / `b[blo..bhi]` —
 /// a port of `difflib.SequenceMatcher.find_longest_match`'s core
-/// sparse-DP chaining, with its `isjunk`/`autojunk` branches dropped
-/// (`DeepDiff` never enables either; see this module's doc). Ties (multiple
-/// equal-longest candidates) resolve exactly like `difflib`'s: earliest
-/// `i`, then earliest `j` — a direct consequence of scanning `i` ascending
-/// and only updating on a *strictly greater* `k`.
+/// sparse-DP chaining, with its `isjunk` branches dropped (`isjunk` is
+/// always `None` here; see this module's doc). Ties (multiple equal-longest
+/// candidates) resolve exactly like `difflib`'s: earliest `i`, then earliest
+/// `j` — a direct consequence of scanning `i` ascending and only updating on
+/// a *strictly greater* `k`.
 ///
-/// **Deliberately omits `difflib`'s post-DP greedy-extension step**
-/// (`while ... and not isbjunk(...): besti -= 1; ...`, run twice — backward
-/// then forward). That step exists in the standard library to bridge a
-/// match across an *excluded* `b` element (junk, or an autojunk-pruned
-/// popular one) that the DP's `b2j` chain skips entirely because such
-/// elements are deleted from `b2j` (`__chain_b`). With `isjunk=None` (this
-/// module's only configuration — see its doc), `b2j` never excludes
-/// anything, so the DP chain alone already finds every genuinely
-/// contiguous run the extension step could ever find; re-extending
-/// afterwards can only ever re-derive a run already reflected in some
-/// `run_length` the DP itself computed. Dropping it therefore changes no
-/// opcode output for this configuration — verified by a 400,000-trial
-/// randomized differential test against real `difflib` (zero divergences),
-/// not only by the argument above.
+/// **`difflib`'s post-DP greedy-extension step runs only when `extend` is
+/// set** (`while ... and not isbjunk(...): besti -= 1; ...`, run twice —
+/// backward then forward). That step exists in the standard library to
+/// bridge a match across an *excluded* `b` element (junk, or an
+/// autojunk-pruned popular one) that the DP's `b2j` chain skips entirely
+/// because such elements are deleted from `b2j` (`__chain_b`). When autojunk
+/// is off ([`compute_opcodes`], `extend == false`), `b2j` excludes nothing,
+/// so the DP chain alone already finds every genuinely contiguous run the
+/// extension step could ever find; re-extending afterwards can only re-derive
+/// a run already reflected in some `run_length` the DP computed, so skipping
+/// it changes no opcode output — verified by a 400,000-trial randomized
+/// differential test against real `difflib` (zero divergences), not only by
+/// the argument. When autojunk is on ([`grouped_opcodes`], `extend == true`),
+/// [`build_b2j`] *does* purge popular elements, so the step is load-bearing
+/// and must run.
 ///
 /// `b2j` maps each of `b`'s [`ScalarKey`]s to the (ascending) list of
-/// indices it occurs at in `b`; built once per `a`/`b` pair and reused
-/// across every call this function makes during [`get_matching_blocks`]'s
-/// traversal, exactly like `difflib`'s own `self.b2j`.
+/// indices it occurs at in `b`; built once per `a`/`b` pair (see
+/// [`build_b2j`]) and reused across every call this function makes during
+/// [`get_matching_blocks`]'s traversal, exactly like `difflib`'s own
+/// `self.b2j`.
+///
+/// When `extend` is `true`, `difflib`'s post-DP greedy-extension step runs
+/// (it is gated rather than always on — see [`build_b2j`] and
+/// [`get_matching_blocks`]). It bridges a match across a `b` element the DP
+/// chain skipped because [`build_b2j`] purged it as *popular*: such an
+/// element is absent from `b2j`, so the DP never chains through it, yet it
+/// still equals its `a` counterpart and `difflib` re-extends the run over
+/// it. `difflib`'s `isjunk` is always `None` here (`bjunk` empty), so its
+/// two junk-extension loops are dead and only its two non-junk loops matter;
+/// with an empty `bjunk`, `not isbjunk(...)` is always true, leaving element
+/// equality (by [`ScalarKey`], `difflib`'s `==`) as the sole condition.
 ///
 /// Returns `(best_a, best_b, best_size)`; `best_size == 0` means no match
 /// was found in the given range at all.
 fn find_longest_match(
-    a: &[Value],
-    alo: usize,
-    ahi: usize,
-    blo: usize,
-    bhi: usize,
+    a_keys: &[ScalarKey],
+    b_keys: &[ScalarKey],
+    window: Window,
     b2j: &HashMap<ScalarKey, Vec<usize>>,
+    extend: bool,
 ) -> (usize, usize, usize) {
+    let Window { alo, ahi, blo, bhi } = window;
     let (mut best_a, mut best_b, mut best_size) = (alo, blo, 0);
     let mut run_length_by_b_index: HashMap<usize, usize> = HashMap::new();
 
-    for (offset, item) in a[alo..ahi].iter().enumerate() {
+    for (offset, key) in a_keys[alo..ahi].iter().enumerate() {
         let a_index = alo + offset;
         let mut next_run_length_by_b_index: HashMap<usize, usize> = HashMap::new();
-        if let Some(b_indices) = b2j.get(&scalar_key(item)) {
+        if let Some(b_indices) = b2j.get(key) {
             for &b_index in b_indices {
                 if b_index < blo {
                     continue;
@@ -328,7 +357,55 @@ fn find_longest_match(
         run_length_by_b_index = next_run_length_by_b_index;
     }
 
+    if extend {
+        while best_a > alo && best_b > blo && a_keys[best_a - 1] == b_keys[best_b - 1] {
+            best_a -= 1;
+            best_b -= 1;
+            best_size += 1;
+        }
+        while best_a + best_size < ahi
+            && best_b + best_size < bhi
+            && a_keys[best_a + best_size] == b_keys[best_b + best_size]
+        {
+            best_size += 1;
+        }
+    }
+
     (best_a, best_b, best_size)
+}
+
+/// A half-open search window into `a`/`b`, bundling `difflib`'s
+/// `alo`/`ahi`/`blo`/`bhi` bounds so [`find_longest_match`] takes them as one
+/// argument.
+#[derive(Clone, Copy)]
+struct Window {
+    alo: usize,
+    ahi: usize,
+    blo: usize,
+    bhi: usize,
+}
+
+/// Builds `difflib`'s `b2j` index — each of `b`'s [`ScalarKey`]s mapped to
+/// the ascending list of indices it occurs at.
+///
+/// When `autojunk` is set, this also applies `difflib`'s *autojunk*
+/// heuristic (`SequenceMatcher.__chain_b`): for a `b` of 200 or more
+/// elements, any element occurring more than `len(b) / 100 + 1` times is
+/// "popular" and dropped from the index entirely, so the matcher never
+/// chains a run through it (the run is re-bridged instead by
+/// [`find_longest_match`]'s extension step). See this module's doc for which
+/// call site passes which value. `isjunk` is `None` in both, so no `bjunk`
+/// set is ever built.
+fn build_b2j(b_keys: &[ScalarKey], autojunk: bool) -> HashMap<ScalarKey, Vec<usize>> {
+    let mut b2j: HashMap<ScalarKey, Vec<usize>> = HashMap::new();
+    for (b_index, key) in b_keys.iter().enumerate() {
+        b2j.entry(key.clone()).or_default().push(b_index);
+    }
+    if autojunk && b_keys.len() >= 200 {
+        let ntest = b_keys.len() / 100 + 1;
+        b2j.retain(|_, indices| indices.len() <= ntest);
+    }
+    b2j
 }
 
 /// Returns every non-empty matching block between `a` and `b`, sorted and
@@ -338,16 +415,32 @@ fn find_longest_match(
 /// `difflib` itself switched to this iterative shape for the same reason
 /// this whole engine avoids native recursion on untrusted input: naive
 /// recursion here overflowed the stack for some real-world inputs.
-fn get_matching_blocks(a: &[Value], b: &[Value]) -> Vec<Match> {
-    let mut b2j: HashMap<ScalarKey, Vec<usize>> = HashMap::new();
-    for (b_index, item) in b.iter().enumerate() {
-        b2j.entry(scalar_key(item)).or_default().push(b_index);
-    }
+///
+/// `autojunk` is threaded through to [`build_b2j`] (which decides whether to
+/// purge popular elements) and to [`find_longest_match`] (which extends a
+/// match over any purged element); the two must agree, so this is the single
+/// switch that turns the whole heuristic on for the string-diff path and off
+/// for the ordered-list path.
+fn get_matching_blocks(a: &[Value], b: &[Value], autojunk: bool) -> Vec<Match> {
+    // Compute each element's `ScalarKey` once, up front, rather than
+    // recomputing it inside every `find_longest_match` window: for a
+    // string-diff `a`/`b` of long lines this turns the worst case's O(N^2)
+    // key rebuilds (each cloning the line) into O(N).
+    let a_keys: Vec<ScalarKey> = a.iter().map(scalar_key).collect();
+    let b_keys: Vec<ScalarKey> = b.iter().map(scalar_key).collect();
+    let b2j = build_b2j(&b_keys, autojunk);
 
-    let mut stack = vec![(0_usize, a.len(), 0_usize, b.len())];
+    let mut stack = vec![Window {
+        alo: 0,
+        ahi: a.len(),
+        blo: 0,
+        bhi: b.len(),
+    }];
     let mut raw_matches = Vec::new();
-    while let Some((alo, ahi, blo, bhi)) = stack.pop() {
-        let (match_a, match_b, match_size) = find_longest_match(a, alo, ahi, blo, bhi, &b2j);
+    while let Some(window) = stack.pop() {
+        let Window { alo, ahi, blo, bhi } = window;
+        let (match_a, match_b, match_size) =
+            find_longest_match(&a_keys, &b_keys, window, &b2j, autojunk);
         if match_size > 0 {
             raw_matches.push(Match {
                 a: match_a,
@@ -355,10 +448,20 @@ fn get_matching_blocks(a: &[Value], b: &[Value]) -> Vec<Match> {
                 size: match_size,
             });
             if alo < match_a && blo < match_b {
-                stack.push((alo, match_a, blo, match_b));
+                stack.push(Window {
+                    alo,
+                    ahi: match_a,
+                    blo,
+                    bhi: match_b,
+                });
             }
             if match_a + match_size < ahi && match_b + match_size < bhi {
-                stack.push((match_a + match_size, ahi, match_b + match_size, bhi));
+                stack.push(Window {
+                    alo: match_a + match_size,
+                    ahi,
+                    blo: match_b + match_size,
+                    bhi,
+                });
             }
         }
     }
@@ -412,12 +515,11 @@ fn get_matching_blocks(a: &[Value], b: &[Value]) -> Vec<Match> {
 /// Never, for any `a`/`b` for which [`all_basic_scalars`] holds on both —
 /// see [`scalar_key`]'s doc for the sole (structurally unreachable here)
 /// panic path this function's callees have.
-#[must_use]
-pub(crate) fn compute_opcodes(a: &[Value], b: &[Value]) -> Vec<Opcode> {
+fn opcodes_with(a: &[Value], b: &[Value], autojunk: bool) -> Vec<Opcode> {
     let mut opcodes = Vec::new();
     let (mut i, mut j) = (0_usize, 0_usize);
 
-    for m in get_matching_blocks(a, b) {
+    for m in get_matching_blocks(a, b, autojunk) {
         let tag = if i < m.a && j < m.b {
             Some(Tag::Replace)
         } else if i < m.a {
@@ -449,6 +551,81 @@ pub(crate) fn compute_opcodes(a: &[Value], b: &[Value]) -> Vec<Opcode> {
     }
 
     opcodes
+}
+
+/// Computes the ordered-list [`Opcode`]s turning `a` into `b`, with
+/// `difflib`'s autojunk heuristic disabled — the exact configuration
+/// `DeepDiff` uses for default list comparison (see this module's doc).
+#[must_use]
+pub(crate) fn compute_opcodes(a: &[Value], b: &[Value]) -> Vec<Opcode> {
+    opcodes_with(a, b, false)
+}
+
+/// Groups `a`→`b`'s opcodes into change clusters, each with up to `n` lines
+/// of surrounding context, dropping the long unchanged stretches between
+/// them — a port of `difflib.SequenceMatcher.get_grouped_opcodes`, run with
+/// autojunk **on** because it feeds `unified_diff`, which constructs its
+/// matcher with `difflib`'s default (`SequenceMatcher(None, a, b)`).
+///
+/// Each returned inner `Vec` is one contiguous group of opcodes, exactly as
+/// `difflib` yields them, and is **never empty**: both sites that emit a
+/// group (the long-equal split and the final flush) push at least one opcode
+/// into it first. An empty *outer* `Vec` means the two inputs produced no
+/// change worth a group (identical, or empty).
+#[must_use]
+pub(crate) fn grouped_opcodes(a: &[Value], b: &[Value], n: usize) -> Vec<Vec<Opcode>> {
+    let mut codes = opcodes_with(a, b, true);
+    if codes.is_empty() {
+        codes.push(Opcode {
+            tag: Tag::Equal,
+            a1: 0,
+            a2: 1,
+            b1: 0,
+            b2: 1,
+        });
+    }
+
+    // Fix up a leading/trailing all-equal opcode so a group never carries
+    // more than `n` lines of leading or trailing context.
+    if let Some(first) = codes.first_mut()
+        && first.tag == Tag::Equal
+    {
+        first.a1 = first.a1.max(first.a2.saturating_sub(n));
+        first.b1 = first.b1.max(first.b2.saturating_sub(n));
+    }
+    if let Some(last) = codes.last_mut()
+        && last.tag == Tag::Equal
+    {
+        last.a2 = last.a2.min(last.a1 + n);
+        last.b2 = last.b2.min(last.b1 + n);
+    }
+
+    let nn = n + n;
+    let mut groups: Vec<Vec<Opcode>> = Vec::new();
+    let mut group: Vec<Opcode> = Vec::new();
+    for mut code in codes {
+        // A long unchanged run ends the current group and starts the next,
+        // keeping only `n` lines of context on either side of the boundary.
+        if code.tag == Tag::Equal && code.a2 - code.a1 > nn {
+            group.push(Opcode {
+                tag: Tag::Equal,
+                a1: code.a1,
+                a2: code.a2.min(code.a1 + n),
+                b1: code.b1,
+                b2: code.b2.min(code.b1 + n),
+            });
+            groups.push(std::mem::take(&mut group));
+            code.a1 = code.a1.max(code.a2.saturating_sub(n));
+            code.b1 = code.b1.max(code.b2.saturating_sub(n));
+        }
+        group.push(code);
+    }
+    let trivial_equal = matches!(group.as_slice(), [only] if only.tag == Tag::Equal);
+    if !group.is_empty() && !trivial_equal {
+        groups.push(group);
+    }
+
+    groups
 }
 
 #[cfg(test)]

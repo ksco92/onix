@@ -1,0 +1,9 @@
+{
+  "values_changed": {
+    "root['k']": {
+      "diff": "--- \n+++ \n@@ -1,2 +1,2 @@\n line1\n-line2\n+line3",
+      "new_value": "line1\nline3",
+      "old_value": "line1\nline2"
+    }
+  }
+}

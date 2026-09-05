@@ -185,6 +185,8 @@ fn insert_lcs_pair_finding(
                 report.insert_values_changed(
                     path.clone(),
                     ValuesChangedEntry {
+                        // Datetimes are never strings, so `_diff_str` never runs.
+                        diff: None,
                         old_value: Value::DateTime(old_value),
                         new_value: Value::DateTime(new_value),
                         new_path,
@@ -199,6 +201,7 @@ fn insert_lcs_pair_finding(
             report.insert_values_changed(
                 path.clone(),
                 ValuesChangedEntry {
+                    diff: crate::unified_diff::str_diff_field(old_value, new_value),
                     old_value: old_value.clone(),
                     new_value: new_value.clone(),
                     new_path,

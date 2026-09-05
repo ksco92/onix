@@ -106,6 +106,7 @@ Pass `--ignore-order` to compare every list by value instead of by position, mir
 - A `str` inside a `tuple` or `frozenset` set item is rendered with Python's `repr()`, which escapes every non-printable character; onix escapes those below `U+0100` (the complete set in that range) and passes higher non-printable code points through literally, since escaping them would mean carrying a Unicode category table. Exact for all of ASCII and all printable text. See [`crates/onix-core/src/path.rs`](crates/onix-core/src/path.rs).
 - Adversarially deep input raises `MaxDepthError` instead of crashing: the default `max_depth` is 512 and the hard ceiling is `MAX_DEPTH_CEILING` (20,000). See [`crates/onix-py/src/guard.rs`](crates/onix-py/src/guard.rs).
 - `ignore_order` pairing is `O(N^2)` in unpaired elements per side and carries a polynomial cost in both time and memory with input depth; it has no `max_passes`/`max_diffs` cutoff, so bound the size and depth of untrusted input yourself. See [`crates/onix-core/src/ignore_order/mod.rs`](crates/onix-core/src/ignore_order/mod.rs).
+- A `values_changed` between two multi-line strings runs a `difflib`-style `O(N*M)` line diff on the default path with no opt-out, worst when changes are spread evenly through the text (about 35 s for a heavily edited 1 MB string and growing quadratically, so a few megabytes is minutes), so bound the size of untrusted strings yourself. See [`crates/onix-core/src/unified_diff.rs`](crates/onix-core/src/unified_diff.rs).
 - Output is byte-identical to DeepDiff except for the cases listed above and two path-rendering quirks; [`tests/golden/README.md`](tests/golden/README.md) enumerates every accepted exception, including integers past `2^53` (the limit of exact `f64` representation) inside ordered scalar lists and `ignore_order` pairing among naive datetimes, which DeepDiff ranks using the *process's local timezone* while onix reads a naive value as UTC everywhere.
 
 ## Performance
@@ -196,3 +197,7 @@ Issues and pull requests are welcome. Open an issue to report a bug, a DeepDiff 
 ## License
 
 MIT: see [LICENSE](LICENSE).
+
+onix reimplements algorithms from CPython's `difflib` (PSF License) and
+reproduces the behavior of DeepDiff (MIT); their notices and license texts are
+in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

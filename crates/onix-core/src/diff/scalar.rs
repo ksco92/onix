@@ -94,6 +94,7 @@ pub(crate) fn scalar_diff(
     report.insert_values_changed(
         path.to_vec(),
         ValuesChangedEntry {
+            diff: crate::unified_diff::str_diff_field(a, b),
             old_value: a.clone(),
             new_value: b.clone(),
             new_path: None,

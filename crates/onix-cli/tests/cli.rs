@@ -58,6 +58,21 @@ fn diff_with_differences_prints_exact_stdout_json_and_exits_zero() {
 }
 
 #[test]
+fn multiline_string_change_carries_the_unified_diff_field() {
+    let a = write_temp_file("ml_a.json", r#""a\nb""#);
+    let b = write_temp_file("ml_b.json", r#""c\nd""#);
+
+    let output = run_onix(&["diff", a.to_str().unwrap(), b.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout_str(&output).trim_end(),
+        r#"{"values_changed":{"root":{"diff":"--- \n+++ \n@@ -1,2 +1,2 @@\n-a\n-b\n+c\n+d","new_value":"c\nd","old_value":"a\nb"}}}"#
+    );
+    assert!(stderr_str(&output).is_empty());
+}
+
+#[test]
 fn diff_with_no_differences_prints_empty_object_and_exits_zero() {
     let a = write_temp_file("same_a.json", r#"{"a": [1, 2, 3]}"#);
     let b = write_temp_file("same_b.json", r#"{"a": [1, 2, 3]}"#);

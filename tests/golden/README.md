@@ -195,6 +195,27 @@ reported raw, a date and a datetime never hash-matching but still pairing by
 distance, and a calendar value pairing with a string of itself (which is what
 the `str()` coercion in the delta shape decides).
 
+**Multi-line string cases (`multiline_string_*`,
+`ignore_order_multiline_string_*`):** at `verbose_level=2` DeepDiff adds a
+`diff` field (a `difflib.unified_diff` of the two strings) to a
+`values_changed` entry whenever both values are strings and one contains a
+newline (`_diff_str`). These pin: the field at the root and at a nested dict
+path; a newline on the old side only and on the new side only both triggering
+it; a plain single-line change getting **no** field; `splitlines()`
+boundaries, including `\r\n` as one boundary and a bare `\r` (and other
+Unicode boundaries) splitting only once a literal `\n` has triggered the
+field; leading and trailing newlines (a leading newline is a blank first
+line, a trailing one is dropped by `splitlines()`); two strings differing
+**only** by a trailing newline getting a `values_changed` but no `diff`
+(the line lists are equal); identical multi-line strings reporting no entry
+at all; two far-apart changes splitting into two hunks (`n=3` context); the
+autojunk heuristic at 250+ lines (which `unified_diff` enables, unlike the
+ordered-list path) and its greedy backward extension over a purged popular
+run; and the `ignore_order` route, where a paired change reaches `_diff_str`
+and carries `new_path`. The field is emitted only where DeepDiff runs
+`_diff_str`: the mutual-add-remove merge and the threshold-collapse paths
+deliberately omit it. See `crates/onix-core/src/unified_diff.rs`.
+
 **`ignore_order=True` (`ignore_order_*` cases):** pure shuffle, shuffle
 plus a changed/added/removed value, duplicate-multiplicity invisibility,
 nested-dict pairing, list-in-dict-in-list, mixed type changes, `[1]` vs
