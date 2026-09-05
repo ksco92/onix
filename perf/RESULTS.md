@@ -6,7 +6,7 @@ Generated entirely by `perf/run_bench.sh` (via `perf/summarize_results.py`) — 
 
 | | |
 |---|---|
-| Date (UTC) | 2026-09-02T23:40:33Z |
+| Date (UTC) | 2026-09-05T01:15:52Z |
 | OS | macOS 26.5.1 (build 25F80) |
 | CPU | Apple M5 Max |
 | Cores | 18 |
@@ -132,16 +132,16 @@ Diff-only time excludes process startup and JSON parsing on both sides (self-ins
 
 | Fixture | onix diff-only (median, min-max) | deepdiff diff-only (median, min-max) | Speedup | onix peak RSS | deepdiff peak RSS | Memory ratio | ≥5x threshold |
 |---|---|---|---|---|---|---|---|
-| `flat_dict_10k` | 3.093 ms (3.020 ms-3.153 ms) | 143.691 ms (140.322 ms-145.891 ms) | 46.46x | 5.72 MB | 39.46 MB | 6.90x | ✅ |
-| `flat_dict_100k` | 38.354 ms (37.963 ms-38.916 ms) | 1.596 s (1.584 s-1.686 s) | 41.60x | 40.53 MB | 110.95 MB | 2.74x | ✅ |
-| `flat_dict_1m` | 450.356 ms (449.689 ms-467.911 ms) | 16.936 s (16.889 s-17.154 s) | 37.60x | 478.10 MB | 753.75 MB | 1.58x | ✅ |
-| `flat_list_100k` | 81.787 ms (78.266 ms-89.593 ms) | 4.798 s (4.746 s-4.828 s) | 58.67x | 38.16 MB | 155.11 MB | 4.06x | ✅ |
-| `nested_uniform_d6_b10` | 208.770 ms (208.269 ms-209.842 ms) | 71.500 s (71.498 s-72.875 s) | 342.48x | 224.58 MB | 908.33 MB | 4.04x | ✅ |
-| `api_payloads` | 160.667 ms (153.309 ms-171.032 ms) | 94.138 s (93.625 s-94.669 s) | 585.92x | 269.39 MB | 544.98 MB | 2.02x | ✅ |
-| `deep_narrow_d120` | 0.027 ms (0.026 ms-0.028 ms) | 123.792 ms (123.234 ms-124.809 ms) | 4588.45x | 2.18 MB | 41.08 MB | 18.85x | ✅ |
-| `startup_trivial` | 0.001 ms (0.001 ms-0.001 ms) | 0.181 ms (0.174 ms-0.207 ms) | 177.24x | 2.18 MB | 32.69 MB | 15.00x | ✅ |
-| `ignore_order_10k` | 80.965 ms (80.117 ms-83.510 ms) | 13.010 s (12.900 s-13.023 s) | 160.68x | 108.82 MB | 345.41 MB | 3.17x | ✅ |
-| `identical_1m` | 6.996 ms (6.114 ms-7.731 ms) | 15.853 s (15.773 s-16.021 s) | 2266.18x | 315.39 MB | 503.28 MB | 1.60x | ✅ |
+| `flat_dict_10k` | 3.154 ms (3.058 ms-3.220 ms) | 141.155 ms (140.606 ms-142.781 ms) | 44.75x | 5.78 MB | 39.29 MB | 6.79x | ✅ |
+| `flat_dict_100k` | 38.440 ms (38.000 ms-38.806 ms) | 1.594 s (1.581 s-1.602 s) | 41.47x | 40.57 MB | 110.82 MB | 2.73x | ✅ |
+| `flat_dict_1m` | 460.082 ms (454.820 ms-465.133 ms) | 17.061 s (16.926 s-17.162 s) | 37.08x | 478.15 MB | 753.65 MB | 1.58x | ✅ |
+| `flat_list_100k` | 82.907 ms (81.131 ms-84.654 ms) | 4.751 s (4.715 s-4.820 s) | 57.31x | 38.17 MB | 154.95 MB | 4.06x | ✅ |
+| `nested_uniform_d6_b10` | 207.242 ms (205.249 ms-217.027 ms) | 71.458 s (70.959 s-71.599 s) | 344.80x | 227.41 MB | 868.32 MB | 3.82x | ✅ |
+| `api_payloads` | 162.489 ms (159.446 ms-178.736 ms) | 93.764 s (93.687 s-94.474 s) | 577.05x | 270.09 MB | 609.93 MB | 2.26x | ✅ |
+| `deep_narrow_d120` | 0.029 ms (0.028 ms-0.030 ms) | 123.650 ms (123.230 ms-125.018 ms) | 4245.55x | 2.15 MB | 41.27 MB | 19.23x | ✅ |
+| `startup_trivial` | 0.001 ms (0.001 ms-0.001 ms) | 0.175 ms (0.169 ms-0.183 ms) | 147.75x | 2.15 MB | 32.67 MB | 15.22x | ✅ |
+| `ignore_order_10k` | 73.475 ms (71.672 ms-73.940 ms) | 12.976 s (12.900 s-13.005 s) | 176.60x | 60.11 MB | 345.19 MB | 5.74x | ✅ |
+| `identical_1m` | 9.254 ms (6.726 ms-9.875 ms) | 15.790 s (15.660 s-15.989 s) | 1706.35x | 315.41 MB | 503.19 MB | 1.60x | ✅ |
 
 ## End-to-end wall clock
 
@@ -149,16 +149,16 @@ Process start to exit, both tools reading the same two JSON files (hyperfine, me
 
 | Fixture | onix wall (mean ± σ) | deepdiff wall (mean ± σ) | Wall speedup |
 |---|---|---|---|
-| `flat_dict_10k` | 8.477 ms ± 0.211 ms | 200.925 ms ± 2.212 ms | 23.79x |
-| `flat_dict_100k` | 65.595 ms ± 0.601 ms | 1.707 s ± 19.158 ms | 25.88x |
-| `flat_dict_1m` | 809.458 ms ± 3.795 ms | 18.061 s ± 290.399 ms | 22.27x |
-| `flat_list_100k` | 90.397 ms ± 3.480 ms | 4.886 s ± 15.473 ms | 54.30x |
-| `nested_uniform_d6_b10` | 391.822 ms ± 4.091 ms | 72.405 s ± 212.440 ms | 185.94x |
-| `api_payloads` | 392.801 ms ± 5.790 ms | 93.927 s ± 593.910 ms | 240.39x |
-| `deep_narrow_d120` | 1.822 ms ± 0.086 ms | 181.635 ms ± 1.528 ms | 99.16x |
-| `startup_trivial` | 1.793 ms ± 0.106 ms | 52.528 ms ± 0.897 ms | 30.00x |
-| `ignore_order_10k` | 81.075 ms ± 0.801 ms | 12.914 s ± 49.636 ms | 160.01x |
-| `identical_1m` | 317.730 ms ± 6.191 ms | 16.405 s ± 85.246 ms | 51.60x |
+| `flat_dict_10k` | 7.445 ms ± 0.118 ms | 200.009 ms ± 1.136 ms | 26.84x |
+| `flat_dict_100k` | 64.992 ms ± 0.777 ms | 1.723 s ± 40.787 ms | 26.34x |
+| `flat_dict_1m` | 836.912 ms ± 66.683 ms | 17.838 s ± 109.506 ms | 21.97x |
+| `flat_list_100k` | 91.937 ms ± 1.800 ms | 4.871 s ± 23.623 ms | 53.13x |
+| `nested_uniform_d6_b10` | 400.179 ms ± 18.937 ms | 72.369 s ± 565.800 ms | 180.03x |
+| `api_payloads` | 424.671 ms ± 17.050 ms | 95.008 s ± 283.940 ms | 223.82x |
+| `deep_narrow_d120` | 1.816 ms ± 0.085 ms | 183.570 ms ± 0.526 ms | 100.54x |
+| `startup_trivial` | 1.777 ms ± 0.098 ms | 53.806 ms ± 0.656 ms | 30.50x |
+| `ignore_order_10k` | 76.810 ms ± 0.935 ms | 13.084 s ± 100.454 ms | 170.50x |
+| `identical_1m` | 323.954 ms ± 9.671 ms | 16.387 s ± 68.901 ms | 50.76x |
 
 ## CPU time (user+sys) and allocation profile
 
@@ -166,16 +166,16 @@ CPU time is the cloud-cost-relevant number (instances bill CPU-seconds regardles
 
 | Fixture | onix CPU (user+sys) | deepdiff CPU (user+sys) | deepdiff tracemalloc peak |
 |---|---|---|---|
-| `flat_dict_10k` | 7.669 ms | 197.830 ms | 1.84 MB |
-| `flat_dict_100k` | 64.010 ms | 1.703 s | 21.40 MB |
-| `flat_dict_1m` | 806.568 ms | 18.043 s | 189.39 MB |
-| `flat_list_100k` | 88.955 ms | 4.880 s | 38.49 MB |
-| `nested_uniform_d6_b10` | 388.206 ms | 72.359 s | 372.47 MB |
-| `api_payloads` | 387.928 ms | 93.875 s | 71.44 MB |
-| `deep_narrow_d120` | 1.455 ms | 179.082 ms | 4.20 MB |
-| `startup_trivial` | 1.373 ms | 50.245 ms | 0.01 MB |
-| `ignore_order_10k` | 79.426 ms | 12.906 s | 158.81 MB |
-| `identical_1m` | 315.113 ms | 16.392 s | 141.22 MB |
+| `flat_dict_10k` | 6.960 ms | 197.442 ms | 1.84 MB |
+| `flat_dict_100k` | 63.526 ms | 1.718 s | 21.40 MB |
+| `flat_dict_1m` | 807.038 ms | 17.787 s | 189.39 MB |
+| `flat_list_100k` | 90.541 ms | 4.859 s | 38.49 MB |
+| `nested_uniform_d6_b10` | 388.317 ms | 72.191 s | 372.47 MB |
+| `api_payloads` | 410.064 ms | 94.785 s | 71.44 MB |
+| `deep_narrow_d120` | 1.427 ms | 181.105 ms | 4.20 MB |
+| `startup_trivial` | 1.374 ms | 51.734 ms | 0.01 MB |
+| `ignore_order_10k` | 75.084 ms | 13.008 s | 158.81 MB |
+| `identical_1m` | 320.772 ms | 16.340 s | 141.22 MB |
 
 ## Startup/import cost
 
@@ -195,15 +195,15 @@ smaller gap.
 
 | | onix | deepdiff (via `uv run`) |
 |---|---|---|
-| Wall clock (mean ± σ) | 1.793 ms ± 0.106 ms | 52.528 ms ± 0.897 ms |
-| Ratio | | 30.00x slower to start |
+| Wall clock (mean ± σ) | 1.777 ms ± 0.098 ms | 53.806 ms ± 0.656 ms |
+| Ratio | | 30.50x slower to start |
 
 ## Design notes: `ignore_order_10k` (the ignore_order headline comparison)
 
 `ignore_order_10k` is diffed by both tools with `--ignore-order`
 (`DeepDiff(..., ignore_order=True)` / `onix diff --ignore-order`) — a real
 two-tool comparison like every other fixture (see the Headline table
-above for its row: 160.68x diff-only, this run).
+above for its row: 176.60x diff-only, this run).
 This was DeepDiff's own documented headline slowness (its `O(changed²)`
 candidate-pairing built from real Python objects) and the motivating
 reason for `onix-core`'s ignore_order support. Three design choices explain the size of the
@@ -266,8 +266,8 @@ CPU-billed instance actually bills.
 
 | | onix | deepdiff |
 |---|---|---|
-| MB of input / CPU-second (`api_payloads`) | 133.1 MB/s | 0.5 MB/s |
-| Estimated $ / 1M `api_payloads`-sized diffs | $14.22 | $3,442.09 |
+| MB of input / CPU-second (`api_payloads`) | 125.9 MB/s | 0.5 MB/s |
+| Estimated $ / 1M `api_payloads`-sized diffs | $15.04 | $3,475.44 |
 
 This is a **CPU-time-only** cost model (excludes egress, storage, and
 per-request platform overhead) meant to illustrate the *relative* economic
@@ -279,19 +279,19 @@ This harness's success thresholds: **≥5x faster (diff-only) OR ≥5x less peak
 
 | Fixture | Meets ≥5x threshold | Diff-only speedup | Memory ratio |
 |---|---|---|---|
-| `flat_dict_10k` | YES | 46.46x | 6.90x |
-| `flat_dict_100k` | YES | 41.60x | 2.74x |
-| `flat_dict_1m` | YES | 37.60x | 1.58x |
-| `flat_list_100k` | YES | 58.67x | 4.06x |
-| `nested_uniform_d6_b10` | YES | 342.48x | 4.04x |
-| `api_payloads` | YES | 585.92x | 2.02x |
-| `deep_narrow_d120` | YES | 4588.45x | 18.85x |
-| `startup_trivial` | YES | 177.24x | 15.00x |
-| `ignore_order_10k` | YES | 160.68x | 3.17x |
-| `identical_1m` | YES | 2266.18x | 1.60x |
+| `flat_dict_10k` | YES | 44.75x | 6.79x |
+| `flat_dict_100k` | YES | 41.47x | 2.73x |
+| `flat_dict_1m` | YES | 37.08x | 1.58x |
+| `flat_list_100k` | YES | 57.31x | 4.06x |
+| `nested_uniform_d6_b10` | YES | 344.80x | 3.82x |
+| `api_payloads` | YES | 577.05x | 2.26x |
+| `deep_narrow_d120` | YES | 4245.55x | 19.23x |
+| `startup_trivial` | YES | 147.75x | 15.22x |
+| `ignore_order_10k` | YES | 176.60x | 5.74x |
+| `identical_1m` | YES | 1706.35x | 1.60x |
 
 - **Majority of fixtures clear the ≥5x bar:** YES.
-- **`api_payloads` strictly better on both axes:** YES (diff-only 585.92x, memory 2.02x).
+- **`api_payloads` strictly better on both axes:** YES (diff-only 577.05x, memory 2.26x).
 - **No fixture where onix is slower (diff-only) than deepdiff.**
 - **Why the largest flat dicts show the slimmest margin:** onix's diff-only speedup and memory ratio bottom out on `flat_dict_1m` (1M unique keys). The compact model stores each object as a sorted key/value slice looked up by binary search, so at this size the dominant cost is key `memcmp` during lookup — worse cache behavior than a `BTreeMap` descent — and unique keys defeat the interner. It is an accepted constant-factor representation tradeoff: the same compact layout is what earns the large memory wins on realistic record and nested data.
 

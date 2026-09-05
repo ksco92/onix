@@ -7,7 +7,7 @@
 [![license](https://img.shields.io/github/license/ksco92/onix.svg)](LICENSE)
 [![last commit](https://img.shields.io/github/last-commit/ksco92/onix.svg)](https://github.com/ksco92/onix/commits/main)
 
-**onix is a Rust rewrite of Python DeepDiff's core: byte-compatible output, 37-4588x faster, with `ignore_order` support included.** Install it as `deepdiff-rs`, a drop-in `DeepDiff` class for Python, or run the diff engine as the `onix` command-line tool.
+**onix is a Rust rewrite of Python DeepDiff's core: byte-compatible output, 37-4245x faster, with `ignore_order` support included.** Install it as `deepdiff-rs`, a drop-in `DeepDiff` class for Python, or run the diff engine as the `onix` command-line tool.
 
 `deepdiff-rs` reads live Python objects (or JSON) and produces the exact same report [DeepDiff](https://github.com/seperman/deepdiff) does at `verbose_level=2`, so it slots into code that already parses DeepDiff output while running dramatically faster on large or deeply nested inputs.
 
@@ -142,16 +142,16 @@ The engine's own diff-only time and peak resident memory against pinned `deepdif
 
 | Fixture | onix diff-only (median, min-max) | deepdiff diff-only (median, min-max) | Speedup | onix peak RSS | deepdiff peak RSS | Memory ratio | ≥5x threshold |
 |---|---|---|---|---|---|---|---|
-| `flat_dict_10k` | 3.093 ms (3.020 ms-3.153 ms) | 143.691 ms (140.322 ms-145.891 ms) | 46.46x | 5.72 MB | 39.46 MB | 6.90x | ✅ |
-| `flat_dict_100k` | 38.354 ms (37.963 ms-38.916 ms) | 1.596 s (1.584 s-1.686 s) | 41.60x | 40.53 MB | 110.95 MB | 2.74x | ✅ |
-| `flat_dict_1m` | 450.356 ms (449.689 ms-467.911 ms) | 16.936 s (16.889 s-17.154 s) | 37.60x | 478.10 MB | 753.75 MB | 1.58x | ✅ |
-| `flat_list_100k` | 81.787 ms (78.266 ms-89.593 ms) | 4.798 s (4.746 s-4.828 s) | 58.67x | 38.16 MB | 155.11 MB | 4.06x | ✅ |
-| `nested_uniform_d6_b10` | 208.770 ms (208.269 ms-209.842 ms) | 71.500 s (71.498 s-72.875 s) | 342.48x | 224.58 MB | 908.33 MB | 4.04x | ✅ |
-| `api_payloads` | 160.667 ms (153.309 ms-171.032 ms) | 94.138 s (93.625 s-94.669 s) | 585.92x | 269.39 MB | 544.98 MB | 2.02x | ✅ |
-| `deep_narrow_d120` | 0.027 ms (0.026 ms-0.028 ms) | 123.792 ms (123.234 ms-124.809 ms) | 4588.45x | 2.18 MB | 41.08 MB | 18.85x | ✅ |
-| `startup_trivial` | 0.001 ms (0.001 ms-0.001 ms) | 0.181 ms (0.174 ms-0.207 ms) | 177.24x | 2.18 MB | 32.69 MB | 15.00x | ✅ |
-| `ignore_order_10k` | 80.965 ms (80.117 ms-83.510 ms) | 13.010 s (12.900 s-13.023 s) | 160.68x | 108.82 MB | 345.41 MB | 3.17x | ✅ |
-| `identical_1m` | 6.996 ms (6.114 ms-7.731 ms) | 15.853 s (15.773 s-16.021 s) | 2266.18x | 315.39 MB | 503.28 MB | 1.60x | ✅ |
+| `flat_dict_10k` | 3.154 ms (3.058 ms-3.220 ms) | 141.155 ms (140.606 ms-142.781 ms) | 44.75x | 5.78 MB | 39.29 MB | 6.79x | ✅ |
+| `flat_dict_100k` | 38.440 ms (38.000 ms-38.806 ms) | 1.594 s (1.581 s-1.602 s) | 41.47x | 40.57 MB | 110.82 MB | 2.73x | ✅ |
+| `flat_dict_1m` | 460.082 ms (454.820 ms-465.133 ms) | 17.061 s (16.926 s-17.162 s) | 37.08x | 478.15 MB | 753.65 MB | 1.58x | ✅ |
+| `flat_list_100k` | 82.907 ms (81.131 ms-84.654 ms) | 4.751 s (4.715 s-4.820 s) | 57.31x | 38.17 MB | 154.95 MB | 4.06x | ✅ |
+| `nested_uniform_d6_b10` | 207.242 ms (205.249 ms-217.027 ms) | 71.458 s (70.959 s-71.599 s) | 344.80x | 227.41 MB | 868.32 MB | 3.82x | ✅ |
+| `api_payloads` | 162.489 ms (159.446 ms-178.736 ms) | 93.764 s (93.687 s-94.474 s) | 577.05x | 270.09 MB | 609.93 MB | 2.26x | ✅ |
+| `deep_narrow_d120` | 0.029 ms (0.028 ms-0.030 ms) | 123.650 ms (123.230 ms-125.018 ms) | 4245.55x | 2.15 MB | 41.27 MB | 19.23x | ✅ |
+| `startup_trivial` | 0.001 ms (0.001 ms-0.001 ms) | 0.175 ms (0.169 ms-0.183 ms) | 147.75x | 2.15 MB | 32.67 MB | 15.22x | ✅ |
+| `ignore_order_10k` | 73.475 ms (71.672 ms-73.940 ms) | 12.976 s (12.900 s-13.005 s) | 176.60x | 60.11 MB | 345.19 MB | 5.74x | ✅ |
+| `identical_1m` | 9.254 ms (6.726 ms-9.875 ms) | 15.790 s (15.660 s-15.989 s) | 1706.35x | 315.41 MB | 503.19 MB | 1.60x | ✅ |
 
 Both reports carry their full methodology, fairness rules, and the reproduce command. `perf/RESULTS.md` is an upper bound (JSON parsed straight into the engine, no Python-object conversion); the bindings table is the product-surface number. Regenerate them with `perf/run_bench.sh` and `crates/onix-py/benchmarks/bench_bindings.py` (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
