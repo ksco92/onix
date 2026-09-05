@@ -1,19 +1,13 @@
 //! The `diff_tables` entry point and its result objects.
 //!
-//! `diff_tables` accepts any Python object implementing the Arrow `PyCapsule`
-//! interface — `__arrow_c_stream__` (pyarrow `Table`/`RecordBatchReader`,
-//! polars `DataFrame`, `DuckDB` relation) or `__arrow_c_array__` (pyarrow
-//! `RecordBatch`/`StructArray`) — imports it into native Arrow record batches
-//! with no Python round trip (via `pyo3-arrow`'s C Data Interface bridge),
-//! and diffs the two tables — schema and keyed rows — with [`onix_arrow`].
-//!
-//! `pyarrow` is not needed to *call* `diff_tables`: polars and `DuckDB` expose
-//! the same protocol, so `import deepdiff_rs` and diffing their tables work
-//! with no pyarrow installed. It is needed only by [`ArrowTable::to_pyarrow`],
-//! which raises a clear `ImportError` naming the optional extra when pyarrow
-//! is absent. Every Arrow result also exports itself through
-//! `__arrow_c_stream__`, so polars and pandas can consume it without pyarrow
-//! either.
+//! `diff_tables` accepts any Arrow `PyCapsule`-interface object (pyarrow,
+//! polars, `DuckDB`), imports it with no Python round trip, and diffs
+//! schema and keyed rows with [`onix_arrow`]. `pyarrow` is optional: only
+//! [`ArrowTable::to_pyarrow`] needs it, raising `ImportError` naming the
+//! extra when absent. Every result exports `__arrow_c_stream__`: polars
+//! reads it needing no pyarrow; pandas' `from_dataframe` imports pyarrow
+//! internally and falls back to the deprecated `__dataframe__` protocol
+//! (unimplemented here), so pandas needs pyarrow either way.
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
@@ -203,10 +197,13 @@ fn map_table_error(error: &TableDiffError) -> PyErr {
 #[pyclass(module = "deepdiff_rs", name = "TableDiff", frozen)]
 pub(crate) struct TableDiff {
     core: CoreTableDiff,
-    /// The JSON rendering and the Arrow record batch, both built once here
-    /// because they cost real work; the schema list and summary are derived
-    /// from `core` on demand instead, since they are cheap.
-    json: String,
+    /// The Arrow record batch for `schema_arrow`, built once here because it
+    /// costs real work; the schema list and summary are derived from `core`
+    /// on demand instead, since they are cheap. `to_json()` is also built on
+    /// demand, from `core`, because — unlike this batch — it can fail once a
+    /// diff has more row-level content than its documented cap (see its own
+    /// doc), and building it eagerly here would make constructing a
+    /// `TableDiff` fail for a caller who never calls `to_json()` at all.
     schema_batch: RecordBatch,
 }
 
@@ -214,18 +211,11 @@ impl TableDiff {
     /// Builds the Python result from a finished core diff, taking it by value so
     /// the (potentially large) changed-key set is moved, not cloned.
     fn from_core(core: CoreTableDiff) -> PyResult<Self> {
-        let json = core
-            .to_json()
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let schema_batch = core
             .schema_record_batch()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        Ok(Self {
-            core,
-            json,
-            schema_batch,
-        })
+        Ok(Self { core, schema_batch })
     }
 }
 
@@ -248,8 +238,9 @@ impl TableDiff {
     }
 
     /// The schema diff as an Arrow-exportable table: it implements
-    /// `__arrow_c_stream__` (so polars and pandas can consume it without
-    /// pyarrow) and offers [`ArrowTable::to_pyarrow`].
+    /// `__arrow_c_stream__` (polars needs no pyarrow to consume it; pandas
+    /// needs pyarrow installed, for its own reasons — see this module's doc)
+    /// and offers [`ArrowTable::to_pyarrow`].
     #[getter]
     fn schema_arrow(&self) -> ArrowTable {
         ArrowTable::new(self.schema_batch.clone())
@@ -278,9 +269,17 @@ impl TableDiff {
         Ok(dict)
     }
 
-    /// The schema diff and its summary as a JSON string.
-    fn to_json(&self) -> &str {
-        &self.json
+    /// The full diff as a JSON string: the schema diff, the summary, and
+    /// `rows_added`, `rows_removed`, `cells_changed`, and `duplicate_keys`
+    /// (each an array of one JSON object per row, keyed by column name,
+    /// with a null cell as JSON `null`). Raises `ValueError` naming the
+    /// count and the cap if those four members would together embed more
+    /// than `deepdiff_rs`'s documented row cap (10,000 rows) — use
+    /// `rows_added()`, `rows_removed()`, `cells_changed()`, or
+    /// `duplicate_keys()` (each an `ArrowTable`: `to_pyarrow()` or
+    /// `__arrow_c_stream__`) for a diff this large.
+    fn to_json(&self) -> PyResult<String> {
+        self.core.to_json().map_err(|e| map_table_error(&e))
     }
 
     /// Rows present only on the right (added), in the right table's schema and
@@ -354,10 +353,11 @@ fn schema_change_dict<'py>(py: Python<'py>, change: &SchemaChange) -> PyResult<B
 }
 
 /// An Arrow record batch exposed to Python through the Arrow `PyCapsule`
-/// interface. Every table-shaped result of a diff is one of these, so polars,
-/// pandas, and pyarrow can all consume it: `__arrow_c_stream__` needs no
-/// third-party package, and [`ArrowTable::to_pyarrow`] is a convenience for
-/// when pyarrow is present.
+/// interface. Every table-shaped result of a diff is one of these, so
+/// pyarrow, polars, and (with pyarrow installed) pandas can all consume it —
+/// see this module's doc for why pandas' own consuming code needs pyarrow
+/// even though this side of the exchange needs no third-party package.
+/// [`ArrowTable::to_pyarrow`] is a convenience for when pyarrow is present.
 #[pyclass(module = "deepdiff_rs", name = "ArrowTable", frozen)]
 pub(crate) struct ArrowTable {
     batch: RecordBatch,
@@ -373,8 +373,8 @@ impl ArrowTable {
 #[pymethods]
 impl ArrowTable {
     /// Exports this table as an Arrow C stream (one record batch) in a
-    /// `PyCapsule`, the standard zero-copy hand-off polars, pandas, and pyarrow
-    /// all understand.
+    /// `PyCapsule`, the standard zero-copy hand-off pyarrow, polars, and
+    /// (given pyarrow) pandas all understand.
     #[pyo3(signature = (requested_schema=None))]
     fn __arrow_c_stream__<'py>(
         &self,
@@ -415,8 +415,10 @@ impl ArrowTable {
     ///
     /// Requires pyarrow (`pip install deepdiff-rs[arrow]`); raises
     /// `ImportError` naming that extra if pyarrow is not installed. Consuming
-    /// the table with polars or pandas needs no pyarrow — use
-    /// `__arrow_c_stream__` (which those libraries call for you) instead.
+    /// the table with polars needs no pyarrow at all — use
+    /// `__arrow_c_stream__` (which polars calls for you) instead; pandas'
+    /// own consumption of that same protocol needs pyarrow regardless (see
+    /// this module's doc), so this method is the simpler path for pandas.
     fn to_pyarrow<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let pyarrow = match py.import("pyarrow") {
@@ -428,8 +430,8 @@ impl ArrowTable {
             Err(error) if error.is_instance_of::<PyModuleNotFoundError>(py) => {
                 let hint = PyImportError::new_err(
                     "pyarrow is required for to_pyarrow(); install it with \
-                     'pip install deepdiff-rs[arrow]'. Consuming this result with polars or \
-                     pandas needs no pyarrow.",
+                     'pip install deepdiff-rs[arrow]'. Consuming this result with polars needs \
+                     no pyarrow at all; pandas needs pyarrow too, for its own reasons.",
                 );
                 hint.set_cause(py, Some(error));
                 return Err(hint);

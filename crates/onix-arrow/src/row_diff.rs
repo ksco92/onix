@@ -66,11 +66,13 @@
 //!
 //! # Per-cell changes
 //!
-//! [`diff_cells`] reports, for every changed row, which cells differ. A cell is
-//! reported changed **if and only if its [`hash_cell`] contribution differs**
-//! between the two matched rows — the same helper the row hash is built from, so
-//! the cell list and the row-changed decision can never drift. Each reported
-//! cell is labelled:
+//! [`diff_cells`] reports, for every changed row, which cells differ, as one
+//! output row per differing cell: the key columns, then `column`, `old_value`,
+//! `new_value`, and `change` (see [`diff_cells`] for the exact output order).
+//! A cell is reported changed **if and only if its [`hash_cell`] contribution
+//! differs** between the two matched rows — the same helper the row hash is
+//! built from, so the cell list and the row-changed decision can never drift.
+//! Each reported cell is labelled:
 //!
 //! - `became_null`/`became_non_null` when exactly one side is null;
 //! - `type_changed` when both are non-null and the two sides' types are not
@@ -93,11 +95,14 @@
 //! `0.10000000149011612` against an `f64` `0.1`), a timestamp renders as its UTC
 //! instant with its zone appended when aware (so an aware and a naive timestamp
 //! of the same instant differ), a decimal renders at its native scale, a string
-//! verbatim (decimals and strings match the `DuckDB` oracle), and a duration
+//! verbatim (decimals and strings match the `DuckDB` oracle), a duration
 //! renders as an ISO 8601 `PT<seconds>S` string computed from its value — never
 //! through the Arrow formatter, whose second/millisecond duration formatter can
-//! emit a `<invalid>` sentinel while still succeeding. As a construction guard,
-//! a `value_changed` record whose two renderings are nonetheless equal is a
+//! emit a `<invalid>` sentinel while still succeeding — and a cross-variant
+//! interval renders with its variant appended, so two variants whose human
+//! form would otherwise coincide stay distinct (see [`prepare_render`]). As a
+//! construction guard, a `value_changed` record whose two renderings are
+//! nonetheless equal is a
 //! [`TableDiffError::EqualRenderings`], not a silent row. There is no typed
 //! old/new
 //! column: a long-format table mixes every compared column's type in one column,
@@ -1287,7 +1292,7 @@ fn value_domain(data_type: &DataType) -> ValueDomain {
 /// diff both use. A `Null`-typed column is all-null by definition and carries no
 /// validity buffer, so it is detected by type; every other column defers to its
 /// validity bitmap.
-fn cell_is_null(array: &ArrayRef, row: usize) -> bool {
+pub(crate) fn cell_is_null(array: &ArrayRef, row: usize) -> bool {
     matches!(array.data_type(), DataType::Null) || array.is_null(row)
 }
 
@@ -1351,13 +1356,16 @@ fn render_duration(raw: i64, unit: TimeUnit) -> String {
 /// One side's cell renderer: the Arrow formatter for most types, or a
 /// dependency-free [`render_duration`] for a `Duration` column (which the
 /// formatter can render as a `<invalid>` sentinel).
-enum SideRenderer<'a> {
+pub(crate) enum SideRenderer<'a> {
     Formatter(ArrayFormatter<'a>),
     Duration(&'a ArrayRef, TimeUnit),
 }
 
 impl<'a> SideRenderer<'a> {
-    fn new(array: &'a ArrayRef, opts: &'a FormatOptions<'a>) -> Result<Self, TableDiffError> {
+    pub(crate) fn new(
+        array: &'a ArrayRef,
+        opts: &'a FormatOptions<'a>,
+    ) -> Result<Self, TableDiffError> {
         if let DataType::Duration(unit) = array.data_type() {
             Ok(SideRenderer::Duration(array, *unit))
         } else {
@@ -1366,7 +1374,7 @@ impl<'a> SideRenderer<'a> {
         }
     }
 
-    fn render(&self, row: usize, column: &str) -> Result<String, TableDiffError> {
+    pub(crate) fn render(&self, row: usize, column: &str) -> Result<String, TableDiffError> {
         match self {
             SideRenderer::Formatter(formatter) => render_value(formatter, row, column),
             SideRenderer::Duration(array, unit) => {

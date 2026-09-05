@@ -205,10 +205,10 @@ pre-fix binary.
 
 The Arrow table-diff tests are part of the same suite
 (`tests/test_table_diff.py` — its module docstring explains what each group
-covers). `uv sync --group test` installs pyarrow, polars, and DuckDB, which
-those tests need but which `diff_tables` itself does not (they are test-only,
-never runtime, dependencies); `pyarrow` is also the optional `arrow` extra. To
-run only them:
+covers). `uv sync --group test` installs pyarrow, polars, DuckDB, and pandas,
+which those tests need but which `diff_tables` itself does not (they are
+test-only, never runtime, dependencies); `pyarrow` is also the optional
+`arrow` extra. To run only them:
 
 ```sh
 cd crates/onix-py
@@ -217,6 +217,26 @@ uv run --group test pytest tests/test_table_diff.py -q
 
 The pure-Rust schema logic lives in `crates/onix-arrow` and is covered by
 `cargo test` / `make check` like the other Rust crates.
+
+### Type stub
+
+[`crates/onix-py/deepdiff_rs.pyi`](crates/onix-py/deepdiff_rs.pyi) is the
+hand-written stub for the whole public surface; maturin packages it (and an
+auto-generated `py.typed` marker) into the wheel because it finds a file
+named after `[tool.maturin] module-name` next to `Cargo.toml`. Three tests
+keep it from drifting silently:
+
+```sh
+cd crates/onix-py
+uv run --group test pytest tests/test_stub_signatures.py -q  # every stub signature vs. inspect.signature() of the built module
+uv run --group test pytest tests/test_stub_mypy.py -q        # mypy --strict over a script exercising every stub-declared callable
+uv run --group test pytest tests/test_wheel_contents.py -q   # a real `maturin build` wheel actually ships the .pyi and py.typed
+```
+
+Edit the stub whenever a signature, default, or keyword-only marker changes
+on the Rust side (`#[pyo3(signature = ...)]`); `test_stub_signatures.py`
+fails loudly otherwise, comparing both by parsing the stub's AST rather than
+importing it, since a `.pyi` is not valid to `exec`.
 
 ## Benchmarking
 

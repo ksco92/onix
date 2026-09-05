@@ -23,10 +23,12 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 ///
 /// `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`:
 ///
-/// - `t1`/`t2`: any of `None`, `bool`, `int`, `float`, `str`, `dict` (`str`
-///   keys), `list`, `tuple`, `set`, `frozenset`, `datetime.datetime`,
-///   `datetime.date`, `datetime.time`, or `datetime.timedelta`, arbitrarily
-///   nested. A *subclass* of any of these is
+/// - `t1`/`t2`: any of `None`, `bool`, `int`, `float`, `str`, `dict` (a key
+///   may be `str`, `None`, `bool`, `int`, `float`, `datetime.datetime`,
+///   `datetime.date`, or a `tuple` of those, never nested), `list`, `tuple`,
+///   `set`, `frozenset`, `datetime.datetime`, `datetime.date`,
+///   `datetime.time`, or `datetime.timedelta`, arbitrarily nested. A
+///   *subclass* of any of these is
 ///   not supported (a `namedtuple`, a `set` subclass, a pandas
 ///   `Timestamp`), because `DeepDiff` reports every value under its own type
 ///   name. A `set`/`frozenset` member is restricted further, to whichever of
