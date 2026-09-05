@@ -3016,8 +3016,7 @@ fn structural_twin(value: &CValue, in_set: bool) -> CValue {
             entries.reverse();
             crate::value::Builder::new().object(entries)
         }
-        CValue::DateTime(_) | CValue::Number(_) if in_set => value.clone(),
-        CValue::DateTime(dt) => {
+        CValue::DateTime(dt) if !in_set => {
             let date = dt.date();
             match dt.utc_offset_seconds() {
                 None => cdt_at(
@@ -3049,7 +3048,7 @@ fn structural_twin(value: &CValue, in_set: bool) -> CValue {
                 }
             }
         }
-        CValue::Number(n) if n.is_f64() => {
+        CValue::Number(n) if n.is_f64() && !in_set => {
             let f = n.as_f64().expect("is_f64 guarantees as_f64");
             let flipped = if f == 0.0 { -f } else { f };
             CValue::Number(
