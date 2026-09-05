@@ -20,9 +20,10 @@
 //!
 //! `DeepDiff`'s default (non-`ignore_order`) list comparison is *not*
 //! always a simple index-aligned scan: when
-//! every element of *both* lists is a JSON scalar (`DeepDiff`'s own
-//! `_all_values_basic_hashable` check — null/bool/number/string; a dict or
-//! list anywhere in either list disqualifies the whole comparison), it
+//! every element of *both* lists is a scalar (`DeepDiff`'s own
+//! `_all_values_basic_hashable` check — null/bool/number/string, plus
+//! datetime and date from `helper.basic_types`; a dict or list anywhere in
+//! either list disqualifies the whole comparison), it
 //! additionally runs a `difflib.SequenceMatcher`-based "cheapest edit"
 //! match and, only when that produces more than one finding, compares its
 //! finding *count* against the plain index-aligned algorithm's, keeping
