@@ -22,8 +22,8 @@ use super::{DiffOptions, check_map_depth, check_value_depth, diff_at, scoped};
 /// finding (via `array_diff`), all surface with their own deep path.
 ///
 /// This always recurses, even for a key whose value is unchanged — it does
-/// not re-check [`values_equal`] per key. That single top-level check in
-/// [`diff_with_max_depth`] is enough for its documented guarantee (fully
+/// not re-check [`values_equal`](super::values_equal) per key. That single top-level check in
+/// [`diff_with_max_depth`](super::diff_with_max_depth) is enough for its documented guarantee (fully
 /// equal *whole* inputs never hit the bound); re-running it per key would
 /// only rescue one specific edge case (an equal subtree nested arbitrarily
 /// deep under an unrelated shallow change) at the cost of an extra full
@@ -49,7 +49,7 @@ use super::{DiffOptions, check_map_depth, check_value_depth, diff_at, scoped};
 /// [`Report::merge`] documents why the per-key `report.merge(...)` calls
 /// below never collide on a *structural* path (each key here is visited
 /// once, so no traversal ever revisits the same node) — `Report` is keyed
-/// by that structural path, not by [`render_path`]'s rendered string, which
+/// by that structural path, not by [`render_path`](crate::path::render_path)'s rendered string, which
 /// is *not* injective on adversarial keys (see [`crate::path::quote_key`]'s
 /// doc and `Report`'s module doc for how two structurally distinct paths
 /// can render identically, and how that collision is handled at

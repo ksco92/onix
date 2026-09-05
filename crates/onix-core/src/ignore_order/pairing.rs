@@ -83,7 +83,7 @@ impl AddedCandidates {
 /// Returns added-hash → removed-hash (only that one direction: `DeepDiff`'s
 /// own `pairs` dict is built symmetrically so `get_other_pair` can look it
 /// up from either side, but this port only ever looks up from the added
-/// side — see [`ignore_order_array_diff`] — so the reverse direction is
+/// side — see [`ignore_order_array_diff`](super::ignore_order_array_diff) — so the reverse direction is
 /// never constructed).
 pub(crate) fn compute_pairs(
     hashes_added: &[Rc<ItemKey>],

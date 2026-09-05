@@ -57,12 +57,14 @@ Every part must pass:
 | `make clippy` | `cargo clippy --all-targets --all-features -- -D warnings` | zero warnings (pedantic enabled at warn) |
 | `make test` | `cargo test --workspace` | all pass (includes doctests) |
 | `make coverage` | `cargo llvm-cov --workspace --fail-under-lines 95` (`onix-py` excluded, see below) | ≥95% line coverage |
-| `make docs` | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace` | no rustdoc warnings |
+| `make docs` | `RUSTDOCFLAGS="-D warnings" cargo doc --document-private-items --no-deps --workspace` | no rustdoc warnings |
 | `make deny` | `cargo deny check` | advisories/licenses/bans/sources clean |
 | `make machete` | `cargo machete` | no unused dependencies |
 
 `make python-test` and `make mutants` are separate targets (see below); they
-are not part of `make check`.
+are not part of `make check`. `make docs` runs with `--document-private-items`,
+so it also validates intra-doc links on private and `pub(crate)` items, not
+just the public API surface.
 
 **Coverage scope.** `onix-cli` is held to the same 95% bar as `onix-core`
 (its `diff` subcommand has unit tests in `crates/onix-cli/src/tests.rs` and
