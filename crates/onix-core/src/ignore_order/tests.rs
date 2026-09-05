@@ -980,18 +980,8 @@ fn count_object_diff_leaves_accumulates_distinct_contributions_by_addition() {
     assert_eq!(count_object_diff_leaves(&a, &b, 0, &opts), 2 + 3 + 4);
 }
 
-/// `count_object_diff_leaves`'s python-equality-matching path
-/// (`count_object_diff_leaves_mixed`), exercised directly since the
-/// `count_object_diff_leaves` wrapper above only ever builds `str`-keyed
-/// objects (via `cobj`). One key shared, one removed-only, one added-only,
-/// so all three of `count_object_diff_leaves_mixed`'s loops run. The shared
-/// key `3`'s values differ (`[9, 9]` vs `[1, 2]`, `item_length` 2), the
-/// removed-only key `1`'s value is a 3-element list (`item_length` 3), and
-/// the added-only key `2`'s value is a 4-element list (`item_length` 4) —
-/// sum 9, so a `+=` -> `*=` mutant in any of the three loops changes the
-/// total, the same mutation-proofing rationale as the accumulation test
-/// above. Kept just above the `threshold_to_diff_deeper` collapse boundary
-/// (the shared key over the three-key union is `1/3 ≈ 0.333 > 0.33`).
+/// `count_object_diff_leaves_mixed` sums a shared key's changed-value cost
+/// with every removed-only and added-only key's own length.
 #[test]
 fn count_object_diff_leaves_mixed_sums_shared_added_and_removed_non_str_keys() {
     let a = crate::value::Object::from_pairs(vec![
@@ -1027,17 +1017,8 @@ fn count_object_diff_leaves_mixed_sums_shared_added_and_removed_non_str_keys() {
     );
 }
 
-/// [`count_object_diff_leaves_shared_key_recursion_depth_boundary_is_exact`]'s
-/// own boundary, for `count_object_diff_leaves_mixed`'s shared-key loop: the
-/// non-`str` key `5`'s values need 3 levels of recursion (array-element ->
-/// dict "a" -> dict "b") to reach the actual leaf difference. With
-/// `max_depth=3` and this call itself at `depth=0`, the recursive
-/// `count_diff_leaves(..., depth + 1, ...)` call must use `depth=1`, so
-/// `count_array_diff_leaves`'s own fresh-restart budget
-/// (`max_depth.saturating_sub(depth)`) is `3 - 1 = 2` — one short of the 3
-/// needed, so the trial is rejected (`0`). A `+` -> `*` mutant computes
-/// `depth=0` instead, handing the trial the full budget of 3 (exactly
-/// enough to succeed), giving a nonzero total instead.
+/// `count_object_diff_leaves_mixed`'s shared-key recursion steps `depth` by
+/// exactly one, matching the trial sub-diff's own remaining-budget bound.
 #[test]
 fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact() {
     let key = || ObjectKey::Other(Box::new(cv(&json!(5))));
@@ -1054,16 +1035,8 @@ fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact()
     );
 }
 
-/// `dict_python_eq_mixed`'s own boolean chain (`only_a.is_empty() &&
-/// only_b.is_empty() && shared.all(...)`): each case below isolates one
-/// operand as the sole reason the pair is unequal, so a `-> true` mutant
-/// (always "equal") and either `&&` -> `||` mutant (which would let a
-/// truthy sibling operand paper over a falsy one) all change the answer.
-/// Reached the same way
-/// `python_eq_matches_dicts_across_python_equal_but_differently_typed_keys`
-/// above is, through `type_change_leaf_length`'s list-vs-tuple coercion —
-/// "not reproduced" costs `1 + item_length(new_value)`, never the
-/// reproduced cost of `1`.
+/// `dict_python_eq_mixed` rejects a pair when either side has an extra key
+/// or a shared key's value differs, never just papering over one with another.
 #[test]
 fn dict_python_eq_mixed_rejects_when_only_one_side_has_an_extra_key_or_a_shared_value_differs() {
     let leaves = super::distance::type_change_leaf_length;
@@ -1101,15 +1074,8 @@ fn dict_python_eq_mixed_rejects_when_only_one_side_has_an_extra_key_or_a_shared_
     );
 }
 
-/// `python_eq`'s dict arm for a non-`str`-keyed pair
-/// (`dict_python_eq_mixed`): `1` and `1.0` are the same *key* to Python
-/// (see `crate::ignore_order::match_dict_keys`'s doc) even though this
-/// crate's own `ObjectKey` keeps them structurally distinct, so these two
-/// dicts are Python-equal. Reached through `type_change_leaf_length`'s
-/// list-vs-tuple coercion check, which calls `python_eq` element-wise
-/// (`sequences_python_eq`) — the same route
-/// `python_eq_rejects_mismatched_nested_sequence_lengths` above uses for the
-/// list/tuple arm, exercised here for the dict one.
+/// `python_eq`'s dict arm treats two dicts as equal across a Python-equal
+/// but differently-typed key (`1` vs `1.0`), matching real Python `==`.
 #[test]
 fn python_eq_matches_dicts_across_python_equal_but_differently_typed_keys() {
     let dict_int = CValue::Object(crate::value::Object::from_pairs(vec![(

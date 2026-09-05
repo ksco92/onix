@@ -324,16 +324,8 @@ def _gen_non_str_dict_key(rng: random.Random) -> JsonValue:
     if kind < 0.8:
         return value if kind < 0.7 else value.date()
 
-    # Never the empty tuple: `DeepDiff`'s own `stringify_param` (model.py)
-    # renders it as the *empty string*, which its caller's `if result:`
-    # check treats as "no path at all" -- the change level's path comes back
-    # `None` rather than a real path string (surfacing as a literal `"null"`
-    # dict key in a JSON report). This is a real, narrow upstream quirk, not
-    # a shape onix needs to bit-for-bit reproduce (see the compatibility
-    # policy: pick the simpler, deterministic behavior and document it —
-    # onix renders `root[]`); it is deliberately excluded here rather than
-    # reproduced, the same way other known-narrow quirks are kept out of
-    # this generator's reach elsewhere in this file.
+    # Never the empty tuple: a real, narrow DeepDiff bug, not reproduced --
+    # see tests/golden/README.md's empty-tuple-key section.
     length = rng.randint(1, 2)
 
     return tuple(rng.choice(NON_STR_KEY_TUPLE_LEAVES) for _ in range(length))

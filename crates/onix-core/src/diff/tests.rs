@@ -1298,14 +1298,7 @@ fn structure_exactly_at_configured_max_depth_diffs_successfully() {
     );
 }
 
-/// `object_diff_mixed`'s shared-key recursion must step `depth` to
-/// `depth + 1`, not leave it unchanged (a `+` -> `*` mutant on that call
-/// site survives everywhere else, since `depth * 1 == depth` differs from
-/// `depth + 1` at every value): a single non-`str` shared key at the root
-/// (`depth` starts at `0`) recursing into a changed value at `max_depth: 0`
-/// must be rejected — `check_traversal_depth` sees `depth + 1 == 1 > 0`
-/// under correct counting, but never rejects anything if `depth` stayed
-/// `0`.
+/// `object_diff_mixed`'s shared-key recursion steps `depth` by exactly one.
 #[test]
 fn mixed_dict_shared_key_recursion_steps_depth_by_one_not_by_multiplication() {
     let a = CValue::Object(CObject::from_pairs(vec![(
@@ -1328,13 +1321,8 @@ fn mixed_dict_shared_key_recursion_steps_depth_by_one_not_by_multiplication() {
     );
 }
 
-/// The same `depth + 1` boundary
-/// `removed_value_at_root_is_checked_against_its_own_plus_one_depth_not_the_parents`
-/// pins for the ordinary `str`-key removed-key sink, for
-/// `object_diff_mixed`'s own removed-key (`only_a`) sink: a `depth + 1` ->
-/// `depth * 1` mutant on that call site is one level *less* strict (it
-/// gives the removed value one extra level of nesting budget), so the
-/// value must sit exactly one level past the correct budget to catch it.
+/// `object_diff_mixed`'s removed-key (`only_a`) sink checks the removed
+/// value against its own path depth plus one, not the parent's.
 #[test]
 fn mixed_dict_removed_key_value_is_checked_against_its_own_plus_one_depth() {
     let a = CValue::Object(CObject::from_pairs(vec![(

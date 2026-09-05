@@ -140,18 +140,12 @@ pub(crate) fn object_diff(
 /// non-`str` key — kept out of `object_diff`'s own body; see the call
 /// site's doc for why.
 ///
-/// A non-`str` key matches across `a` and `b` by Python `==` (`1`/`1.0`/
-/// `True` collapse; a `tuple` key element-wise), not this crate's own
-/// structural `ObjectKey` equality — see
-/// [`crate::ignore_order::match_dict_keys`]'s doc — and, confirmed against
-/// real `deepdiff==9.1.0`, `b`'s own key object is what both the reported
-/// path and the recursion use even when `a`'s matching key is a different
-/// (but Python-equal) type: `{1: "a"}` vs `{1.0: "a2"}` reports
-/// `root[1.0]`, `b`'s form, never `a`'s. `DeepDiff`'s `_diff_dict` does this
-/// because its key-intersection set is built `t2_keys & t1_keys` (`t2` —
-/// `b` — is the left/`self` operand `SetOrdered.intersection` keeps
-/// elements from) and the same object then indexes both `t1[key]` and
-/// `t2[key]`.
+/// A non-`str` key matches across `a` and `b` by Python `==`, not this
+/// crate's own structural `ObjectKey` equality, via
+/// [`crate::ignore_order::match_dict_keys`] — see that function's doc for
+/// the exact rule and `tests/golden/README.md`'s "A dict key matches across
+/// two dicts by Python `==`" section for the confirmed example
+/// (`{1: "a"}` vs `{1.0: "a2"}` reports `root[1.0]`, `b`'s key form).
 ///
 /// The `threshold_to_diff_deeper` collapse and the depth-counting
 /// convention are exactly [`object_diff`]'s own — see that function's doc.

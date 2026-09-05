@@ -621,8 +621,8 @@ fn classify_dict_key(
     }
 
     // Exact, like every other tuple check in this module (see the module
-    // doc): a tuple *subclass* key is refused below, under
-    // `bad_dict_key_error`, the same way a tuple subclass *value* is.
+    // doc): a tuple *subclass* key falls through to `classify_key_scalar`'s
+    // own error below, the same way a tuple subclass *value* is refused.
     if let Ok(tuple) = key.cast_exact::<PyTuple>() {
         let mut items = Vec::with_capacity(tuple.len());
         for item in tuple.iter() {
@@ -676,18 +676,12 @@ fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyR
         return Ok(CValue::Date(date_fields(obj, dict_path)?));
     }
 
-    Err(bad_dict_key_error(obj, dict_path))
-}
-
-/// The error for a dict key of a type this MVP does not accept — see the
-/// module doc's key-type table.
-fn bad_dict_key_error(key: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyErr {
-    PyTypeError::new_err(format!(
+    Err(PyTypeError::new_err(format!(
         "unsupported type for a dict key: {} at {}; a dict key must be \
          None/bool/int/float/str/datetime/date, or a tuple of those",
-        type_name(key),
+        type_name(obj),
         render_path(dict_path),
-    ))
+    )))
 }
 
 /// Reads a `date`'s (or a `datetime`'s) `year`/`month`/`day` attributes.

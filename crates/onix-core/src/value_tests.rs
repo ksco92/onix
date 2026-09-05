@@ -215,14 +215,8 @@ fn object_with_non_str_keys_has_non_str_keys_is_true() {
     assert!(!str_only.has_non_str_keys());
 }
 
-/// `to_serde_json()` on a nested value that is itself a dict with a
-/// `datetime`/`date`/`tuple` key: real `DeepDiff`'s own `to_json()` raises
-/// `TypeError` on this shape (confirmed against `deepdiff==9.1.0`; only
-/// `str`/`int`/`float`/`bool`/`None` dict keys survive `json.dumps`), so no
-/// golden fixture can pin an expected byte output — per this crate's
-/// compatibility policy (crash → simplest deterministic behavior, documented
-/// in `tests/golden/README.md`), onix instead renders the same `repr()` text
-/// the key gets as a top-level path segment.
+/// See `tests/golden/README.md`'s nested-non-`str`-dict-key `to_json()`
+/// section, where this test is pinned as the `tuple`-key case.
 #[test]
 fn to_serde_json_stringifies_a_tuple_key_via_python_repr_where_deepdiff_would_crash() {
     let obj = Value::Object(Object::from_pairs(vec![(
@@ -232,6 +226,8 @@ fn to_serde_json_stringifies_a_tuple_key_via_python_repr_where_deepdiff_would_cr
     assert_eq!(obj.to_serde_json(), json!({"(1, 2)": "x"}));
 }
 
+/// [`to_serde_json_stringifies_a_tuple_key_via_python_repr_where_deepdiff_would_crash`]'s
+/// `datetime`-key twin.
 #[test]
 fn to_serde_json_stringifies_a_datetime_key_via_python_repr_where_deepdiff_would_crash() {
     let obj = Value::Object(Object::from_pairs(vec![(
