@@ -10,16 +10,30 @@
 //! (the table's primary key), carried in [`TableDiffOptions`]. The key is not
 //! used by the schema diff itself, but every key column must exist on both
 //! sides — a missing one is a [`TableDiffError::KeyColumnMissing`] — so the
-//! later row diff has a valid key to match on.
+//! later row diff has a valid key to match on. Column names must be unique on
+//! each side; a repeated name is a [`TableDiffError::DuplicateColumn`].
 //!
 //! # Type comparison
 //!
 //! Two columns of the same name are "changed type" when their Arrow
-//! [`arrow_schema::DataType`]s differ, comparing every parameter (timestamp
-//! unit and timezone, decimal precision and scale). Two exceptions:
-//! nullability is ignored (but reported), and a dictionary-encoded column is
-//! compared as its value type, so a dictionary-encoded string and a plain
-//! string are the same type.
+//! [`arrow_schema::DataType`]s differ, comparing every logical parameter
+//! (timestamp unit and timezone, decimal precision and scale). Nullability is
+//! ignored (but reported). Physical encodings that carry the same logical type
+//! are treated as equal, so a column keeps the same type when a producer picks
+//! a different encoding of it (`diff_tables(pl.DataFrame, pa.Table)` does not
+//! flag every string column, for instance). The normalized-away encodings,
+//! applied recursively through `List`/`LargeList`/`ListView`/`LargeListView`,
+//! `Struct`, and `Map` children:
+//!
+//! - a dictionary-encoded type compares as its value type (dictionary-encoded
+//!   string == plain string; `list<dictionary<int32, string>>` ==
+//!   `list<string>`);
+//! - `Utf8View` and `LargeUtf8` compare as `Utf8`;
+//! - `BinaryView` and `LargeBinary` compare as `Binary`;
+//! - `LargeList`, `ListView`, and `LargeListView` compare as `List`.
+//!
+//! The reported `left_type`/`right_type` strings show the actual (un-normalized)
+//! Arrow type, so a real change reports exactly what each side holds.
 //!
 //! # Example
 //!
@@ -74,6 +88,8 @@ pub use table_diff::{TableDiff, TableDiffSummary};
 /// # Errors
 ///
 /// - [`TableDiffError::EmptyKey`] if `options` has no key columns.
+/// - [`TableDiffError::DuplicateColumn`] if either input has two columns with
+///   the same name.
 /// - [`TableDiffError::KeyColumnMissing`] if a key column is absent from
 ///   either input's schema, naming the column and the side.
 // The readers are taken by value because the row-diff versions consume them
@@ -93,6 +109,10 @@ pub fn diff_tables(
     let left_schema = left.schema();
     let right_schema = right.schema();
 
+    // Runs the schema diff first: it also rejects duplicate column names, after
+    // which the key lookups below are unambiguous.
+    let changes = diff_schemas(&left_schema, &right_schema)?;
+
     for key in options.key() {
         if left_schema.field_with_name(key).is_err() {
             return Err(TableDiffError::KeyColumnMissing {
@@ -108,7 +128,7 @@ pub fn diff_tables(
         }
     }
 
-    Ok(TableDiff::new(diff_schemas(&left_schema, &right_schema)))
+    Ok(TableDiff::new(changes))
 }
 
 #[cfg(test)]
@@ -173,13 +193,31 @@ mod tests {
         ]);
         let right = reader(vec![
             Field::new("id", DataType::Int64, false),
-            Field::new("name", DataType::LargeUtf8, true),
+            Field::new("name", DataType::Int64, true),
         ]);
         let options = TableDiffOptions::new(vec!["id".to_string()]);
         let diff = diff_tables(left, right, &options).unwrap();
 
         assert_eq!(diff.schema().len(), 1);
         assert_eq!(diff.schema()[0].column, "name");
+    }
+
+    #[test]
+    fn duplicate_column_is_rejected() {
+        let left = reader(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("x", DataType::Int64, true),
+            Field::new("x", DataType::Utf8, true),
+        ]);
+        let right = reader(vec![Field::new("id", DataType::Int64, false)]);
+        let options = TableDiffOptions::new(vec!["id".to_string()]);
+        assert_eq!(
+            diff_tables(left, right, &options),
+            Err(TableDiffError::DuplicateColumn {
+                column: "x".to_string(),
+                side: Side::Left,
+            })
+        );
     }
 
     #[test]

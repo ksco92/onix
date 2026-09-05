@@ -47,6 +47,16 @@ pub enum TableDiffError {
         /// The side whose schema lacks the column.
         side: Side,
     },
+    /// One of the inputs has two or more columns with the same name. A table
+    /// diff needs column names to be unique on each side: columns are matched
+    /// across the two sides by name, and the later row diff keys on unique
+    /// column names too.
+    DuplicateColumn {
+        /// The duplicated column name.
+        column: String,
+        /// The side whose schema contains the duplicate.
+        side: Side,
+    },
     /// A member of [`crate::TableDiff`] that a later version fills in was
     /// asked for before that version exists. Schema diffing is complete in
     /// this version; row-level results (`rows_added`, `rows_removed`,
@@ -66,6 +76,11 @@ impl fmt::Display for TableDiffError {
             TableDiffError::KeyColumnMissing { column, side } => write!(
                 f,
                 "key column {column:?} is missing from the {side} table's schema"
+            ),
+            TableDiffError::DuplicateColumn { column, side } => write!(
+                f,
+                "the {side} table has more than one column named {column:?}; \
+                 column names must be unique on each side"
             ),
             TableDiffError::NotImplemented { feature } => write!(
                 f,
@@ -103,6 +118,18 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("\"id\""));
         assert!(message.contains("right"));
+    }
+
+    #[test]
+    fn duplicate_column_message_names_column_and_side() {
+        let error = TableDiffError::DuplicateColumn {
+            column: "x".to_string(),
+            side: Side::Left,
+        };
+        let message = error.to_string();
+        assert!(message.contains("\"x\""));
+        assert!(message.contains("left"));
+        assert!(message.contains("unique"));
     }
 
     #[test]

@@ -304,22 +304,6 @@ mod tests {
     }
 
     #[test]
-    fn row_level_members_are_not_implemented() {
-        let diff = sample();
-        for result in [
-            diff.rows_added().err(),
-            diff.rows_removed().err(),
-            diff.cells_changed().err(),
-            diff.duplicate_keys().err(),
-        ] {
-            assert!(matches!(
-                result,
-                Some(TableDiffError::NotImplemented { .. })
-            ));
-        }
-    }
-
-    #[test]
     fn each_row_level_member_names_itself() {
         assert!(matches!(
             sample().rows_added(),
