@@ -203,13 +203,22 @@ pub(crate) fn serialize_value(py: Python<'_>, value: &Value, deep: bool) -> PyRe
 /// `Value::to_serde_json`, so routing this function to the sized worker is
 /// enough to keep a deep report off the calling thread's stack entirely.
 ///
+/// The whole tree is checked for a non-finite float exactly **once**, here —
+/// [`write_json`] never re-derives this for any node it walks, only for the
+/// leaf it is currently rendering, from that leaf's own `is_finite()`
+/// (`O(1)`, no subtree scan). Re-checking containment at every nesting level
+/// on the way down (a node checks itself, then each of its children checks
+/// itself again before recursing further, and so on) would cost `O(depth²)`
+/// on a deeply nested single non-finite leaf — quadratic in `max_depth`,
+/// which a caller can raise up to `MAX_DEPTH_CEILING` — where the
+/// one-check-total design below is `O(nodes)` total, matching
+/// `Value::to_serde_json`'s own construction cost.
+///
 /// A subtree with no non-finite float anywhere in it takes the fast,
 /// pre-existing path (`Value::to_serde_json` + [`serde_json::to_string`]),
 /// byte-identical to what this function produced before non-finite floats
-/// were supported — the common case, since a non-finite float is rare. Only
-/// a container that actually holds one is walked structurally in
-/// [`write_json`], one child at a time, so the extra walk costs nothing on a
-/// report that never encounters one.
+/// were supported — the common case, since a non-finite float is rare, and
+/// still the *only* place this module scans for one.
 fn to_json_string(value: &Value) -> Result<String, serde_json::Error> {
     if !has_non_finite_float(value) {
         return serde_json::to_string(&value.to_serde_json());
@@ -220,7 +229,9 @@ fn to_json_string(value: &Value) -> Result<String, serde_json::Error> {
 }
 
 /// Returns `true` if `value` is, or contains anywhere within it, a
-/// non-finite float.
+/// non-finite float. Called exactly once per [`to_json_string`] call, on the
+/// root — see that function's doc for why [`write_json`] never calls this
+/// again on any node it descends into.
 fn has_non_finite_float(value: &Value) -> bool {
     match value {
         Value::Number(n) => n.as_f64().is_some_and(|f| !f.is_finite()),
@@ -231,33 +242,32 @@ fn has_non_finite_float(value: &Value) -> bool {
     }
 }
 
-/// [`to_json_string`]'s slow path (only reached once [`has_non_finite_float`]
-/// has confirmed `value` needs it): writes `value`'s JSON text into `out`,
-/// delegating a whole subtree straight to `serde_json` the moment it is free
-/// of non-finite floats and otherwise recursing one container level at a
-/// time, so a `NaN`/`Infinity`/`-Infinity` leaf can be written as its literal
-/// token instead of going through `Value::to_serde_json` (which cannot hold
-/// one) at all. Object keys reuse `serde_json`'s own string escaping
-/// (`Value`'s keys are always plain strings), so the only text this function
-/// writes by hand is JSON punctuation and the three non-finite tokens.
+/// [`to_json_string`]'s slow path, reached only once [`has_non_finite_float`]
+/// has confirmed (once, for the whole tree, by the caller) that `value`
+/// contains a non-finite float somewhere in it. Writes every node's JSON
+/// text by hand — a `Number` decides its own rendering directly from its own
+/// finiteness (the literal token, or `Value::to_serde_json` for a finite
+/// one), and every container writes its children the same way — so the walk
+/// touches each node exactly once, `O(nodes)` total, with no re-scanning of
+/// what an ancestor already covered. Object keys reuse `serde_json`'s own
+/// string escaping (`Value`'s keys are always plain strings), so the only
+/// text this function writes by hand is JSON punctuation and the three
+/// non-finite tokens.
 fn write_json(value: &Value, out: &mut String) -> Result<(), serde_json::Error> {
-    if !has_non_finite_float(value) {
-        out.push_str(&serde_json::to_string(&value.to_serde_json())?);
-        return Ok(());
-    }
-
     match value {
         Value::Number(n) => {
             let f = n
                 .as_f64()
-                .expect("has_non_finite_float confirmed this Number has a non-finite f64 view");
-            out.push_str(if f.is_nan() {
-                "NaN"
+                .expect("a Number is always an i64, a u64, or an f64");
+            if f.is_finite() {
+                out.push_str(&serde_json::to_string(&value.to_serde_json())?);
+            } else if f.is_nan() {
+                out.push_str("NaN");
             } else if f.is_sign_positive() {
-                "Infinity"
+                out.push_str("Infinity");
             } else {
-                "-Infinity"
-            });
+                out.push_str("-Infinity");
+            }
         }
         Value::Array(items) | Value::Tuple(items) => write_json_seq(items.iter(), out)?,
         Value::Set(items) | Value::FrozenSet(items) => write_json_seq(items.iter(), out)?,
@@ -273,10 +283,9 @@ fn write_json(value: &Value, out: &mut String) -> Result<(), serde_json::Error> 
             }
             out.push('}');
         }
-        // Unreachable: `has_non_finite_float` returns `false` for every one
-        // of these, so the fast path above already returned. Delegating
-        // rather than asserting keeps this function panic-free even if that
-        // invariant ever changes.
+        // An ordinary leaf below a non-finite one somewhere else in the
+        // tree (not unreachable: this function no longer pre-filters by
+        // containment, see this function's own doc).
         Value::Null | Value::Bool(_) | Value::Str(_) | Value::DateTime(_) | Value::Date(_) => {
             out.push_str(&serde_json::to_string(&value.to_serde_json())?);
         }

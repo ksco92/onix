@@ -946,19 +946,9 @@ pub(crate) fn fold_signed_zero(f: f64) -> f64 {
 
 /// [`canonical_cmp`]'s number case, for two numbers of the same kind (an
 /// int and a float are already ranked apart). Orders by [`fold_signed_zero`]
-/// of each float, so this agrees with [`Number`]'s own [`PartialEq`] on every
-/// non-`NaN` pair.
-///
-/// [`f64::total_cmp`] gives `NaN` a well-defined (if arbitrary) place in the
-/// order, by raw bits, so two floats that are `NaN` compare `Equal` here
-/// exactly when they share a bit pattern — coarser than [`Number`]'s
-/// [`PartialEq`], which (matching Python's `nan != nan`) never calls two
-/// `NaN`s equal. This is safe for [`SetItems::new`]'s dedup: it can only
-/// ever *drop* two bit-identical `NaN`s into one canonical member, a
-/// deterministic choice `tests/golden/README.md`'s "Non-finite floats"
-/// section documents as a divergence from a real Python `set` (which keeps
-/// two distinct-`NaN`-object members apart by identity, something this
-/// crate's value model has no notion of).
+/// of each float via [`f64::total_cmp`], so this agrees with [`Number`]'s
+/// own [`PartialEq`] on every non-`NaN` pair; see [`SetItems::new`]'s doc
+/// for the one place it is deliberately coarser (two bit-identical `NaN`s).
 fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
     if a.is_f64() {
         let af = fold_signed_zero(a.as_f64().unwrap_or_default());

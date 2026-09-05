@@ -93,13 +93,7 @@ pub(crate) enum ScalarKey {
     /// hashed through [`mix_float_bits`]; see this type's hand-written `Hash`.
     Float(u64),
     /// A `NaN`, keyed by the address of the [`Value`] node it was read from
-    /// rather than by its bits — see [`python_scalar_key`]'s `NaN` case for
-    /// why: unlike every other [`ScalarKey`] variant, no bit pattern (or any
-    /// other structural fact) can make this key agree with Python's own
-    /// `==`, because `NaN != NaN` holds for every pair of `NaN`s in Python,
-    /// even two reads of the same bits. Never equal to another `Nan`, and
-    /// (`usize`s being what they are) never equal to any other variant's
-    /// discriminant-tagged value either.
+    /// — see [`python_scalar_key`]'s `NaN` case for why.
     Nan(usize),
     /// A `datetime`, keyed by whether it is aware and by its instant —
     /// Python's own `datetime.__eq__`/`__hash__` pair, which compares two
