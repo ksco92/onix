@@ -13,7 +13,7 @@
 //! | `bool` | `Bool` | checked before `int` — `bool` is a Python `int` subclass |
 //! | `int` | `Number` | must fit in `i64` or `u64`; see below |
 //! | `float` | `Number` | must be finite; see below |
-//! | `str` | `Str` | |
+//! | `str` | `Str` | must be encodable as UTF-8; see below |
 //! | `dict` (`str` keys only) | `Object` | keys interned across the whole walk |
 //! | `list` | `Array` | |
 //! | `tuple` | `Tuple` | exactly `tuple`; every subclass is rejected, see below |
@@ -29,8 +29,21 @@
 //!   `DeepDiff` supports them natively).
 //! - A `NaN` or infinite `float` raises [`PyValueError`] (JSON has no
 //!   representation for either).
+//! - A `str` containing a lone (unpaired) surrogate code point — legal in a
+//!   Python `str`, e.g. `"\udc80"` — raises [`PyValueError`] naming the
+//!   exact path: the value model is UTF-8 and such a code point has no UTF-8
+//!   encoding. This is a deliberate divergence from real `DeepDiff`, which
+//!   compares such a string by Python `==`/hash and would report a change
+//!   (or, inside a `set`/`frozenset`, crashes with an unhandled
+//!   `UnicodeEncodeError` trying to hash it) — see `tests/golden/README.md`.
+//!   A genuine non-BMP character (e.g. `"😀"`, one Python `str` character,
+//!   `U+1F600`) is valid UTF-8 and converts normally; only an *unpaired*
+//!   surrogate is refused.
 //! - A `dict` key that is not a `str` raises [`PyTypeError`] naming the
-//!   key's type and the path to the dict containing it.
+//!   key's type and the path to the dict containing it; a `str` key
+//!   containing a lone surrogate raises [`PyValueError`] the same way a
+//!   value does, naming the path to the dict containing it (the key itself
+//!   has no path segment to name — it never parses as one).
 //! - A `tzinfo` whose `utcoffset()` is not a whole number of seconds raises
 //!   [`PyValueError`]: the value model carries an offset in seconds.
 //! - A `set`/`frozenset` member that is not one of the types this MVP allows
@@ -279,7 +292,8 @@ fn classify<'py>(
     }
 
     if let Ok(s) = current.cast::<PyString>() {
-        return Ok(Step::Done(CValue::Str(s.to_string().into_boxed_str())));
+        let s = s.to_cow().map_err(|_| lone_surrogate_error(path, false))?;
+        return Ok(Step::Done(CValue::Str(s.into_owned().into_boxed_str())));
     }
 
     // Exact, and `datetime` before `date`: see the module doc. A `date` cast
@@ -562,7 +576,12 @@ fn next_dict_entry<'py>(
         ))
     })?;
 
-    Ok(Some((key.to_string(), value)))
+    let key = key
+        .to_cow()
+        .map_err(|_| lone_surrogate_error(dict_path, true))?
+        .into_owned();
+
+    Ok(Some((key, value)))
 }
 
 /// Reads a `date`'s (or a `datetime`'s) `year`/`month`/`day` attributes.
@@ -633,6 +652,31 @@ fn out_of_range_error(type_name: &str, path: &[PathSegment]) -> PyErr {
     PyValueError::new_err(format!(
         "{type_name} at {} is out of range for onix's internal value model",
         render_path(path),
+    ))
+}
+
+/// A Python `str` containing a lone (unpaired) surrogate code point — legal
+/// in a Python `str` but not encodable as UTF-8, which is what onix's value
+/// model requires. `to_str`/`to_cow`'s own `UnicodeEncodeError` is discarded
+/// in favor of this, so the message names the exact path the way every other
+/// conversion error in this module does; see the module doc for why this is
+/// a `ValueError` rather than a lossy conversion (real `DeepDiff` compares
+/// such a string by Python `==` and reports it as changed like any other
+/// string, and even crashes outright hashing one inside a `set`/`frozenset`
+/// — see `tests/golden/README.md`).
+///
+/// `is_key` distinguishes the two call sites' wording: a dict key that fails
+/// this check has no path segment of its own yet (like a non-`str` key, see
+/// [`next_dict_entry`]), so `path` there is the path to the *dict*, not the
+/// entry, and the message says so explicitly to avoid implying otherwise.
+fn lone_surrogate_error(path: &[PathSegment], is_key: bool) -> PyErr {
+    let subject = if is_key { "dict key" } else { "str" };
+    let path = render_path(path);
+
+    PyValueError::new_err(format!(
+        "{subject} at {path} contains a lone (unpaired) surrogate code point, which has no \
+         UTF-8 representation; onix's internal value model is UTF-8 and cannot represent it, \
+         unlike Python's str"
     ))
 }
 

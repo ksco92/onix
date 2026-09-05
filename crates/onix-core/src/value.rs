@@ -522,9 +522,13 @@ impl SetItems {
     /// dropping any member equal to an earlier one.
     ///
     /// A real Python `set` cannot hold two equal members, but this
-    /// constructor cannot assume it was handed one: the Python conversion
-    /// boundary is lossy for lone surrogates (`'\ud800'` and `'\udc00'`
-    /// both become `U+FFFD`), and this type is public. Two equal members
+    /// constructor cannot assume it was handed one: this type is public, so
+    /// nothing stops a caller building a [`Value`] directly from handing it
+    /// two structurally equal members (the Python conversion boundary
+    /// itself now rejects the one input that used to manufacture such a
+    /// pair by accident — a `str` containing a lone surrogate, previously
+    /// collapsed to `U+FFFD`; see `crates/onix-py/src/convert.rs`'s module
+    /// doc). Two equal members
     /// would render to the same path segment and so to the same *structural*
     /// report path, which [`crate::report::Report`] requires to be unique;
     /// dropping the later one is what a Python set would have done with the

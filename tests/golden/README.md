@@ -529,6 +529,27 @@ generated — so it is pinned in `test_sets.py` instead.
   exceptions; `an_unnormalizable_datetime_under_ignore_order_is_reported_raw`
   in `crates/onix-core/src/diff/tests.rs` pins onix's side.
 
+- **A lone (unpaired) surrogate code point in a `str` raises `ValueError`
+  instead of converting.** A Python `str` can legally hold an unpaired
+  surrogate (e.g. `"\udc80"`), but such a code point has no UTF-8 encoding,
+  which onix's value model requires. Real `DeepDiff` compares such a string
+  by Python `==`/hash and reports a plain `values_changed`
+  (`DeepDiff("\udc80", "\udc81").to_dict()` is `{"values_changed": {"root":
+  {"new_value": "\udc81", "old_value": "\udc80"}}}`; `to_json()` escapes it
+  the same way `json.dumps` does, `"\udc81"`/`"\udc80"`) — and crashes
+  outright with an unhandled `UnicodeEncodeError` from `deephash.py` if the
+  string is ever hashed, i.e. a `set`/`frozenset` member, both confirmed
+  against `deepdiff==9.1.0`. Silently mapping the code point to `U+FFFD`
+  (Rust's own lossy conversion) was rejected because it is a correctness
+  hazard for a diffing tool: two distinct strings differing only in their
+  lone surrogate would convert to the same Rust string and compare equal.
+  Raising is therefore strictly safer than either of real `DeepDiff`'s own
+  outcomes, not merely different from them, and needs no golden case: the
+  corpus records reports, not exceptions. `crates/onix-py/tests/test_conversions.py`
+  pins the value, nested-value, dict-key, set-member and tuple-member
+  cases, and that a genuine non-BMP character (one valid UTF-8-encodable
+  `str` character, not an unpaired surrogate) still converts normally.
+
 `crate::diff::object_diff` (the ordinary dict-vs-dict diff, used
 identically whether or not `ignore_order` is set) implements `DeepDiff`'s
 `threshold_to_diff_deeper=0.33` (`_diff_dict`, diff.py): a dict-vs-dict
@@ -560,8 +581,8 @@ exact for all of ASCII and all printable text.
 Every other divergence found while building the corpus was fixed in `onix-core` to match
 `DeepDiff` exactly. The two path-rendering exceptions above, the three
 set-iteration-order differences, the `repr()` gap just described, the
-list-LCS `2^53` limitation and the naive-datetime pairing timezone above are
-the only accepted, documented exceptions —
+list-LCS `2^53` limitation, the naive-datetime pairing timezone above, and the
+lone-surrogate `ValueError` just described are the only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
 `scripts/differential_fuzz.py`) found zero *other* unexplained

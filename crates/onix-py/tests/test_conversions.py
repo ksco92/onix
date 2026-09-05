@@ -217,6 +217,62 @@ def test_non_str_dict_key_error_reports_path_to_the_dict() -> None:
         DeepDiff({"a": {1: "x"}}, {"a": {1: "y"}})
 
 
+# lone (unpaired) surrogates: legal in a Python str, not representable as UTF-8.
+#
+# Real deepdiff==9.1.0 compares such a string by Python == and reports a plain
+# values_changed, e.g. DeepDiff("\udc80", "\udc81").to_dict() == {"values_changed":
+# {"root": {"new_value": "\udc81", "old_value": "\udc80"}}}; the same
+# to_json() escapes it as "\udc81"/"\udc80" via json.dumps. Hashing one (a set
+# or frozenset member) crashes real DeepDiff outright with an unhandled
+# UnicodeEncodeError from deephash.py. onix instead raises ValueError at
+# conversion time in every case, naming the exact path; see convert.rs's
+# module doc and tests/golden/README.md for the documented divergence.
+
+
+def test_lone_surrogate_value_raises_value_error() -> None:
+    """A lone surrogate value raises ValueError instead of silently comparing equal."""
+    with pytest.raises(ValueError, match=r"str at root contains a lone"):
+        DeepDiff("\udc80", "\udc81")
+
+
+def test_distinct_lone_surrogates_both_raise_the_same_way() -> None:
+    """Two different lone surrogates are refused identically, not silently equated."""
+    with pytest.raises(ValueError, match=r"str at root contains a lone"):
+        DeepDiff("\udc80", "\udc81")
+    with pytest.raises(ValueError, match=r"str at root contains a lone"):
+        DeepDiff("\udc81", "\udc82")
+
+
+def test_lone_surrogate_nested_in_list_reports_its_path() -> None:
+    """The error names the exact path, like every other conversion error in this module."""
+    with pytest.raises(ValueError, match=r"str at root\['a'\]\[1\] contains a lone"):
+        DeepDiff({"a": [1, "\udc80"]}, {"a": [1, "ok"]})
+
+
+def test_lone_surrogate_dict_key_raises_value_error_naming_the_dict() -> None:
+    """A lone surrogate dict key raises ValueError naming the containing dict's path."""
+    with pytest.raises(ValueError, match=r"dict key at root\['a'\] contains a lone"):
+        DeepDiff({"a": {"\udc80": 1}}, {"a": {"ok": 1}})
+
+
+def test_lone_surrogate_set_item_raises_value_error() -> None:
+    """A lone surrogate set member raises ValueError; real DeepDiff crashes hashing one instead."""
+    with pytest.raises(ValueError, match=r"str at root\[<set member>\] contains a lone"):
+        DeepDiff({"\udc80"}, {"ok"})
+
+
+def test_lone_surrogate_tuple_item_raises_value_error() -> None:
+    """A lone surrogate inside a tuple raises ValueError naming its index."""
+    with pytest.raises(ValueError, match=r"str at root\[0\] contains a lone"):
+        DeepDiff(("\udc80",), ("ok",))
+
+
+def test_non_bmp_character_is_accepted() -> None:
+    """A genuine non-BMP character converts fine: only an unpaired surrogate is refused."""
+    diff = DeepDiff("😀", "😁")
+    assert diff.to_dict()["values_changed"]["root"] == {"new_value": "😁", "old_value": "😀"}
+
+
 # diff_json's own error path (JSON parsing, not Python-object conversion)
 
 
