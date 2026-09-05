@@ -233,6 +233,24 @@ def test_distinct_lone_surrogates_both_raise_the_same_way() -> None:
         DeepDiff("\udc81", "\udc82")
 
 
+def test_identical_lone_surrogate_value_still_raises() -> None:
+    """An identical pair still raises, even though real DeepDiff reports no change for it."""
+    with pytest.raises(ValueError, match=r"str at root contains a lone"):
+        DeepDiff("\udc80", "\udc80")
+
+
+def test_identical_lone_surrogate_dict_key_still_raises() -> None:
+    """The same holds for a dict key equal on both sides: conversion still validates it."""
+    with pytest.raises(ValueError, match=r"dict key at root\['a'\] contains a lone"):
+        DeepDiff({"a": {"\udc80": 1}}, {"a": {"\udc80": 1}})
+
+
+def test_identical_lone_surrogate_set_item_still_raises() -> None:
+    """The same holds for a set member equal on both sides: real DeepDiff would still crash."""
+    with pytest.raises(ValueError, match=r"str at root\[<set member>\] contains a lone"):
+        DeepDiff({"\udc80"}, {"\udc80"})
+
+
 def test_lone_surrogate_nested_in_list_reports_its_path() -> None:
     """The error names the exact path, like every other conversion error in this module."""
     with pytest.raises(ValueError, match=r"str at root\['a'\]\[1\] contains a lone"):

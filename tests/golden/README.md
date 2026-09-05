@@ -529,26 +529,43 @@ generated — so it is pinned in `test_sets.py` instead.
   exceptions; `an_unnormalizable_datetime_under_ignore_order_is_reported_raw`
   in `crates/onix-core/src/diff/tests.rs` pins onix's side.
 
-- **A lone (unpaired) surrogate code point in a `str` raises `ValueError`
-  instead of converting.** A Python `str` can legally hold an unpaired
-  surrogate (e.g. `"\udc80"`), but such a code point has no UTF-8 encoding,
-  which onix's value model requires. Real `DeepDiff` compares such a string
-  by Python `==`/hash and reports a plain `values_changed`
-  (`DeepDiff("\udc80", "\udc81").to_dict()` is `{"values_changed": {"root":
-  {"new_value": "\udc81", "old_value": "\udc80"}}}`; `to_json()` escapes it
-  the same way `json.dumps` does, `"\udc81"`/`"\udc80"`) — and crashes
-  outright with an unhandled `UnicodeEncodeError` from `deephash.py` if the
-  string is ever hashed, i.e. a `set`/`frozenset` member, both confirmed
-  against `deepdiff==9.1.0`. Silently mapping the code point to `U+FFFD`
-  (Rust's own lossy conversion) was rejected because it is a correctness
-  hazard for a diffing tool: two distinct strings differing only in their
-  lone surrogate would convert to the same Rust string and compare equal.
-  Raising is therefore strictly safer than either of real `DeepDiff`'s own
-  outcomes, not merely different from them, and needs no golden case: the
-  corpus records reports, not exceptions. `crates/onix-py/tests/test_conversions.py`
-  pins the value, nested-value, dict-key, set-member and tuple-member
-  cases, and that a genuine non-BMP character (one valid UTF-8-encodable
-  `str` character, not an unpaired surrogate) still converts normally.
+- **A `str` containing a lone (unpaired) surrogate code point raises
+  `ValueError` at conversion, on either side, before either value is
+  compared.** A Python `str` can legally hold an unpaired surrogate (e.g.
+  `"\udc80"`), but such a code point has no UTF-8 encoding, which onix's
+  value model requires; both inputs are validated at extraction, so the
+  rejection happens unconditionally rather than depending on what the other
+  side turns out to be. Silently mapping the code point to `U+FFFD` (Rust's
+  own lossy conversion, the pre-#27 behavior) was rejected because it is a
+  correctness hazard for a diffing tool: two distinct strings differing only
+  in their lone surrogate would convert to the same Rust string and compare
+  equal. Rejecting at the boundary is deterministic and independent of the
+  other side, at the cost of three distinct outcomes relative to real
+  `DeepDiff` (all confirmed against `deepdiff==9.1.0`):
+  - Two *different* lone-surrogate strings: `DeepDiff("\udc80",
+    "\udc81").to_dict()` is `{"values_changed": {"root": {"new_value":
+    "\udc81", "old_value": "\udc80"}}}` (`to_json()` escapes the same way
+    `json.dumps` does); onix now raises instead of the pre-#27 false
+    negative (the two converted to the same string and compared equal).
+  - Two *equal* lone-surrogate strings: `DeepDiff("\udc80",
+    "\udc80").to_dict()` is `{}` — scalar equality is plain Python `==` and
+    never hashes, so real `DeepDiff` never encounters the encoding problem
+    at all. onix still raises here, because conversion validates each side
+    before any comparison exists to short-circuit; this is the one case
+    where onix reports an error where `DeepDiff` correctly finds no
+    difference — a documented nuance, not a strict improvement, and it is
+    still preferred over threading the raw Python object past conversion
+    just to special-case equality.
+  - Hashing one (a `set`/`frozenset` member, always hashed regardless of
+    equality): real `DeepDiff` crashes outright with an unhandled
+    `UnicodeEncodeError` from `deephash.py`; onix raises `ValueError`
+    instead — strictly safer than a crash.
+
+  None of the three needs a golden case: the corpus records reports, not
+  exceptions or crashes. `crates/onix-py/tests/test_conversions.py` pins the
+  differing-pair, equal-pair, dict-key, set-member and tuple-member cases,
+  and that a genuine non-BMP character (one valid UTF-8-encodable `str`
+  character, not an unpaired surrogate) still converts normally.
 
 `crate::diff::object_diff` (the ordinary dict-vs-dict diff, used
 identically whether or not `ignore_order` is set) implements `DeepDiff`'s
