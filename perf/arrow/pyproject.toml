@@ -1,0 +1,21 @@
+[project]
+name = "onix-arrow-perf"
+version = "0.0.0"
+requires-python = "==3.13.*"
+dependencies = []
+
+[dependency-groups]
+# pyarrow/duckdb are heavy, compiled dependencies used only by the arrow
+# fixture generator, the DuckDB oracle, and their tests -- kept in their own
+# group (mirroring crates/onix-py/pyproject.toml's "test" group) rather than
+# PEP-723 per-script inline dependencies, since three scripts under this
+# directory (generate_fixtures.py, oracle_duckdb.py, and #43's
+# bench_tables.py) share the same dependency set and lockfile.
+perf = ["pyarrow>=18", "duckdb>=1.1", "pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# So `tests/*.py` can `from generate_fixtures import ...`/`from oracle_duckdb import ...`
+# with no sys.path hack, the same convention as crates/onix-py/pyproject.toml.
+pythonpath = ["."]
+markers = ["slow: exercises the 100k fixture pair; skipped by default (-m 'not slow')"]

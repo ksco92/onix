@@ -1,6 +1,8 @@
 /target
 perf/fixtures/
 perf/bench_raw/
+perf/arrow/fixtures/
+perf/arrow/.venv/
 __pycache__/
 *.profraw
 .idea/

@@ -1,0 +1,213 @@
+"""Tests for `oracle_duckdb.py`: parity with the fixture sidecar, plus the
+value-comparison semantics its module docstring documents (null handling,
+duplicate keys, schema-diff classification) exercised on small synthetic
+tables the shared 5%-mutation fixture never produces on its own.
+"""
+
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+
+from generate_fixtures import generate
+from oracle_duckdb import run
+
+SEED = 67890
+
+
+# Parity against the fixture sidecar
+def test_oracle_counts_match_sidecar_at_1k(tmp_path: Path) -> None:
+    """Every oracle count equals the sidecar's corresponding count at 1k rows."""
+    fixture_dir = tmp_path / "fixture"
+    manifest = generate(1000, SEED, fixture_dir)
+
+    summary = run(fixture_dir / "a.parquet", fixture_dir / "b.parquet", ["id"], tmp_path / "oracle")
+
+    assert summary["rows_added"] == manifest["rows_added"]
+    assert summary["rows_removed"] == manifest["rows_deleted"]
+    assert summary["duplicate_keys"] == manifest["duplicate_keys"]
+    assert summary["cells_changed"] == manifest["rows_modified_amount"] + manifest["rows_modified_payload"]
+    # `category`'s dictionary retype is invisible to a SQL-only oracle (see the
+    # module docstring); only `ts` and `note` show up in `schema_changes`.
+    assert summary["schema_changes"] == len(manifest["schema_changes"]) - 1
+
+
+@pytest.mark.slow
+def test_oracle_counts_match_sidecar_at_100k(tmp_path: Path) -> None:
+    """The same parity check holds at 100k rows, not just 1k."""
+    fixture_dir = tmp_path / "fixture"
+    manifest = generate(100_000, SEED, fixture_dir)
+
+    summary = run(fixture_dir / "a.parquet", fixture_dir / "b.parquet", ["id"], tmp_path / "oracle")
+
+    assert summary["rows_added"] == manifest["rows_added"]
+    assert summary["rows_removed"] == manifest["rows_deleted"]
+    assert summary["duplicate_keys"] == manifest["duplicate_keys"]
+    assert summary["cells_changed"] == manifest["rows_modified_amount"] + manifest["rows_modified_payload"]
+
+
+def test_oracle_output_files_have_expected_columns(tmp_path: Path) -> None:
+    """Each written parquet file has the documented long-format columns."""
+    fixture_dir = tmp_path / "fixture"
+    generate(1000, SEED, fixture_dir)
+    out_dir = tmp_path / "oracle"
+    run(fixture_dir / "a.parquet", fixture_dir / "b.parquet", ["id"], out_dir)
+
+    cells_changed = pq.read_schema(out_dir / "cells_changed.parquet")
+    assert cells_changed.names == ["id", "column", "old_value", "new_value"]
+
+    duplicate_keys = pq.read_schema(out_dir / "duplicate_keys.parquet")
+    assert duplicate_keys.names == ["id", "left_count", "right_count"]
+
+    schema_diff = pq.read_schema(out_dir / "schema_diff.parquet")
+    assert schema_diff.names == ["column", "left_type", "right_type", "change"]
+
+
+# Synthetic small-table tests: semantics the shared fixture never exercises
+def _write_pair(tmp_path: Path, a_rows: list[dict], b_rows: list[dict]) -> tuple[Path, Path]:
+    """
+    Write two small ad hoc parquet files for a synthetic oracle test.
+
+    :param tmp_path: pytest's per-test temp directory.
+    :param a_rows: Records for the base side.
+    :param b_rows: Records for the changed side.
+    :return: `(a_path, b_path)`.
+    """
+    a_path, b_path = tmp_path / "synthetic_a.parquet", tmp_path / "synthetic_b.parquet"
+    pq.write_table(pa.Table.from_pylist(a_rows), a_path)
+    pq.write_table(pa.Table.from_pylist(b_rows), b_path)
+
+    return a_path, b_path
+
+
+def test_null_becomes_non_null_is_reported_as_a_changed_cell(tmp_path: Path) -> None:
+    """A cell that goes from NULL to a value is a changed cell, per IS DISTINCT FROM."""
+    a_rows = [{"id": 1, "value": None}, {"id": 2, "value": "x"}]
+    b_rows = [{"id": 1, "value": "now set"}, {"id": 2, "value": "x"}]
+    a_path, b_path = _write_pair(tmp_path, a_rows, b_rows)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+    changed = pq.read_table(tmp_path / "oracle" / "cells_changed.parquet").to_pylist()
+
+    assert summary["cells_changed"] == 1
+    assert changed == [{"id": 1, "column": "value", "old_value": None, "new_value": "now set"}]
+
+
+def test_two_nulls_compare_equal_and_are_not_reported(tmp_path: Path) -> None:
+    """Two NULL cells for the same key/column are unchanged, not a false positive."""
+    a_rows = [{"id": 1, "value": None}]
+    b_rows = [{"id": 1, "value": None}]
+    a_path, b_path = _write_pair(tmp_path, a_rows, b_rows)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+    assert summary["cells_changed"] == 0
+
+
+def test_duplicate_key_on_the_left_is_reported_and_excluded_from_changed_removed(tmp_path: Path) -> None:
+    """A key appearing twice on the left is a duplicate, not a false removal/change."""
+    a_rows = [{"id": 1, "value": "x"}, {"id": 1, "value": "y"}, {"id": 2, "value": "z"}]
+    b_rows = [{"id": 2, "value": "z"}]
+    a_path, b_path = _write_pair(tmp_path, a_rows, b_rows)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+    duplicates = pq.read_table(tmp_path / "oracle" / "duplicate_keys.parquet").to_pylist()
+
+    assert summary["duplicate_keys"] == 1
+    assert summary["rows_removed"] == 0
+    assert summary["cells_changed"] == 0
+    assert duplicates == [{"id": 1, "left_count": 2, "right_count": 0}]
+
+
+def test_duplicate_key_on_both_sides_reports_both_counts(tmp_path: Path) -> None:
+    """A key duplicated on both sides reports its exact left/right counts."""
+    a_rows = [{"id": 1, "value": "x"}, {"id": 1, "value": "y"}]
+    b_rows = [{"id": 1, "value": "x"}, {"id": 1, "value": "y"}, {"id": 1, "value": "z"}]
+    a_path, b_path = _write_pair(tmp_path, a_rows, b_rows)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+    duplicates = pq.read_table(tmp_path / "oracle" / "duplicate_keys.parquet").to_pylist()
+
+    assert summary["duplicate_keys"] == 1
+    assert duplicates == [{"id": 1, "left_count": 2, "right_count": 3}]
+
+
+def test_schema_diff_reports_removed_column(tmp_path: Path) -> None:
+    """A column present only on the left is reported as `removed`."""
+    a_rows = [{"id": 1, "value": "x", "extra": "gone"}]
+    b_rows = [{"id": 1, "value": "x"}]
+    a_path, b_path = _write_pair(tmp_path, a_rows, b_rows)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+    schema_diff = pq.read_table(tmp_path / "oracle" / "schema_diff.parquet").to_pylist()
+
+    assert summary["schema_changes"] == 1
+    assert schema_diff == [{"column": "extra", "left_type": "VARCHAR", "right_type": None, "change": "removed"}]
+
+
+def test_schema_diff_reports_type_changed_column(tmp_path: Path) -> None:
+    """A column present on both sides with a different DuckDB type is `type_changed`."""
+    a_path = tmp_path / "typed_a.parquet"
+    b_path = tmp_path / "typed_b.parquet"
+    pq.write_table(pa.table({"id": pa.array([1], type=pa.int64()), "value": pa.array([1], type=pa.int32())}), a_path)
+    pq.write_table(pa.table({"id": pa.array([1], type=pa.int64()), "value": pa.array([1], type=pa.int64())}), b_path)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+    schema_diff = pq.read_table(tmp_path / "oracle" / "schema_diff.parquet").to_pylist()
+
+    assert summary["schema_changes"] == 1
+    assert schema_diff[0]["change"] == "type_changed"
+
+
+def test_category_dictionary_retype_is_invisible_to_the_sql_schema_diff(tmp_path: Path) -> None:
+    """
+    Document (and pin) the known limitation: a plain-string-to-dictionary
+    retype has zero footprint in Parquet's own schema, so the SQL-only
+    oracle cannot see it -- `pyarrow` can, by re-reading the Arrow-side type.
+    """
+    fixture_dir = tmp_path / "fixture"
+    generate(1000, SEED, fixture_dir)
+
+    summary = run(fixture_dir / "a.parquet", fixture_dir / "b.parquet", ["id"], tmp_path / "oracle")
+    schema_diff_columns = {
+        row["column"] for row in pq.read_table(tmp_path / "oracle" / "schema_diff.parquet").to_pylist()
+    }
+    assert "category" not in schema_diff_columns
+    assert summary["schema_changes"] == 2
+
+    a_category_type = pq.read_schema(fixture_dir / "a.parquet").field("category").type
+    b_category_type = pq.read_schema(fixture_dir / "b.parquet").field("category").type
+    assert str(a_category_type) == "string"
+    assert str(b_category_type) == "dictionary<values=string, indices=int32, ordered=0>"
+
+
+# Boundary tests
+def test_run_with_no_changes_at_all(tmp_path: Path) -> None:
+    """Two byte-identical tables produce zero of every count."""
+    rows = [{"id": 1, "value": "x"}, {"id": 2, "value": "y"}]
+    a_path, b_path = _write_pair(tmp_path, rows, rows)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+
+    assert summary == {
+        "rows_added": 0,
+        "rows_removed": 0,
+        "duplicate_keys": 0,
+        "null_keys": 0,
+        "cells_changed": 0,
+        "schema_changes": 0,
+    }
+
+
+def test_run_with_empty_tables(tmp_path: Path) -> None:
+    """Two empty (schema-only) tables produce zero of every count, no crash."""
+    a_path = tmp_path / "empty_a.parquet"
+    b_path = tmp_path / "empty_b.parquet"
+    pq.write_table(pa.table({"id": pa.array([], type=pa.int64()), "value": pa.array([], type=pa.string())}), a_path)
+    pq.write_table(pa.table({"id": pa.array([], type=pa.int64()), "value": pa.array([], type=pa.string())}), b_path)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+
+    assert summary["rows_added"] == 0
+    assert summary["rows_removed"] == 0
+    assert summary["cells_changed"] == 0
