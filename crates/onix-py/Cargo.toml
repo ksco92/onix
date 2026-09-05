@@ -20,20 +20,12 @@ onix-arrow = { path = "../onix-arrow" }
 # so the record batches crossing between all three are the identical types.
 arrow-array = "=59.3.0"
 arrow-schema = "=59.3.0"
-# The Arrow C Data Interface bridge: imports any Python object implementing
-# the Arrow PyCapsule protocol (__arrow_c_stream__ / __arrow_c_array__) into
-# native Arrow record batches with zero copy, and exports batches back the
-# same way. Its `unsafe` FFI lives inside the crate, keeping this crate free
-# of `unsafe` under the workspace `forbid`. Requires arrow ^59, matching
-# onix-arrow's exact 59.3.0 pin, so both see the identical Arrow types.
-#
-# `default-features = false` turns off only pyo3-arrow's `buffer_protocol`
-# feature, which needs the non-abi3 CPython buffer API (`Py_buffer`,
-# `releasebufferproc`, gated to Py_3_11+) and so will not compile under this
-# crate's abi3-py39; the feature is unused here (only schema import/export and
-# the capsule protocol are needed). It does NOT drop pyo3-arrow's own
-# dependencies: numpy, ndarray, and matrixmultiply are still pulled in and
-# compiled, which is the bulk of the wheel-size increase this bridge brings.
+# The Arrow C Data Interface bridge: imports/exports Arrow PyCapsule objects
+# with its `unsafe` FFI encapsulated, so this crate stays `unsafe`-free; pinned
+# to arrow ^59 to match onix-arrow's 59.3.0.
+# `default-features = false` drops pyo3-arrow's `buffer_protocol` feature, which
+# needs the non-abi3 CPython buffer API and so will not build under abi3-py39;
+# it is unused here.
 pyo3-arrow = { version = "0.19", default-features = false }
 pyo3 = { version = "0.29", features = ["abi3-py39"] }
 serde_json = "1"

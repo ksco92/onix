@@ -1,14 +1,6 @@
-"""Arrow table diffing at the bindings boundary: schema diff, ingestion, and export.
+"""Tests for the Arrow table diff: schema diff, ingestion, export, and safety."""
 
-Ingestion is exercised through pyarrow, polars, and DuckDB, which must all
-produce identical results for the same data; the schema-comparison semantics
-(timestamp timezone, decimal scale, dictionary encoding, nullability) are
-pinned with pyarrow, which gives the most direct control over Arrow types. The
-optional-dependency behaviour (importing and diffing with no pyarrow, and the
-ImportError from to_pyarrow when it is absent) runs in a subprocess that blocks
-the pyarrow import.
-"""
-
+import ctypes
 import decimal
 import json
 import os
@@ -23,19 +15,22 @@ import pytest
 
 from deepdiff_rs import MaxDepthError, diff_tables
 
+# The library-pair matrix reused by every cross-library test: same-library on
+# each side, plus mixed pairs (the acceptance example diffs a polars table
+# against a pyarrow one).
+_LIBRARY_PAIRS = [
+    ("pyarrow", "pyarrow"),
+    ("polars", "polars"),
+    ("duckdb", "duckdb"),
+    ("polars", "pyarrow"),
+    ("duckdb", "polars"),
+]
+
 # Helpers
 
 
 def _int_tables() -> tuple[pa.Table, pa.Table]:
-    """
-    Build a left/right pair with one column each of every schema change.
-
-    Only integer columns are used so the result is identical no matter which
-    library re-encodes the data: int32/int64 map to the same Arrow types
-    through pyarrow, polars, and DuckDB, whereas string types do not.
-
-    :return: The left and right pyarrow tables.
-    """
+    """Build a left/right pair with one integer column of every schema change kind."""
     left = pa.table(
         {
             "id": pa.array([1, 2], pa.int64()),
@@ -57,13 +52,7 @@ def _int_tables() -> tuple[pa.Table, pa.Table]:
 
 
 def _as(lib: str, table: pa.Table) -> object:
-    """
-    Re-present a pyarrow table as the given library's table object.
-
-    :param lib: One of ``pyarrow``, ``polars``, ``duckdb``.
-    :param table: The source pyarrow table.
-    :return: The table as the requested library's object.
-    """
+    """Re-present a pyarrow table as the given library's (pyarrow/polars/duckdb) table object."""
     if lib == "pyarrow":
         return table
 
@@ -73,13 +62,13 @@ def _as(lib: str, table: pa.Table) -> object:
     return duckdb.from_arrow(table)
 
 
-def _by_change(diff: object) -> dict:
-    """
-    Group a diff's schema records by their change kind.
+def _keyed(columns: dict) -> pa.Table:
+    """Build a one-row pyarrow table with an int64 ``id`` key plus the given columns."""
+    return pa.table({"id": pa.array([1], pa.int64()), **columns})
 
-    :param diff: A TableDiff.
-    :return: A dict of change kind to the sorted list of column names.
-    """
+
+def _by_change(diff: object) -> dict:
+    """Group a diff's schema records into change kind -> sorted list of column names."""
     grouped: dict = {"added": [], "removed": [], "type_changed": []}
 
     for record in diff.schema:
@@ -88,34 +77,36 @@ def _by_change(diff: object) -> dict:
     return {kind: sorted(columns) for kind, columns in grouped.items()}
 
 
-# Cross-library ingestion tests
-
-
-@pytest.mark.parametrize(
-    ("left_lib", "right_lib"),
-    [
-        ("pyarrow", "pyarrow"),
-        ("polars", "polars"),
-        ("duckdb", "duckdb"),
-        ("polars", "pyarrow"),
-        ("duckdb", "polars"),
-    ],
-)
-def test_identical_results_across_input_libraries(left_lib: str, right_lib: str) -> None:
-    """
-    The schema diff is identical no matter which library supplies each table.
-
-    :param left_lib: The library providing the left table.
-    :param right_lib: The library providing the right table.
-    """
-    left_pa, right_pa = _int_tables()
-    diff = diff_tables(_as(left_lib, left_pa), _as(right_lib, right_pa), key=["id"])
-
+def _assert_default_changes(diff: object) -> None:
+    """Assert the diff matches the single-change-of-each-kind result of ``_int_tables``."""
     assert _by_change(diff) == {
         "added": ["only_right"],
         "removed": ["only_left"],
         "type_changed": ["changed"],
     }
+
+
+def _run_isolated(program: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run a program in a subprocess so a native crash surfaces as a non-zero return code."""
+    return subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(program)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **env} if env else None,
+    )
+
+
+# Cross-library ingestion tests
+
+
+@pytest.mark.parametrize(("left_lib", "right_lib"), _LIBRARY_PAIRS)
+def test_identical_results_across_input_libraries(left_lib: str, right_lib: str) -> None:
+    """The schema diff is identical no matter which library supplies each table."""
+    left_pa, right_pa = _int_tables()
+    diff = diff_tables(_as(left_lib, left_pa), _as(right_lib, right_pa), key=["id"])
+
+    _assert_default_changes(diff)
     assert diff.summary() == {
         "columns_added": 1,
         "columns_removed": 1,
@@ -124,12 +115,7 @@ def test_identical_results_across_input_libraries(left_lib: str, right_lib: str)
 
 
 def _struct_array(table: pa.Table) -> pa.StructArray:
-    """
-    Build a StructArray (an __arrow_c_array__-only object) from a table's columns.
-
-    :param table: The source table (single chunk per column).
-    :return: A struct array with one field per column.
-    """
+    """Build a StructArray (an __arrow_c_array__-only object) from a table's columns."""
     return pa.StructArray.from_arrays(
         [table.column(name).combine_chunks() for name in table.column_names],
         names=table.column_names,
@@ -144,11 +130,7 @@ def test_struct_array_c_array_protocol_input() -> None:
     assert not hasattr(left, "__arrow_c_stream__")
     diff = diff_tables(left, right, key=["id"])
 
-    assert _by_change(diff) == {
-        "added": ["only_right"],
-        "removed": ["only_left"],
-        "type_changed": ["changed"],
-    }
+    _assert_default_changes(diff)
 
 
 def test_record_batch_stream_protocol_input() -> None:
@@ -159,11 +141,7 @@ def test_record_batch_stream_protocol_input() -> None:
     assert hasattr(left_batch, "__arrow_c_stream__")
     diff = diff_tables(left_batch, right_batch, key=["id"])
 
-    assert _by_change(diff) == {
-        "added": ["only_right"],
-        "removed": ["only_left"],
-        "type_changed": ["changed"],
-    }
+    _assert_default_changes(diff)
 
 
 def test_record_batch_reader_input() -> None:
@@ -173,11 +151,7 @@ def test_record_batch_reader_input() -> None:
     right = pa.RecordBatchReader.from_batches(right_pa.schema, right_pa.to_batches())
     diff = diff_tables(left, right, key=["id"])
 
-    assert _by_change(diff) == {
-        "added": ["only_right"],
-        "removed": ["only_left"],
-        "type_changed": ["changed"],
-    }
+    _assert_default_changes(diff)
 
 
 def test_multi_chunk_table_input() -> None:
@@ -188,33 +162,12 @@ def test_multi_chunk_table_input() -> None:
     assert left.column("id").num_chunks == 2
     diff = diff_tables(left, right, key=["id"])
 
-    assert _by_change(diff) == {
-        "added": ["only_right"],
-        "removed": ["only_left"],
-        "type_changed": ["changed"],
-    }
+    _assert_default_changes(diff)
 
 
-@pytest.mark.parametrize(
-    ("left_lib", "right_lib"),
-    [
-        ("pyarrow", "pyarrow"),
-        ("polars", "polars"),
-        ("duckdb", "duckdb"),
-        ("polars", "pyarrow"),
-        ("duckdb", "polars"),
-    ],
-)
+@pytest.mark.parametrize(("left_lib", "right_lib"), _LIBRARY_PAIRS)
 def test_string_columns_identical_across_libraries(left_lib: str, right_lib: str) -> None:
-    """
-    A string column present on both sides is never a type change, whatever library supplies it.
-
-    polars exports strings as Utf8View and pyarrow/DuckDB as Utf8; without physical-encoding
-    normalization this would report every string column as type_changed.
-
-    :param left_lib: The library providing the left table.
-    :param right_lib: The library providing the right table.
-    """
+    """A string column present on both sides is never a type change, whatever library supplies it."""
     left_pa = pa.table({"id": pa.array([1], pa.int64()), "name": pa.array(["a"], pa.string())})
     right_pa = pa.table({"id": pa.array([1], pa.int64()), "name": pa.array(["b"], pa.string())})
     diff = diff_tables(_as(left_lib, left_pa), _as(right_lib, right_pa), key=["id"])
@@ -222,26 +175,9 @@ def test_string_columns_identical_across_libraries(left_lib: str, right_lib: str
     assert diff.schema == []
 
 
-@pytest.mark.parametrize(
-    ("left_lib", "right_lib"),
-    [
-        ("pyarrow", "pyarrow"),
-        ("polars", "polars"),
-        ("duckdb", "duckdb"),
-        ("polars", "pyarrow"),
-        ("duckdb", "polars"),
-    ],
-)
+@pytest.mark.parametrize(("left_lib", "right_lib"), _LIBRARY_PAIRS)
 def test_fixed_size_list_string_column_identical_across_libraries(left_lib: str, right_lib: str) -> None:
-    """
-    A fixed-size-list-of-string column is never a spurious type change across libraries.
-
-    polars stores it as Array(String) (Utf8View element) and DuckDB drops the element name; the
-    element type and name are normalized so the width alone distinguishes the type.
-
-    :param left_lib: The library providing the left table.
-    :param right_lib: The library providing the right table.
-    """
+    """A fixed-size-list-of-string column is never a spurious type change across libraries."""
     left_pa = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([["a", "b"]], pa.list_(pa.string(), 2))})
     right_pa = pa.table({"id": pa.array([2], pa.int64()), "v": pa.array([["c", "d"]], pa.list_(pa.string(), 2))})
     diff = diff_tables(_as(left_lib, left_pa), _as(right_lib, right_pa), key=["id"])
@@ -249,17 +185,32 @@ def test_fixed_size_list_string_column_identical_across_libraries(left_lib: str,
     assert diff.schema == []
 
 
+def _kv_list_table() -> pa.Table:
+    """Build a one-column table of a list of two-field key/value structs (nullable key)."""
+    kv = pa.struct([pa.field("key", pa.string()), pa.field("value", pa.int32())])
+    return pa.schema([pa.field("id", pa.int64()), pa.field("m", pa.list_(kv))]).empty_table()
+
+
+@pytest.mark.parametrize(("left_lib", "right_lib"), _LIBRARY_PAIRS)
+def test_list_of_key_value_struct_identical_across_libraries(left_lib: str, right_lib: str) -> None:
+    """A list of key/value structs reads the same across libraries (polars re-exports it as a large list)."""
+    left_pa = _kv_list_table()
+    right_pa = _kv_list_table()
+    diff = diff_tables(_as(left_lib, left_pa), _as(right_lib, right_pa), key=["id"])
+
+    assert diff.schema == []
+
+
+def test_list_of_key_value_struct_and_map_are_not_distinguished() -> None:
+    """Accepted false negative: a list of key/value structs and a real map compare equal, since polars cannot tell them apart."""
+    as_list = _kv_list_table()
+    as_map = pa.schema([pa.field("id", pa.int64()), pa.field("m", pa.map_(pa.string(), pa.int32()))]).empty_table()
+    diff = diff_tables(as_list, as_map, key=["id"])
+
+    assert diff.schema == []
+
+
 # Schema-comparison semantics tests
-
-
-def _keyed(columns: dict) -> pa.Table:
-    """
-    Build a one-row pyarrow table with an int64 ``id`` key plus the columns.
-
-    :param columns: Column name to pyarrow array.
-    :return: The table.
-    """
-    return pa.table({"id": pa.array([1], pa.int64()), **columns})
 
 
 def test_identical_schemas_have_no_changes() -> None:
@@ -591,8 +542,6 @@ def test_reprs() -> None:
 
 def test_bad_requested_schema_capsule_raises_value_error() -> None:
     """A malformed requested_schema capsule raises ValueError, not a native crash or PanicException."""
-    import ctypes
-
     left, right = _int_tables()
     diff = diff_tables(left, right, key=["id"])
 
@@ -612,14 +561,8 @@ def test_bad_requested_schema_capsule_raises_value_error() -> None:
 
 
 def test_import_and_diff_without_pyarrow() -> None:
-    """deepdiff_rs imports and diffs DuckDB tables with pyarrow unavailable, and to_pyarrow errors.
-
-    DuckDB is the Arrow source here because it exposes __arrow_c_stream__ natively, with no
-    pyarrow. pyarrow is made unimportable with a finder that lets libraries probe it (find_spec
-    returns a spec, so a graceful pyarrow-optional import path sees "present") but fails the actual
-    import, which is what to_pyarrow triggers.
-    """
-    program = textwrap.dedent(
+    """deepdiff_rs imports and diffs DuckDB tables with pyarrow unavailable, and to_pyarrow errors."""
+    result = _run_isolated(
         """
         import importlib.abc
         import importlib.machinery
@@ -669,12 +612,6 @@ def test_import_and_diff_without_pyarrow() -> None:
         print("OK")
         """,
     )
-    result = subprocess.run(
-        [sys.executable, "-c", program],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().endswith("OK")
@@ -682,7 +619,7 @@ def test_import_and_diff_without_pyarrow() -> None:
 
 def test_to_pyarrow_propagates_a_broken_pyarrow() -> None:
     """A pyarrow that fails to import for a reason other than absence is propagated, not masked."""
-    program = textwrap.dedent(
+    result = _run_isolated(
         """
         import importlib.abc
         import importlib.machinery
@@ -727,12 +664,6 @@ def test_to_pyarrow_propagates_a_broken_pyarrow() -> None:
         print("OK")
         """,
     )
-    result = subprocess.run(
-        [sys.executable, "-c", program],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().endswith("OK")
@@ -742,27 +673,9 @@ def test_to_pyarrow_propagates_a_broken_pyarrow() -> None:
 #
 # Arrow type nesting is attacker-controlled. Importing, comparing, and dropping
 # a deeply nested type all recurse on the native stack and would SIGSEGV the
-# interpreter; diff_tables must instead raise MaxDepthError. Each case runs in a
-# subprocess so a regression is a non-zero exit (a failed assertion), not a dead
-# test session -- and the first test is the control proving that mechanism
-# actually catches a native crash.
-
-
-def _run_isolated(program: str, env: dict | None = None) -> subprocess.CompletedProcess:
-    """
-    Run a program in a subprocess so a native crash surfaces as a non-zero return code.
-
-    :param program: Python source; it should print OK and exit 0 on success.
-    :param env: Extra environment variables to set on top of the current environment.
-    :return: The completed subprocess.
-    """
-    return subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(program)],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={**os.environ, **env} if env else None,
-    )
+# interpreter; diff_tables must instead raise MaxDepthError. Each subprocess case
+# turns a regression into a non-zero exit, and the first is the control proving
+# that mechanism catches a native crash.
 
 
 def test_subprocess_harness_detects_a_native_crash() -> None:
@@ -781,12 +694,7 @@ def test_subprocess_harness_detects_a_native_crash() -> None:
 
 
 def test_deeply_nested_type_raises_max_depth_error_not_a_crash() -> None:
-    """A column nested well past the bound raises MaxDepthError and the process stays alive.
-
-    The depth here (500) is comfortably past the bound while cheap to import; the exact boundary is
-    pinned in the onix-arrow unit tests, which build far deeper types natively (no Arrow C import,
-    which is superlinear in depth).
-    """
+    """A column nested well past the bound raises MaxDepthError and the process stays alive."""
     result = _run_isolated(
         """
         import pyarrow as pa
@@ -815,9 +723,8 @@ def test_deeply_nested_type_raises_max_depth_error_not_a_crash() -> None:
 def test_max_depth_error_is_a_value_error_subclass() -> None:
     """MaxDepthError raised by diff_tables is catchable as ValueError."""
     left = pa.schema([pa.field("id", pa.int64())]).empty_table()
-    depth = 200
     inner = pa.int64()
-    for _ in range(depth):
+    for _ in range(200):
         inner = pa.struct([pa.field("f", inner)])
     right = pa.schema([pa.field("id", pa.int64()), pa.field("deep", inner)]).empty_table()
 
@@ -830,12 +737,7 @@ def test_max_depth_error_is_a_value_error_subclass() -> None:
 
 
 def test_duckdb_session_timezone_labelling_is_documented_and_workaround_works() -> None:
-    """DuckDB labels TIMESTAMPTZ with the session time zone on Arrow export; SET TimeZone='UTC' makes it deterministic.
-
-    Runs under TZ=America/New_York in a subprocess so the behavior is pinned regardless of the host
-    time zone: without the workaround the timestamp column reads as a type change against a UTC
-    column, and with `SET TimeZone='UTC'` it does not.
-    """
+    """DuckDB labels TIMESTAMPTZ with the session time zone on Arrow export; SET TimeZone='UTC' makes it deterministic."""
     result = _run_isolated(
         """
         import pyarrow as pa
