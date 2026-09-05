@@ -95,11 +95,14 @@
 //! `0.10000000149011612` against an `f64` `0.1`), a timestamp renders as its UTC
 //! instant with its zone appended when aware (so an aware and a naive timestamp
 //! of the same instant differ), a decimal renders at its native scale, a string
-//! verbatim (decimals and strings match the `DuckDB` oracle), and a duration
+//! verbatim (decimals and strings match the `DuckDB` oracle), a duration
 //! renders as an ISO 8601 `PT<seconds>S` string computed from its value — never
 //! through the Arrow formatter, whose second/millisecond duration formatter can
-//! emit a `<invalid>` sentinel while still succeeding. As a construction guard,
-//! a `value_changed` record whose two renderings are nonetheless equal is a
+//! emit a `<invalid>` sentinel while still succeeding — and a cross-variant
+//! interval renders with its variant appended, so two variants whose human
+//! form would otherwise coincide stay distinct (see [`prepare_render`]). As a
+//! construction guard, a `value_changed` record whose two renderings are
+//! nonetheless equal is a
 //! [`TableDiffError::EqualRenderings`], not a silent row. There is no typed
 //! old/new
 //! column: a long-format table mixes every compared column's type in one column,
