@@ -1546,6 +1546,20 @@ mod tests {
     }
 
     #[test]
+    fn hash_uses_the_full_128_bits() {
+        // The finish combines the two 64-bit hashers as `(low << 64) | high`, so
+        // the top 64 bits carry `low`; if it collapsed to `high` alone the hash
+        // would be only 64 bits wide. At least one of a few inputs has a non-zero
+        // top half (each hasher's output is effectively random).
+        let hasher = super::RowHasher::new();
+        let any_high_bits = (0..4).any(|v| {
+            let cell: ArrayRef = Arc::new(Int64Array::from(vec![v]));
+            cell_hash(&hasher, cell) >> 64 != 0
+        });
+        assert!(any_high_bits, "the hash must occupy its top 64 bits");
+    }
+
+    #[test]
     fn key_and_row_domains_hash_differently() {
         // The domain tag separates a key hash from a row hash of the same cell.
         let hasher = super::RowHasher::new();
