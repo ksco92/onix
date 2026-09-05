@@ -634,13 +634,14 @@ fn scalar_content_key(value: &Value) -> ItemKey {
 }
 
 /// The type-distinct key for a bare number, mirroring [`ItemKey`]'s own
-/// number rule (see [`keyed`]'s number branch for the signed-zero note).
+/// number rule (see [`crate::value::fold_signed_zero`] for the signed-zero
+/// note).
 fn number_key(n: &crate::value::Number) -> ItemKey {
     if n.is_f64() {
         let f = n
             .as_f64()
             .expect("Number::is_f64 guarantees as_f64 succeeds");
-        return ItemKey::Float((f + 0.0).to_bits());
+        return ItemKey::Float(crate::value::fold_signed_zero(f).to_bits());
     }
     if let Some(i) = n.as_i64() {
         return ItemKey::Int(i128::from(i));
@@ -694,19 +695,13 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
                 let f = n
                     .as_f64()
                     .expect("Number::is_f64 guarantees as_f64 succeeds");
-                // Normalize signed zeros so `-0.0` and `+0.0` produce one
-                // key: Python's `DeepHash` treats them equal (confirmed
-                // against `deepdiff==9.1.0`: `DeepDiff([0.0, -0.0], [],
-                // ignore_order=True)` removes a single item). `f + 0.0` maps
-                // `-0.0` to `+0.0` and is the identity on every other float,
-                // so all other bit patterns are preserved: an integral float
-                // like `2.0` keeps a distinct `Float` key from the integer
-                // `2` (deepdiff reports that pairing as a `type_changes`,
-                // never a hash match), which is why this deliberately does
-                // NOT take the ordered path's `ScalarKey` integral-to-`Int`
-                // canonicalization — the two paths have genuinely different
-                // number semantics.
-                ItemKey::Float((f + 0.0).to_bits())
+                // See `crate::value::fold_signed_zero`: it is the identity on
+                // every float but `-0.0`, so an integral float like `2.0`
+                // keeps a distinct `Float` key from the integer `2` (this
+                // deliberately does NOT take the ordered path's `ScalarKey`
+                // integral-to-`Int` canonicalization — the two paths have
+                // genuinely different number semantics).
+                ItemKey::Float(crate::value::fold_signed_zero(f).to_bits())
             } else if let Some(i) = n.as_i64() {
                 ItemKey::Int(i128::from(i))
             } else {

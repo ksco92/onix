@@ -554,6 +554,12 @@ impl SetItems {
     /// `tests/golden/README.md`'s "Set iteration order" section for where
     /// this leaves `DeepDiff`'s own (hash-order-dependent) answer behind.
     ///
+    /// `canonical_cmp`'s one deliberately *coarser* spot is a bare `-0.0`
+    /// versus `0.0`: it folds them together (see `number_cmp`), so both
+    /// dedup here exactly as a real Python `set` would (they hash and
+    /// compare equal there too), instead of surviving as two members the
+    /// way `(1,)`/`(1.0,)` do.
+    ///
     /// Comparing structurally rather than by identity is also what keeps
     /// this cheap: a comparison stops at the first difference, where
     /// building an identity always walks the whole member, which would make
@@ -709,14 +715,26 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     Ordering::Equal
 }
 
+/// Maps `-0.0` to `+0.0` and leaves every other float unchanged.
+///
+/// `-0.0` and `+0.0` are one value: Python's `==` and `hash` agree on it (a
+/// `set` can hold only one), and so does [`Number`]'s own [`PartialEq`]
+/// (IEEE `==`). Every place this crate orders or hashes a float folds the
+/// sign away first with this function, so all of them agree with each other
+/// and with that equality — `canonical_cmp`'s [`number_cmp`], and
+/// `crate::ignore_order::hash`'s `number_key` and `keyed`.
+pub(crate) fn fold_signed_zero(f: f64) -> f64 {
+    f + 0.0
+}
+
 /// [`canonical_cmp`]'s number case, for two numbers of the same kind (an
-/// int and a float are already ranked apart).
+/// int and a float are already ranked apart). Orders by [`fold_signed_zero`]
+/// of each float, so this agrees with [`Number`]'s own [`PartialEq`].
 fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
     if a.is_f64() {
-        return a
-            .as_f64()
-            .unwrap_or_default()
-            .total_cmp(&b.as_f64().unwrap_or_default());
+        let af = fold_signed_zero(a.as_f64().unwrap_or_default());
+        let bf = fold_signed_zero(b.as_f64().unwrap_or_default());
+        return af.total_cmp(&bf);
     }
 
     match (a.as_i64(), b.as_i64()) {

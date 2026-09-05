@@ -28,7 +28,6 @@ against the same fixtures.
 
 import datetime
 import json
-import math
 from collections.abc import Callable
 from typing import Final, Protocol
 
@@ -312,8 +311,8 @@ def canonical_set_order(members: object) -> list[SetMember]:
     This is the Python twin of ``onix_core::value::SetItems``'s own ordering, whose doc
     is the definition of the rule. Two points it is easy to get wrong here: ``bool`` is
     ranked before ``int`` even though every Python bool *is* an int, and ``float``
-    comparison is a **total** one, so ``-0.0`` sorts before ``0.0`` where Python's ``<``
-    calls them equal.
+    comparison folds ``-0.0`` into ``0.0`` before ordering, matching Python's own
+    equality -- see ``number_cmp`` in ``crates/onix-core/src/value.rs``.
 
     :param members: Any iterable of set members.
     :return: The members in canonical order.
@@ -340,10 +339,9 @@ def _order_key(value: object) -> tuple[object, ...]:
         return (2, value)
 
     if isinstance(value, float):
-        # A total order, matching Rust's `f64::total_cmp`: Python's own `<`
-        # calls the two signed zeros equal, which would leave a set holding
-        # both in whatever order it arrived in.
-        return (3, math.copysign(1.0, value) > 0.0, value)
+        # Folds -0.0 into +0.0 before ordering -- see `number_cmp` in
+        # crates/onix-core/src/value.rs.
+        return (3, value + 0.0)
 
     if isinstance(value, str):
         return (4, value)
