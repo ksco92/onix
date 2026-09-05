@@ -112,6 +112,15 @@ pub enum TableDiffError {
         /// The number of changed rows that overflowed.
         rows: usize,
     },
+    /// A `value_changed` cell rendered identically on both sides — a broken
+    /// invariant, not a caller error. The per-cell diff renders each side in a
+    /// common comparison form so a value change always shows two different
+    /// strings; this variant guards that guarantee and cannot fire for any real
+    /// input.
+    EqualRenderings {
+        /// The column whose two renderings were equal.
+        column: String,
+    },
 }
 
 impl fmt::Display for TableDiffError {
@@ -155,6 +164,11 @@ impl fmt::Display for TableDiffError {
                 "the per-cell diff has {rows} changed rows on one side, more than the \
                  {} its row-index arrays can address; bound the changed-row count",
                 u32::MAX
+            ),
+            TableDiffError::EqualRenderings { column } => write!(
+                f,
+                "internal invariant: a value change in column {column:?} rendered identically \
+                 on both sides, which the common-form rendering is designed to prevent"
             ),
         }
     }
@@ -242,6 +256,16 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("\"ts\""));
         assert!(message.contains("Cast error"));
+    }
+
+    #[test]
+    fn equal_renderings_message_reads_as_an_invariant() {
+        let error = TableDiffError::EqualRenderings {
+            column: "d".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("\"d\""));
+        assert!(message.contains("invariant"));
     }
 
     #[test]

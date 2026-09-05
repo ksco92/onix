@@ -1332,10 +1332,12 @@ fn render_duration(raw: i64, unit: TimeUnit) -> String {
     let abs = nanos.unsigned_abs();
     let seconds = abs / 1_000_000_000;
     let frac = abs % 1_000_000_000;
-    let mut out = String::from("PT");
+    // ISO 8601 and arrow-cast put the sign before `P`, e.g. `-PT1S`.
+    let mut out = String::new();
     if nanos < 0 {
         out.push('-');
     }
+    out.push_str("PT");
     out.push_str(&seconds.to_string());
     if frac != 0 {
         out.push('.');
@@ -1384,9 +1386,8 @@ fn check_distinct_renderings(
     column: &str,
 ) -> Result<(), TableDiffError> {
     if change == CHANGE_VALUE && old == new {
-        return Err(TableDiffError::Render {
+        return Err(TableDiffError::EqualRenderings {
             column: column.to_string(),
-            message: "a value change rendered identically on both sides".to_string(),
         });
     }
     Ok(())
@@ -2362,28 +2363,32 @@ mod tests {
     fn interval_variant_difference_is_type_changed_with_distinct_renderings() {
         // The three interval variants render into one human form (`1 days`), so a
         // cross-variant pair is a type change with its variant appended, never a
-        // value change with two equal renderings.
-        let one_daytime: ArrayRef =
-            Arc::new(IntervalDayTimeArray::from(vec![IntervalDayTime::new(1, 0)]));
-        let one_monthdaynano: ArrayRef = Arc::new(IntervalMonthDayNanoArray::from(vec![
-            IntervalMonthDayNano::new(0, 1, 0),
-        ]));
-        let one_yearmonth: ArrayRef = Arc::new(IntervalYearMonthArray::from(vec![1]));
-        for (lt, la, rt, ra) in [
-            (
-                IntervalUnit::DayTime,
-                one_daytime,
-                IntervalUnit::MonthDayNano,
-                one_monthdaynano.clone(),
-            ),
-            (
-                IntervalUnit::YearMonth,
-                one_yearmonth,
-                IntervalUnit::MonthDayNano,
-                one_monthdaynano,
-            ),
+        // value change with two equal renderings. Every ordered pair of distinct
+        // variants is covered — including `YearMonth` versus `DayTime`, neither
+        // of which is `MonthDayNano`, so narrowing the predicate to "either side
+        // is MonthDayNano" would fail.
+        let array = |unit: IntervalUnit| -> ArrayRef {
+            match unit {
+                IntervalUnit::YearMonth => Arc::new(IntervalYearMonthArray::from(vec![1])),
+                IntervalUnit::DayTime => {
+                    Arc::new(IntervalDayTimeArray::from(vec![IntervalDayTime::new(1, 0)]))
+                }
+                IntervalUnit::MonthDayNano => Arc::new(IntervalMonthDayNanoArray::from(vec![
+                    IntervalMonthDayNano::new(0, 1, 0),
+                ])),
+            }
+        };
+        for (lt, rt) in [
+            (IntervalUnit::DayTime, IntervalUnit::MonthDayNano),
+            (IntervalUnit::YearMonth, IntervalUnit::MonthDayNano),
+            (IntervalUnit::YearMonth, IntervalUnit::DayTime),
         ] {
-            let got = one_column_diff(DataType::Interval(lt), la, DataType::Interval(rt), ra);
+            let got = one_column_diff(
+                DataType::Interval(lt),
+                array(lt),
+                DataType::Interval(rt),
+                array(rt),
+            );
             assert_eq!(got.len(), 1, "{lt:?} vs {rt:?}");
             assert_eq!(got[0].4, "type_changed", "{lt:?} vs {rt:?}");
             assert_ne!(got[0].2, got[0].3, "{lt:?} vs {rt:?}");
@@ -2512,7 +2517,8 @@ mod tests {
             render_duration(1_500_000_000, TimeUnit::Nanosecond),
             "PT1.5S"
         );
-        assert_eq!(render_duration(-1, TimeUnit::Second), "PT-1S");
+        assert_eq!(render_duration(-1, TimeUnit::Second), "-PT1S");
+        assert_eq!(render_duration(-1500, TimeUnit::Millisecond), "-PT1.5S");
         assert_eq!(render_duration(0, TimeUnit::Second), "PT0S");
     }
 
@@ -2528,7 +2534,7 @@ mod tests {
             "c",
         )
         .unwrap_err();
-        assert!(matches!(&error, TableDiffError::Render { column, .. } if column == "c"));
+        assert!(matches!(&error, TableDiffError::EqualRenderings { column } if column == "c"));
         // A type change may legitimately render alike (an aware/naive timestamp
         // of the same instant), so the guard only fires for value_changed.
         assert!(
