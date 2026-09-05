@@ -26,14 +26,15 @@
 //!    hash); the two sides' changed rows are paired by key hash and every common
 //!    non-key column is compared cell by cell, one output record per differing
 //!    cell — see [`diff_cells`]. Only the changed rows are materialized, so this
-//!    pass too is bounded by the changed-row count, not the table size.
+//!    pass never holds the whole table.
 //!
 //! Memory beyond the per-row hash vectors: the duplicate-key report holds the
 //! actual key values of every *distinct duplicated* key, so a duplicate-heavy
 //! input adds a term proportional to the number of distinct duplicated keys
-//! times the key width (see the README's Known-limitations bullet for measured
-//! figures); the cell pass holds the changed rows of both sides at once, a term
-//! proportional to the changed-row count.
+//! times the key width; the cell pass holds both sides' changed rows and renders
+//! every changed cell to an owned string, so its term is the number of changed
+//! cells times the cell width (values are rendered in full). The README's
+//! Known-limitations bullet states both with measured figures.
 //!
 //! # Hashing
 //!
@@ -49,17 +50,19 @@
 //!
 //! # Value semantics
 //!
-//! Cell hashing matches how onix's core compares scalars: integers and integral
-//! floats within `±2⁵³` fold to one integer form (so `1`, `1.0`, `-0.0`, and a
-//! dictionary-encoded `1` all hash equal), every NaN folds to one canonical NaN
-//! (so no NaN-payload difference is a change), other floats hash by their bit
-//! pattern, decimals (128- and 256-bit) hash by their exact value with trailing
-//! zeros removed (so `1.00` equals `1.0000`), timestamps hash by their UTC
-//! instant in nanoseconds (so the same instant at microsecond and millisecond
-//! precision hashes equal), times and durations likewise normalize to
-//! nanoseconds (so the same clock time or elapsed span at different units hashes
-//! equal), and a null is a distinct value that equals only another null — the
-//! `IS DISTINCT FROM` semantics the `DuckDB` oracle uses.
+//! Cell hashing largely matches how onix's core compares scalars: integers and
+//! integral floats within `±2⁵³` fold to one integer form (so `1`, `1.0`,
+//! `-0.0`, and a dictionary-encoded `1` all hash equal), other floats hash by
+//! their bit pattern, decimals (128- and 256-bit) hash by their exact value with
+//! trailing zeros removed (so `1.00` equals `1.0000`), timestamps hash by their
+//! UTC instant in nanoseconds (so the same instant at microsecond and
+//! millisecond precision hashes equal), times and durations likewise normalize
+//! to nanoseconds (so the same clock time or elapsed span at different units
+//! hashes equal), and a null is a distinct value that equals only another null —
+//! the `IS DISTINCT FROM` semantics the `DuckDB` oracle uses. One rule is this
+//! crate's own, not `onix-core`'s (which refuses NaN at conversion): every NaN
+//! folds to one canonical NaN, so no NaN-payload difference is a change, because
+//! the renderer cannot show two NaN payloads apart.
 //!
 //! # Per-cell changes
 //!
@@ -72,8 +75,9 @@
 //! - `became_null`/`became_non_null` when exactly one side is null;
 //! - `type_changed` when both are non-null and the two sides' types are not
 //!   losslessly comparable — their [`value_domain`]s differ (a number becoming a
-//!   string, a timestamp becoming a date), or both are timestamps but one is
-//!   zone-aware and the other naive (different meaning at the same instant);
+//!   string, a timestamp becoming a date), both are timestamps but one is
+//!   zone-aware and the other naive (different meaning at the same instant), or
+//!   both are intervals of different variants (which are not one span);
 //! - `value_changed` otherwise: the same value domain, differing in value over
 //!   the hash's lossless normalization. This covers a lossless type change —
 //!   `Int32`→`Int64`, a float width change, a time/duration unit change, a
@@ -88,11 +92,16 @@
 //! differing width render at the wider type (an `f32` `0.1` shows as
 //! `0.10000000149011612` against an `f64` `0.1`), a timestamp renders as its UTC
 //! instant with its zone appended when aware (so an aware and a naive timestamp
-//! of the same instant differ), a decimal renders at its native scale, and a
-//! string verbatim (decimals and strings match the `DuckDB` oracle). There is no
-//! typed old/new column: a long-format table mixes every compared column's type
-//! in one column, so a single typed column cannot represent them and the string
-//! rendering is the uniform form.
+//! of the same instant differ), a decimal renders at its native scale, a string
+//! verbatim (decimals and strings match the `DuckDB` oracle), and a duration
+//! renders as an ISO 8601 `PT<seconds>S` string computed from its value — never
+//! through the Arrow formatter, whose second/millisecond duration formatter can
+//! emit a `<invalid>` sentinel while still succeeding. As a construction guard,
+//! a `value_changed` record whose two renderings are nonetheless equal is a
+//! [`TableDiffError::Render`], not a silent row. There is no typed old/new
+//! column: a long-format table mixes every compared column's type in one column,
+//! so a single typed column cannot represent them and the string rendering is
+//! the uniform form.
 //!
 //! # Which column types are hashed, refused, or skipped
 //!
@@ -793,13 +802,15 @@ fn hash_int(hasher: &mut CellHasher, value: i128) {
     hasher.write_i128(value);
 }
 
-/// Writes a float using the same exact-integral fold `scalar_key` applies in
+/// Writes a float. The exact-integral fold mirrors `scalar_key` in
 /// `crates/onix-core/src/lcs.rs` (its doc carries the full rationale; the
 /// predicate and the `±2⁵³` bound are duplicated here on purpose because the
 /// crates are decoupled, and both sites move together): an integral value in
-/// range folds to the integer form (so `-0.0` and `0.0` both become `0`);
-/// anything else keeps its raw bit pattern, so two NaNs hash equal only when
-/// bit-identical.
+/// range folds to the integer form (so `-0.0` and `0.0` both become `0`). The
+/// NaN canonicalization is this crate's own rule, not `onix-core`'s (which
+/// refuses NaN at conversion): every NaN folds to one canonical NaN so two NaNs
+/// always hash equal, because the renderer cannot show two NaN payloads apart.
+/// Any other value keeps its raw bit pattern.
 fn hash_float(hasher: &mut CellHasher, value: f64) {
     if value.is_nan() {
         // Fold every NaN (any payload, any sign bit) to one canonical NaN, so
@@ -1290,19 +1301,6 @@ fn cell_hash(hasher: &RowHasher, array: &ArrayRef, row: usize) -> Result<u128, T
     Ok(cell.finish())
 }
 
-/// The column for rendering: a timestamp's timezone is stripped so
-/// [`ArrayFormatter`] renders its UTC instant (the raw value is already the UTC
-/// instant, and this crate compares timestamps by instant) without needing a
-/// timezone database; every other column renders as-is.
-fn render_column(array: &ArrayRef) -> Result<ArrayRef, TableDiffError> {
-    match array.data_type() {
-        DataType::Timestamp(unit, Some(_)) => {
-            arrow_cast::cast(array, &DataType::Timestamp(*unit, None)).map_err(|e| read_error(&e))
-        }
-        _ => Ok(array.clone()),
-    }
-}
-
 /// Renders one non-null cell to its canonical string via `try_to_string`, or a
 /// typed [`TableDiffError::Render`] naming `column`. Never `to_string()` on the
 /// formatter's `Display`: with the default `safe = true` options that writes an
@@ -1321,6 +1319,77 @@ fn render_value(
             column: column.to_string(),
             message: e.to_string(),
         })
+}
+
+/// Renders a `Duration` cell as an ISO 8601 `PT<seconds>S` string from its raw
+/// value and unit (normalized to nanoseconds) — never through [`ArrayFormatter`],
+/// whose second/millisecond duration formatter writes the literal `<invalid>`
+/// for a value chrono cannot represent while still returning `Ok`, which no
+/// report value may ship. The normalized form makes two spans that hash equal
+/// render equal and two that differ render apart.
+fn render_duration(raw: i64, unit: TimeUnit) -> String {
+    let nanos = unit_nanos(raw, unit);
+    let abs = nanos.unsigned_abs();
+    let seconds = abs / 1_000_000_000;
+    let frac = abs % 1_000_000_000;
+    let mut out = String::from("PT");
+    if nanos < 0 {
+        out.push('-');
+    }
+    out.push_str(&seconds.to_string());
+    if frac != 0 {
+        out.push('.');
+        out.push_str(format!("{frac:09}").trim_end_matches('0'));
+    }
+    out.push('S');
+    out
+}
+
+/// One side's cell renderer: the Arrow formatter for most types, or a
+/// dependency-free [`render_duration`] for a `Duration` column (which the
+/// formatter can render as a `<invalid>` sentinel).
+enum SideRenderer<'a> {
+    Formatter(ArrayFormatter<'a>),
+    Duration(&'a ArrayRef, TimeUnit),
+}
+
+impl<'a> SideRenderer<'a> {
+    fn new(array: &'a ArrayRef, opts: &'a FormatOptions<'a>) -> Result<Self, TableDiffError> {
+        if let DataType::Duration(unit) = array.data_type() {
+            Ok(SideRenderer::Duration(array, *unit))
+        } else {
+            let formatter = ArrayFormatter::try_new(array, opts).map_err(|e| read_error(&e))?;
+            Ok(SideRenderer::Formatter(formatter))
+        }
+    }
+
+    fn render(&self, row: usize, column: &str) -> Result<String, TableDiffError> {
+        match self {
+            SideRenderer::Formatter(formatter) => render_value(formatter, row, column),
+            SideRenderer::Duration(array, unit) => {
+                Ok(render_duration(duration_value(array, *unit, row), *unit))
+            }
+        }
+    }
+}
+
+/// Enforces that a `value_changed` record never carries two equal renderings — a
+/// typed error, not a `debug_assert!` (the release wheel compiles the latter
+/// out). The common-form rendering makes this unreachable for real diffs, so the
+/// error is a construction guard; a unit test forces the equal pair to reach it.
+fn check_distinct_renderings(
+    change: &str,
+    old: Option<&String>,
+    new: Option<&String>,
+    column: &str,
+) -> Result<(), TableDiffError> {
+    if change == CHANGE_VALUE && old == new {
+        return Err(TableDiffError::Render {
+            column: column.to_string(),
+            message: "a value change rendered identically on both sides".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Whether a type is a floating-point type.
@@ -1356,11 +1425,26 @@ fn timestamp_awareness_differs(left: &DataType, right: &DataType) -> bool {
     )
 }
 
+/// Whether two interval types are different variants (`YearMonth`, `DayTime`,
+/// `MonthDayNano`). The hash distinguishes them by a variant tag but the
+/// formatter renders unlike variants into one human form (`DayTime` one day and
+/// `MonthDayNano` one day both read `1 days`), so a cross-variant pair is a type
+/// change and each side is rendered with its variant appended, not a value
+/// change with two equal renderings.
+fn interval_variant_differs(left: &DataType, right: &DataType) -> bool {
+    matches!(
+        (left, right),
+        (DataType::Interval(l), DataType::Interval(r)) if l != r
+    )
+}
+
 /// The render array and a per-cell suffix for one side of a compared column.
 /// A number of differing width is cast to the common render type; an aware
 /// timestamp is rendered as its UTC instant (zone stripped, so no timezone
 /// database is needed) with the zone appended as a suffix, so an aware and a
-/// naive timestamp at the same instant never render identically.
+/// naive timestamp at the same instant never render identically; an interval
+/// keeps its variant as a suffix, so two variants that render into one human
+/// form stay distinct.
 fn prepare_render(
     decoded_column: &ArrayRef,
     common: Option<&DataType>,
@@ -1375,6 +1459,7 @@ fn prepare_render(
                 .map_err(|e| read_error(&e))?;
             Ok((naive, format!("[{zone}]")))
         }
+        DataType::Interval(unit) => Ok((decoded_column.clone(), format!("[{unit:?}]"))),
         _ => Ok((decoded_column.clone(), String::new())),
     }
 }
@@ -1477,14 +1562,18 @@ struct CellDiff<'a> {
 
 /// Produces the long-format per-cell diff for the changed rows.
 ///
-/// Re-streams both inputs, materializes only the changed rows on each side
-/// (bounded by the changed-row count), pairs them by key hash, and emits one
-/// record per differing cell — one whose [`hash_cell`] contribution differs
-/// between the two matched rows. A cell is `became_null`/`became_non_null` when
-/// exactly one side is null, `type_changed` when both are non-null but the
-/// column's [`value_domain`] differs across sides, and `value_changed`
-/// otherwise. Output rows are ordered by the canonical string rendering of the
-/// key columns (lexicographic, nulls first), then by left-schema column order.
+/// Re-streams both inputs, materializes only the changed rows on each side, and
+/// renders each changed cell in full, so its memory term is the number of
+/// changed cells times the cell width (see the README's Known-limitations
+/// bullet). Pairs the rows by key hash and emits one record per differing cell —
+/// one whose [`hash_cell`] contribution differs between the two matched rows. A
+/// cell is `became_null`/`became_non_null` when exactly one side is null,
+/// `type_changed` when both are non-null and the two types are not losslessly
+/// comparable — their [`value_domain`]s differ, both are timestamps of differing
+/// zone-awareness, or both are intervals of different variants — and
+/// `value_changed` otherwise. Output rows are
+/// ordered by the canonical string rendering of the key columns (lexicographic,
+/// nulls first), then by left-schema column order.
 fn diff_cells(
     left: &impl TableInput,
     right: &impl TableInput,
@@ -1593,15 +1682,14 @@ fn emit_column_records(
     let right_dt = right_dec.data_type().clone();
 
     let is_type_change = value_domain(&left_dt) != value_domain(&right_dt)
-        || timestamp_awareness_differs(&left_dt, &right_dt);
+        || timestamp_awareness_differs(&left_dt, &right_dt)
+        || interval_variant_differs(&left_dt, &right_dt);
 
     let common = common_render_type(&left_dt, &right_dt);
     let (left_render, left_suffix) = prepare_render(&left_dec, common.as_ref())?;
     let (right_render, right_suffix) = prepare_render(&right_dec, common.as_ref())?;
-    let left_fmt =
-        ArrayFormatter::try_new(&left_render, column.opts).map_err(|e| read_error(&e))?;
-    let right_fmt =
-        ArrayFormatter::try_new(&right_render, column.opts).map_err(|e| read_error(&e))?;
+    let left_renderer = SideRenderer::new(&left_render, column.opts)?;
+    let right_renderer = SideRenderer::new(&right_render, column.opts)?;
 
     for left_row in 0..column.left_rows.batch.num_rows() {
         let Some(&right_row) = column.right_pos.get(&column.left_rows.key_hashes[left_row]) else {
@@ -1633,19 +1721,16 @@ fn emit_column_records(
         let old_value = if left_null {
             None
         } else {
-            Some(render_value(&left_fmt, left_row, name)? + &left_suffix)
+            Some(left_renderer.render(left_row, name)? + &left_suffix)
         };
         let new_value = if right_null {
             None
         } else {
-            Some(render_value(&right_fmt, right_row, name)? + &right_suffix)
+            Some(right_renderer.render(right_row, name)? + &right_suffix)
         };
         // A value_changed record must never carry equal renderings: the
         // common-form rendering above shows every facet the hash saw differ.
-        debug_assert!(
-            change != CHANGE_VALUE || old_value != new_value,
-            "value_changed with equal renderings in column {name:?}: {old_value:?}"
-        );
+        check_distinct_renderings(change, old_value.as_ref(), new_value.as_ref(), name)?;
         // The output addresses each left changed row by a `u32` index (the
         // `take` indices); refuse if there are more than `u32` can address.
         let left_row = u32::try_from(left_row).map_err(|_| TableDiffError::TooManyChangedRows {
@@ -1677,7 +1762,10 @@ fn projected_schema(schema: &Schema, columns: &SideColumns) -> SchemaRef {
 }
 
 /// Renders each row's key columns (timezone-stripped for timestamps) to a
-/// nullable-string tuple, the primary sort key of the output.
+/// nullable-string tuple, the primary sort key of the output. Uses
+/// [`prepare_render`] and drops its zone suffix: key types are unified across
+/// the two sides, so a sort key never needs the aware/naive distinction the
+/// suffix draws for value cells.
 fn render_key_rows(
     batch: &RecordBatch,
     key_count: usize,
@@ -1686,7 +1774,7 @@ fn render_key_rows(
     let mut columns = Vec::with_capacity(key_count);
     for position in 0..key_count {
         let decoded_column = decoded(batch.column(position))?;
-        let render = render_column(&decoded_column)?;
+        let (render, _suffix) = prepare_render(&decoded_column, None)?;
         columns.push((decoded_column, render));
     }
 
@@ -1864,10 +1952,11 @@ mod tests {
     use arrow_array::{
         Array, ArrayRef, BinaryArray, BinaryViewArray, Date32Array, Date64Array, Decimal32Array,
         Decimal64Array, Decimal128Array, Decimal256Array, DictionaryArray,
-        DurationMillisecondArray, DurationNanosecondArray, DurationSecondArray, Float32Array,
-        Float64Array, Int32Array, Int64Array, IntervalDayTimeArray, IntervalMonthDayNanoArray,
-        IntervalYearMonthArray, ListArray, NullArray, RecordBatch, RecordBatchReader, StringArray,
-        Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
+        DurationMicrosecondArray, DurationMillisecondArray, DurationNanosecondArray,
+        DurationSecondArray, Float32Array, Float64Array, Int32Array, Int64Array,
+        IntervalDayTimeArray, IntervalMonthDayNanoArray, IntervalYearMonthArray, ListArray,
+        NullArray, RecordBatch, RecordBatchReader, StringArray, Time32MillisecondArray,
+        Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
         TimestampMicrosecondArray, TimestampMillisecondArray,
     };
     use arrow_buffer::{IntervalDayTime, IntervalMonthDayNano, i256};
@@ -2268,6 +2357,38 @@ mod tests {
     }
 
     #[test]
+    fn interval_variant_difference_is_type_changed_with_distinct_renderings() {
+        // The three interval variants render into one human form (`1 days`), so a
+        // cross-variant pair is a type change with its variant appended, never a
+        // value change with two equal renderings.
+        let one_daytime: ArrayRef =
+            Arc::new(IntervalDayTimeArray::from(vec![IntervalDayTime::new(1, 0)]));
+        let one_monthdaynano: ArrayRef = Arc::new(IntervalMonthDayNanoArray::from(vec![
+            IntervalMonthDayNano::new(0, 1, 0),
+        ]));
+        let one_yearmonth: ArrayRef = Arc::new(IntervalYearMonthArray::from(vec![1]));
+        for (lt, la, rt, ra) in [
+            (
+                IntervalUnit::DayTime,
+                one_daytime,
+                IntervalUnit::MonthDayNano,
+                one_monthdaynano.clone(),
+            ),
+            (
+                IntervalUnit::YearMonth,
+                one_yearmonth,
+                IntervalUnit::MonthDayNano,
+                one_monthdaynano,
+            ),
+        ] {
+            let got = one_column_diff(DataType::Interval(lt), la, DataType::Interval(rt), ra);
+            assert_eq!(got.len(), 1, "{lt:?} vs {rt:?}");
+            assert_eq!(got[0].4, "type_changed", "{lt:?} vs {rt:?}");
+            assert_ne!(got[0].2, got[0].3, "{lt:?} vs {rt:?}");
+        }
+    }
+
+    #[test]
     fn time_unit_change_at_the_same_clock_emits_no_record() {
         // 3600 s == 3_600_000 ms.
         let got = one_column_diff(
@@ -2317,6 +2438,80 @@ mod tests {
         );
         assert_eq!(differ.len(), 1);
         assert_eq!(differ[0].4, "value_changed");
+    }
+
+    #[test]
+    fn extreme_durations_render_without_a_sentinel() {
+        // Values past chrono's range: arrow-cast's own second/millisecond
+        // duration formatter writes "<invalid>" while returning Ok, which no
+        // report value may ship; render_duration produces a real, distinct one.
+        let dur = |unit: TimeUnit, v: i64| -> ArrayRef {
+            match unit {
+                TimeUnit::Second => Arc::new(DurationSecondArray::from(vec![v])),
+                TimeUnit::Millisecond => Arc::new(DurationMillisecondArray::from(vec![v])),
+                TimeUnit::Microsecond => Arc::new(DurationMicrosecondArray::from(vec![v])),
+                TimeUnit::Nanosecond => Arc::new(DurationNanosecondArray::from(vec![v])),
+            }
+        };
+        let cases = [
+            (
+                TimeUnit::Second,
+                9_300_000_000_000_000_i64,
+                9_400_000_000_000_000_i64,
+            ),
+            (TimeUnit::Millisecond, i64::MIN, i64::MIN + 1),
+            (TimeUnit::Microsecond, i64::MAX, i64::MAX - 1),
+            (TimeUnit::Nanosecond, i64::MIN, i64::MAX),
+        ];
+        for (unit, left, right) in cases {
+            let dt = DataType::Duration(unit);
+            let got = one_column_diff(dt.clone(), dur(unit, left), dt, dur(unit, right));
+            assert_eq!(got.len(), 1, "{unit:?}");
+            assert_eq!(got[0].4, "value_changed", "{unit:?}");
+            let (old, new) = (got[0].2.as_deref().unwrap(), got[0].3.as_deref().unwrap());
+            assert_ne!(old, new, "{unit:?}");
+            assert!(
+                !old.contains("invalid") && !new.contains("invalid"),
+                "{unit:?}: {old} {new}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_duration_produces_iso_seconds() {
+        // Exact renderings pin the second/nanosecond split and the sign, which a
+        // distinctness-only check leaves free.
+        use super::render_duration;
+        assert_eq!(render_duration(3600, TimeUnit::Second), "PT3600S");
+        assert_eq!(render_duration(1, TimeUnit::Millisecond), "PT0.001S");
+        assert_eq!(render_duration(1500, TimeUnit::Millisecond), "PT1.5S");
+        assert_eq!(
+            render_duration(1_500_000_000, TimeUnit::Nanosecond),
+            "PT1.5S"
+        );
+        assert_eq!(render_duration(-1, TimeUnit::Second), "PT-1S");
+        assert_eq!(render_duration(0, TimeUnit::Second), "PT0S");
+    }
+
+    #[test]
+    fn equal_renderings_for_a_value_change_are_a_typed_error() {
+        // The invariant guard: reachable only by a forced equal pair, since the
+        // common-form rendering makes it impossible for real diffs.
+        let same = Some("x".to_string());
+        let error = super::check_distinct_renderings(
+            super::CHANGE_VALUE,
+            same.as_ref(),
+            same.as_ref(),
+            "c",
+        )
+        .unwrap_err();
+        assert!(matches!(&error, TableDiffError::Render { column, .. } if column == "c"));
+        // A type change may legitimately render alike (an aware/naive timestamp
+        // of the same instant), so the guard only fires for value_changed.
+        assert!(
+            super::check_distinct_renderings(super::CHANGE_TYPE, same.as_ref(), same.as_ref(), "c")
+                .is_ok()
+        );
     }
 
     #[test]

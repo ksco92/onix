@@ -21,7 +21,7 @@ onix-arrow = { path = "../onix-arrow" }
 arrow-array = "=59.3.0"
 arrow-schema = "=59.3.0"
 # Spools each one-shot imported Python Arrow stream to a temporary IPC file so
-# the two-pass row diff can re-read it; the stream format is used (not the file
+# the multi-pass row diff can re-read it; the stream format is used (not the file
 # format) because it permits the dictionary replacement pyarrow/DuckDB emit
 # across batches. Compression off: the spool is transient and local.
 arrow-ipc = { version = "=59.3.0", default-features = false }
