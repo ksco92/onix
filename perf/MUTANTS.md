@@ -18,9 +18,9 @@ make mutants        # cargo mutants --package onix-core --package onix-cli --pac
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **1061** mutants (20 in `onix-cli`,
-980 in `onix-core`, 61 in `onix-arrow` — of which 42 are viable and all
-caught, 19 do not compile). Its classification of each mutant into
+`make mutants` enumerates a deterministic **1063** mutants (20 in `onix-cli`,
+980 in `onix-core`, 63 in `onix-arrow` — of which 42 are viable and all
+caught, 21 do not compile). Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
 depends on wall-clock time (a slow mutant is a "timeout" on one machine and
 "missed"/"caught" on another) and, in this workspace, on build caching (a
@@ -139,8 +139,9 @@ that test (0.01 s to fail, reporting 1 distinct bucket out of 10,000). A
 standalone re-run of this file now classifies the mutant as **caught**, not
 timeout.
 
-The full `make mutants` enumeration is deterministic at **1000** mutants
-(`cargo mutants --list`; hash.rs 37, memo.rs 14, lcs.rs 111 of them). The last full
+The `onix-core` + `onix-cli` portion of the enumeration is deterministic at
+**1000** mutants (`cargo mutants --list`; hash.rs 37, memo.rs 14, lcs.rs 111 of
+them); with `onix-arrow`'s 63 the top-line total is 1063, as recorded above. The last full
 representative run classified the previous 986-mutant enumeration as **890
 caught, 75 unviable, 15 missed, 6 timeout** — the survivors confined to the
 documented equivalent/uncompilable kinds: the `lcs.rs` LCS spots (missed plus
