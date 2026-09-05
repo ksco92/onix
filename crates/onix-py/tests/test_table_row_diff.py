@@ -3,7 +3,7 @@
 import decimal
 import random
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
 import polars as pl
@@ -271,6 +271,77 @@ def test_decimal_cell_renders_at_native_scale() -> None:
     cell = _table(diff_tables(left, right, key=["id"]).cells_changed()).to_pylist()[0]
 
     assert (cell["old_value"], cell["new_value"]) == ("20.0000", "20.5000")
+
+
+def test_negative_time32_cell_raises_a_render_error() -> None:
+    """A value Arrow accepts but the formatter cannot render surfaces as a typed error naming the column, not error prose in the output."""
+    left = pa.table({"id": pa.array([1], pa.int64()), "t": pa.array([-1], pa.time32("s"))})
+    right = pa.table({"id": pa.array([1], pa.int64()), "t": pa.array([0], pa.time32("s"))})
+    with pytest.raises(ValueError, match='could not render a value of column "t"'):
+        diff_tables(left, right, key=["id"])
+
+
+def test_out_of_range_timestamp_cell_raises_a_render_error() -> None:
+    """An out-of-range timestamp renders to a typed error naming the column."""
+    left = pa.table({"id": pa.array([1], pa.int64()), "ts": pa.array([2**63 - 1], pa.timestamp("us"))})
+    right = pa.table({"id": pa.array([1], pa.int64()), "ts": pa.array([0], pa.timestamp("us"))})
+    with pytest.raises(ValueError, match='could not render a value of column "ts"'):
+        diff_tables(left, right, key=["id"])
+
+
+# Same-domain, different-type facets: labels and equal-after-cast pairs
+
+
+def _one_cell(left_type: pa.DataType, left_val: object, right_type: pa.DataType, right_val: object) -> list:
+    """Diff a single (id=1, c) row pair whose c column differs in type across sides."""
+    left = pa.table({"id": pa.array([1], pa.int64()), "c": pa.array([left_val], left_type)})
+    right = pa.table({"id": pa.array([1], pa.int64()), "c": pa.array([right_val], right_type)})
+    return _table(diff_tables(left, right, key=["id"]).cells_changed()).to_pylist()
+
+
+def test_float_width_difference_is_value_changed_with_distinct_renderings() -> None:
+    """f32 0.1 versus f64 0.1 is a value change rendered at the wider type, so the two renderings differ."""
+    cells = _one_cell(pa.float32(), 0.1, pa.float64(), 0.1)
+    assert len(cells) == 1
+    assert cells[0]["change"] == "value_changed"
+    assert cells[0]["old_value"] == "0.10000000149011612"
+    assert cells[0]["new_value"] == "0.1"
+
+
+def test_equal_value_across_float_width_emits_no_record() -> None:
+    """f32 2.0 equals f64 2.0 after widening, so no cell is reported."""
+    assert _one_cell(pa.float32(), 2.0, pa.float64(), 2.0) == []
+
+
+def test_timestamp_zone_awareness_difference_is_type_changed() -> None:
+    """A zone-aware and a naive timestamp at the same instant are a type change with distinct renderings."""
+    cells = _one_cell(
+        pa.timestamp("us", tz="UTC"),
+        datetime(2024, 1, 1, tzinfo=timezone.utc),
+        pa.timestamp("us"),
+        datetime(2024, 1, 1),
+    )
+    assert len(cells) == 1
+    assert cells[0]["change"] == "type_changed"
+    assert cells[0]["old_value"] != cells[0]["new_value"]
+
+
+def test_time_unit_change_at_the_same_clock_emits_no_record() -> None:
+    """time32('s') and time32('ms') at the same clock time normalize equal, so no cell is reported."""
+    assert _one_cell(pa.time32("s"), time(1, 0, 0), pa.time32("ms"), time(1, 0, 0)) == []
+
+
+def test_duration_unit_change_at_the_same_span_emits_no_record() -> None:
+    """duration('s') and duration('ms') of the same span normalize equal, so no cell is reported."""
+    assert _one_cell(pa.duration("s"), timedelta(seconds=1), pa.duration("ms"), timedelta(seconds=1)) == []
+
+
+def test_decimal_scale_change_is_no_record_when_equal_and_value_changed_when_not() -> None:
+    """A decimal scale change at an equal value emits nothing; a differing value is value_changed."""
+    assert _one_cell(pa.decimal128(10, 2), decimal.Decimal("1.00"), pa.decimal128(10, 4), decimal.Decimal("1.0000")) == []
+    cells = _one_cell(pa.decimal128(10, 2), decimal.Decimal("1.00"), pa.decimal128(10, 4), decimal.Decimal("2.0000"))
+    assert len(cells) == 1
+    assert cells[0]["change"] == "value_changed"
 
 
 def test_cells_ordered_by_rendered_key_then_left_schema_column() -> None:
@@ -579,3 +650,44 @@ def test_cell_labels_match_a_naive_reference_across_every_hashed_type() -> None:
             got = {(c["id"], c["column"], c["change"]) for c in cells}
             expected = _naive_cell_labels(left_rows, right_rows)
             assert got == expected, (column_type, left_rows, right_rows)
+
+
+def test_cross_type_cell_labels_match_a_naive_reference() -> None:
+    """With two types per column, onix's changed cells and labels equal a naive reference read from pyarrow's own values.
+
+    Each pair is a lossless same-domain cast (int/float widening, a time unit
+    change), so the label is value_changed and equality read back through
+    ``to_pylist`` reflects onix's own normalization (an f32 0.1 widens to a value
+    distinct from f64 0.1; time32 s/ms at the same clock read equal).
+    """
+    pairs = [
+        (pa.int32(), pa.int64(), [None, -1, 0, 7]),
+        (pa.float32(), pa.float64(), [None, 0.0, 0.1, 2.0]),
+        (pa.time32("s"), pa.time32("ms"), [None, time(0, 0, 1), time(1, 0, 0)]),
+    ]
+    rng = random.Random(20260907)
+
+    for left_type, right_type, pool in pairs:
+        for _ in range(40):
+            left_rows = [(rng.randint(0, 3), rng.choice(pool)) for _ in range(rng.randint(0, 8))]
+            right_rows = [(rng.randint(0, 3), rng.choice(pool)) for _ in range(rng.randint(0, 8))]
+            left = pa.table(
+                {
+                    "id": pa.array([k for k, _ in left_rows], pa.int64()),
+                    "v": pa.array([v for _, v in left_rows], left_type),
+                },
+            )
+            right = pa.table(
+                {
+                    "id": pa.array([k for k, _ in right_rows], pa.int64()),
+                    "v": pa.array([v for _, v in right_rows], right_type),
+                },
+            )
+            # Read the values back through pyarrow so the naive reference sees
+            # the same normalized values onix hashes (f32 widening, time units).
+            left_read = list(zip((k for k, _ in left_rows), left.column("v").to_pylist()))
+            right_read = list(zip((k for k, _ in right_rows), right.column("v").to_pylist()))
+            cells = _table(diff_tables(left, right, key=["id"]).cells_changed()).to_pylist()
+            got = {(c["id"], c["column"], c["change"]) for c in cells}
+            expected = _naive_cell_labels(left_read, right_read)
+            assert got == expected, (left_type, right_type, left_rows, right_rows)
