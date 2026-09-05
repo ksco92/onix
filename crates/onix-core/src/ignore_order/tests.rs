@@ -1027,6 +1027,80 @@ fn count_object_diff_leaves_mixed_sums_shared_added_and_removed_non_str_keys() {
     );
 }
 
+/// [`count_object_diff_leaves_shared_key_recursion_depth_boundary_is_exact`]'s
+/// own boundary, for `count_object_diff_leaves_mixed`'s shared-key loop: the
+/// non-`str` key `5`'s values need 3 levels of recursion (array-element ->
+/// dict "a" -> dict "b") to reach the actual leaf difference. With
+/// `max_depth=3` and this call itself at `depth=0`, the recursive
+/// `count_diff_leaves(..., depth + 1, ...)` call must use `depth=1`, so
+/// `count_array_diff_leaves`'s own fresh-restart budget
+/// (`max_depth.saturating_sub(depth)`) is `3 - 1 = 2` — one short of the 3
+/// needed, so the trial is rejected (`0`). A `+` -> `*` mutant computes
+/// `depth=0` instead, handing the trial the full budget of 3 (exactly
+/// enough to succeed), giving a nonzero total instead.
+#[test]
+fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact() {
+    let key = || ObjectKey::Other(Box::new(cv(&json!(5))));
+    let a = crate::value::Object::from_pairs(vec![(key(), cv(&json!([{"a": {"b": 1}}])))]);
+    let b = crate::value::Object::from_pairs(vec![(key(), cv(&json!([{"a": {"b": 9}}])))]);
+    let opts = DiffOptions {
+        max_depth: 3,
+        ignore_order: false,
+    };
+
+    assert_eq!(
+        super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &super::IgnoreOrderMemo::new()),
+        0
+    );
+}
+
+/// `dict_python_eq_mixed`'s own boolean chain (`only_a.is_empty() &&
+/// only_b.is_empty() && shared.all(...)`): each case below isolates one
+/// operand as the sole reason the pair is unequal, so a `-> true` mutant
+/// (always "equal") and either `&&` -> `||` mutant (which would let a
+/// truthy sibling operand paper over a falsy one) all change the answer.
+/// Reached the same way
+/// `python_eq_matches_dicts_across_python_equal_but_differently_typed_keys`
+/// above is, through `type_change_leaf_length`'s list-vs-tuple coercion —
+/// "not reproduced" costs `1 + item_length(new_value)`, never the
+/// reproduced cost of `1`.
+#[test]
+fn dict_python_eq_mixed_rejects_when_only_one_side_has_an_extra_key_or_a_shared_value_differs() {
+    let leaves = super::distance::type_change_leaf_length;
+    let key = |n: i64| ObjectKey::Other(Box::new(cv(&json!(n))));
+    let dict =
+        |pairs: Vec<(ObjectKey, CValue)>| CValue::Object(crate::value::Object::from_pairs(pairs));
+    let list_of = |value: CValue| CValue::Array(vec![value].into_boxed_slice());
+    let tuple_of = |value: CValue| CValue::Tuple(vec![value].into_boxed_slice());
+
+    let base = || dict(vec![(key(1), cv(&json!("a")))]);
+    let with_extra_key = || dict(vec![(key(1), cv(&json!("a"))), (key(2), cv(&json!("b")))]);
+    let with_changed_value = || dict(vec![(key(1), cv(&json!("z")))]);
+
+    // `only_a` non-empty (a key present only on the list side): the first
+    // `&&` operand alone must fail the whole chain.
+    assert_ne!(
+        leaves(&list_of(with_extra_key()), &tuple_of(base())),
+        1,
+        "not reproduced: the list side has an extra key the tuple side never had"
+    );
+
+    // `only_b` non-empty: the second `&&` operand alone must fail the chain.
+    assert_ne!(
+        leaves(&list_of(base()), &tuple_of(with_extra_key())),
+        1,
+        "not reproduced: the tuple side has an extra key the list side never had"
+    );
+
+    // Same keys, a shared value differs: the third operand (`shared.all`)
+    // alone must fail the chain.
+    assert_ne!(
+        leaves(&list_of(base()), &tuple_of(with_changed_value())),
+        1,
+        "not reproduced: the shared key's value differs"
+    );
+}
+
 /// `python_eq`'s dict arm for a non-`str`-keyed pair
 /// (`dict_python_eq_mixed`): `1` and `1.0` are the same *key* to Python
 /// (see `crate::ignore_order::match_dict_keys`'s doc) even though this

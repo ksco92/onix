@@ -1298,6 +1298,83 @@ fn structure_exactly_at_configured_max_depth_diffs_successfully() {
     );
 }
 
+/// `object_diff_mixed`'s shared-key recursion must step `depth` to
+/// `depth + 1`, not leave it unchanged (a `+` -> `*` mutant on that call
+/// site survives everywhere else, since `depth * 1 == depth` differs from
+/// `depth + 1` at every value): a single non-`str` shared key at the root
+/// (`depth` starts at `0`) recursing into a changed value at `max_depth: 0`
+/// must be rejected — `check_traversal_depth` sees `depth + 1 == 1 > 0`
+/// under correct counting, but never rejects anything if `depth` stayed
+/// `0`.
+#[test]
+fn mixed_dict_shared_key_recursion_steps_depth_by_one_not_by_multiplication() {
+    let a = CValue::Object(CObject::from_pairs(vec![(
+        ObjectKey::Other(Box::new(CValue::from(json!(1)))),
+        cv(&json!("a")),
+    )]));
+    let b = CValue::Object(CObject::from_pairs(vec![(
+        ObjectKey::Other(Box::new(CValue::from(json!(1)))),
+        cv(&json!("b")),
+    )]));
+
+    let err = super::diff_with_max_depth(&a, &b, 0).unwrap_err();
+
+    assert_eq!(
+        err,
+        Error::MaxDepthExceeded {
+            path: "root[1]".to_string(),
+            max_depth: 0,
+        }
+    );
+}
+
+/// The same `depth + 1` boundary
+/// `removed_value_at_root_is_checked_against_its_own_plus_one_depth_not_the_parents`
+/// pins for the ordinary `str`-key removed-key sink, for
+/// `object_diff_mixed`'s own removed-key (`only_a`) sink: a `depth + 1` ->
+/// `depth * 1` mutant on that call site is one level *less* strict (it
+/// gives the removed value one extra level of nesting budget), so the
+/// value must sit exactly one level past the correct budget to catch it.
+#[test]
+fn mixed_dict_removed_key_value_is_checked_against_its_own_plus_one_depth() {
+    let a = CValue::Object(CObject::from_pairs(vec![(
+        ObjectKey::Other(Box::new(CValue::from(json!(5)))),
+        cv(&nested_array(10, json!(1))), // one past the correct budget of 9
+    )]));
+    let b = CValue::Object(CObject::from_pairs(vec![]));
+
+    let err = super::diff_with_max_depth(&a, &b, 10).unwrap_err();
+
+    assert_eq!(
+        err,
+        Error::MaxDepthExceeded {
+            path: "root[5]".to_string(),
+            max_depth: 10,
+        }
+    );
+}
+
+/// [`mixed_dict_removed_key_value_is_checked_against_its_own_plus_one_depth`]'s
+/// twin for `object_diff_mixed`'s added-key (`only_b`) sink.
+#[test]
+fn mixed_dict_added_key_value_is_checked_against_its_own_plus_one_depth() {
+    let a = CValue::Object(CObject::from_pairs(vec![]));
+    let b = CValue::Object(CObject::from_pairs(vec![(
+        ObjectKey::Other(Box::new(CValue::from(json!(5)))),
+        cv(&nested_array(10, json!(1))), // one past the correct budget of 9
+    )]));
+
+    let err = super::diff_with_max_depth(&a, &b, 10).unwrap_err();
+
+    assert_eq!(
+        err,
+        Error::MaxDepthExceeded {
+            path: "root[5]".to_string(),
+            max_depth: 10,
+        }
+    );
+}
+
 #[test]
 fn structure_one_level_past_configured_max_depth_errors() {
     let a = nested_dict(4, json!("a"));
