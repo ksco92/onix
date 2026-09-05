@@ -103,3 +103,9 @@ cd perf/arrow
 uv run --group perf pytest tests -q             # fast: 1k-row fixtures + synthetic tables
 uv run --group perf pytest tests -q -m slow      # also regenerates and checks the 100k and 1M pairs
 ```
+
+## Benchmark against hand-rolled baselines
+
+`bench_tables.py` times `diff_tables` against a DuckDB SQL diff and a polars join-based diff on
+this fixture pair, at 1M rows and full size; its own module docstring is the single home for the
+methodology, correctness check, and fairness rules. Results: [`RESULTS.md`](RESULTS.md).
