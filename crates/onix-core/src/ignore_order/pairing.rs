@@ -195,12 +195,12 @@ pub(crate) fn compute_pairs(
                 );
             while let Some(to_hash) = to_hashes.pop() {
                 if !used.contains(&to_hash) {
-                    used.insert(from_hash.clone());
-                    used.insert(to_hash.clone());
+                    used.insert(Rc::clone(&from_hash));
+                    used.insert(Rc::clone(&to_hash));
                     // No `break`: every further unused candidate popped
                     // here keeps overwriting this entry — see this
                     // function's own doc for why that is load-bearing.
-                    pairs.insert(from_hash.clone(), to_hash);
+                    pairs.insert(Rc::clone(&from_hash), to_hash);
                 }
             }
         }

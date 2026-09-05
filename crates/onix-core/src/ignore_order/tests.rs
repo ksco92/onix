@@ -2833,14 +2833,7 @@ fn ignore_order_memo_at_default_budget_on_plain_thread() {
         .expect("default-budget ignore_order diff completes on an ordinary stack");
 }
 
-/// `DistKey`'s `Hash` must agree with its `Eq` (equal values hash equal), or the
-/// distance memo silently stops hitting and the pairing goes exponential. The
-/// explicit-stack rewrite is the usual place this breaks (a differing child
-/// visit order, or a length hashed at the wrong spot), so pin the equal-but-
-/// differently-built cases the value model treats as equal: signed-zero and
-/// integral floats, and sets/frozensets whose members arrive in different
-/// insertion orders (`SetItems` canonicalizes them equal).
-#[cfg(test)]
+/// The distance-cache key's hash of a value, for the agreement tests below.
 fn dist_hash(value: &CValue) -> u64 {
     use std::hash::{Hash, Hasher};
     let key = super::hash::DistKey::from_rc(std::rc::Rc::new(value.clone()));
@@ -2849,6 +2842,15 @@ fn dist_hash(value: &CValue) -> u64 {
     hasher.finish()
 }
 
+/// `DistKey`'s `Hash` must agree with its `Eq` (equal values hash equal), or the
+/// distance memo silently stops hitting and the pairing goes exponential. The
+/// explicit-stack rewrite is the usual place this breaks (a differing child
+/// visit order, or a length hashed at the wrong spot), so pin the equal-but-
+/// differently-built cases the value model treats as equal: signed-zero and
+/// integral floats, sets/frozensets whose members arrive in different insertion
+/// orders (`SetItems` canonicalizes them equal), and datetimes equal by instant
+/// though built with different offsets (a naive value read as UTC, and an
+/// aware pair shifted by its offset to the same moment).
 #[test]
 fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
     let float = |f: f64| CValue::Number(crate::value::Number::from_f64(f).unwrap());
@@ -2873,6 +2875,16 @@ fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
         ),
         // A set of tuples, members reordered: exercises the nested walk.
         (nested_set([1, 2, 3]), nested_set([3, 2, 1])),
+        // A naive datetime (read as UTC) and an aware one at the same instant:
+        // Value equality compares datetimes by instant, so these are equal and
+        // must hash equal — they would not if the hash mixed in the offset.
+        (cdt(2024, 6, 1, None), cdt(2024, 6, 1, Some(0))),
+        // Two aware datetimes at the same instant but different wall clock and
+        // offset: 12:00+00:00 == 13:00+01:00.
+        (
+            cdt_at(2024, 6, 1, 12, 0, 0, 0, Some(0)),
+            cdt_at(2024, 6, 1, 13, 0, 0, 0, Some(3600)),
+        ),
     ];
     for (a, b) in pairs {
         assert_eq!(a, b, "test inputs must be Value-equal: {a:?} vs {b:?}");
@@ -2884,17 +2896,116 @@ fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
     }
 }
 
+/// An `arbitrary` compact value covering every equality class the distance-key
+/// hash must respect — including the ones JSON cannot express, so they are
+/// actually generated: tuples, sets, frozensets, datetimes (naive and aware),
+/// dates, and floats (signed zero and integral values among them).
+fn arb_cvalue() -> impl Strategy<Value = CValue> {
+    let arb_datetime = (
+        2000i32..2025,
+        1u8..=12,
+        1u8..=28,
+        0u8..24,
+        0u8..60,
+        0u8..60,
+        prop_oneof![
+            Just(None),
+            Just(Some(0)),
+            Just(Some(3600)),
+            Just(Some(-3600))
+        ],
+    )
+        .prop_map(|(y, mo, d, h, mi, s, off)| cdt_at(y, mo, d, h, mi, s, 0, off));
+    let arb_date = (2000i32..2025, 1u8..=12, 1u8..=28).prop_map(|(y, m, d)| cdate(y, m, d));
+    let arb_float = prop_oneof![
+        Just(0.0f64),
+        Just(-0.0f64),
+        Just(1.0f64),
+        Just(2.0f64),
+        any::<f64>(),
+    ]
+    .prop_filter_map("finite floats only", |f| {
+        crate::value::Number::from_f64(f).map(CValue::Number)
+    });
+    let leaf = prop_oneof![
+        Just(CValue::Null),
+        any::<bool>().prop_map(CValue::Bool),
+        any::<i64>().prop_map(|i| CValue::Number(crate::value::Number::from_i64(i))),
+        arb_float,
+        "[a-z]{0,3}".prop_map(|s| CValue::Str(s.into_boxed_str())),
+        arb_datetime,
+        arb_date,
+    ];
+    leaf.prop_recursive(5, 40, 4, |inner| {
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..4)
+                .prop_map(|v| CValue::Array(v.into_boxed_slice())),
+            prop::collection::vec(inner.clone(), 0..4)
+                .prop_map(|v| CValue::Tuple(v.into_boxed_slice())),
+            prop::collection::vec(inner.clone(), 0..4).prop_map(|v| CValue::Set(SetItems::new(v))),
+            prop::collection::vec(inner.clone(), 0..4)
+                .prop_map(|v| CValue::FrozenSet(SetItems::new(v))),
+            prop::collection::vec(("[a-c]", inner), 0..3)
+                .prop_map(|entries| { crate::value::Builder::new().object(entries) }),
+        ]
+    })
+}
+
+/// Rebuilds `value` into a structurally-equal twin by a *different* construction
+/// path: every set/frozenset from its members in reversed order and every dict
+/// from its entries in reversed order (both re-canonicalized on build), so the
+/// twin is equal by the value model's rules yet was never built the same way as
+/// the original — the property `dist_key_hash_equal_for_equal_values` needs to
+/// have any power. Recurses over proptest-bounded depth (safe).
+fn structural_twin(value: &CValue) -> CValue {
+    match value {
+        CValue::Array(items) => CValue::Array(
+            items
+                .iter()
+                .map(structural_twin)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ),
+        CValue::Tuple(items) => CValue::Tuple(
+            items
+                .iter()
+                .map(structural_twin)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ),
+        CValue::Set(items) => {
+            let mut members: Vec<CValue> = items.iter().map(structural_twin).collect();
+            members.reverse();
+            CValue::Set(SetItems::new(members))
+        }
+        CValue::FrozenSet(items) => {
+            let mut members: Vec<CValue> = items.iter().map(structural_twin).collect();
+            members.reverse();
+            CValue::FrozenSet(SetItems::new(members))
+        }
+        CValue::Object(map) => {
+            let mut entries: Vec<(String, CValue)> = map
+                .iter()
+                .map(|(key, child)| (key.to_string(), structural_twin(child)))
+                .collect();
+            entries.reverse();
+            crate::value::Builder::new().object(entries)
+        }
+        scalar => scalar.clone(),
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
 
-    /// Over generated nested shapes, a value hashes identically to a structural
-    /// twin built through a different path (round-tripped through the value
-    /// model), and reordering a set's members leaves the hash unchanged. Guards
-    /// the `DistKey` `Hash`/`Eq` agreement the memo's soundness depends on.
+    /// Over generated nested shapes spanning every equality class (see
+    /// `arb_cvalue`), a value hashes identically to a structural twin built by
+    /// an independent path ([`structural_twin`], which reverses set members and
+    /// dict entries before re-canonicalizing). Guards the `DistKey` `Hash`/`Eq`
+    /// agreement the memo's soundness depends on.
     #[test]
-    fn dist_key_hash_equal_for_equal_values(a in arb_nested()) {
-        let value = crate::value::Value::from(a.clone());
-        let twin = crate::value::Value::from(a);
+    fn dist_key_hash_equal_for_equal_values(value in arb_cvalue()) {
+        let twin = structural_twin(&value);
         prop_assert_eq!(&value, &twin);
         prop_assert_eq!(dist_hash(&value), dist_hash(&twin));
 
