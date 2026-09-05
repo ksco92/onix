@@ -9,6 +9,7 @@ import sys
 import textwrap
 
 import duckdb
+import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pytest
@@ -516,15 +517,59 @@ def test_every_row_member_returns_an_arrow_table() -> None:
 # Output and export tests
 
 
-def test_to_json_has_schema_and_summary() -> None:
-    """to_json round-trips to an object with schema and summary."""
+def test_to_json_has_schema_summary_and_row_members() -> None:
+    """to_json round-trips to an object with the schema, summary, and every row-level member."""
     left, right = _int_tables()
     diff = diff_tables(left, right, key=["id"])
     data = json.loads(diff.to_json())
 
-    assert set(data) == {"schema", "summary"}
+    assert set(data) == {
+        "schema",
+        "summary",
+        "rows_added",
+        "rows_removed",
+        "cells_changed",
+        "duplicate_keys",
+    }
     assert data["summary"]["columns_type_changed"] == 1
     assert {record["column"] for record in data["schema"]} == {"only_left", "only_right", "changed"}
+    # This fixture's rows all match by key with only a column-type change, so
+    # every row-level member is empty.
+    assert data["rows_added"] == []
+    assert data["rows_removed"] == []
+    assert data["cells_changed"] == []
+    assert data["duplicate_keys"] == []
+
+
+def test_to_json_embeds_row_level_content() -> None:
+    """to_json's row-level members carry the same content as the row-level accessors."""
+    left = pa.table({"id": pa.array([1, 2], pa.int64()), "v": pa.array([10, 20], pa.int64())})
+    right = pa.table({"id": pa.array([2, 3], pa.int64()), "v": pa.array([21, 30], pa.int64())})
+    diff = diff_tables(left, right, key=["id"])
+    data = json.loads(diff.to_json())
+
+    assert data["rows_removed"] == [{"id": "1", "v": "10"}]
+    assert data["rows_added"] == [{"id": "3", "v": "30"}]
+    assert len(data["cells_changed"]) == 1
+    assert data["cells_changed"][0]["column"] == "v"
+    assert data["cells_changed"][0]["old_value"] == "20"
+    assert data["cells_changed"][0]["new_value"] == "21"
+
+
+def test_to_json_refuses_a_diff_larger_than_the_row_cap() -> None:
+    """to_json raises a clear ValueError naming the row count and cap for an oversized diff."""
+    n = 10_001
+    left = pa.table({"id": pa.array(range(n), pa.int64())})
+    right = pa.table({"id": pa.array(range(n, 2 * n), pa.int64())})
+    diff = diff_tables(left, right, key=["id"])
+
+    with pytest.raises(ValueError, match=f"{2 * n} row objects.*10000-row cap"):
+        diff.to_json()
+
+    # The row-level accessors and the schema/summary members are unaffected;
+    # only to_json's embedding of the full row content is capped.
+    assert diff.summary()["rows_added"] == n
+    assert len(diff.rows_added()) == n
 
 
 def test_schema_arrow_exports_to_pyarrow() -> None:
@@ -624,58 +669,159 @@ def test_bad_requested_schema_capsule_raises_value_error() -> None:
 
 # Optional-dependency tests
 
+# Shared by every test below that needs pyarrow genuinely unimportable in the
+# subprocess (not merely unimported): a meta-path finder that raises
+# ModuleNotFoundError for "pyarrow" and any of its submodules.
+_BLOCK_PYARROW_IMPORT = textwrap.dedent(
+    """
+    import importlib.abc
+    import importlib.machinery
+    import sys
+
+
+    class FailLoader(importlib.abc.Loader):
+        def create_module(self, spec):
+            raise ModuleNotFoundError("No module named 'pyarrow' (blocked for test)")
+
+        def exec_module(self, module):
+            raise ModuleNotFoundError("No module named 'pyarrow' (blocked for test)")
+
+
+    class PyarrowBlocker(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name == "pyarrow" or name.startswith("pyarrow."):
+                return importlib.machinery.ModuleSpec(name, FailLoader())
+            return None
+
+
+    sys.modules.pop("pyarrow", None)
+    sys.meta_path.insert(0, PyarrowBlocker())
+    """
+)
+
+# Shared closing check: pyarrow really is unimportable, so the test above
+# proved something about the blocked state rather than an accidental import.
+_ASSERT_PYARROW_UNIMPORTABLE = textwrap.dedent(
+    """
+    try:
+        import pyarrow  # noqa: F401
+    except ModuleNotFoundError:
+        pass
+    else:
+        raise AssertionError("pyarrow should be unimportable in this subprocess")
+    """
+)
+
 
 def test_import_and_diff_without_pyarrow() -> None:
     """deepdiff_rs imports and diffs DuckDB tables with pyarrow unavailable, and to_pyarrow errors."""
     result = _run_isolated(
-        """
-        import importlib.abc
-        import importlib.machinery
-        import sys
+        _BLOCK_PYARROW_IMPORT
+        + textwrap.dedent(
+            """
+            import duckdb
+            import deepdiff_rs
+
+            left = duckdb.sql("SELECT CAST(1 AS BIGINT) AS id, 1 AS a")
+            right = duckdb.sql("SELECT CAST(1 AS BIGINT) AS id, 1 AS b")
+            diff = deepdiff_rs.diff_tables(left, right, key=["id"])
+            assert {record["column"] for record in diff.schema} == {"a", "b"}
+            """
+        )
+        + _ASSERT_PYARROW_UNIMPORTABLE
+        + textwrap.dedent(
+            """
+            try:
+                diff.schema_arrow.to_pyarrow()
+            except ImportError as error:
+                assert "deepdiff-rs[arrow]" in str(error), str(error)
+            else:
+                raise AssertionError("expected ImportError from to_pyarrow without pyarrow")
+
+            print("OK")
+            """
+        )
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("OK")
 
 
-        class FailLoader(importlib.abc.Loader):
-            def create_module(self, spec):
-                raise ModuleNotFoundError("No module named 'pyarrow' (blocked for test)")
+def test_row_member_exports_to_polars_without_pyarrow() -> None:
+    """rows_added() (an ArrowTable) is consumable by polars with pyarrow unimportable.
 
-            def exec_module(self, module):
-                raise ModuleNotFoundError("No module named 'pyarrow' (blocked for test)")
+    Polars has its own native Arrow C Data Interface reader, so it needs no pyarrow at all.
+    """
+    result = _run_isolated(
+        _BLOCK_PYARROW_IMPORT
+        + textwrap.dedent(
+            """
+            import duckdb
+            import polars as pl
+
+            import deepdiff_rs
+
+            left = duckdb.sql("SELECT * FROM (VALUES (1, 10), (2, 20)) AS t(id, v)")
+            right = duckdb.sql("SELECT * FROM (VALUES (2, 20), (3, 30)) AS t(id, v)")
+            diff = deepdiff_rs.diff_tables(left, right, key=["id"])
+            added = diff.rows_added()
+            assert len(added) == 1
+
+            polars_frame = pl.DataFrame(added)
+            assert polars_frame["id"].to_list() == [3]
+            """
+        )
+        + _ASSERT_PYARROW_UNIMPORTABLE
+        + textwrap.dedent(
+            """
+            print("OK")
+            """
+        )
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("OK")
 
 
-        class PyarrowBlocker(importlib.abc.MetaPathFinder):
-            def find_spec(self, name, path=None, target=None):
-                if name == "pyarrow" or name.startswith("pyarrow."):
-                    return importlib.machinery.ModuleSpec(name, FailLoader())
-                return None
+def test_row_member_exports_to_pandas_via_the_interchange_protocol() -> None:
+    """rows_added() (an ArrowTable) is consumable by pandas through pd.api.interchange.from_dataframe, given pyarrow."""
+    left = pa.table({"id": pa.array([1, 2], pa.int64()), "v": pa.array([10, 20], pa.int64())})
+    right = pa.table({"id": pa.array([2, 3], pa.int64()), "v": pa.array([20, 30], pa.int64())})
+    diff = diff_tables(left, right, key=["id"])
+
+    frame = pd.api.interchange.from_dataframe(diff.rows_added())
+    assert frame["id"].tolist() == [3]
 
 
-        sys.modules.pop("pyarrow", None)
-        sys.meta_path.insert(0, PyarrowBlocker())
+def test_row_member_exports_to_pandas_raises_without_pyarrow() -> None:
+    """pandas' interchange path raises when pyarrow is genuinely unimportable, the regression test for that fact."""
+    result = _run_isolated(
+        _BLOCK_PYARROW_IMPORT
+        + textwrap.dedent(
+            """
+            import duckdb
+            import pandas as pd
 
-        import duckdb
-        import deepdiff_rs
+            import deepdiff_rs
 
-        left = duckdb.sql("SELECT CAST(1 AS BIGINT) AS id, 1 AS a")
-        right = duckdb.sql("SELECT CAST(1 AS BIGINT) AS id, 1 AS b")
-        diff = deepdiff_rs.diff_tables(left, right, key=["id"])
-        assert {record["column"] for record in diff.schema} == {"a", "b"}
+            left = duckdb.sql("SELECT * FROM (VALUES (1, 10), (2, 20)) AS t(id, v)")
+            right = duckdb.sql("SELECT * FROM (VALUES (2, 20), (3, 30)) AS t(id, v)")
+            diff = deepdiff_rs.diff_tables(left, right, key=["id"])
 
-        try:
-            import pyarrow  # noqa: F401
-        except ModuleNotFoundError:
-            pass
-        else:
-            raise AssertionError("pyarrow should be unimportable in this subprocess")
-
-        try:
-            diff.schema_arrow.to_pyarrow()
-        except ImportError as error:
-            assert "deepdiff-rs[arrow]" in str(error), str(error)
-        else:
-            raise AssertionError("expected ImportError from to_pyarrow without pyarrow")
-
-        print("OK")
-        """,
+            try:
+                pd.api.interchange.from_dataframe(diff.rows_added())
+            except ValueError as error:
+                assert "__dataframe__" in str(error), str(error)
+            else:
+                raise AssertionError("expected pandas' interchange path to raise without pyarrow")
+            """
+        )
+        + _ASSERT_PYARROW_UNIMPORTABLE
+        + textwrap.dedent(
+            """
+            print("OK")
+            """
+        )
     )
 
     assert result.returncode == 0, result.stderr

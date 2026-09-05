@@ -5,8 +5,10 @@ use std::sync::Arc;
 use arrow_array::{ArrayRef, BooleanArray, RecordBatch, StringArray};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use serde::Serialize;
+use serde_json::Value as JsonValue;
 
 use crate::error::TableDiffError;
+use crate::json_rows::rows_to_json;
 use crate::row_diff::RowDiff;
 use crate::schema::SchemaChange;
 
@@ -55,6 +57,10 @@ pub struct TableDiff {
 struct TableDiffJson<'a> {
     schema: &'a [SchemaChange],
     summary: TableDiffSummary,
+    rows_added: Vec<JsonValue>,
+    rows_removed: Vec<JsonValue>,
+    cells_changed: Vec<JsonValue>,
+    duplicate_keys: Vec<JsonValue>,
 }
 
 impl TableDiff {
@@ -97,16 +103,48 @@ impl TableDiff {
         summary
     }
 
-    /// The schema diff and its summary as a JSON string.
+    /// The full diff — schema, summary, and every row-level member — as a
+    /// JSON string: `schema` and `summary` as [`TableDiff::schema`] and
+    /// [`TableDiff::summary`] give them, then `rows_added`, `rows_removed`,
+    /// `cells_changed`, and `duplicate_keys`, each an array of one JSON
+    /// object per row keyed by column name (a null cell as JSON `null`,
+    /// every other cell as its canonical string rendering — the same
+    /// rendering [`TableDiff::cells_changed`]'s `old_value`/`new_value`
+    /// columns use). See [`crate::MAX_JSON_ROWS`]'s own doc for the row cap
+    /// this enforces and why.
     ///
     /// # Errors
     ///
-    /// Returns the underlying [`serde_json::Error`] if serialization fails,
-    /// which does not happen for the value shapes this type holds.
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(&TableDiffJson {
+    /// - [`TableDiffError::TooManyJsonRows`] if `rows_added`, `rows_removed`,
+    ///   `cells_changed`, and `duplicate_keys` have more rows in total than
+    ///   [`crate::MAX_JSON_ROWS`].
+    /// - [`TableDiffError::Render`] if a row-level cell cannot be rendered to
+    ///   its canonical string, naming the column.
+    /// - [`TableDiffError::Json`] if serialization itself fails, which does
+    ///   not happen for the value shapes this type holds.
+    pub fn to_json(&self) -> Result<String, TableDiffError> {
+        let total_rows = self.rows.rows_added.num_rows()
+            + self.rows.rows_removed.num_rows()
+            + self.rows.cells_changed.num_rows()
+            + self.rows.duplicate_keys.num_rows();
+        if total_rows > crate::MAX_JSON_ROWS {
+            return Err(TableDiffError::TooManyJsonRows {
+                rows: total_rows,
+                max: crate::MAX_JSON_ROWS,
+            });
+        }
+
+        let payload = TableDiffJson {
             schema: &self.schema,
             summary: self.summary(),
+            rows_added: rows_to_json(&self.rows.rows_added)?,
+            rows_removed: rows_to_json(&self.rows.rows_removed)?,
+            cells_changed: rows_to_json(&self.rows.cells_changed)?,
+            duplicate_keys: rows_to_json(&self.rows.duplicate_keys)?,
+        };
+
+        serde_json::to_string(&payload).map_err(|e| TableDiffError::Json {
+            message: e.to_string(),
         })
     }
 
@@ -329,6 +367,60 @@ mod tests {
         assert_eq!(json["schema"][0]["right_type"], serde_json::Value::Null);
         assert_eq!(json["schema"][1]["change"], "type_changed");
         assert_eq!(json["schema"][2]["change"], "added");
+        assert_eq!(json["rows_added"], serde_json::json!([]));
+        assert_eq!(json["rows_removed"], serde_json::json!([]));
+        assert_eq!(json["cells_changed"], serde_json::json!([]));
+        assert_eq!(json["duplicate_keys"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn to_json_embeds_row_level_members() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let one_row =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![7]))])
+                .unwrap();
+        let diff = TableDiff::new(
+            Vec::new(),
+            RowDiff {
+                rows_added: one_row.clone(),
+                rows_removed: empty_batch(),
+                duplicate_keys: empty_batch(),
+                cells_changed: empty_batch(),
+                counts: RowCounts {
+                    rows_added: 1,
+                    ..no_rows()
+                },
+            },
+        );
+        let json: serde_json::Value = serde_json::from_str(&diff.to_json().unwrap()).unwrap();
+        assert_eq!(json["rows_added"][0]["id"], "7");
+    }
+
+    #[test]
+    fn to_json_refuses_more_rows_than_the_cap() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let rows: Vec<i64> = (0..=crate::MAX_JSON_ROWS)
+            .map(|i| i64::try_from(i).unwrap())
+            .collect();
+        let big_batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(rows))]).unwrap();
+        let diff = TableDiff::new(
+            Vec::new(),
+            RowDiff {
+                rows_added: big_batch,
+                rows_removed: empty_batch(),
+                duplicate_keys: empty_batch(),
+                cells_changed: empty_batch(),
+                counts: no_rows(),
+            },
+        );
+        assert_eq!(
+            diff.to_json(),
+            Err(crate::error::TableDiffError::TooManyJsonRows {
+                rows: crate::MAX_JSON_ROWS + 1,
+                max: crate::MAX_JSON_ROWS,
+            })
+        );
     }
 
     #[test]
