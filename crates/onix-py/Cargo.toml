@@ -15,6 +15,18 @@ workspace = true
 
 [dependencies]
 onix-core = { path = "../onix-core" }
+onix-arrow = { path = "../onix-arrow" }
+# Same exact Arrow pin as onix-arrow and the version pyo3-arrow resolves to,
+# so the record batches crossing between all three are the identical types.
+arrow-array = "=59.3.0"
+arrow-schema = "=59.3.0"
+# The Arrow C Data Interface bridge: imports/exports Arrow PyCapsule objects
+# with its `unsafe` FFI encapsulated, so this crate stays `unsafe`-free; pinned
+# to arrow ^59 to match onix-arrow's 59.3.0.
+# `default-features = false` drops pyo3-arrow's `buffer_protocol` feature, which
+# needs the non-abi3 CPython buffer API and so will not build under abi3-py39;
+# it is unused here.
+pyo3-arrow = { version = "0.19", default-features = false }
 pyo3 = { version = "0.29", features = ["abi3-py39"] }
 serde_json = "1"
 

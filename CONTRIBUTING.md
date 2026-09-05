@@ -68,7 +68,8 @@ just the public API surface.
 
 **Coverage scope.** `onix-cli` is held to the same 95% bar as `onix-core`
 (its `diff` subcommand has unit tests in `crates/onix-cli/src/tests.rs` and
-end-to-end tests in `crates/onix-cli/tests/cli.rs`). `onix-py` is excluded
+end-to-end tests in `crates/onix-cli/tests/cli.rs`). `onix-arrow` is held to
+the same bar (its schema-diff logic is unit-tested in-crate). `onix-py` is excluded
 from the line-coverage denominator: it is a `cdylib` whose logic is
 Python-object conversion and PyO3 glue, only meaningfully exercised by calling
 the compiled wheel from real Python, so `make python-test` is its coverage
@@ -196,6 +197,21 @@ after a change is `maturin develop --release`; if a fix does not bump the
 version, run `uv cache clean` first so the reinstall cannot serve a cached
 pre-fix binary.
 
+The Arrow table-diff tests are part of the same suite
+(`tests/test_table_diff.py` — its module docstring explains what each group
+covers). `uv sync --group test` installs pyarrow, polars, and DuckDB, which
+those tests need but which `diff_tables` itself does not (they are test-only,
+never runtime, dependencies); `pyarrow` is also the optional `arrow` extra. To
+run only them:
+
+```sh
+cd crates/onix-py
+uv run --group test pytest tests/test_table_diff.py -q
+```
+
+The pure-Rust schema logic lives in `crates/onix-arrow` and is covered by
+`cargo test` / `make check` like the other Rust crates.
+
 ## Benchmarking
 
 Two benchmarks live in the repo; both are reproduced from source here, and the
@@ -251,8 +267,8 @@ every scale, and the oracle's value-comparison semantics; nothing under
 
 ## Mutation testing
 
-`make mutants` runs [`cargo-mutants`](https://mutants.rs/) against `onix-core`
-and `onix-cli` (the two crates coverage holds to the 95% bar). It is the
+`make mutants` runs [`cargo-mutants`](https://mutants.rs/) against `onix-core`,
+`onix-cli`, and `onix-arrow` (the crates coverage holds to the 95% bar). It is the
 coverage gate's honest sibling: 95% line coverage proves every line ran, not
 that a test would notice if that line's logic were wrong. It is slow by design
 (one rebuild and re-test per mutant), so it runs periodically, not on every
@@ -263,9 +279,11 @@ cargo install cargo-mutants --locked
 make mutants
 ```
 
-**Standing result.** `make mutants` enumerates a deterministic **1000** mutants
-(20 in `onix-cli`, 980 in `onix-core`). Every viable mutant is caught except
-equivalent mutants confined to five documented spots (`onix-core/src/lcs.rs`;
+**Standing result.** `make mutants` enumerates a deterministic **1063** mutants
+(20 in `onix-cli`, 980 in `onix-core`, 63 in `onix-arrow`). In `onix-arrow` all
+42 viable mutants are caught (21 do not compile). In `onix-core`/`onix-cli`
+every viable mutant is caught except equivalent mutants confined to five
+documented spots (`onix-core/src/lcs.rs`;
 the `> 1` threshold in `onix-core/src/diff/array.rs`, provably output-neutral;
 `onix-core/src/path.rs`'s `python_float_repr`, an unreachable branch
 condition; `onix-core/src/ignore_order/distance.rs`'s datetime-scale mutant,

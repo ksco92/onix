@@ -58,15 +58,15 @@ machete:
 # Mutation testing: coverage's honest sibling. Slow by design — run
 # periodically, not on every check. Install: cargo install cargo-mutants
 #
-# Scoped to onix-core and onix-cli, the same two crates coverage holds
-# to the 95% bar. onix-py is excluded for the same structural reason it is
-# excluded from coverage: it is a cdylib whose logic is only exercised by
+# Scoped to onix-core, onix-cli, and onix-arrow, the same crates coverage
+# holds to the 95% bar. onix-py is excluded for the same structural reason it
+# is excluded from coverage: it is a cdylib whose logic is only exercised by
 # calling the compiled wheel from Python, which the Rust test harness cannot
 # do, so every onix-py mutant would survive vacuously. This scope matches the
 # reproduce command recorded in perf/MUTANTS.md, where every finding is triaged.
 mutants:
 	@command -v cargo-mutants >/dev/null 2>&1 || { echo "cargo-mutants not installed: cargo install cargo-mutants --locked"; exit 1; }
-	cargo mutants --package onix-core --package onix-cli
+	cargo mutants --package onix-core --package onix-cli --package onix-arrow
 
 # Regenerates perf/RESULTS.md from a real run against pinned deepdiff.
 # Slow (tens of minutes on the full fixture matrix, including two
