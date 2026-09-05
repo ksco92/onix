@@ -128,7 +128,7 @@ added ids: [4]
 removed ids: [1]
 ```
 
-A key appearing more than once on either side is reported in `duplicate_keys` (with `left_count` and `right_count`) and excluded from the added/removed/changed sets; a null key matches its counterpart and is counted in `null_keys`. Rows are compared by the non-key columns present on *both* sides, with onix's value semantics (integers and integral floats fold together, `1.00` equals `1.0000`, a timestamp compares by its instant across units, dictionary-encoded values equal their plain form, and null equals null); a nested non-key column is out of scope and is skipped rather than compared.
+A key appearing more than once on either side is reported in `duplicate_keys` (with `left_count` and `right_count`) and excluded from the added/removed/changed sets; a null key matches its counterpart and is counted in `null_keys`. Rows are compared by the non-key columns present on *both* sides, with onix's value semantics (integers and integral floats fold together, `1.00` equals `1.0000`, a timestamp compares by its instant across units, dictionary-encoded values equal their plain form, and null equals null); a nested non-key column is out of scope and is skipped rather than compared. The exact value-comparison rules are documented on the hashing functions in [`crates/onix-arrow/src/row_diff.rs`](crates/onix-arrow/src/row_diff.rs).
 
 Type comparison uses the full logical Arrow type (timestamp unit and timezone, decimal precision and scale, and so on), but physical encodings that carry the same logical type compare equal — a dictionary-encoded string equals a plain string, polars' `Utf8View` equals pyarrow's `Utf8`, the list variants normalize together, and a map compares equal however a library spells it — so the same table read through pyarrow, polars, or DuckDB reports no spurious type changes. The full normalization rules are documented on `normalized_type` (and `map_entries`) in [`crates/onix-arrow/src/schema.rs`](crates/onix-arrow/src/schema.rs); nullability is ignored but reported in each record. Column names must be unique on each side; a repeated name raises `ValueError`. `diff.schema_arrow` is the same result as an Arrow table: it implements `__arrow_c_stream__`, so `polars.DataFrame(diff.schema_arrow)` and `pandas` consume it directly, and `diff.schema_arrow.to_pyarrow()` returns a `pyarrow.Table`.
 
@@ -204,7 +204,7 @@ Both reports carry their full methodology, fairness rules, and the reproduce com
 
 ## Reference
 
-**Python API.** The public surface is `DeepDiff`, `diff_json`, `MaxDepthError`, and `MAX_DEPTH_CEILING`.
+**Python API.** The public surface is `DeepDiff`, `diff_json`, `diff_tables` (returning a `TableDiff`), `MaxDepthError`, and `MAX_DEPTH_CEILING`.
 
 - `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`: diffs two live Python objects of supported value types — `None`, `bool`, `int`, `float`, `str`, `dict` (with `str` keys), `list`, `tuple`, `set`, `frozenset`, `datetime.datetime`, and `datetime.date` (see [Known limitations](#known-limitations) for the exact restrictions and exclusions); `.to_json()` returns the DeepDiff-compatible JSON string, `.to_dict()` the same report as a dict — with Python types preserved, so a value the diff found in a `tuple`, `set` or `frozenset` comes back as one and a `datetime`/`date` comes back as a real `datetime`/`date` — and the instance is falsy when there is no difference. The `set_item_added`/`set_item_removed` categories are lists of path strings, each ending in the item itself (`root['a'][2]`, `root['x']`, `root[(1, 2)]`).
 - `diff_json(a, b, ignore_order=False, max_depth=None) -> str`: diffs two JSON strings entirely in Rust and returns the report as a JSON string.
@@ -231,7 +231,7 @@ Exit codes:
 ```
 crates/onix-core   # the diff engine (library, no I/O)
 crates/onix-cli    # the `onix` binary (thin CLI over the core)
-crates/onix-arrow  # Arrow table diffing (schema diff; rows in a later version)
+crates/onix-arrow  # Arrow table diffing (schema diff and keyed row diff)
 crates/onix-py     # PyO3 bindings, published as `deepdiff-rs`
 scripts/           # gen_goldens.py: regenerates tests/golden/ from real DeepDiff
 tests/golden       # DeepDiff-generated expected outputs (the compatibility corpus)

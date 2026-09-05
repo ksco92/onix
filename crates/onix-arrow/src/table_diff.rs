@@ -198,15 +198,6 @@ impl TableDiff {
     pub fn duplicate_keys(&self) -> Result<RecordBatch, TableDiffError> {
         Ok(self.rows.duplicate_keys.clone())
     }
-
-    /// The key hashes of rows present on both sides whose non-key values
-    /// differ. Internal to the crate: the per-cell diff version consumes it,
-    /// so it has no caller in this version.
-    #[must_use]
-    #[allow(dead_code)]
-    pub(crate) fn changed_keys(&self) -> &[u128] {
-        &self.rows.changed_keys
-    }
 }
 
 /// The fixed Arrow schema of the batch [`TableDiff::schema_record_batch`]
@@ -413,14 +404,5 @@ mod tests {
                 feature: "cells_changed"
             })
         ));
-    }
-
-    #[test]
-    fn changed_keys_is_exposed_internally() {
-        let counts = no_rows();
-        let mut rows = row_diff(counts);
-        rows.changed_keys = vec![1, 2, 3];
-        let diff = TableDiff::new(Vec::new(), rows);
-        assert_eq!(diff.changed_keys(), &[1, 2, 3]);
     }
 }

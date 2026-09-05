@@ -144,7 +144,10 @@ impl std::hash::Hash for ScalarKey {
 /// The largest magnitude an `f64` can represent every integer up to,
 /// exactly (`2^53`). Beyond this, adjacent integers can be indistinguishable
 /// in floating point, so [`scalar_key`] does not attempt an exact integer
-/// cast past this bound.
+/// cast past this bound. `onix-arrow`'s row hasher applies the identical bound
+/// and fold predicate (`MAX_EXACT_F64_INT` / `hash_float` in
+/// `crates/onix-arrow/src/row_diff.rs`); the crates are decoupled, so the two
+/// copies move together.
 const MAX_EXACT_F64_INT: f64 = 9_007_199_254_740_992.0;
 
 /// Returns `true` if every element of `items` is a JSON scalar (null, bool,

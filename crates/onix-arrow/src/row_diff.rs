@@ -112,9 +112,11 @@ impl TableInput for MemoryInput {
 
 use crate::error::TableDiffError;
 
-/// The largest exact integer a binary64 float can hold; a float that is
-/// integral and within `±` this folds to the integer hash form, matching onix's
-/// core scalar-key normalization.
+/// The largest exact integer a binary64 float can hold (`2^53`); a float
+/// integral and within `±` this folds to the integer hash form. `onix-core`
+/// carries the identical bound and rationale as `MAX_EXACT_F64_INT` in
+/// `crates/onix-core/src/lcs.rs`; the two crates are decoupled by design, so
+/// this is a deliberate copy that must move with it.
 const MAX_EXACT_F64_INT: f64 = 9_007_199_254_740_992.0;
 
 /// Domain-separation tag mixed into a key-column hash, so a key hash and a row
@@ -446,9 +448,13 @@ fn hash_int(hasher: &mut DualHasher, value: i128) {
     hasher.write_i128(value);
 }
 
-/// Writes a float: integral and within `±2⁵³` folds to the integer form (so
-/// `-0.0` and `0.0` both become `0`); otherwise the raw bit pattern, so two
-/// NaNs hash equal only when bit-identical.
+/// Writes a float using the same exact-integral fold `scalar_key` applies in
+/// `crates/onix-core/src/lcs.rs` (its doc carries the full rationale; the
+/// predicate and the `±2⁵³` bound are duplicated here on purpose because the
+/// crates are decoupled, and both sites move together): an integral value in
+/// range folds to the integer form (so `-0.0` and `0.0` both become `0`);
+/// anything else keeps its raw bit pattern, so two NaNs hash equal only when
+/// bit-identical.
 fn hash_float(hasher: &mut DualHasher, value: f64) {
     if value.fract() == 0.0 && value.abs() <= MAX_EXACT_F64_INT {
         // `fract() == 0.0` and the magnitude bound guarantee an exact cast.
@@ -486,7 +492,10 @@ fn hash_bytes(hasher: &mut DualHasher, tag: u8, bytes: &[u8]) {
 
 /// Writes a timestamp as its UTC instant in nanoseconds plus a flag for whether
 /// it carries a timezone, so the same instant at different precisions hashes
-/// equal while a naive timestamp stays distinct from an aware one.
+/// equal while a naive timestamp stays distinct from an aware one. This mirrors
+/// `onix-core`'s `ScalarKey::DateTime { aware, instant }` in
+/// `crates/onix-core/src/lcs.rs` (instant plus an aware flag); the two are kept
+/// consistent by hand, the crates being decoupled by design.
 fn hash_timestamp(hasher: &mut DualHasher, raw: i64, unit: TimeUnit, has_tz: bool) {
     let nanos = i128::from(raw)
         * match unit {
