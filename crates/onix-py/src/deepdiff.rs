@@ -23,7 +23,8 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 ///
 /// `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`:
 ///
-/// - `t1`/`t2`: any of `None`, `bool`, `int`, `float`, `str`, `dict` (a key
+/// - `t1`/`t2`: any of `None`, `bool`, `int`, `float` (`NaN`/`Infinity`/
+///   `-Infinity` included), `str`, `dict` (a key
 ///   may be `str`, `None`, `bool`, `int`, `float`, `datetime.datetime`,
 ///   `datetime.date`, or a `tuple` of those, never nested), `list`, `tuple`,
 ///   `set`, `frozenset`, `datetime.datetime`, `datetime.date`,
