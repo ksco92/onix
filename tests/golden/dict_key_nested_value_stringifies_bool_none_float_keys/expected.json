@@ -1,0 +1,10 @@
+{
+  "dictionary_item_added": {
+    "root['a']": {
+      "1.5": 3,
+      "5": 0,
+      "null": 2,
+      "true": 1
+    }
+  }
+}

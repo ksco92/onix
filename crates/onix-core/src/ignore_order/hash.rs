@@ -129,12 +129,19 @@ fn hash_value<H: Hasher>(root: &Value, state: &mut H) {
             }
             Value::Object(map) => {
                 map.len().hash(state);
-                // Keys carry the association and are hashed here in sorted
-                // order; the values are pushed and hashed as they pop. The
-                // order values come back in is deterministic, which is all
-                // equality-consistency needs.
+                // A `str` key carries the association and is hashed here
+                // directly, in sorted order; a non-`str` key's own `Value`
+                // is pushed onto the same work-stack the values use below,
+                // so it gets discriminant-and-content hashed by this same
+                // loop rather than needing a second, `ObjectKey`-specific
+                // `Hash` impl (this type deliberately has none — see its own
+                // doc). Either way, the order everything comes back in is
+                // deterministic, which is all equality-consistency needs.
                 for (key, _) in map {
-                    key.hash(state);
+                    match key {
+                        crate::value::ObjectKey::Str(s) => s.hash(state),
+                        crate::value::ObjectKey::Other(value) => stack.push(value),
+                    }
                 }
                 stack.extend(map.values());
             }
@@ -244,8 +251,12 @@ pub(crate) enum ItemKey {
     /// not reproduce that: a frozenset keys by its own membership, always.
     /// See `tests/golden/README.md`'s "Set iteration order" section.
     FrozenSet(BTreeSet<ItemKey>),
-    /// Key-sorted, recursively keyed values.
-    Dict(BTreeMap<String, ItemKey>),
+    /// Key-sorted, recursively keyed values, the key itself recursively
+    /// keyed too — a plain `String` cannot represent a non-`str` dict key
+    /// (`ItemKey` already covers every key kind this crate's dicts allow,
+    /// scalar or a `tuple` of scalars, via the same recursion [`item_key`]
+    /// runs on a value).
+    Dict(BTreeMap<ItemKey, ItemKey>),
 }
 
 /// Hand-written to run the `Float` arm through [`mix_float_bits`] before
@@ -405,8 +416,9 @@ pub(crate) enum MemberContent {
     UnhashableList(Vec<RepId>),
     /// A `set`, likewise.
     UnhashableSet(Vec<RepId>),
-    /// A `dict`, likewise.
-    UnhashableDict(BTreeMap<String, RepId>),
+    /// A `dict`, likewise, keyed by each key's own [`ItemKey`] rather than a
+    /// plain `String` — see [`ItemKey::Dict`]'s doc for why.
+    UnhashableDict(BTreeMap<ItemKey, RepId>),
 }
 
 /// The members of `a` that no member of `b` shares a digest with, and the
@@ -569,7 +581,10 @@ pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> RepId {
             Value::Object(map) => {
                 let reps = child_reps(&mut built, map.len());
                 let content = MemberContent::UnhashableDict(
-                    map.keys().map(str::to_owned).zip(reps).collect(),
+                    map.keys()
+                        .map(|key| object_key_item_key(key, memo))
+                        .zip(reps)
+                        .collect(),
                 );
                 (memo.content_rep(content), None)
             }
@@ -760,11 +775,24 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
         Value::Object(map) => (
             ItemKey::Dict(
                 map.iter()
-                    .map(|(k, v)| (k.to_string(), item_key(v, memo)))
+                    .map(|(k, v)| (object_key_item_key(k, memo), item_key(v, memo)))
                     .collect(),
             ),
             None,
         ),
+    }
+}
+
+/// One [`ObjectKey`](crate::value::ObjectKey)'s [`ItemKey`] — a `str` key
+/// keys exactly like [`keyed`]'s own `Value::Str` case, and any other key
+/// recurses through [`item_key`] on its wrapped [`Value`], covering a
+/// `tuple` key the same way a `tuple` value already is. Shared by
+/// [`keyed`]'s dict case and [`set_member_digest`]'s, so `ItemKey::Dict` and
+/// `MemberContent::UnhashableDict` key a dict identically.
+fn object_key_item_key(key: &crate::value::ObjectKey, memo: &IgnoreOrderMemo) -> ItemKey {
+    match key {
+        crate::value::ObjectKey::Str(s) => ItemKey::Str(s.to_string()),
+        crate::value::ObjectKey::Other(value) => item_key(value, memo),
     }
 }
 

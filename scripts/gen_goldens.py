@@ -82,6 +82,66 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
         {"a": {"x": 1, "y": 2}},
         {"a": {"x": 1, "z": 3}},
     ),
+    # Non-str dict keys (issue #62): DeepDiff diffs a dict keyed by anything
+    # hashable, not only `str`. Path rendering for each key kind is `repr()`
+    # except a `tuple`, which splits into one bracket group per element
+    # (`root[1][2]`, never `root[(1, 2)]`) — see
+    # `onix_core::path::dict_key_repr`'s doc for the upstream code this
+    # reproduces. Each "added" case is a single-key dict against `{}`, kept
+    # deliberately below the union-length-1 floor `threshold_to_diff_deeper`
+    # never collapses at (see that section below), so each is a genuine
+    # per-key `dictionary_item_added`, not a wholesale `values_changed`.
+    "dict_key_int_added": ({}, {1: "x"}),
+    "dict_key_int_removed": ({1: "x"}, {}),
+    "dict_key_bool_added": ({}, {True: "x"}),
+    "dict_key_none_added": ({}, {None: "x"}),
+    "dict_key_float_added": ({}, {1.5: "x"}),
+    "dict_key_negative_int_added": ({}, {-7: "x"}),
+    "dict_key_tuple_added": ({}, {(1, 2): "x"}),
+    "dict_key_tuple_single_member_added": ({}, {(5,): "x"}),
+    "dict_key_tuple_mixed_members_added": ({}, {(1, "a", True, None): "x"}),
+    "dict_key_tuple_str_member_with_quote_added": ({}, {("it's",): "x"}),
+    "dict_key_datetime_added": ({}, {datetime(2024, 1, 1, 10, 30): "x"}),
+    "dict_key_date_added": ({}, {date(2024, 1, 1): "x"}),
+    # An int key changes value at its own path; both sides share the one
+    # key, so this never nears the threshold collapse either.
+    "dict_key_int_changed": ({1: "a"}, {1: "b"}),
+    # `1`/`1.0`/`True` are the same *key* to DeepDiff (Python dict/set
+    # equality) even though this crate's own `Value` keeps them structurally
+    # distinct everywhere else — confirmed against real `deepdiff==9.1.0`:
+    # this is a `values_changed` at the shared key (rendered with `b`'s own
+    # key form), never an added+removed pair.
+    "dict_key_int_vs_float_same_value_matches_by_python_equality": (
+        {1: "a"},
+        {1.0: "a"},
+    ),
+    "dict_key_int_vs_float_changed_value_matches_by_python_equality": (
+        {1: "a"},
+        {1.0: "b"},
+    ),
+    "dict_key_bool_vs_int_matches_by_python_equality": ({True: "a"}, {1: "b"}),
+    # A mix of `str` and non-`str` keys, several changed at once, above the
+    # threshold ratio (4/4 keys shared).
+    "dict_key_mixed_str_and_non_str_changed": (
+        {1: "a", "s": "z", 2.5: "q", None: "n"},
+        {1: "b", "s": "z2", 2.5: "q2", None: "n2"},
+    ),
+    # A non-str key nested inside an ordinary str-keyed dict, added, removed
+    # and changed together at depth.
+    "dict_key_non_str_nested_in_dict": (
+        {"a": {1: "x", 2: "y"}},
+        {"a": {1: "x2", 3: "z"}},
+    ),
+    # A *reported value* that is itself a dict with non-str keys (rather
+    # than the path segment): to_json() must stringify each key the way
+    # Python's own json.dumps does for a dict key — bool to "true"/"false",
+    # None to "null", int to its decimal text, float through the same
+    # repr()-style shortest round trip a float value gets. Confirmed against
+    # real deepdiff==9.1.0.
+    "dict_key_nested_value_stringifies_bool_none_float_keys": (
+        {},
+        {"a": {5: 0, True: 1, None: 2, 1.5: 3}},
+    ),
     # threshold_to_diff_deeper=0.33: below this key-overlap ratio
     # (intersection / union), a dict-vs-dict comparison collapses into one
     # wholesale values_changed (old/new value the whole dict) instead of
@@ -1260,6 +1320,32 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
     "combined_dict_with_time_and_timedelta_values_under_ignore_order": (
         {"t": time(10, 30), "d": {1, 2, 3}},
         {"t": time(12, 0), "d": {2, 3, 4}},
+        {"ignore_order": True},
+    ),
+    # --- non-str dict keys under ignore_order (issue #62) ----------------
+    # A list of single-int-keyed dicts, shuffled: each dict is structurally
+    # unchanged, so this is a pure reorder (empty diff) the same way a
+    # shuffled list of scalars is.
+    "ignore_order_list_of_int_keyed_dicts_pure_shuffle": (
+        [{1: "a"}, {2: "b"}],
+        [{2: "b"}, {1: "a"}],
+        {"ignore_order": True},
+    ),
+    # The same shuffle, but one dict's value actually changes — proves
+    # pairing still finds the right candidate and recurses into it, at a
+    # non-str key's own path.
+    "ignore_order_list_of_int_keyed_dicts_shuffle_plus_change": (
+        [{1: "a"}, {2: "b"}, {3: "c"}],
+        [{3: "c"}, {1: "z"}, {2: "b"}],
+        {"ignore_order": True},
+    ),
+    # `{1: "a"}` and `{1.0: "a"}` are Python-equal dicts (int/float key
+    # collapse under dict/set equality), so under ignore_order these pair
+    # with zero diff even though the key *types* differ — confirmed against
+    # real deepdiff==9.1.0.
+    "ignore_order_int_vs_float_key_same_value_dicts_are_equal": (
+        [{1: "a"}],
+        [{1.0: "a"}],
         {"ignore_order": True},
     ),
 }

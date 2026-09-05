@@ -3,7 +3,7 @@ use crate::error::Error;
 use crate::path::PathSegment;
 use crate::report::Report;
 use crate::test_support::{cdate, cdt, cdt_at, cfrozen, cnum, cobj, cset, ctup, cv};
-use crate::value::{Object as CObject, SetItems, Value as CValue};
+use crate::value::{Object as CObject, ObjectKey, SetItems, Value as CValue};
 use serde_json::{Map, Number, Value, json};
 
 // Thin wrappers routing each `serde_json`-literal-based test through the real
@@ -1234,12 +1234,21 @@ fn threshold_collapse_rejects_a_deep_side_on_a_constrained_stack_instead_of_cras
                 value
             };
             let a = CValue::Object(CObject::from_pairs(vec![
-                (std::sync::Arc::from("p"), CValue::from(json!(1))),
-                (std::sync::Arc::from("q"), CValue::from(json!(2))),
+                (
+                    ObjectKey::Str(std::sync::Arc::from("p")),
+                    CValue::from(json!(1)),
+                ),
+                (
+                    ObjectKey::Str(std::sync::Arc::from("q")),
+                    CValue::from(json!(2)),
+                ),
             ]));
             let b = CValue::Object(CObject::from_pairs(vec![
-                (std::sync::Arc::from("r"), CValue::from(json!(3))),
-                (std::sync::Arc::from("deep"), deep),
+                (
+                    ObjectKey::Str(std::sync::Arc::from("r")),
+                    CValue::from(json!(3)),
+                ),
+                (ObjectKey::Str(std::sync::Arc::from("deep")), deep),
             ]));
 
             let err = super::diff_with_max_depth(&a, &b, 1).unwrap_err();
@@ -1918,7 +1927,7 @@ fn list_vs_tuple_nested_in_a_dict_is_a_type_change() {
     let mut a = Map::new();
     a.insert("a".to_string(), json!([1, 2]));
     let b = CValue::Object(CObject::from_pairs(vec![(
-        std::sync::Arc::from("a"),
+        ObjectKey::Str(std::sync::Arc::from("a")),
         ctup(&[json!(1), json!(2)]),
     )]));
     let report = super::diff(&cv(&Value::Object(a)), &b).unwrap();
@@ -2052,7 +2061,10 @@ fn a_dict_value_that_is_a_too_deep_tuple_errors_instead_of_being_cloned() {
     for _ in 0..5 {
         deep = CValue::Tuple(vec![deep].into_boxed_slice());
     }
-    let b = CValue::Object(CObject::from_pairs(vec![(std::sync::Arc::from("a"), deep)]));
+    let b = CValue::Object(CObject::from_pairs(vec![(
+        ObjectKey::Str(std::sync::Arc::from("a")),
+        deep,
+    )]));
     let error = super::diff_with_max_depth(&cv(&json!({})), &b, 4).unwrap_err();
     assert!(matches!(error, Error::MaxDepthExceeded { .. }));
 }

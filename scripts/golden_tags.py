@@ -23,6 +23,16 @@ key is literally one of the reserved names cannot be written as a golden fixture
 :func:`encode_tags` refuses such a value rather than writing a file that would decode
 back into something else.
 
+A **plain JSON object can only ever have ``str`` keys**, so a dict with any other key kind
+(``int``, ``bool``, ``float``, ``None``, ``datetime``, ``date``, or a ``tuple`` of those) needs
+its own tag: ``{"$dict": [[key, value], ...]}`` is a list of ``[key, value]`` pairs, each
+itself tagged where its type needs it (a ``$tuple``/``$datetime``/``$date`` key encodes exactly
+like a value of that type would). This is the one tag whose payload is a list of pairs rather
+than a list of items or a bare string — a JSON object cannot represent a non-``str`` key at
+all, so pairs are the only shape left. A ``$dict`` value never itself needs the plain-object
+form (any dict that would round-trip through it is `str`-keyed and is written directly), so
+:func:`encode_tags` only ever *emits* one of these when it meets a genuinely non-``str`` key.
+
 This is corpus tooling only. onix's own parse paths (``onix_core::Value``'s
 ``Deserialize``, ``deepdiff_rs.diff_json``, the CLI) never interpret these names — a
 tagged object is an ordinary dict to all of them, which the test suites pin down.
@@ -43,12 +53,36 @@ DATETIME_TAG: Final[str] = "$datetime"
 DATE_TAG: Final[str] = "$date"
 TIME_TAG: Final[str] = "$time"
 TIMEDELTA_TAG: Final[str] = "$timedelta"
+DICT_TAG: Final[str] = "$dict"
 
-# Every tag name the encoding reserves. All seven are implemented; the list is still
+# Every tag name the encoding reserves. All eight are implemented; the list is still
 # fixed here so a fixture can never use one as an ordinary dict key, and so all three
 # readers agree on the full set.
 RESERVED_TAGS: Final[frozenset[str]] = frozenset(
-    {TUPLE_TAG, SET_TAG, FROZENSET_TAG, DATETIME_TAG, DATE_TAG, TIME_TAG, TIMEDELTA_TAG}
+    {
+        TUPLE_TAG,
+        SET_TAG,
+        FROZENSET_TAG,
+        DATETIME_TAG,
+        DATE_TAG,
+        TIME_TAG,
+        TIMEDELTA_TAG,
+        DICT_TAG,
+    }
+)
+
+# The key kinds a dict may hold (mirrors `onix_core::value::ObjectKey`'s
+# non-`str` case, plus `str` itself, and only a `tuple` *of* these — never a
+# nested `tuple`).
+type DictKey = (
+    str
+    | int
+    | float
+    | bool
+    | None
+    | datetime.datetime
+    | datetime.date
+    | tuple[str | int | float | bool | None | datetime.datetime | datetime.date, ...]
 )
 
 # DeepDiff's own `to_json()` cannot serialize a `date`, `time` or `timedelta` at all:
@@ -69,7 +103,7 @@ JSON_DEFAULT_MAPPING: Final[dict[type, Callable[[_Renderable], str]]] = {
 # A JSON-shaped value, plus the Python types the tags decode to. Named instead of
 # `typing.Any` per the python-coding-guide's ban on `Any`.
 type TaggedValue = (
-    dict[str, "TaggedValue"]
+    dict[DictKey, "TaggedValue"]
     | list["TaggedValue"]
     | tuple["TaggedValue", ...]
     | set["SetMember"]
@@ -162,6 +196,13 @@ def encode_tags(value: TaggedValue) -> TaggedValue:
         return [encode_tags(item) for item in value]
 
     if isinstance(value, dict):
+        # A JSON object can only ever have `str` keys; any other key kind
+        # forces the `$dict` pair-list form (see this module's own doc) —
+        # for *every* key, once any one of them needs it, so decoding never
+        # has to guess which entries were originally `str`.
+        if not all(isinstance(key, str) for key in value):
+            return {DICT_TAG: [[encode_tags(key), encode_tags(item)] for key, item in value.items()]}
+
         if _sole_tag(value) is not None:
             raise ValueError(
                 f"cannot encode a dict whose only key is the reserved tag {next(iter(value))!r}: "
@@ -215,6 +256,12 @@ def decode_tags(value: TaggedValue) -> TaggedValue:
                 seconds=int(payload["seconds"]),
                 microseconds=int(payload["microseconds"]),
             )
+
+        if tag == DICT_TAG:
+            pairs = value[tag]
+            if not isinstance(pairs, list):
+                raise TypeError(f"the {DICT_TAG!r} tag's payload must be a list of pairs")
+            return {decode_tags(key): decode_tags(item) for key, item in pairs}
 
         if tag is not None:
             raise NotImplementedError(f"the {tag!r} tag is reserved but not decodable yet")
@@ -336,11 +383,21 @@ def _canonical_value(as_object: object, as_json: TaggedValue) -> TaggedValue:
         ]
 
     if isinstance(as_object, dict) and isinstance(as_json, dict):
-        return {
-            key: _canonical_value(value, as_json[key])
-            for key, value in as_object.items()
-            if key in as_json
-        }
+        # Paired positionally, not by `key in as_json`/`as_json[key]`: a
+        # non-`str` key (`1`, `True`, ...) is stringified by `to_json()`
+        # (`"1"`, `"true"`, ...), so it can never look itself up in
+        # `as_json` by identity. Both dicts come from serializing the same
+        # `as_object` once, so their key order already corresponds — no
+        # lookup is needed, only the zip.
+        return dict(
+            zip(
+                as_json.keys(),
+                (
+                    _canonical_value(value, json_value)
+                    for value, json_value in zip(as_object.values(), as_json.values())
+                ),
+            )
+        )
 
     return as_json
 

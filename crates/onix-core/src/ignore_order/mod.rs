@@ -167,7 +167,7 @@ use hash::{HashedList, ItemKey};
 use pairing::compute_pairs;
 
 pub(crate) use distance::{
-    is_below_threshold_to_diff_deeper, item_length, type_change_leaf_length,
+    is_below_threshold_to_diff_deeper, item_length, match_dict_keys, type_change_leaf_length,
 };
 pub(crate) use hash::set_difference;
 #[cfg(test)]

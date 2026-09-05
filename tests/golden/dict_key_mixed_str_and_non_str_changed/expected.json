@@ -1,0 +1,20 @@
+{
+  "values_changed": {
+    "root['s']": {
+      "new_value": "z2",
+      "old_value": "z"
+    },
+    "root[1]": {
+      "new_value": "b",
+      "old_value": "a"
+    },
+    "root[2.5]": {
+      "new_value": "q2",
+      "old_value": "q"
+    },
+    "root[None]": {
+      "new_value": "n2",
+      "old_value": "n"
+    }
+  }
+}
