@@ -181,7 +181,7 @@ Both reports carry their full methodology, fairness rules, and the reproduce com
 
 ## Reference
 
-**Python API.** The public surface is `DeepDiff`, `diff_json`, `diff_tables` (returning a `TableDiff`), `MaxDepthError`, and `MAX_DEPTH_CEILING`.
+**Python API.** The public surface is `DeepDiff`, `diff_json`, `diff_tables` (returning a `TableDiff`), `MaxDepthError`, `MAX_DEPTH_CEILING`, and `__version__` (a `str` matching the installed `deepdiff-rs` distribution version).
 
 - `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`: diffs two live Python objects of supported value types — `None`, `bool`, `int`, `float`, `str`, `dict`, `list`, `tuple`, `set`, `frozenset`, `datetime.datetime`, `datetime.date`, `datetime.time`, and `datetime.timedelta` (see [Known limitations](#known-limitations) for the exact restrictions and exclusions, including which types a `dict` key may be); `.to_json()` returns the DeepDiff-compatible JSON string, `.to_dict()` the same report as a dict — with Python types preserved, so a value the diff found in a `tuple`, `set` or `frozenset` comes back as one and a `datetime`/`date`/`time`/`timedelta` comes back as a real one of those — and the instance is falsy when there is no difference. The `set_item_added`/`set_item_removed` categories are lists of path strings, each ending in the item itself (`root['a'][2]`, `root['x']`, `root[(1, 2)]`).
 - `diff_json(a, b, ignore_order=False, max_depth=None) -> str`: diffs two JSON strings entirely in Rust and returns the report as a JSON string.

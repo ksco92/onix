@@ -8,6 +8,7 @@ surfacing later as a wrong IDE tooltip or a `mypy` false negative.
 """
 
 import ast
+import importlib.metadata
 import inspect
 from pathlib import Path
 
@@ -70,9 +71,19 @@ def _class_members(node: ast.ClassDef) -> dict[str, ast.FunctionDef]:
     return {n.name: n for n in node.body if isinstance(n, ast.FunctionDef)}
 
 
+def _stub_constants(module: ast.Module) -> set[str]:
+    """Names of module-level annotated assignments (``NAME: type``) in the stub."""
+    return {
+        node.target.id
+        for node in module.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+
+
 MODULE = _stub_module()
 FUNCTIONS = _stub_functions(MODULE)
 CLASSES = _stub_classes(MODULE)
+CONSTANTS = _stub_constants(MODULE)
 
 
 def test_stub_declares_the_whole_public_surface() -> None:
@@ -82,10 +93,17 @@ def test_stub_declares_the_whole_public_surface() -> None:
     symbol added to the module with no matching stub entry fails this test
     instead of passing silently.
     """
-    module_names = {n for n in dir(deepdiff_rs) if not n.startswith("_") and n != "deepdiff_rs"}
-    stub_names = set(FUNCTIONS) | set(CLASSES) | {"MAX_DEPTH_CEILING"}
+    module_names = {
+        n for n in dir(deepdiff_rs) if (not n.startswith("_") or n == "__version__") and n != "deepdiff_rs"
+    }
+    stub_names = set(FUNCTIONS) | set(CLASSES) | CONSTANTS
     assert module_names == stub_names
     assert isinstance(deepdiff_rs.MAX_DEPTH_CEILING, int)
+    assert isinstance(deepdiff_rs.__version__, str)
+
+
+def test_version_matches_the_published_distribution() -> None:
+    assert deepdiff_rs.__version__ == importlib.metadata.version("deepdiff-rs")
 
 
 @pytest.mark.parametrize("name", sorted(FUNCTIONS))
