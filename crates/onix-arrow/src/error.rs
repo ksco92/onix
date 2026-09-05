@@ -81,10 +81,10 @@ pub enum TableDiffError {
         /// The unsupported Arrow type, rendered.
         data_type: String,
     },
-    /// A key column has a different (normalized) Arrow type on each side. A
-    /// primary key that changed type is not a keyed comparison — the two sides'
-    /// key hashes could not match — so the row diff refuses it rather than
-    /// coercing one side to the other's type.
+    /// A key column has a different (normalized) Arrow type on each side. This
+    /// is the deliberate conservative choice: a primary key that changed type is
+    /// refused rather than guessed — the row diff will not coerce one side to
+    /// the other's type to decide row identity.
     KeyTypeMismatch {
         /// The key column whose type differs across the two inputs.
         column: String,

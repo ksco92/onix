@@ -201,8 +201,9 @@ pub fn diff_tables(
         }
 
         // A key whose normalized type differs across sides is a schema type
-        // change; the two sides' key hashes could not match, so refuse it. The
-        // schema diff above already computed this.
+        // change; refuse it rather than guess row identity across a changed key
+        // type (the conservative choice). The schema diff above already computed
+        // this.
         if changes
             .iter()
             .any(|change| &change.column == key && change.change == ChangeKind::TypeChanged)

@@ -53,19 +53,24 @@
 //!
 //! # Which column types are hashed, refused, or skipped
 //!
-//! - **Hashed** (compared): boolean; every signed and unsigned integer width;
-//!   `Float16`/`Float32`/`Float64`; `Decimal128` and `Decimal256`; `Utf8`,
-//!   `LargeUtf8`, `Utf8View`; `Binary`, `LargeBinary`, `BinaryView`,
-//!   `FixedSizeBinary`; `Timestamp` (any unit, with or without a zone); `Date32`
-//!   and `Date64` (both by day count, so a `Date32` and a whole-day `Date64` of
-//!   the same calendar day hash equal; a non-whole-day `Date64`, which Arrow's
-//!   whole-day contract forbids, keeps its raw value distinctly); `Time32`,
-//!   `Time64`, and `Duration` (by raw value tagged with their unit, so a unit
-//!   change reads as a value change); `Interval` (by its per-variant fields);
-//!   and a `Dictionary` of any of these (decoded first).
+//! - **Hashed** (compared): `Null` (every row a null); boolean; every signed
+//!   and unsigned integer width; `Float16`/`Float32`/`Float64`; `Decimal32`,
+//!   `Decimal64`, `Decimal128`, and `Decimal256` (all by exact value, so equal
+//!   values of different widths or scales hash equal); `Utf8`, `LargeUtf8`,
+//!   `Utf8View`; `Binary`, `LargeBinary`, `BinaryView`, `FixedSizeBinary`;
+//!   `Timestamp` (any unit, with or without a zone); `Date32` and `Date64` (both
+//!   by day count, so a `Date32` and a whole-day `Date64` of the same calendar
+//!   day hash equal; a non-whole-day `Date64`, which Arrow's whole-day contract
+//!   forbids, keeps its raw value distinctly); `Time32` (second, millisecond),
+//!   `Time64` (microsecond, nanosecond), and `Duration` (by raw value tagged
+//!   with their unit, so a unit change reads as a value change); `Interval` (by
+//!   its per-variant fields); and a `Dictionary` of any of these (decoded
+//!   first).
 //! - **Refused** with [`TableDiffError::UnsupportedRowType`], key or non-key:
-//!   any other scalar type this list does not name — today `RunEndEncoded`. A
-//!   scalar column is always hashed or refused, never silently skipped.
+//!   `RunEndEncoded`, and the `Time32`/`Time64` unit and `FixedSizeBinary` width
+//!   combinations arrow-rs has no array type for (e.g. `Time32(Nanosecond)`, a
+//!   negative fixed-size width). A scalar column is always hashed or refused,
+//!   never silently skipped.
 //! - **Skipped** (not compared, so a change in it is not reported): a *nested*
 //!   non-key column (`List` and its variants, `FixedSizeList`, `Struct`, `Map`,
 //!   `Union`), which is out of scope for the row diff. A nested *key* column is
@@ -83,11 +88,11 @@ use siphasher::sip128::{Hasher128, SipHasher13};
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{
-    Date32Type, Date64Type, Decimal128Type, Decimal256Type, DurationMicrosecondType,
-    DurationMillisecondType, DurationNanosecondType, DurationSecondType, Float16Type, Float32Type,
-    Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, IntervalDayTimeType,
-    IntervalMonthDayNanoType, IntervalYearMonthType, Time32MillisecondType, Time32SecondType,
-    Time64MicrosecondType, Time64NanosecondType, TimestampMicrosecondType,
+    Date32Type, Date64Type, Decimal32Type, Decimal64Type, Decimal128Type, Decimal256Type,
+    DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType, DurationSecondType,
+    Float16Type, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
+    IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType, Time32MillisecondType,
+    Time32SecondType, Time64MicrosecondType, Time64NanosecondType, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt8Type, UInt16Type,
     UInt32Type, UInt64Type,
 };
@@ -100,9 +105,10 @@ use arrow_schema::{ArrowError, DataType, Field, IntervalUnit, Schema, SchemaRef,
 /// The row diff reads each side twice — once to hash every row, once to
 /// materialize only the differing rows — so it needs a source it can open more
 /// than once rather than a single-use [`RecordBatchReader`]. A caller whose
-/// input is a one-shot reader (a Python Arrow stream, say) spools it to a
-/// temporary Arrow IPC file first and hands that file's path in as the source;
-/// an in-memory table is re-openable directly (see [`MemoryInput`]).
+/// input is a one-shot reader (a Python Arrow stream, say) spools it to an
+/// anonymous temporary Arrow IPC file first and re-reads that file through a
+/// fresh, rewound handle on each `open`; an in-memory table is re-openable
+/// directly (see [`MemoryInput`]).
 pub trait TableInput {
     /// The table's schema, without opening a reader.
     fn schema(&self) -> SchemaRef;
@@ -190,13 +196,16 @@ impl RowHasher {
     ///
     /// [`TableDiffError::Read`] if the OS random source is unavailable.
     fn new() -> Result<Self, TableDiffError> {
-        let mut bytes = [0u8; 16];
-        getrandom::fill(&mut bytes).map_err(|e| TableDiffError::Read {
-            message: format!("could not obtain a random hash key from the OS: {e}"),
-        })?;
+        // Draw each half into its own fixed-size array, so there is no fallible
+        // slice-to-array conversion to discard and no way to end up with a
+        // zeroed key half.
+        let mut k0 = [0u8; 8];
+        let mut k1 = [0u8; 8];
+        getrandom::fill(&mut k0).map_err(random_key_error)?;
+        getrandom::fill(&mut k1).map_err(random_key_error)?;
         Ok(Self {
-            k0: u64::from_le_bytes(bytes[..8].try_into().unwrap_or_default()),
-            k1: u64::from_le_bytes(bytes[8..].try_into().unwrap_or_default()),
+            k0: u64::from_le_bytes(k0),
+            k1: u64::from_le_bytes(k1),
         })
     }
 
@@ -276,6 +285,14 @@ fn read_error(error: &ArrowError) -> TableDiffError {
     }
 }
 
+/// Turns an OS-randomness failure (drawing the per-diff hash key) into a
+/// [`TableDiffError`].
+fn random_key_error(error: getrandom::Error) -> TableDiffError {
+    TableDiffError::Read {
+        message: format!("could not obtain a random hash key from the OS: {error}"),
+    }
+}
+
 /// The column indices, on one side, of the key columns (in the caller's key
 /// order) and the common non-key columns (sorted by name so both sides agree).
 struct SideColumns {
@@ -351,10 +368,11 @@ fn is_nested(data_type: &DataType) -> bool {
 /// Recurses through the dictionary value type, but only after
 /// [`crate::diff_schemas`]'s `check_depths` has rejected any column nested past
 /// [`crate::MAX_NESTING_DEPTH`], so the recursion is bounded and cannot overflow
-/// the native stack (see `.claude/rules/arrow-nesting-depth.md`).
+/// the native stack.
 pub(crate) fn is_hashable(data_type: &DataType) -> bool {
     match data_type {
-        DataType::Boolean
+        DataType::Null
+        | DataType::Boolean
         | DataType::Int8
         | DataType::Int16
         | DataType::Int32
@@ -366,6 +384,8 @@ pub(crate) fn is_hashable(data_type: &DataType) -> bool {
         | DataType::Float16
         | DataType::Float32
         | DataType::Float64
+        | DataType::Decimal32(_, _)
+        | DataType::Decimal64(_, _)
         | DataType::Decimal128(_, _)
         | DataType::Decimal256(_, _)
         | DataType::Utf8
@@ -374,14 +394,21 @@ pub(crate) fn is_hashable(data_type: &DataType) -> bool {
         | DataType::Binary
         | DataType::LargeBinary
         | DataType::BinaryView
-        | DataType::FixedSizeBinary(_)
         | DataType::Timestamp(_, _)
         | DataType::Date32
         | DataType::Date64
-        | DataType::Time32(_)
-        | DataType::Time64(_)
         | DataType::Duration(_)
         | DataType::Interval(_) => true,
+        // Only the width/unit combinations arrow-rs has a concrete array type
+        // for; the others (e.g. `Time32(Nanosecond)`) have no array and would
+        // panic in `RecordBatch::new_empty`, so they fall through to refused.
+        DataType::FixedSizeBinary(width) => *width >= 0,
+        DataType::Time32(unit) => {
+            matches!(unit, TimeUnit::Second | TimeUnit::Millisecond)
+        }
+        DataType::Time64(unit) => {
+            matches!(unit, TimeUnit::Microsecond | TimeUnit::Nanosecond)
+        }
         DataType::Dictionary(_, value) => is_hashable(value),
         _ => false,
     }
@@ -417,6 +444,30 @@ fn integer_value(array: &ArrayRef, row: usize) -> Option<i128> {
     })
 }
 
+/// The `(value, scale)` of a decimal cell, every width widened to `i256`, so a
+/// decimal of any width and scale hashes by its exact value; `None` for any
+/// non-decimal type.
+fn decimal_value(array: &ArrayRef, row: usize) -> Option<(i256, i8)> {
+    Some(match array.data_type() {
+        DataType::Decimal32(_, scale) => (
+            i256::from_i128(i128::from(array.as_primitive::<Decimal32Type>().value(row))),
+            *scale,
+        ),
+        DataType::Decimal64(_, scale) => (
+            i256::from_i128(i128::from(array.as_primitive::<Decimal64Type>().value(row))),
+            *scale,
+        ),
+        DataType::Decimal128(_, scale) => (
+            i256::from_i128(array.as_primitive::<Decimal128Type>().value(row)),
+            *scale,
+        ),
+        DataType::Decimal256(_, scale) => {
+            (array.as_primitive::<Decimal256Type>().value(row), *scale)
+        }
+        _ => return None,
+    })
+}
+
 /// Hashes one cell into `hasher`, tagged by kind so unlike kinds never collide.
 /// A null writes only [`TAG_NULL`]; every other kind writes its tag then a
 /// canonical form of the value (see the module docs' value semantics).
@@ -426,15 +477,27 @@ fn hash_cell(
     column: &str,
     row: usize,
 ) -> Result<(), TableDiffError> {
+    // A Null-typed column is all-null by definition and carries no validity
+    // buffer, so `is_null` cannot be trusted for it; hash every row as a null.
+    if matches!(array.data_type(), DataType::Null) {
+        hasher.tag(TAG_NULL);
+        return Ok(());
+    }
+
     if array.is_null(row) {
         hasher.tag(TAG_NULL);
         return Ok(());
     }
 
     // Bool and every integer width fold to one integer form (`1`, `1.0`, `true`
-    // all hash equal); handled first so the match below stays short.
+    // all hash equal); decimals fold to a common exact value; both handled first
+    // so the match below stays short.
     if let Some(value) = integer_value(array, row) {
         hash_int(hasher, value);
+        return Ok(());
+    }
+    if let Some((value, scale)) = decimal_value(array, row) {
+        hash_decimal(hasher, value, scale);
         return Ok(());
     }
 
@@ -448,20 +511,6 @@ fn hash_cell(
             f64::from(array.as_primitive::<Float32Type>().value(row)),
         ),
         DataType::Float64 => hash_float(hasher, array.as_primitive::<Float64Type>().value(row)),
-        DataType::Decimal128(_, scale) => {
-            hash_decimal(
-                hasher,
-                i256::from_i128(array.as_primitive::<Decimal128Type>().value(row)),
-                *scale,
-            );
-        }
-        DataType::Decimal256(_, scale) => {
-            hash_decimal(
-                hasher,
-                array.as_primitive::<Decimal256Type>().value(row),
-                *scale,
-            );
-        }
         DataType::Utf8 => hash_bytes(
             hasher,
             TAG_STR,
@@ -565,27 +614,28 @@ fn hash_time_like(hasher: &mut CellHasher, tag: u8, unit_discriminant: u8, raw: 
     hasher.write_i64(raw);
 }
 
-/// Hashes a `Time32` cell (seconds or milliseconds).
+/// Hashes a `Time32` cell. Only `Second` and `Millisecond` have a `Time32`
+/// array type in arrow-rs; [`is_hashable`] refuses the other two units before
+/// any row is read, so those arms are unreachable.
 fn hash_time32(hasher: &mut CellHasher, array: &ArrayRef, unit: TimeUnit, row: usize) {
-    let raw = if unit == TimeUnit::Second {
-        array.as_primitive::<Time32SecondType>().value(row)
-    } else {
-        array.as_primitive::<Time32MillisecondType>().value(row)
+    let raw = match unit {
+        TimeUnit::Second => i64::from(array.as_primitive::<Time32SecondType>().value(row)),
+        TimeUnit::Millisecond => {
+            i64::from(array.as_primitive::<Time32MillisecondType>().value(row))
+        }
+        TimeUnit::Microsecond | TimeUnit::Nanosecond => return,
     };
-    hash_time_like(
-        hasher,
-        TAG_TIME,
-        time_unit_discriminant(unit),
-        i64::from(raw),
-    );
+    hash_time_like(hasher, TAG_TIME, time_unit_discriminant(unit), raw);
 }
 
-/// Hashes a `Time64` cell (microseconds or nanoseconds).
+/// Hashes a `Time64` cell. Only `Microsecond` and `Nanosecond` have a `Time64`
+/// array type in arrow-rs; [`is_hashable`] refuses the other two units before
+/// any row is read, so those arms are unreachable.
 fn hash_time64(hasher: &mut CellHasher, array: &ArrayRef, unit: TimeUnit, row: usize) {
-    let raw = if unit == TimeUnit::Microsecond {
-        array.as_primitive::<Time64MicrosecondType>().value(row)
-    } else {
-        array.as_primitive::<Time64NanosecondType>().value(row)
+    let raw = match unit {
+        TimeUnit::Microsecond => array.as_primitive::<Time64MicrosecondType>().value(row),
+        TimeUnit::Nanosecond => array.as_primitive::<Time64NanosecondType>().value(row),
+        TimeUnit::Second | TimeUnit::Millisecond => return,
     };
     hash_time_like(hasher, TAG_TIME, time_unit_discriminant(unit), raw);
 }
@@ -1014,6 +1064,24 @@ pub(crate) fn diff_rows(
     let hasher = RowHasher::new()?;
     let common_values = common_value_columns(left_schema, right_schema, key);
 
+    // Refuse a non-nested-but-unhashable common column (e.g. `RunEndEncoded`,
+    // or a `Time32`/`Time64` unit or `FixedSizeBinary` width arrow-rs has no
+    // array type for) up front, before any batch or empty output is built —
+    // such a column cannot be silently skipped, and building its empty array
+    // for an all-matching output would otherwise panic.
+    for name in &common_values {
+        for schema in [left_schema, right_schema] {
+            if let Ok(field) = schema.field_with_name(name)
+                && !is_hashable(field.data_type())
+            {
+                return Err(TableDiffError::UnsupportedRowType {
+                    column: name.clone(),
+                    data_type: field.data_type().to_string(),
+                });
+            }
+        }
+    }
+
     let key_names: Vec<&str> = key.iter().map(String::as_str).collect();
     let value_names: Vec<&str> = common_values.iter().map(String::as_str).collect();
 
@@ -1096,12 +1164,13 @@ mod tests {
     use arrow_array::cast::AsArray;
     use arrow_array::types::Int64Type;
     use arrow_array::{
-        Array, ArrayRef, BinaryArray, BinaryViewArray, Date32Array, Date64Array, Decimal128Array,
-        Decimal256Array, DurationNanosecondArray, DurationSecondArray, Float64Array, Int32Array,
-        Int64Array, IntervalDayTimeArray, IntervalMonthDayNanoArray, IntervalYearMonthArray,
-        ListArray, RecordBatch, RecordBatchReader, StringArray, Time32MillisecondArray,
-        Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
-        TimestampMicrosecondArray, TimestampMillisecondArray,
+        Array, ArrayRef, BinaryArray, BinaryViewArray, Date32Array, Date64Array, Decimal32Array,
+        Decimal64Array, Decimal128Array, Decimal256Array, DurationNanosecondArray,
+        DurationSecondArray, Float64Array, Int32Array, Int64Array, IntervalDayTimeArray,
+        IntervalMonthDayNanoArray, IntervalYearMonthArray, ListArray, NullArray, RecordBatch,
+        RecordBatchReader, StringArray, Time32MillisecondArray, Time32SecondArray,
+        Time64MicrosecondArray, Time64NanosecondArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray,
     };
     use arrow_buffer::{IntervalDayTime, IntervalMonthDayNano, i256};
     use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -1559,6 +1628,52 @@ mod tests {
     }
 
     #[test]
+    fn decimal32_value_change_is_detected() {
+        let d = |v: i32| {
+            Decimal32Array::from(vec![v])
+                .with_precision_and_scale(8, 2)
+                .unwrap()
+        };
+        assert_value_change_detected(
+            DataType::Decimal32(8, 2),
+            Arc::new(d(100)),
+            Arc::new(d(200)),
+        );
+    }
+
+    #[test]
+    fn decimal64_value_change_is_detected() {
+        let d = |v: i64| {
+            Decimal64Array::from(vec![v])
+                .with_precision_and_scale(16, 2)
+                .unwrap()
+        };
+        assert_value_change_detected(
+            DataType::Decimal64(16, 2),
+            Arc::new(d(100)),
+            Arc::new(d(200)),
+        );
+    }
+
+    #[test]
+    fn null_column_hashes_and_is_unchanged() {
+        // An all-Null column is hashable (every row a null), so two such columns
+        // compare unchanged rather than being refused.
+        let sch = schema(vec![id_field(), Field::new("n", DataType::Null, true)]);
+        let make = || {
+            reader(
+                &sch,
+                vec![
+                    Arc::new(Int64Array::from(vec![Some(1)])),
+                    Arc::new(NullArray::new(1)) as ArrayRef,
+                ],
+            )
+        };
+        let diff = diff_rows(&make(), &make(), &sch, &sch, &key()).unwrap();
+        assert_eq!(diff.counts.rows_changed, 0);
+    }
+
+    #[test]
     fn decimal256_value_change_is_detected() {
         let d = |v: i128| {
             Decimal256Array::from(vec![i256::from_i128(v)])
@@ -1638,8 +1753,14 @@ mod tests {
 
     #[test]
     fn adjacent_string_cells_are_not_confused_by_framing() {
-        // Two string columns: ("ab","c") vs ("a","bc"). Without the per-string
-        // length prefix these would hash identically; they must be a change.
+        // Pins the per-string length prefix in `hash_bytes`. The two rows are
+        // ("x", "\x04y") and ("x\x04", "y"), where `\x04` is `TAG_STR` itself:
+        // each string writes TAG_STR then its bytes, so without the length
+        // prefix both rows flatten to the identical byte stream
+        // `04 78 04 04 79` and would hash equal. With the prefix (each string's
+        // length between the tag and the bytes) they differ. Removing the prefix
+        // at `hash_bytes` makes this test go red.
+        let tag = char::from(super::TAG_STR); // U+0004
         let sch = schema(vec![
             id_field(),
             Field::new("p", DataType::Utf8, false),
@@ -1649,16 +1770,16 @@ mod tests {
             &sch,
             vec![
                 Arc::new(Int64Array::from(vec![Some(1)])),
-                Arc::new(StringArray::from(vec!["ab"])),
-                Arc::new(StringArray::from(vec!["c"])),
+                Arc::new(StringArray::from(vec!["x".to_string()])),
+                Arc::new(StringArray::from(vec![format!("{tag}y")])),
             ],
         );
         let right = reader(
             &sch,
             vec![
                 Arc::new(Int64Array::from(vec![Some(1)])),
-                Arc::new(StringArray::from(vec!["a"])),
-                Arc::new(StringArray::from(vec!["bc"])),
+                Arc::new(StringArray::from(vec![format!("x{tag}")])),
+                Arc::new(StringArray::from(vec!["y".to_string()])),
             ],
         );
         let diff = diff_rows(&left, &right, &sch, &sch, &key()).unwrap();
@@ -2169,6 +2290,30 @@ mod tests {
             Arc::new(BinaryViewArray::from(vec![&b"a"[..]])),
             Arc::new(BinaryViewArray::from(vec![&b"b"[..]])),
         );
+    }
+
+    #[test]
+    fn unhashable_scalar_value_types_are_refused_over_empty_input() {
+        // Scalar types arrow-rs has no array for (invalid Time32/Time64 units,
+        // a negative-width FixedSizeBinary) are refused up front, so an empty
+        // table with such a column errors cleanly instead of panicking when the
+        // empty output array is built.
+        let invalid = [
+            DataType::Time32(TimeUnit::Microsecond),
+            DataType::Time32(TimeUnit::Nanosecond),
+            DataType::Time64(TimeUnit::Second),
+            DataType::Time64(TimeUnit::Millisecond),
+            DataType::FixedSizeBinary(-1),
+        ];
+        for dt in invalid {
+            let sch = schema(vec![id_field(), Field::new("v", dt.clone(), true)]);
+            let empty = MemoryInput::new(sch.clone(), Vec::new());
+            let error = diff_rows(&empty, &empty, &sch, &sch, &key()).unwrap_err();
+            assert!(
+                matches!(error, TableDiffError::UnsupportedRowType { ref column, .. } if column == "v"),
+                "{dt:?} should be refused, got {error:?}"
+            );
+        }
     }
 
     #[test]

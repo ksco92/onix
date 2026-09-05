@@ -5,6 +5,7 @@ import random
 from collections import defaultdict
 from pathlib import Path
 
+import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -186,6 +187,9 @@ def test_key_type_mismatch_across_sides_raises(left_type: pa.DataType, right_typ
         (pa.time32("s"), 1, 2),
         (pa.time64("us"), 1, 2),
         (pa.duration("s"), 1, 2),
+        (pa.decimal32(8, 2), decimal.Decimal("1.00"), decimal.Decimal("2.00")),
+        (pa.decimal64(16, 2), decimal.Decimal("1.00"), decimal.Decimal("2.00")),
+        (pa.decimal128(20, 2), decimal.Decimal("1.00"), decimal.Decimal("2.00")),
         (pa.decimal256(40, 2), decimal.Decimal("1.00"), decimal.Decimal("2.00")),
         (pa.month_day_nano_interval(), (1, 0, 0), (2, 0, 0)),
     ],
@@ -201,6 +205,28 @@ def test_changed_value_in_each_scalar_type_is_reported(
     diff = diff_tables(left, right, key=["id"])
 
     assert diff.summary()["rows_changed"] == 1
+
+
+def test_pyarrow_all_none_column_compares_as_all_null() -> None:
+    """A pyarrow all-None column (inferred as the null type) is compared, not refused: its rows read as all-null."""
+    left = pa.table({"id": pa.array([1, 2], pa.int64()), "n": pa.array([None, None])})
+    right = pa.table({"id": pa.array([1, 3], pa.int64()), "n": pa.array([None, None])})
+    assert left.schema.field("n").type == pa.null()
+    diff = diff_tables(left, right, key=["id"])
+
+    assert diff.summary()["rows_added"] == 1
+    assert diff.summary()["rows_removed"] == 1
+    assert diff.summary()["rows_changed"] == 0
+
+
+def test_polars_all_null_column_fails_at_import() -> None:
+    """A polars all-null (Null-typed) column cannot cross the Arrow C interface; the error is surfaced as ValueError."""
+    left = pl.DataFrame({"id": [1, 2], "n": [None, None]})
+    right = pl.DataFrame({"id": [1, 3], "n": [None, None]})
+    assert left["n"].dtype == pl.Null
+
+    with pytest.raises(ValueError, match='datatype "Null" doesn\'t expect buffer'):
+        diff_tables(left, right, key=["id"])
 
 
 # Oracle parity
