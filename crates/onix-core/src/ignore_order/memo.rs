@@ -179,6 +179,15 @@ pub(crate) struct IgnoreOrderMemo {
     /// [`BTreeMap`] for the same collision-immunity reason as `node_table`.
     member_content: RefCell<BTreeMap<MemberContent, RepId>>,
     enabled: bool,
+    /// Total number of times [`Self::put`] has actually run — every distance
+    /// *recomputation*, not just the distinct entries it leaves behind (a
+    /// repeated `put` for a key already in `cache` overwrites the entry
+    /// rather than growing [`Self::cache_len`], so this is the only signal
+    /// that would rise if a caller re-derived a distance it should have
+    /// gotten from [`Self::get`] instead). Test-only: see
+    /// [`Self::put_count`]'s own doc for what it guards.
+    #[cfg(test)]
+    puts: std::cell::Cell<usize>,
 }
 
 impl IgnoreOrderMemo {
@@ -191,6 +200,8 @@ impl IgnoreOrderMemo {
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),
             enabled: true,
+            #[cfg(test)]
+            puts: std::cell::Cell::new(0),
         }
     }
 
@@ -206,6 +217,7 @@ impl IgnoreOrderMemo {
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),
             enabled: false,
+            puts: std::cell::Cell::new(0),
         }
     }
 
@@ -229,6 +241,18 @@ impl IgnoreOrderMemo {
         self.cache.borrow().len()
     }
 
+    /// The number of times [`Self::put`] has run — see that counter's own
+    /// field doc. A deep, self-similar nesting whose distance is computed
+    /// through this cache must see this count grow *linearly* with depth: a
+    /// cache whose lookup is broken (every candidate pair is recomputed
+    /// rather than reused) instead compounds `~2x` per level, which this
+    /// deterministically catches without timing anything — see
+    /// `super::tests::deep_nested_ignore_order_memoizes_distance_computations_linearly`.
+    #[cfg(test)]
+    pub(crate) fn put_count(&self) -> usize {
+        self.puts.get()
+    }
+
     /// The cached distance for `key`, if present.
     pub(crate) fn get(&self, key: &DistanceKey) -> Option<f64> {
         self.cache.borrow().get(key).copied()
@@ -236,6 +260,8 @@ impl IgnoreOrderMemo {
 
     /// Records `value` for `key` (moving the already-cloned key in).
     pub(crate) fn put(&self, key: DistanceKey, value: f64) {
+        #[cfg(test)]
+        self.puts.set(self.puts.get() + 1);
         self.cache.borrow_mut().insert(key, value);
     }
 

@@ -108,7 +108,7 @@ cargo mutants --package onix-core \
   -f crates/onix-core/src/ignore_order/memo.rs
 ```
 
-51 tested — **26 caught, 20 unviable, 4 missed, 1 timeout**. All four misses
+51 tested — **27 caught, 20 unviable, 4 missed, 0 timeout**. All four misses
 are `memo.rs`'s pre-existing caching-gate equivalents (`should_cache`,
 `is_container` — kind (1) above, provably result-neutral); every viable mutant
 in the new set-member code (`set_member_digest`, `build_container`,
@@ -120,15 +120,23 @@ differs the bool across sides so a `Bool(*b) -> Bool(true)` mutant flips the
 result — confirmed by applying that mutant by hand and watching
 `cargo test --test golden` fail.
 
-The one timeout — replacing `<impl Hash for ItemKey>::hash` with `()` (a
-no-op hasher) — is genuine, not a false timeout from worker contention:
-reproduced standalone it does not complete in 90 s where the suite normally
-runs in seconds. A no-op `ItemKey` hash sends every `FxHash`-backed table
-(`HashedList`, tuple digests) to one bucket, i.e. `O(n^2)`; the
-`set_and_list_member_interning_scales_near_linearly` test is exactly what
-detects that (it would fail its `K -> 2K` ratio bound), but the suite-wide
-slowdown trips `cargo-mutants`' per-mutant test timeout first, so the tool
-records it as a timeout rather than a caught. Detected, not a survivor.
+Replacing `<impl std::hash::Hash for ItemKey>::hash` with `()` (a no-op
+hasher) used to only surface as a `cargo-mutants` timeout: a no-op `ItemKey`
+hash sends every `FxHash`-backed table (`HashedList`, tuple digests) to one
+bucket, i.e. `O(n^2)`, and the suite-wide slowdown it caused tripped the
+tool's per-mutant test timeout before the previous timing-based test
+(removed, issue #33) could fail on its own bound — detected, but only as a
+hang. That test was replaced with
+`float_hash_buckets_stay_distinct_and_grow_linearly_with_member_count`, which
+hashes real `ItemKey`s through the crate's actual `FxHasher` and asserts the
+low bits of the resulting hash spread across (near-)distinct buckets for a
+run of integral and half-integer floats. A no-op hash makes every key hash to
+the same value regardless of content, so the test now fails its
+distinctness assertion immediately — no diff, no recursion, no timing
+involved — confirmed by applying the mutation by hand and re-running just
+that test (0.01 s to fail, reporting 1 distinct bucket out of 10,000). A
+standalone re-run of this file now classifies the mutant as **caught**, not
+timeout.
 
 The full `make mutants` enumeration is deterministic at **1000** mutants
 (`cargo mutants --list`; hash.rs 37, memo.rs 14, lcs.rs 111 of them). The last full
@@ -143,8 +151,8 @@ to run, per the caveat above; the survivor *set* is not). The set-member
 rebuild plus the hash-flooding/float-mixing hardening add a net **+14** mutants
 (986 -> 1000), mostly in `lcs.rs` (`mix_float_bits` and the hand-written
 `Hash` impls) and `hash.rs`; per the scoped run above every one is caught or
-unviable except the single genuine `ItemKey::hash`-no-op timeout documented
-there. No new *missed* survivor. Its caller-threading elsewhere (`diff/set.rs`,
+unviable, including the `ItemKey::hash`-no-op mutant discussed there. No new
+*missed* survivor. Its caller-threading elsewhere (`diff/set.rs`,
 `diff/dispatch.rs`, `distance.rs`'s `count_set_diff_leaves`) is exercised by the
 existing set/`ignore_order` tests.
 
