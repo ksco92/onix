@@ -47,6 +47,18 @@ dependence on the process's set iteration order (see
   reachable through any batch's values once a set/frozenset can pair against
   a list/tuple under `ignore_order`, not only the set batch's own.
 
+A wider, out-of-range sweep of the combined batch (seeds 120000347 and
+120000708, well past `COMBINED_SEED_BASE`'s own window) found two cases of a
+third, already-pinned class instead: a bare `frozenset` inheriting a
+Python-equal one's shared-cache digest (`tests/golden/README.md`'s "Which
+member of an equality class wins"; `test_a_frozenset_never_inherits_another_ones_digest`
+and `test_a_frozenset_bool_vs_float_member_hits_the_same_shared_cache_rule` in
+`test_sets.py`). Seed 120000347 minimizes to the `int`/`float` form of that
+same pinned case; seed 120000708 to its `bool`/`float` form, whose one
+mismatched `frozenset` also perturbs an unrelated pairing decision elsewhere
+in the same list — a downstream symptom of the one root cause, not a second
+divergence. Neither seed falls inside `COMBINED_SEED_COUNT`'s current window.
+
 Every generator function that walks an *existing* `set`/`frozenset`'s members
 (as opposed to building a fresh one) does so through `_deterministic_members`,
 never Python's own `for item in a_set`: the live set's iteration order is
