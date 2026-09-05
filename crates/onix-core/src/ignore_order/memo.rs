@@ -137,14 +137,18 @@ use super::hash::{
 
 /// A `(removed, added)` container-pair distance-cache key — see
 /// [`super::hash::DistKey`] for why each side is a value's exact structural
-/// identity (not its order/repetition-insensitive `ItemKey`) and why recording
-/// the `A * R` entries one pairing produces stays cheap (a refcount bump per
-/// side, the value interned once per candidate).
+/// identity (not its order/repetition-insensitive `ItemKey`). Memory per
+/// entry is a refcount bump: each side's value is interned once per candidate
+/// and the `A * R` entries one pairing records just share those [`Rc`]s. The
+/// *lookup* cost is not constant, though — every probe hashes both keys (a
+/// full walk of each value) and, on a bucket match, compares them structurally
+/// — so per-pair work is proportional to record size (see [`super::hash::DistKey`]).
 type DistanceKey = (DistKey, DistKey);
 
 /// The per-top-level-diff caches described in this module's doc: container-pair
-/// [`rough_distance`] results keyed by the `(removed, added)` [`ItemKey`]
-/// pair, the tuple-digest interning table for list-item matching, and the two
+/// [`rough_distance`] results keyed by the `(removed, added)` [`DistKey`]
+/// pair (each side a value's exact structural identity), the tuple-digest
+/// interning table for list-item matching, and the two
 /// set-member interning tables. Created in `crate::diff::diff_with_options`,
 /// threaded (by shared reference, interior mutability) through the whole
 /// recursive diff, and dropped when it returns. No eviction and no tuning

@@ -41,12 +41,19 @@ use super::fxhash::HashMap;
 pub(crate) struct DistKey(Rc<Value>);
 
 impl DistKey {
-    /// Interns a copy of `value` as a cache key. Cloned once per distinct
-    /// candidate (added/removed) entry, not once per pair, so the `A * R`
-    /// entries one pairing records cost a refcount bump each. The clone
-    /// recurses natively like the report's own value clones and is bounded by
-    /// the same [`crate::diff::check_value_depth`] pre-pass; the hashing this
-    /// key is looked up by is iterative (see [`hash_value`]).
+    /// Interns a copy of `value` as a cache key: the value is cloned once per
+    /// distinct candidate (added/removed) entry, not once per pair, so the
+    /// `A * R` cache entries one pairing records cost only a refcount bump of
+    /// memory each. Per-*lookup* work is not constant, however — every probe
+    /// hashes the key ([`hash_value`] walks the whole value) and, on a bucket
+    /// match, compares two keys structurally — so a pairing's distance work is
+    /// proportional to record size, a constant-factor cost the `ignore_order`
+    /// input-size cap already covers (measured 2.3x-5.6x slower than a
+    /// deduplicating `ItemKey` key only on a crafted worst case: large values
+    /// whose `ItemKey` collapses to a tiny set; every realistic shape is
+    /// faster). The clone recurses natively like the report's own value clones
+    /// and is bounded by the same [`crate::diff::check_value_depth`] pre-pass;
+    /// the hashing the key is looked up by is iterative (see [`hash_value`]).
     pub(crate) fn new(value: &Value) -> Self {
         Self(Rc::new(value.clone()))
     }

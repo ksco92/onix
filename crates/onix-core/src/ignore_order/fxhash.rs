@@ -48,10 +48,13 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// the pairing/`used` sets, and the distance memo — is reached **only** under
 /// `ignore_order=true`, the pairing hot path already bounded by the `O(N²)`
 /// caveat below; those keep `FxHash`, and their float-carrying keys
-/// ([`ItemKey`](super::hash::ItemKey)/[`ScalarKey`](super::hash::ScalarKey)) mix
-/// their bits first ([`mix_float_bits`](crate::lcs::mix_float_bits)) so a
-/// *non-adversarial* run of integral/half-integer floats — whose raw bit
-/// patterns share ~50 trailing zeros — does not accidentally collide.
+/// ([`ItemKey`](super::hash::ItemKey), [`ScalarKey`](super::hash::ScalarKey),
+/// and the distance memo's [`DistKey`](super::hash::DistKey)) mix their bits
+/// first ([`mix_float_bits`](crate::lcs::mix_float_bits)) — `DistKey`'s
+/// encoding routes every float through `number_key`, hence `ItemKey::Float`,
+/// hence `mix_float_bits`, so the hazard does not reach the new key either — a
+/// *non-adversarial* run of integral/half-integer floats, whose raw bit
+/// patterns share ~50 trailing zeros, does not accidentally collide.
 ///
 /// For those remaining `ignore_order`-only tables the trade is deliberate and
 /// measured. Re-keying them to `SipHash` (`RandomState`) added a material,
