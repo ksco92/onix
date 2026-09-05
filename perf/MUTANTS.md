@@ -18,22 +18,36 @@ make mutants        # cargo mutants --package onix-core --package onix-cli --pac
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **1210** mutants (20 in `onix-cli`,
-980 in `onix-core`, 210 in `onix-arrow`). A standalone `cargo mutants -p
-onix-arrow` on a quiet machine reports, for the 210 `onix-arrow` mutants
-(144 in `row_diff.rs`, 38 in `schema.rs`, 17 in `table_diff.rs`, 4 in `lib.rs`,
-4 in `error.rs`, 3 in `options.rs`): **161 caught, 39 unviable, 9 timeout, 1
-missed**. The 39 unviable are `Default`-substitution mutants on types without a
+`make mutants` enumerates a deterministic **1251** mutants (20 in `onix-cli`,
+980 in `onix-core`, 251 in `onix-arrow`). A standalone `cargo mutants -p
+onix-arrow` on a quiet machine reports, for the 251 `onix-arrow` mutants
+(185 in `row_diff.rs`, 38 in `schema.rs`, 17 in `table_diff.rs`, 4 in `lib.rs`,
+4 in `error.rs`, 3 in `options.rs`): **193 caught, 46 unviable, 9 timeout, 3
+missed**. The 46 unviable are `Default`-substitution mutants on types without a
 usable `Default`. The 9 timeouts are mutant-induced infinite loops the tests
 reach — the trailing-zero reduction loop in `hash_decimal` (`==`/`/=` mutants)
 and the two cursor-advance loops in `classify` (the `<`/`==`/`+=` mutants) —
-detected as hangs, not silent survivors. The 1 missed is a genuine equivalent
-mutant: `row_diff.rs`'s `materialize_side` guards `if selected.num_rows() > 0`
-before pushing a batch to `concat_batches`, and `> 0 -> >= 0` only adds empty
-batches, which `concat_batches` ignores, so the output is identical (the
-keyed-hash `finish` combine that was an equivalent in an earlier revision is
-gone — the 128-bit hash is now a single `siphasher` `SipHasher13`, not two
-combined 64-bit hashers). Its classification of each mutant into
+detected as hangs, not silent survivors. All 3 missed are genuine equivalent
+mutants:
+
+- `row_diff.rs`'s `materialize_side` guards `if selected.num_rows() > 0` before
+  pushing a batch to `concat_batches`, and `> 0 -> >= 0` only adds empty
+  batches, which `concat_batches` ignores, so the output is identical (the
+  keyed-hash `finish` combine that was an equivalent in an earlier revision is
+  gone — the 128-bit hash is now a single `siphasher` `SipHasher13`, not two
+  combined 64-bit hashers).
+- `row_diff.rs`'s `collect_changed` carries the identical
+  `if selected.num_rows() > 0` push guard for the changed rows of the per-cell
+  diff, equivalent under `> 0 -> >= 0` for the same reason.
+- `row_diff.rs`'s `value_domain` `delete match arm DataType::Null`: a
+  `Null`-typed column is all-null by definition, so the per-cell diff always
+  takes the null branch for it and never reaches the both-non-null branch that
+  consults the value domain — `value_domain(Null)`'s result is dead, so dropping
+  the arm (folding `Null` into the string domain) changes no output. Every other
+  `value_domain` arm is pinned by
+  `each_value_domain_paired_with_a_string_is_type_changed`, which pairs each
+  domain against a `Utf8` column and asserts the change is `type_changed`
+  (dropping any of those arms would mislabel it `value_changed`). Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
 depends on wall-clock time (a slow mutant is a "timeout" on one machine and
 "missed"/"caught" on another) and, in this workspace, on build caching (a
@@ -154,7 +168,7 @@ timeout.
 
 The `onix-core` + `onix-cli` portion of the enumeration is deterministic at
 **1000** mutants (`cargo mutants --list`; hash.rs 37, memo.rs 14, lcs.rs 111 of
-them); with `onix-arrow`'s 210 the top-line total is 1210, as recorded above. The last full
+them); with `onix-arrow`'s 251 the top-line total is 1251, as recorded above. The last full
 representative run classified the previous 986-mutant enumeration as **890
 caught, 75 unviable, 15 missed, 6 timeout** — the survivors confined to the
 documented equivalent/uncompilable kinds: the `lcs.rs` LCS spots (missed plus
