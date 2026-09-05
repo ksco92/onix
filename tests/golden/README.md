@@ -95,9 +95,21 @@ quirks" below). It runs as part of the normal `cargo test` / `make check`.
 
 ## Pinned versions
 
-- **Python:** 3.13 (installed on demand by `uv`)
+- **Python:** 3.14 (installed on demand by `uv`, per `scripts/gen_goldens.py`'s
+  inline script metadata) — pinned exactly, not just a floor: a case holding
+  a `str` nested inside a tuple/frozenset set item is rendered by real
+  DeepDiff's own `repr()`, which escapes against *this interpreter's*
+  Unicode table, so generating on any other version could bake a stale
+  classification into the committed spec (see the Unicode entry below;
+  `main()` asserts the running interpreter's `unicodedata.unidata_version`
+  before writing anything).
 - **deepdiff:** `9.1.0` exactly (pinned in `scripts/gen_goldens.py`'s inline
   script metadata, resolved from PyPI's latest `8.x`+ line; see that file's `# /// script` header)
+- **Unicode:** 16.0.0 via the `unicode-general-category` crate, matching
+  CPython 3.14's `unicodedata` table; an older CPython escapes code points
+  assigned after its own Unicode version where onix renders them literally
+  (`onix_core::path::python_repr`'s `str` escaping — see
+  `crates/onix-py/tests/test_sets.py`'s BMP differential test).
 
 ## Regenerating
 
@@ -608,19 +620,13 @@ nested array pair now measures a nested dict-vs-dict candidate through
 this same real `object_diff` collapse, so no inflated leaf count can flip
 a pairing decision.
 
-One more accepted limitation lives in `onix_core::path::python_repr`, which
-ports Python's `repr()` for the strings nested inside a tuple or frozenset set
-item: it escapes every non-printable code point below `U+0100` (the complete set
-in that range) and passes everything above through literally, where Python also
-escapes the non-printable ones (zero-width joiners, unassigned code points).
-Reproducing those would mean carrying a Unicode category table; the port is
-exact for all of ASCII and all printable text.
-
 Every other divergence found while building the corpus was fixed in `onix-core` to match
-`DeepDiff` exactly. The two path-rendering exceptions above, the three
-set-iteration-order differences, the `repr()` gap just described, the
-list-LCS `2^53` limitation, the naive-datetime pairing timezone above, and the
-lone-surrogate `ValueError` just described are the only accepted, documented exceptions —
+`DeepDiff` exactly. The path-rendering collision exception, the multi-member
+nested-`frozenset`-rendering exception (both above), the three
+set-iteration-order differences, the list-LCS `2^53` limitation, the
+naive-datetime pairing timezone above, the lone-surrogate `ValueError` just
+described, and the Unicode-version `str`-repr divergence documented under
+"Pinned versions" above are the only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
 `scripts/differential_fuzz.py`) found zero *other* unexplained

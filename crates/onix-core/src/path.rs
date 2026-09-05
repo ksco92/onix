@@ -10,6 +10,8 @@
 
 use std::fmt::Write as _;
 
+use unicode_general_category::{GeneralCategory, get_general_category};
+
 use crate::datetime::{SECONDS_PER_DAY, div_rem_euclid};
 use crate::value::{Number, Value};
 
@@ -209,20 +211,6 @@ pub fn set_item_repr(item: &Value) -> String {
 /// [`Value`]'s own stack-safety posture: nothing bounds how deep a value a
 /// caller may render, and a natively recursive renderer would be an
 /// unguarded overflow sink on adversarially nested input.
-///
-/// # Divergence from Python: non-printable non-ASCII characters
-///
-/// Python's `repr()` escapes any character it considers non-printable (the
-/// Unicode `Cc`/`Cf`/`Cs`/`Co`/`Cn`/`Zl`/`Zp` categories, plus `Zs` other
-/// than a plain space) as `\xXX`/`\uXXXX`/`\UXXXXXXXX`. This port escapes
-/// exactly those below `U+0100` (every ASCII control, `U+007F`–`U+00A0`,
-/// and the soft hyphen `U+00AD` — the complete non-printable set in that
-/// range) and passes everything above through literally, which is what
-/// Python does for all *printable* text. Reproducing the rest would mean
-/// carrying a Unicode category table for characters (zero-width joiners,
-/// unassigned code points) that no realistic diff input holds; this is an
-/// accepted, narrow, documented limitation, in the same class as
-/// `crate::lcs`'s `2^53` numeric bound.
 #[must_use]
 pub fn python_repr(value: &Value) -> String {
     let mut out = String::new();
@@ -387,8 +375,8 @@ fn push_sequence<'a>(
 
 /// Python's `repr()` for a `str`: single quotes unless the string contains a
 /// single quote and no double quote (then double quotes), with `\`, the
-/// wrapping quote and the non-printable characters escaped — see
-/// [`python_repr`]'s doc for the one documented gap above `U+00FF`.
+/// wrapping quote and every non-printable code point escaped as `\xXX`,
+/// `\uXXXX` or `\UXXXXXXXX` per [`escape_non_printable`].
 fn python_repr_str(s: &str) -> String {
     let quote = if s.contains('\'') && !s.contains('"') {
         '"'
@@ -408,10 +396,7 @@ fn python_repr_str(s: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
-            c if is_escaped_below_u100(c) => {
-                // Writing into a `String` is infallible.
-                let _ = write!(out, "\\x{:02x}", u32::from(c));
-            }
+            c if is_non_printable(c) => escape_non_printable(&mut out, c),
             c => out.push(c),
         }
     }
@@ -437,10 +422,43 @@ fn number_repr(n: &Number) -> String {
         .to_string()
 }
 
-/// The complete set of code points below `U+0100` Python's `repr()` escapes
-/// as `\xXX`: the C0 controls, `DEL` through `NBSP`, and the soft hyphen.
-fn is_escaped_below_u100(c: char) -> bool {
-    c < '\u{20}' || ('\u{7f}'..='\u{a0}').contains(&c) || c == '\u{ad}'
+/// Whether `c` is one of the code points Python's `repr()` escapes: every
+/// character in Unicode general categories `Cc`, `Cf`, `Cs`, `Co`, `Cn`,
+/// `Zl`, `Zp` or `Zs`, except the plain space (`U+0020`), which is `Zs` but
+/// stays printable. This is `CPython`'s own rule
+/// (`Tools/unicode/makeunicodedata.py`'s `PRINTABLE_MASK`, read from the
+/// `unicode-general-category` table pinned to Unicode 16.0.0 — the same
+/// version Python 3.14's `unicodedata` module ships).
+fn is_non_printable(c: char) -> bool {
+    if c == ' ' {
+        return false;
+    }
+    matches!(
+        get_general_category(c),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::Surrogate
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Unassigned
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+            | GeneralCategory::SpaceSeparator
+    )
+}
+
+/// Appends `c`'s `repr()` escape to `out`: `\xXX` below `U+0100`, `\uXXXX`
+/// up to `U+FFFF`, `\UXXXXXXXX` above — the same three widths
+/// `Objects/unicodeobject.c`'s `unicode_repr` picks by.
+fn escape_non_printable(out: &mut String, c: char) {
+    let code_point = u32::from(c);
+    // Writing into a `String` is infallible.
+    let _ = if code_point < 0x100 {
+        write!(out, "\\x{code_point:02x}")
+    } else if code_point < 0x1_0000 {
+        write!(out, "\\u{code_point:04x}")
+    } else {
+        write!(out, "\\U{code_point:08x}")
+    };
 }
 
 /// Python's `repr()` for a `float`, which is `float_repr_style="short"`: the
@@ -525,7 +543,9 @@ fn python_float_repr(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PathSegment, python_repr, quote_key, render_path, set_item_repr};
+    use super::{
+        PathSegment, escape_non_printable, python_repr, quote_key, render_path, set_item_repr,
+    };
     use crate::test_support::{cdate, cdt_at};
     use crate::value::{Builder, Number, SetItems, Value};
 
@@ -811,6 +831,86 @@ mod tests {
                 "for {input:?}"
             );
         }
+    }
+
+    /// Every expectation here is real Python `repr()` output, verified
+    /// against `CPython` 3.14 (Unicode 16.0.0).
+    #[test]
+    fn python_repr_str_escapes_non_printable_code_points_above_u0100() {
+        let cases = [
+            // U+00FF: printable Latin-1, the code point right after the old
+            // below-U+0100 ceiling — left bare, not escaped.
+            ("a\u{ff}b", "'a\u{ff}b'"),
+            // U+200B: Cf (zero width space) — \uXXXX width.
+            ("a\u{200b}b", r"'a\u200bb'"),
+            // U+2028: Zl (line separator) — \uXXXX width.
+            ("a\u{2028}b", r"'a\u2028b'"),
+            // U+E000: Co (private use) — \uXXXX width.
+            ("a\u{e000}b", r"'a\ue000b'"),
+            // U+0378: Cn (unassigned in Unicode 16.0.0) — \uXXXX width.
+            ("a\u{378}b", r"'a\u0378b'"),
+            // U+FFFF: Cn (a BMP noncharacter) — the top of the \uXXXX width.
+            ("a\u{ffff}b", r"'a\uffffb'"),
+            // U+10000: Lo, printable astral text — left bare.
+            ("a\u{10000}b", "'a\u{10000}b'"),
+            // U+1F600: So, a printable astral emoji — left bare.
+            ("a\u{1f600}b", "'a\u{1f600}b'"),
+            // U+F0000: Co (a supplementary private-use plane) — \UXXXXXXXX
+            // width, the one the old port could not reach at all.
+            ("a\u{f0000}b", r"'a\U000f0000b'"),
+            // U+10FFFF: Cn, the last valid Unicode scalar value.
+            ("a\u{10ffff}b", r"'a\U0010ffffb'"),
+        ];
+        for (input, expected) in cases {
+            let item = Value::Tuple(Box::new([Value::Str(input.into())]));
+            assert_eq!(
+                python_repr(&item),
+                format!("({expected},)"),
+                "for {input:?}"
+            );
+        }
+    }
+
+    /// The plain space (`U+0020`) is `Zs` like every other escaped space
+    /// separator, but Python's own rule carves it out as printable — the
+    /// one exception `is_non_printable` must apply.
+    #[test]
+    fn python_repr_str_does_not_escape_plain_space() {
+        let item = Value::Tuple(Box::new([Value::Str("a b".into())]));
+        assert_eq!(python_repr(&item), "('a b',)");
+    }
+
+    /// Exercises `escape_non_printable` directly, at the two code points
+    /// each escape width's `<` comparison must reject vs. accept: `U+00FF`
+    /// stays `\xXX`, `U+0100` switches to `\uXXXX`; `U+FFFF` stays `\uXXXX`,
+    /// `U+10000` switches to `\UXXXXXXXX`.
+    #[test]
+    fn escape_non_printable_widths_switch_exactly_at_their_boundaries() {
+        let cases = [
+            (0xff, "\\xff"),
+            (0x100, "\\u0100"),
+            (0xffff, "\\uffff"),
+            (0x1_0000, "\\U00010000"),
+        ];
+        for (code_point, expected) in cases {
+            let mut out = String::new();
+            escape_non_printable(
+                &mut out,
+                char::from_u32(code_point).expect("valid code point"),
+            );
+            assert_eq!(out, expected, "for U+{code_point:04X}");
+        }
+    }
+
+    /// Fails `make check` if a `unicode-general-category` bump ever changes
+    /// the table `is_non_printable` reads, so a Unicode-version drift is
+    /// caught here rather than only by the Python bindings' own
+    /// interpreter-version-gated differential test (`test_sets.py`'s
+    /// `test_bmp_printability_table_matches_the_running_interpreter_on_3_14`),
+    /// which needs a Python 3.14 interpreter to run at all.
+    #[test]
+    fn unicode_general_category_stays_pinned_to_16_0_0() {
+        assert_eq!(unicode_general_category::UNICODE_VERSION, (16, 0, 0));
     }
 
     /// Python's `repr()` for a calendar value — the form a container holding

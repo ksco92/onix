@@ -1,5 +1,5 @@
 # /// script
-# requires-python = "==3.13.*"
+# requires-python = "==3.14.*"
 # dependencies = ["deepdiff==9.1.0"]
 # ///
 """Generate onix's golden corpus from real DeepDiff output.
@@ -39,6 +39,7 @@ out-of-scope DeepDiff quirk excluded from this corpus.
 
 import json
 import random
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Final
@@ -295,6 +296,13 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
     # A `str` nested inside a tuple item IS escaped (Python `repr`), unlike a
     # top-level one — the two halves of the rule in one case.
     "set_str_inside_tuple_item": ({("it's",)}, {"x"}),
+    # Non-printable code points above U+0100, one per category: U+200B (Cf,
+    # zero width space), U+2028 (Zl, line separator), U+E000 (Co, private
+    # use) and U+0378 (Cn, unassigned in Unicode 16.0.0).
+    "set_str_inside_tuple_item_non_printable_above_u0100": (
+        {("\u200b\u2028\ue000\u0378",)},
+        {"x"},
+    ),
     "set_frozenset_items": ({frozenset({1, 2})}, {frozenset({1, 3})}),
     "set_empty_frozenset_item": ({frozenset()}, {1}),
     # Only a *bare* number is type-wrapped, so a container Python's `==`
@@ -1084,6 +1092,10 @@ def read_case_input(path: Path) -> TaggedValue:
 
 def main() -> None:
     """Regenerate every case directory under tests/golden/ from every case dict above."""
+    # Pinned to 3.14, Unicode 16.0.0; see tests/golden/README.md, Pinned versions.
+    assert unicodedata.unidata_version == "16.0.0", (
+        f"unicodedata.unidata_version is {unicodedata.unidata_version!r}, not '16.0.0'"
+    )
 
     ordered_cases: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {
         name: (a, b, {}) for name, (a, b) in {**CASES, **_generate_fuzz_cases()}.items()

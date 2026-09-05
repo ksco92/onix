@@ -18,6 +18,8 @@ import json
 import math
 import random
 import struct
+import sys
+import unicodedata
 from typing import Final
 
 import pytest
@@ -29,6 +31,26 @@ from deepdiff_rs import DeepDiff, diff_json
 # rendered per diff call (one call per batch keeps a million-value run fast).
 FLOAT_CASE_COUNT: Final[int] = 1_000_000
 FLOAT_BATCH_SIZE: Final[int] = 5_000
+
+# How many BMP code points are rendered per diff call in the str-repr
+# differential below (one call per batch keeps the full sweep fast).
+BMP_BATCH_SIZE: Final[int] = 2_000
+
+# Beyond-BMP sample: one code point per category needing the `\UXXXXXXXX`
+# escape width, plus three printable ones left bare.
+SUPPLEMENTARY_SAMPLE: Final[list[int]] = [
+    0x10000,  # Lo, printable
+    0x1F600,  # So, printable (emoji)
+    0x30000,  # Lo, printable
+    0xE01EF,  # Mn, printable (combining, astral)
+    0xE0001,  # Cf, non-printable
+    0xF0000,  # Co, non-printable (private-use plane)
+    0x10FFFD,  # Co, non-printable (private-use plane)
+    0x2FFFE,  # Cn, non-printable (unassigned noncharacter)
+    0x3FFFD,  # Cn, non-printable (unassigned)
+    0x40000,  # Cn, non-printable (unassigned)
+    0x10FFFF,  # Cn, non-printable (last valid code point)
+]
 
 
 def test_set_items_are_reported_as_added_and_removed_paths() -> None:
@@ -202,6 +224,61 @@ def test_float_set_item_paths_match_python_repr_over_a_million_bit_patterns() ->
         f"{len(mismatches)} of {checked} floats rendered differently "
         f"(showing up to 3): {mismatches[:3]}"
     )
+
+
+def _rendered_tuple_str_path(s: str) -> str:
+    """
+    Render one `(s,)` tuple set item's path.
+
+    :param s: A single-character string.
+    :return: The rendered ``set_item_removed`` entry.
+    """
+    entries = DeepDiff({(s,)}, {("sentinel",)}).to_dict()["set_item_removed"]
+    assert len(entries) == 1, entries
+    return entries[0]
+
+
+def _assert_batch_matches_python_repr(code_points: list[int]) -> None:
+    """
+    Diff one batch of one-element `(chr(cp),)` tuple set items against real Python `repr()`.
+
+    :param code_points: The batch to check, distinct code points.
+    """
+    strings = [chr(cp) for cp in code_points]
+    items = {(s,) for s in strings}
+    rendered = set(DeepDiff(items, {("sentinel",)}).to_dict()["set_item_removed"])
+    expected = {f"root[{(s,)!r}]" for s in strings}
+    if rendered == expected:
+        return
+
+    for cp in code_points:
+        s = chr(cp)
+        want = f"root[{(s,)!r}]"
+        actual = _rendered_tuple_str_path(s)
+        assert actual == want, f"U+{cp:04X} rendered differently: expected {want!r}, got {actual!r}"
+    pytest.fail("batch-level mismatch, but no single code point in it diverged")
+
+
+def test_bmp_printability_table_matches_the_running_interpreter_on_3_14() -> None:
+    """Pins the assumption the sweep below relies on: 3.14 must ship Unicode 16.0.0."""
+    if sys.version_info[:2] != (3, 14):
+        pytest.skip("only meaningful on the crate's pinned reference interpreter, 3.14")
+    assert unicodedata.unidata_version == "16.0.0"
+
+
+def test_str_inside_tuple_matches_python_repr_over_the_full_bmp() -> None:
+    """Every BMP code point escapes exactly like Python `repr()`, against Unicode 16.0.0."""
+    if unicodedata.unidata_version != "16.0.0":
+        pytest.skip("valid only against Unicode 16.0.0 (Python 3.14); see tests/golden/README.md")
+
+    code_points = [cp for cp in range(0x10000) if not 0xD800 <= cp <= 0xDFFF]
+    for start in range(0, len(code_points), BMP_BATCH_SIZE):
+        _assert_batch_matches_python_repr(code_points[start : start + BMP_BATCH_SIZE])
+
+
+def test_str_inside_tuple_matches_python_repr_beyond_the_bmp() -> None:
+    """The `\\UXXXXXXXX` escape width, and printable astral text left bare."""
+    _assert_batch_matches_python_repr(SUPPLEMENTARY_SAMPLE)
 
 
 def test_a_set_holding_an_unhashable_subclass_is_refused() -> None:

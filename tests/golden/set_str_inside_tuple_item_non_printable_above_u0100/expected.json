@@ -1,0 +1,8 @@
+{
+  "set_item_added": [
+    "root['x']"
+  ],
+  "set_item_removed": [
+    "root[('\\u200b\\u2028\\ue000\\u0378',)]"
+  ]
+}
