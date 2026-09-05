@@ -164,6 +164,15 @@ pub const MAX_NESTING_DEPTH: usize = 128;
 ///   nested key, a run-end-encoded column, or a type combination Arrow cannot
 ///   build.
 /// - [`TableDiffError::Read`] if a batch cannot be read from either input.
+/// - [`TableDiffError::Render`] if a changed cell's value cannot be rendered to
+///   its canonical string — for example an out-of-range temporal value the
+///   formatter cannot format.
+/// - [`TableDiffError::TooManyChangedRows`] if one side has more than
+///   `u32::MAX` changed rows, which the per-cell diff's row-index arrays cannot
+///   address.
+/// - [`TableDiffError::EqualRenderings`] never fires for real input: it guards
+///   the internal invariant that a `value_changed` cell always renders two
+///   different strings.
 pub fn diff_tables(
     left: &impl TableInput,
     right: &impl TableInput,

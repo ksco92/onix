@@ -98,7 +98,8 @@
 //! through the Arrow formatter, whose second/millisecond duration formatter can
 //! emit a `<invalid>` sentinel while still succeeding. As a construction guard,
 //! a `value_changed` record whose two renderings are nonetheless equal is a
-//! [`TableDiffError::Render`], not a silent row. There is no typed old/new
+//! [`TableDiffError::EqualRenderings`], not a silent row. There is no typed
+//! old/new
 //! column: a long-format table mixes every compared column's type in one column,
 //! so a single typed column cannot represent them and the string rendering is
 //! the uniform form.
@@ -1375,10 +1376,11 @@ impl<'a> SideRenderer<'a> {
     }
 }
 
-/// Enforces that a `value_changed` record never carries two equal renderings — a
-/// typed error, not a `debug_assert!` (the release wheel compiles the latter
-/// out). The common-form rendering makes this unreachable for real diffs, so the
-/// error is a construction guard; a unit test forces the equal pair to reach it.
+/// Enforces that a `value_changed` record never carries two equal renderings,
+/// returning [`TableDiffError::EqualRenderings`] if it does — a typed error, not
+/// a `debug_assert!` (the release wheel compiles the latter out). The common-form
+/// rendering makes this unreachable for real diffs, so the error is a
+/// construction guard; a unit test forces the equal pair to reach it.
 fn check_distinct_renderings(
     change: &str,
     old: Option<&String>,
