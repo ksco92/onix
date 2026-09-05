@@ -205,6 +205,22 @@ def test_to_dict_returns_real_floats() -> None:
     assert report["values_changed"]["root[0]"]["new_value"] == float("-inf")
 
 
+def test_non_finite_dict_key_renders_without_crashing() -> None:
+    # deepdiff==9.1.0: stringify_param's repr()-then-ast.literal_eval round
+    # trip fails on "nan"/"inf" and silently collapses the key to None
+    # (confirmed live: DeepDiff({}, {float('nan'): 1}).to_json() ==
+    # '{"dictionary_item_added": {"null": 1}}', with a warning printed).
+    # onix instead renders the key deterministically rather than reproducing
+    # that garble; pinned as onix's own behavior, not compared to DeepDiff.
+    report = OnixDeepDiff({}, {float("nan"): 1})
+    assert report.to_json() == '{"dictionary_item_added":{"root[nan]":1}}'
+
+    report = OnixDeepDiff({}, {float("inf"): 1, float("-inf"): 2})
+    parsed = json.loads(report.to_json())
+    new_value = parsed["values_changed"]["root"]["new_value"]
+    assert new_value == {"Infinity": 1, "-Infinity": 2}
+
+
 # --- the one documented divergence: no Python object identity -------------
 
 

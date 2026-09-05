@@ -275,16 +275,26 @@ impl Value {
 }
 
 /// Renders one [`ObjectKey`] as the JSON string key
-/// [`Value::to_serde_json`] embeds it under.
+/// [`Value::to_serde_json`] embeds it under — also reused by `onix-py`'s
+/// hand-written non-finite-float JSON writer, so a report can carry a
+/// non-`str` key regardless of which of `to_json()`'s two rendering paths it
+/// takes.
 ///
 /// A `Str` key renders as its own text, unchanged (the only case a JSON
 /// object can ever hold in the first place). An `Other` key mirrors Python's
 /// `json.dumps`, which stringifies a non-`str` dict key rather than
 /// rejecting it — `bool` to `"true"`/`"false"`, `None` to `"null"`, `int` to
-/// its decimal text, and `float` through the identical shortest-round-trip
-/// `repr()` [`crate::path::python_repr`] uses for a float *value* — so a
-/// report embedding one of these four kinds as a nested key matches real
-/// `DeepDiff`'s own `to_json()` byte-for-byte.
+/// its decimal text, and a finite `float` through the identical
+/// shortest-round-trip `repr()` [`crate::path::python_repr`] uses for a
+/// float *value* — so a report embedding one of these four kinds as a
+/// nested key matches real `DeepDiff`'s own `to_json()` byte-for-byte. A
+/// non-finite `float` key renders as the bare `NaN`/`Infinity`/`-Infinity`
+/// token text a *value* of the same bits would get, rather than reproducing
+/// a confirmed real `DeepDiff` bug where `stringify_param`'s
+/// `repr()`-then-`ast.literal_eval` round trip fails on `"nan"`/`"inf"` and
+/// silently collapses the key to `None` — per this crate's compatibility
+/// policy (crash-or-garble → pick the simpler, deterministic behavior, and
+/// document it).
 ///
 /// A `datetime`, `date`, or `tuple` key has no such rule to match: Python's
 /// `json.dumps` (and so `DeepDiff.to_json()`) *raises* `TypeError` rather
@@ -294,16 +304,31 @@ impl Value {
 /// [`crate::path::python_repr`] text the key would get as a *top-level*
 /// path segment, which is at least useful output instead of a hard failure.
 /// See `tests/golden/README.md`'s "Known `DeepDiff` quirks" section.
-fn object_key_json_string(key: &ObjectKey) -> String {
+// `Number`'s three-way i64/u64/f64 representation makes each `expect` below
+// prove an invariant `Number` itself guarantees (mirrors `path::number_repr`,
+// which cannot show this lint at all since it stayed `pub(crate)`).
+#[allow(clippy::missing_panics_doc)]
+#[must_use]
+pub fn object_key_json_string(key: &ObjectKey) -> String {
     match key {
         ObjectKey::Str(s) => s.to_string(),
         ObjectKey::Other(value) => match value.as_ref() {
             Value::Null => "null".to_string(),
             Value::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
-            Value::Number(n) if n.is_f64() => crate::path::python_float_repr(
-                n.as_f64()
-                    .expect("Number::is_f64 guarantees as_f64 succeeds"),
-            ),
+            Value::Number(n) if n.is_f64() => {
+                let f = n
+                    .as_f64()
+                    .expect("Number::is_f64 guarantees as_f64 succeeds");
+                if f.is_finite() {
+                    crate::path::python_float_repr(f)
+                } else if f.is_nan() {
+                    "NaN".to_string()
+                } else if f.is_sign_positive() {
+                    "Infinity".to_string()
+                } else {
+                    "-Infinity".to_string()
+                }
+            }
             Value::Number(n) => n
                 .as_i64()
                 .map(|i| i.to_string())
