@@ -39,11 +39,16 @@ Repository = "https://github.com/ksco92/onix"
 #
 # `deepdiff==9.1.0` itself requires Python >=3.10, tighter than this
 # package's own `requires-python` (>=3.9) — the marker below keeps `uv
-# sync`'s universal (all-supported-versions) resolution satisfiable. There
-# is no interpreter pin for the test venv itself (unlike the PEP-723
-# scripts under ../../scripts/ and ../../perf/, which do pin an exact
-# version): `uv sync` resolves whatever Python >=3.10 it finds/manages, and
-# the abi3 wheel this crate builds works identically across all of them.
+# sync`'s universal (all-supported-versions) resolution satisfiable. The
+# test venv itself IS pinned, via this directory's `.python-version` (3.14):
+# the str-repr escaping differential in test_sets.py checks onix's output
+# against this interpreter's own `unicodedata` table (Unicode 16.0.0, the
+# version `crates/onix-core`'s `unicode-general-category` dependency is
+# pinned to — see `tests/golden/README.md`'s "Pinned versions" section), so
+# an unpinned `uv sync` resolving an older Python would compare against a
+# narrower Unicode table and report false failures for code points assigned
+# since. The abi3 wheel this crate builds still runs identically on every
+# Python >=3.9; only the *test* venv needs the exact interpreter.
 # polars and duckdb are here (test group) only, never as runtime deps: the
 # Arrow table-diff tests feed the same data through pyarrow, polars, and
 # DuckDB and assert identical results, which needs all three installed to run

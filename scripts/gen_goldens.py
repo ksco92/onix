@@ -1,5 +1,5 @@
 # /// script
-# requires-python = "==3.13.*"
+# requires-python = "==3.14.*"
 # dependencies = ["deepdiff==9.1.0"]
 # ///
 """Generate onix's golden corpus from real DeepDiff output.
@@ -39,6 +39,7 @@ out-of-scope DeepDiff quirk excluded from this corpus.
 
 import json
 import random
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Final
@@ -1091,6 +1092,18 @@ def read_case_input(path: Path) -> TaggedValue:
 
 def main() -> None:
     """Regenerate every case directory under tests/golden/ from every case dict above."""
+    # A case holding a `str` nested inside a tuple/frozenset set item is
+    # rendered by real DeepDiff's own `repr()`, which escapes non-printable
+    # code points against *this interpreter's* Unicode table — onix's own
+    # renderer is pinned to 16.0.0 (see `tests/golden/README.md`'s "Pinned
+    # versions" section), so a generator run on any other interpreter would
+    # bake a stale classification into the committed spec for a code point
+    # assigned between the two versions.
+    assert unicodedata.unidata_version == "16.0.0", (
+        f"unicodedata.unidata_version is {unicodedata.unidata_version!r}, not '16.0.0': "
+        "run this script with the pinned Python 3.14 interpreter (uv run resolves it "
+        "from this file's own inline script metadata)"
+    )
 
     ordered_cases: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {
         name: (a, b, {}) for name, (a, b) in {**CASES, **_generate_fuzz_cases()}.items()

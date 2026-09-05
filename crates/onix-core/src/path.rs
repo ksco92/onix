@@ -902,6 +902,17 @@ mod tests {
         }
     }
 
+    /// Fails `make check` if a `unicode-general-category` bump ever changes
+    /// the table `is_non_printable` reads, so a Unicode-version drift is
+    /// caught here rather than only by the Python bindings' own
+    /// interpreter-version-gated differential test (`test_sets.py`'s
+    /// `test_bmp_printability_table_matches_the_running_interpreter_on_3_14`),
+    /// which needs a Python 3.14 interpreter to run at all.
+    #[test]
+    fn unicode_general_category_stays_pinned_to_16_0_0() {
+        assert_eq!(unicode_general_category::UNICODE_VERSION, (16, 0, 0));
+    }
+
     /// Python's `repr()` for a calendar value — the form a container holding
     /// one shows, and the form issue #21 will need once a calendar value may
     /// be a set member. Every expectation here is real Python `repr()`
