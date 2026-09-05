@@ -917,9 +917,10 @@ fn scalar_diff_rejects_a_value_whose_own_nesting_exceeds_max_depth_on_the_new_si
     );
 }
 
-// --- Compounding-depth regression (security-gate round 3): a value's
-// own nesting and the path depth it is found at share ONE combined
-// max_depth budget, not one each. ---
+// --- Compounding-depth regression: a value reached through a shallow
+// finding must not be allowed its own full max_depth on top of the path
+// depth already consumed to reach it. A value's own nesting and the path
+// depth it is found at share ONE combined max_depth budget, not one each. ---
 
 #[test]
 fn value_depth_full_budget_at_a_shallow_finding_is_accepted() {

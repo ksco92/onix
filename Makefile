@@ -47,7 +47,7 @@ coverage:
 	cargo llvm-cov --workspace --fail-under-lines 95 --ignore-filename-regex 'crates/onix-py/src/'
 
 docs:
-	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --quiet
+	RUSTDOCFLAGS="-D warnings" cargo doc --document-private-items --no-deps --workspace --quiet
 
 deny:
 	cargo deny check

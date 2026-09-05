@@ -44,7 +44,7 @@ use crate::value::Value;
 
 /// A bucket key for grouping list elements that compare equal the way
 /// Python's `==` (and therefore `difflib`'s matcher, and dict/set hashing)
-/// does — **not** the way [`crate::diff`]'s own scalar comparison does.
+/// does — **not** the way [`mod@crate::diff`]'s own scalar comparison does.
 ///
 /// This is the "hashable" finding: Python treats `1 == 1.0 == True` (and
 /// `0 == 0.0 == False`) as equal regardless of type, so `difflib` can match

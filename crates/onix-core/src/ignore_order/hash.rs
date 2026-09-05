@@ -169,7 +169,7 @@ pub(crate) enum ItemKey {
     /// value (never collides with `Int`).
     Bool(bool),
     /// A JSON value `serde_json` parsed as an integer (no decimal point or
-    /// exponent) — see [`crate::diff`]'s `python_type_name` for the same
+    /// exponent) — see [`mod@crate::diff`]'s `python_type_name` for the same
     /// int/float split used throughout this crate. Always exact: a
     /// `serde_json::Number`'s non-float representation is always an `i64`
     /// or `u64`, both of which fit losslessly in `i128`.
@@ -400,7 +400,7 @@ pub(crate) enum MemberContent {
 /// `RepId`s are equal.
 ///
 /// Shared by [`crate::diff::set_diff`] and
-/// [`crate::ignore_order::count_set_diff_leaves`] so the two can never drift
+/// `count_set_diff_leaves` so the two can never drift
 /// on what "the same member" means.
 pub(crate) fn set_difference<'a>(
     a: &'a [Value],
@@ -660,7 +660,7 @@ fn number_key(n: &crate::value::Number) -> ItemKey {
 ///
 /// Recurses natively — safe only because
 /// every caller in this module first proves `value`'s nesting is within the
-/// crate's shared depth budget via [`check_value_depth`] (see this module's
+/// crate's shared depth budget via [`check_value_depth`](crate::diff::check_value_depth) (see this module's
 /// "Depth safety" doc section).
 pub(crate) fn item_key(value: &Value, memo: &IgnoreOrderMemo) -> ItemKey {
     keyed(value, memo, false).0
@@ -790,7 +790,7 @@ pub(crate) struct HashedList<'a> {
     /// — this is `SetOrdered(full_t{1,2}_hashtable.keys())`'s own iteration
     /// order (a Python dict's insertion order). Each key sits behind an [`Rc`]
     /// shared with [`Self::info`] and the distance-memo cache keys (see
-    /// [`super::memo::DistanceKey`]).
+    /// `DistanceKey`).
     pub(crate) distinct_order: Vec<Rc<ItemKey>>,
     info: HashMap<Rc<ItemKey>, (usize, &'a Value)>,
 }

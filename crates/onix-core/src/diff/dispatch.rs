@@ -18,7 +18,7 @@ use super::{
     type_change_report,
 };
 
-/// The recursive core of [`diff_with_max_depth()`]: identical dispatch, but
+/// The recursive core of [`diff_with_max_depth()`](super::diff_with_max_depth): identical dispatch, but
 /// carrying the path and depth accumulated so far, so that nested findings
 /// get their full deep path and the recursion-depth bound can be enforced.
 ///
@@ -153,7 +153,7 @@ pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
 /// closes: a value could be accepted at up to `max_depth` deep *in addition
 /// to* however deep the traversal already was, for a combined worst case of
 /// roughly `2 * max_depth` native frames at the `.clone()` call — see
-/// [`diff_with_max_depth`]'s doc for the full contract this restores.
+/// [`diff_with_max_depth`](super::diff_with_max_depth)'s doc for the full contract this restores.
 pub(crate) fn check_value_depth(
     path: &[PathSegment],
     value: &Value,
@@ -217,10 +217,10 @@ pub(crate) fn check_map_depth(
 /// `max_depth`, `Ok(())` otherwise.
 ///
 /// This is [`diff_at`]'s own top check, factored out so
-/// [`insert_lcs_pair_finding`] can enforce the *exact same* bound for an
+/// `insert_lcs_pair_finding` can enforce the *exact same* bound for an
 /// LCS `'replace'`-opcode pairwise comparison as `diff_at` would have
 /// enforced had the pair been reached by ordinary recursion instead (which
-/// is what [`positional_array_diff`]'s equivalent same-index pairs go
+/// is what `positional_array_diff`'s equivalent same-index pairs go
 /// through) — see [`array_diff`]'s module-level "List diffing" doc section.
 /// Deliberately distinct from [`check_value_depth`]: that function bounds a
 /// *value's own nesting* combined with the remaining budget, and is a

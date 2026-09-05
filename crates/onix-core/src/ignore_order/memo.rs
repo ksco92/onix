@@ -139,7 +139,7 @@ use super::hash::{
 /// [`super::hash::DistKey`] for why each side is a value's exact structural
 /// identity (not its order/repetition-insensitive `ItemKey`). Memory per
 /// entry is a refcount bump: each side's value is interned once per candidate
-/// and the `A * R` entries one pairing records just share those [`Rc`]s. The
+/// and the `A * R` entries one pairing records just share those [`Rc`](std::rc::Rc)s. The
 /// *lookup* cost is not constant, though — every probe hashes both keys (a
 /// full walk of each value) and, on a bucket match, compares them structurally
 /// — so per-pair work is proportional to record size (see [`super::hash::DistKey`]).

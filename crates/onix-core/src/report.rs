@@ -588,7 +588,7 @@ impl Report {
     }
 
     /// `DeepDiff`'s `_get_item_length` (distance.py) applied to a whole
-    /// trial-diff report — [`crate::ignore_order::rough_distance`]'s
+    /// trial-diff report — `rough_distance`'s
     /// structural-fallback numerator (`diff_length`).
     ///
     /// Mirrors exactly which sub-value `_get_item_length` would see for

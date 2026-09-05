@@ -1,6 +1,6 @@
 //! `FxHash`: a small, fast, non-cryptographic hasher used for this module's
 //! `HashMap`/`HashSet`s ([`HashedList::info`](super::hash::HashedList),
-//! [`AddedCandidates::buckets`](super::pairing::AddedCandidates), the
+//! `AddedCandidates::buckets`, the
 //! pairing/`used` sets in [`compute_pairs`](super::pairing::compute_pairs),
 //! and the [`IgnoreOrderMemo`](super::memo::IgnoreOrderMemo) cache) —
 //! chosen for speed at the cost of hash-flooding resistance. Some of these
@@ -12,7 +12,7 @@
 use std::hash::BuildHasherDefault;
 
 /// A [`std::collections::HashMap`] keyed by this module's own types
-/// ([`ItemKey`], [`Distance`]), using [`FxHasher`] instead of the standard
+/// ([`ItemKey`](super::hash::ItemKey), [`Distance`](super::distance::Distance)), using [`FxHasher`] instead of the standard
 /// library's default (`SipHash`) — see that type's doc for the trade-off.
 pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<FxHasher>>;
 /// The [`HashMap`] equivalent for [`std::collections::HashSet`].
@@ -44,11 +44,11 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// `FxHash` table there would be a crafted-collision `DoS` on the ordinary
 /// path; a `BTreeMap` has no hash to attack (`O(log n)` worst case, always). See
 /// that module's "Set-member digests" section. Every remaining `FxHash` table
-/// in this module — `HashedList`, [`AddedCandidates`](super::pairing::AddedCandidates),
+/// in this module — `HashedList`, `AddedCandidates`,
 /// the pairing/`used` sets, and the distance memo — is reached **only** under
 /// `ignore_order=true`, the pairing hot path already bounded by the `O(N²)`
 /// caveat below; those keep `FxHash`, and their float-carrying keys
-/// ([`ItemKey`](super::hash::ItemKey), [`ScalarKey`](super::hash::ScalarKey),
+/// ([`ItemKey`](super::hash::ItemKey), [`ScalarKey`](crate::lcs::ScalarKey),
 /// and the distance memo's [`DistKey`](super::hash::DistKey)) mix their bits
 /// first ([`mix_float_bits`](crate::lcs::mix_float_bits)) — `DistKey`'s
 /// encoding routes every float through `number_key`, hence `ItemKey::Float`,

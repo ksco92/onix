@@ -14,8 +14,8 @@ use super::IgnoreOrderMemo;
 use super::fxhash::HashSet;
 
 /// A total-ordering wrapper for the non-negative, always-finite distances
-/// [`rough_distance`] computes, so they can key a [`BTreeMap`] (ascending
-/// iteration, for [`compute_pairs`]'s greedy loop) and group candidates by
+/// [`rough_distance`] computes, so they can key a [`BTreeMap`](std::collections::BTreeMap) (ascending
+/// iteration, for [`compute_pairs`](super::pairing::compute_pairs)'s greedy loop) and group candidates by
 /// **exact** float equality — matching `DeepDiff`'s own behavior of keying
 /// a plain Python `dict` by the raw `float` distance value.
 #[derive(Debug, Clone, Copy)]
@@ -155,7 +155,7 @@ fn family_distance(removed: &Value, added: &Value, cutoff: f64) -> Option<f64> {
 /// `DeepDiff`'s `_get_numbers_distance` (distance.py), including the
 /// "self-cancellation" quirk (`max_` appears in both the
 /// formula and the rejection threshold, so same-sign numeric pairs are
-/// almost never rejected by [`CUTOFF_DISTANCE_FOR_PAIRS`]) and the
+/// almost never rejected by [`CUTOFF_DISTANCE_FOR_PAIRS`](super::pairing::CUTOFF_DISTANCE_FOR_PAIRS)) and the
 /// opposite-sign zero-sum edge case (`divisor == 0.0` returns `cutoff`
 /// itself, i.e. always-reject, rather than dividing by zero).
 #[allow(
@@ -254,9 +254,9 @@ pub(crate) fn is_length_excluded_key(key: &str) -> bool {
 }
 
 /// A `Report`-free mirror of the recursive diff dispatch, counting exactly
-/// what [`Report::distance_leaf_length`] would sum from the equivalent real
+/// what [`Report::distance_leaf_length`](crate::report::Report::distance_leaf_length) would sum from the equivalent real
 /// diff — used by [`rough_distance`]'s structural fallback so a candidate
-/// pair's `diff_length` never pays for a [`Report`]'s `PathSegment`
+/// pair's `diff_length` never pays for a [`Report`](crate::report::Report)'s `PathSegment`
 /// allocations, `Value` clones, or `BTreeMap` inserts. This matters: a
 /// naive "just call `diff_at` and count its `Report`" implementation would
 /// pay exactly the per-candidate object-construction cost that is the
@@ -648,10 +648,10 @@ fn coerce_to_python_str(value: &Value) -> Option<String> {
 /// dict-vs-dict pair through the real `array_diff`/`object_diff` engine:
 /// when that trial's pairing accepts a dict-vs-dict pair nested inside it,
 /// the *actual Report entry it builds* now already reflects the collapse,
-/// so [`Report::distance_leaf_length`] never inherits an inflated,
+/// so [`Report::distance_leaf_length`](crate::report::Report::distance_leaf_length) never inherits an inflated,
 /// uncollapsed leaf count from it (found by differential fuzzing: a
 /// nested-array-of-dicts candidate pair whose true distance is 0.1364 used
-/// to be measured at 0.3182 — crossing [`CUTOFF_DISTANCE_FOR_PAIRS`] and
+/// to be measured at 0.3182 — crossing [`CUTOFF_DISTANCE_FOR_PAIRS`](super::pairing::CUTOFF_DISTANCE_FOR_PAIRS) and
 /// producing a completely different pairing decision).
 pub(crate) const THRESHOLD_TO_DIFF_DEEPER: f64 = 0.33;
 
@@ -783,7 +783,7 @@ pub(crate) fn count_array_diff_leaves(
 /// `diff_length` comes from [`count_diff_leaves`] — a `Report`-free mirror
 /// of a trial recursive diff between `removed` and `added` (see that
 /// function's own doc for why it deliberately does *not* build a
-/// [`Report`], unlike `DeepDiff`'s own brand-new nested `DeepDiff` object
+/// [`Report`](crate::report::Report), unlike `DeepDiff`'s own brand-new nested `DeepDiff` object
 /// built purely to measure this).
 ///
 /// `depth` is the depth of the *list* doing the pairing (so `removed`/
@@ -797,14 +797,14 @@ pub(crate) fn count_array_diff_leaves(
 ///
 /// **The one place this can still fail is [`count_array_diff_leaves`]'s own
 /// nested trial diff, and it is believed unreachable today, kept anyway as
-/// defense-in-depth.** [`ignore_order_array_diff`]'s own up-front
+/// defense-in-depth.** [`ignore_order_array_diff`](super::ignore_order_array_diff)'s own up-front
 /// [`crate::diff::check_value_depth`] pass already validates `removed`/`added`
 /// individually against this exact same reduced budget
 /// (`max_depth` minus the items' own depth) before pairing ever runs; a
 /// short inductive argument (every subtree's remaining-budget-at-its-relative-depth
 /// transfers exactly from a depth-checked root to a trial restarted at
 /// depth `0` with that same budget as its own `max_depth`) shows the trial
-/// can never need more depth than that. Unlike [`insert_lcs_pair_finding`]'s
+/// can never need more depth than that. Unlike `insert_lcs_pair_finding`'s
 /// equivalent "structurally unreachable" guard (a *static type fact* — a
 /// JSON scalar's nesting is always `0`, true forever), the invariant here
 /// is a *cross-function arithmetic* one, spread across several functions —

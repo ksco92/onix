@@ -173,7 +173,7 @@ pub(crate) fn numeric_diff(
     scalar_diff(path, numbers_equal(old, new), a, b, depth, max_depth)
 }
 /// The single definition of numeric equality shared by [`numeric_diff`] and
-/// [`values_equal`], so there is exactly one place these rules live.
+/// [`values_equal`](super::values_equal), so there is exactly one place these rules live.
 ///
 /// An int and a float are never equal (mirroring `DeepDiff` always reporting
 /// that pairing as a `type_changes`, never a numeric comparison). Within the

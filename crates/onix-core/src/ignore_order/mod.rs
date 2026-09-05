@@ -33,7 +33,7 @@
 //!
 //! For one list level (`a` = `t1`/old, `b` = `t2`/new):
 //!
-//! 1. **Hash every item** ([`item_key`]) into a canonical equivalence key —
+//! 1. **Hash every item** ([`item_key`](hash::item_key)) into a canonical equivalence key —
 //!    see that function's doc for the exact `DeepHash`-matching rules
 //!    (type-tagged numbers, order/count-insensitive nested lists, etc.).
 //!    Reduce each list to its *distinct* keys in first-occurrence order
@@ -70,7 +70,7 @@
 //!    added-hash loop consumed every paired partner) is a plain
 //!    `iterable_item_removed` at its own index.
 //!
-//! After the whole recursive traversal finishes, [`crate::diff`]'s existing
+//! After the whole recursive traversal finishes, [`mod@crate::diff`]'s existing
 //! whole-tree [`crate::report::Report::merge_mutual_add_removes`] pass
 //! still runs exactly once, unchanged — it is what turns many of this
 //! module's own raw adds/removes into `values_changed` on typical small,
@@ -79,21 +79,21 @@
 //!
 //! # Depth safety (this crate's own invariant, not `DeepDiff`'s)
 //!
-//! [`item_key`] and [`rough_length`] both recurse **natively** (no explicit
+//! [`item_key`](hash::item_key) and [`rough_length`](distance::rough_length) both recurse **natively** (no explicit
 //! work-stack) — unlike the rest of this crate's traversal, which is bounded
 //! via [`crate::diff::check_traversal_depth`]/[`crate::diff::check_value_depth`].
 //! [`ignore_order_array_diff`] closes this gap up front: every item of both
 //! `a` and `b` is validated with [`crate::diff::check_value_depth`] (the same
 //! combined path-depth-plus-value-depth budget documented on
 //! [`crate::diff::diff_with_max_depth`]) *before* any hashing happens, so by
-//! the time [`item_key`]/[`rough_length`] run, their native recursion is
+//! the time [`item_key`](hash::item_key)/[`rough_length`](distance::rough_length) run, their native recursion is
 //! already proven to be no deeper than a bound this crate already trusts a
 //! plain `.clone()` to recurse through safely elsewhere. The structural
-//! distance fallback's own trial comparison ([`count_diff_leaves`]) is a
+//! distance fallback's own trial comparison ([`count_diff_leaves`](distance::count_diff_leaves)) is a
 //! `Report`-free mirror of a diff for scalars and dicts (no further native
 //! recursion risk beyond what's already covered above), except for a
 //! genuinely nested array, which still runs a real, small trial
-//! [`crate::diff::array_diff`] call — see [`rough_distance`]'s doc for its
+//! [`crate::diff::array_diff`] call — see [`rough_distance`](distance::rough_distance)'s doc for its
 //! own remaining-budget bound.
 //!
 //! # Two `DeepDiff` behaviors the pairing depends on
@@ -107,7 +107,7 @@
 //!    `float(0) == 0.0`, `int(True) == 1`, `bool(0) == False`) — the general
 //!    rule real `DeepDiff` applies
 //!    (`model.py::TreeResult._from_tree_type_changes`, `DELTA_VIEW` branch).
-//!    See [`coerce_for_type_change`] for the exact matrix.
+//!    See `coerce_for_type_change` for the exact matrix.
 //!    [`type_change_leaf_length`] and `Report::distance_leaf_length` both
 //!    route through it, so this rule lives in exactly one place.
 //! 2. **`new_path` composition across nesting levels.** A paired item whose

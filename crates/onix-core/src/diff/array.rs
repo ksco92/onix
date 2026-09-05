@@ -133,7 +133,7 @@ struct LcsPair<'a> {
 /// function, and must record *nothing* — which is also what keeps
 /// [`lcs_or_positional_array_diff`]'s finding-count comparison matching
 /// `DeepDiff`'s. That branch is also where the pair picks up the
-/// UTC-normalized rendering [`datetime_diff`] documents.
+/// UTC-normalized rendering [`datetime_diff`](super::datetime_diff) documents.
 ///
 /// Checks [`check_traversal_depth`] at `depth + 1` (this pair's own path
 /// depth) before recording anything — the same bound
@@ -312,7 +312,7 @@ fn lcs_array_diff(
 /// own internal dispatch one level deeper with the index appended to the
 /// path (so a changed, type-changed, or further-nested-container
 /// difference at that index surfaces with its own deep path, exactly like
-/// [`object_diff`]'s shared-key recursion). Once the shorter list is
+/// [`object_diff`](super::object_diff)'s shared-key recursion). Once the shorter list is
 /// exhausted, the longer list's surplus tail becomes
 /// `iterable_item_removed` findings (if `a` is longer) or
 /// `iterable_item_added` findings (if `b` is longer), one per surplus index,
@@ -325,15 +325,15 @@ fn lcs_array_diff(
 /// against [`lcs_array_diff`]'s result otherwise — see [`array_diff`]'s
 /// doc.
 ///
-/// Like [`object_diff`], this always recurses into same-index pairs rather
-/// than re-checking [`values_equal`] first — see that function's doc for why
-/// the single top-level equality check in [`diff_with_max_depth`] is enough.
+/// Like [`object_diff`](super::object_diff), this always recurses into same-index pairs rather
+/// than re-checking [`values_equal`](super::values_equal) first — see that function's doc for why
+/// the single top-level equality check in [`diff_with_max_depth`](super::diff_with_max_depth) is enough.
 ///
 /// Every surplus-tail clone is checked with [`check_value_depth`] first,
-/// exactly like [`object_diff`]'s added/removed leaf clones: a surplus
+/// exactly like [`object_diff`](super::object_diff)'s added/removed leaf clones: a surplus
 /// element can itself be an arbitrarily deep value, so the same combined
 /// path-depth-plus-value-depth budget applies here too (see
-/// [`diff_with_max_depth`]'s doc for the full contract).
+/// [`diff_with_max_depth`](super::diff_with_max_depth)'s doc for the full contract).
 ///
 /// `path` is the single buffer shared across the whole traversal (see
 /// [`diff_at`]'s doc): each iteration below runs its work through
