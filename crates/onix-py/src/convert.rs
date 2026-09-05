@@ -66,44 +66,19 @@
 //!
 //! # Subclasses
 //!
-//! `DeepDiff` reports every value under `type(obj).__name__`, so a subclass
-//! of a supported type — a `datetime`/`date` subclass (pandas' `Timestamp`
-//! is the common one), a `list`/`tuple`/`set`/`frozenset`/`dict` subclass, or
-//! a `namedtuple` (a `tuple` subclass with named fields) — is never a plain
-//! instance of the base type there, even when every field matches: a
-//! subclass-vs-base pair is a `type_changes` finding naming the two concrete
-//! classes, confirmed against real `deepdiff==9.1.0`. This conversion checks
-//! the *exact* type first (the common, and cheapest, case), falling through
-//! to a second, non-exact `isinstance`-style cast that additionally records
-//! `type(obj).__name__` for a subclass — see [`onix_core::value::Typed`]'s
-//! doc (the "Subclass type names" section) for how that name flows through
-//! the rest of the value model and diff engine, and why every other
-//! matching identity in the crate (`SetItems` dedup, `crate::lcs`'s
-//! scalar-list matching, `crate::ignore_order`'s hashing) needs no change at
-//! all to stay class-agnostic, matching Python's own subclass-oblivious
-//! `__eq__`/`__hash__` for these types.
-//!
-//! A `namedtuple` is accepted as an ordinary `tuple` subclass and diffed
-//! **positionally** (`root[0][1]`, not `root[0].y`) — real `DeepDiff` instead
-//! walks a `namedtuple`'s fields by name (`deephash.py`'s `_prep_tuple`),
-//! producing `attribute_added`/`attribute_removed`/dotted-path findings this
-//! crate has no machinery for. Reproducing that shape would need a second,
-//! name-keyed diffing path threaded through the whole engine for one
-//! single-source special case; this is a documented divergence (see
-//! `tests/golden/README.md`), not an approximation of the field-walking
-//! shape — the class name itself still carries through, so a namedtuple
-//! type change against a plain tuple (or a different namedtuple type) still
-//! names the concrete classes correctly.
-//!
-//! [`crate::deepdiff::DeepDiff::to_dict`] cannot reconstruct the original
-//! subclass *instance* for a `datetime`/`date` subclass: once a value has
-//! passed through the compact model there is no reference to the original
-//! class left to rebuild one from, so it renders back as the plain base
-//! type its fields describe — the same simplification already documented
-//! below for the `zoneinfo`/`pytz` `tzinfo` round trip. `list`/`tuple`
-//! subclasses/`namedtuple`s render back as a plain `list`/`tuple` for the
-//! same reason (a `dict`/`set`/`frozenset` subclass renders back as its
-//! base type too).
+//! This conversion checks the *exact* type first, falling through to a
+//! second, non-exact `isinstance`-style cast that additionally records
+//! `type(obj).__name__` for a subclass — see [`onix_core::value`]'s
+//! "Subclasses" section for how that name flows through the rest of the
+//! value model and diff engine. A
+//! `namedtuple` is accepted as an ordinary `tuple` subclass and diffed
+//! **positionally** (`root[0][1]`), not by field (`root[0].y`) the way real
+//! `DeepDiff` does — a documented divergence (see `tests/golden/README.md`),
+//! not an approximation of the field-walking shape. A subclass instance
+//! (`datetime`/`date`/`list`/`tuple`) also cannot round-trip through
+//! [`crate::deepdiff::DeepDiff::to_dict`] as itself: it renders back as the
+//! plain base type its fields describe, the same simplification the
+//! `zoneinfo`/`pytz` round trip below already documents.
 //!
 //! # Datetimes and dates
 //!

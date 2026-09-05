@@ -61,6 +61,19 @@
 //! own recursive `Clone` had before the engine migrated onto this type. A
 //! caller cloning an untrusted value outside that guard should reject
 //! over-deep input up front with [`crate::exceeds_depth`].
+//!
+//! # Subclasses
+//!
+//! [`Value::DateTime`]/[`Value::Date`]/[`Value::Array`]/[`Value::Tuple`]
+//! wrap their payload in [`Typed`], and [`SetItems`]/[`Object`] carry an
+//! equivalent `type_name` field, so a Python subclass instance keeps the
+//! source class name it needs to report a `type_changes` finding, while
+//! comparing, hashing, and rendering exactly like its base type everywhere
+//! else — every matching identity in the crate (`SetItems` dedup,
+//! `crate::lcs`'s scalar-list matching, `crate::ignore_order`'s hashing)
+//! is unaffected, since none of them read the class name. `diff_at`
+//! (`crate::diff`) is the one place that does, gating its per-pair dispatch
+//! on it before recursing into any of those six variants.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -145,57 +158,12 @@ pub enum Value {
     Object(Object),
 }
 
-/// Wraps a value together with the concrete Python class it came from, when
-/// that class is a *subclass* of the type this [`Value`] variant represents
-/// (`None` for the exact base type — `datetime`, `date`, `list`, or
-/// `tuple`).
-///
-/// # Subclass type names
-///
-/// `DeepDiff` reports every value under `type(obj).__name__`, so a subclass
-/// instance — a `datetime`/`date` subclass (pandas' `Timestamp` is the
-/// common case), a `list`/`tuple`/`set`/`frozenset`/`dict` subclass, or a
-/// `namedtuple` (a `tuple` subclass with named fields) — never compares as
-/// its bare base type there: a subclass instance equal in every field to a
-/// base-type instance of the same shape still reports a `type_changes`
-/// finding naming the two concrete classes, confirmed against real
-/// `deepdiff==9.1.0` at the root, inside a dict value, and at a plain
-/// (non-scalar-list) array index — every place `diff_at` (the recursive
-/// dispatch core in `crate::diff`) recurses through its own per-pair
-/// dispatch. This wrapper (on
-/// [`Value::DateTime`]/[`Value::Date`]/[`Value::Array`]/[`Value::Tuple`],
-/// and the equivalent `type_name` field on [`SetItems`]/[`Object`] for
-/// `set`/`frozenset`/`dict`) carries that class name through the value
-/// model so the diff engine and [`crate::report`] can reproduce it.
-///
-/// A subclass instance otherwise compares, hashes, and renders *exactly*
-/// like its base type — this is the "compare as base type" half of the
-/// contract, confirmed against `DeepDiff` too: a `set`/list/tuple of
-/// subclass-vs-base values that are otherwise equal never reports a
-/// difference (Python's own `__eq__`/`__hash__` for these types already
-/// ignore the subclass), and neither does `DeepDiff`'s hash-based
-/// `ignore_order`/set-membership matching. So [`Typed`]'s own [`PartialEq`]
-/// deliberately compares only the wrapped value, ignoring the class name —
-/// every place a class-name difference *is* significant ([`Value`]'s own
-/// structural equality, and `diff_at`'s dispatch) checks it separately, via
-/// the crate-private `class_name` function. This is why every matching-identity path in the
-/// crate — [`SetItems`] dedup/ordering, `crate::lcs`'s scalar-list matching,
-/// and `crate::ignore_order`'s hashing — needs no change at all to stay
-/// class-agnostic: none of them consult a class name in the first place.
-///
-/// A `namedtuple` is accepted as an ordinary `tuple` subclass and diffed
-/// **positionally** (`root[1]`, not `root.y`) — `DeepDiff` instead walks a
-/// `namedtuple`'s fields by name (`root.y`, and `attribute_added`/
-/// `attribute_removed` for a plain object with dynamic attributes, which is
-/// out of scope here). Reproducing the attribute-path walk would need a
-/// second, name-keyed diffing shape threaded through the whole engine for a
-/// single-source special case; this is a documented divergence (see
-/// `tests/golden/README.md`), not an approximation of the real shape.
-///
-/// A subclass instance is not accepted as a *member* of a `set`/`frozenset`
-/// (the existing exact-type restriction in `crate::value` at the
-/// `onix-py` boundary is unchanged there) — out of scope for this type, see
-/// its own module doc.
+/// Wraps a value with the source Python class name, when it differs from
+/// the base type this [`Value`] variant represents (`None` for the exact
+/// base type). [`PartialEq`] compares only the wrapped value, ignoring the
+/// class name — see the [module documentation](self)'s "Subclasses"
+/// section, and `diff_at`'s class-name gate (`crate::diff`) for where the
+/// name is checked instead.
 #[derive(Debug, Clone)]
 pub struct Typed<T> {
     inner: T,
@@ -247,12 +215,6 @@ impl<T> Deref for Typed<T> {
 
     fn deref(&self) -> &T {
         &self.inner
-    }
-}
-
-impl<T: Default> Default for Typed<T> {
-    fn default() -> Self {
-        Self::new(T::default())
     }
 }
 
@@ -410,7 +372,7 @@ impl Drop for Value {
 fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
     match value {
         Value::Array(items) | Value::Tuple(items) => {
-            let taken = std::mem::take(items);
+            let taken = std::mem::replace(items, Typed::new(Box::default()));
             stack.extend(taken.into_inner().into_vec());
         }
         Value::Set(items) | Value::FrozenSet(items) => {

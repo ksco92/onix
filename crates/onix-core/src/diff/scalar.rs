@@ -12,7 +12,9 @@ use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
 
 use super::check_value_depth;
 
-/// The Python type name `DeepDiff` would report for a given [`Value`].
+/// The base-type name for a given [`Value`], ignoring any subclass name it
+/// carries; see [`effective_type_name`] for the name `DeepDiff` actually
+/// reports.
 ///
 /// Numbers are split into `"int"` and `"float"` by the compact [`Number`]'s
 /// preserved representation (which carries `serde_json`'s original parse: a
