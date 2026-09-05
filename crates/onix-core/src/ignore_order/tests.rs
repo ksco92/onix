@@ -2487,100 +2487,95 @@ fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
         .expect("set-member hashing and comparison complete on a small stack");
 }
 
-/// Interning `K` set members must stay near linear in `K`, never quadratic.
+/// Interning `K` set/list members must never collapse onto one hash bucket —
+/// the property a wall-clock `K -> 2K` diff-time ratio used to guard here by
+/// timing, which is noise-dominated at these sizes on a shared CI runner (a
+/// bare-metal-quiet 10ms K sample can read `3x` slower than main on the same
+/// engine code; see this test's own history in the issue tracker). Measured
+/// directly instead, with no diff and no clock in the loop:
 ///
-/// - **Float bit-pattern collision (`SetFloat*`, `ListFloat`) — the runtime
-///   guard.** A float carrying an integer or half-integer has ~50 trailing zero
-///   bits; on the `FxHash` tables the crate keeps (e.g. `HashedList` for an
-///   `ignore_order` list), a run of them collides unless the float bits are
-///   mixed first ([`crate::lcs::mix_float_bits`]). Reverting the mixing turns
-///   the float rows here red, so they genuinely guard it.
-/// - **Benign near-linearity (`SetIntPair`).** A run of plain int 2-tuples
-///   exercises the set-member tables on the *shape* of the crafted
-///   hash-flooding attack, but does **not** stand in for the attack: sequential
-///   ints do not collide under `FxHash`, so this row stays green even if the
-///   tables were reverted to `FxHash`. The adversarial hazard — the tables are
-///   keyed by attacker-controlled content and reached with the default
-///   `ignore_order=false` — is guarded at the **type level** instead: the tables
-///   are [`BTreeMap`]s, and [`super::hash::MemberHashKey`]/
-///   [`super::hash::MemberContent`] no longer derive `Hash`, so putting them
-///   back on an `FxHash` map fails to compile (`E0599`). This row is a plain
-///   regression check that the `BTreeMap` path itself scales.
-///
-/// Each asserts the `K -> 2K` diff-time ratio stays under `3.0` — a linear (or
-/// `n log n`) pass is `~2x`, a quadratic one `~4x`. Sized to run well under a
-/// second.
+/// [`super::hash::item_key`]'s `Float` arm hashes through
+/// [`crate::lcs::mix_float_bits`] before the bits ever reach one of this
+/// module's `FxHash` tables (e.g. [`super::hash::HashedList`], the table an
+/// `ignore_order` list's items are matched through) — an integral or
+/// half-integer float's raw bit pattern shares dozens of trailing zero bits
+/// over the range this test uses, and `hashbrown` picks a table's bucket
+/// from a hash's *low* bits (see `mix_float_bits`'s own doc), so an unmixed
+/// run of them would all name the same bucket and degrade every lookup to a
+/// linear scan. This hashes real [`super::hash::ItemKey`]s through the real
+/// [`FxHasher`] `HashedList` itself uses and checks the low 32 bits (a proxy
+/// wide enough that no realistic table capacity at these sizes reads outside
+/// it) of `K`, and separately `2K`, keys: with the mixing intact they land in
+/// (almost) pairwise-distinct buckets, so the distinct count grows linearly
+/// with `K`; reverting or breaking the mix collapses the whole run onto a
+/// handful of buckets regardless of `K`, which the linearity assertion below
+/// catches immediately (confirmed by temporarily reverting `hash.rs`'s
+/// `Float` arm to hash the raw bits and re-running this test, which then
+/// fails on both the distinctness and the growth checks).
 #[test]
-fn set_and_list_member_interning_scales_near_linearly() {
+fn float_hash_buckets_stay_distinct_and_grow_linearly_with_member_count() {
     use crate::value::Number;
+    use std::collections::HashSet;
+    use std::hash::{Hash, Hasher};
 
-    #[derive(Clone, Copy)]
-    enum Shape {
-        SetIntFloat,
-        SetHalfFloat,
-        SetIntPair,
-        ListFloat,
-    }
-
-    let f = |x: f64| CValue::Number(Number::from_f64(x).expect("finite"));
-    let i = |n: i64| CValue::Number(Number::from_i64(n));
-
-    let build = |k: usize, shape: Shape| -> (CValue, CValue, DiffOptions) {
-        #[allow(clippy::cast_precision_loss)]
-        let member = |n: usize| -> CValue {
-            let n_i = i64::try_from(n).expect("test sizes fit i64");
-            match shape {
-                Shape::SetIntFloat => CValue::Tuple(vec![f(n as f64)].into_boxed_slice()),
-                Shape::SetHalfFloat => CValue::Tuple(vec![f(n as f64 + 0.5)].into_boxed_slice()),
-                Shape::SetIntPair => CValue::Tuple(vec![i(n_i), i(n_i)].into_boxed_slice()),
-                Shape::ListFloat => f(n as f64),
-            }
-        };
-        let side = |extra: bool| {
-            let mut items: Vec<CValue> = (0..k).map(member).collect();
-            if extra {
-                items.push(CValue::Str("sentinel".to_string().into_boxed_str()));
-            }
-            match shape {
-                Shape::ListFloat => CValue::Array(items.into_boxed_slice()),
-                _ => CValue::Set(SetItems::new(items)),
-            }
-        };
-        let opts = DiffOptions {
-            ignore_order: matches!(shape, Shape::ListFloat),
-            ..DiffOptions::default()
-        };
-        // Differ by one member so the whole-value fast path can't short-circuit.
-        (side(false), side(true), opts)
-    };
-
-    let best_diff = |k: usize, shape: Shape| -> f64 {
-        let (a, b, opts) = build(k, shape);
-        let _ = crate::diff::diff_with_options(&a, &b, &opts).expect("diffs cleanly"); // warm
-        (0..5)
-            .map(|_| {
-                let start = std::time::Instant::now();
-                let _ = crate::diff::diff_with_options(&a, &b, &opts).expect("diffs cleanly");
-                start.elapsed().as_secs_f64()
-            })
-            .fold(f64::INFINITY, f64::min)
-    };
-
-    for (name, shape) in [
-        ("set int-float", Shape::SetIntFloat),
-        ("set half-float", Shape::SetHalfFloat),
-        ("set int-pair", Shape::SetIntPair),
-        ("ignore_order list float", Shape::ListFloat),
-    ] {
-        let k = 10_000;
-        let t1 = best_diff(k, shape);
-        let t2 = best_diff(2 * k, shape);
-        let ratio = t2 / t1;
-        assert!(
-            ratio < 3.0,
-            "{name}: K->2K ratio {ratio:.2} (t1={t1:.4}s t2={t2:.4}s) is super-linear — \
-             keys are colliding in their interning table"
+    let memo = IgnoreOrderMemo::new();
+    let low_bucket = |n: usize, half: bool| -> u32 {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "n stays well under 2^53 here; exactness is not the point of the probe"
+        )]
+        let value = n as f64 + if half { 0.5 } else { 0.0 };
+        let key = super::hash::item_key(
+            &CValue::Number(Number::from_f64(value).expect("finite")),
+            &memo,
         );
+        let mut hasher = FxHasher::default();
+        key.hash(&mut hasher);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "only the low 32 bits are the bucket proxy under test"
+        )]
+        {
+            hasher.finish() as u32
+        }
+    };
+
+    for (name, half) in [("integral", false), ("half-integer", true)] {
+        let k = 10_000;
+        let distinct_count = |count: usize| -> usize {
+            (0..count)
+                .map(|n| low_bucket(n, half))
+                .collect::<HashSet<_>>()
+                .len()
+        };
+
+        let distinct_1x = distinct_count(k);
+        let distinct_2x = distinct_count(2 * k);
+
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "k is a small test constant; the ratio only needs two significant figures"
+        )]
+        {
+            assert!(
+                (distinct_1x as f64) > 0.99 * (k as f64),
+                "{name} floats: only {distinct_1x}/{k} distinct hash buckets at K \
+                 — keys are colliding in their interning table"
+            );
+            assert!(
+                (distinct_2x as f64) > 0.99 * (2.0 * k as f64),
+                "{name} floats: only {distinct_2x}/{} distinct hash buckets at 2K \
+                 — keys are colliding in their interning table",
+                2 * k
+            );
+
+            let ratio = distinct_2x as f64 / distinct_1x as f64;
+            assert!(
+                (1.9..=2.1).contains(&ratio),
+                "{name} floats: distinct-bucket count did not grow linearly \
+                 with K (K->2K ratio {ratio:.3}, distinct_1x={distinct_1x}, distinct_2x={distinct_2x})"
+            );
+        }
     }
 }
 
