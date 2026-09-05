@@ -2967,40 +2967,56 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
 /// (they re-canonicalize to the same stored order, so this is only a
 /// construction-path check, not where the power comes from). Recurses over
 /// proptest-bounded depth (safe).
-fn structural_twin(value: &CValue) -> CValue {
+///
+/// The datetime and signed-zero perturbations are suppressed once the walk is
+/// **below a set or frozenset** (`in_set`, sticky through nested arrays, tuples
+/// and dicts). A set's canonical storage order is *finer* than value equality
+/// for signed zero (`-0.0` sorts before `0.0` in [`SetItems`], and `Value::eq`
+/// on sets zips stored order), so perturbing a member there would reorder the
+/// enclosing set and make the twin genuinely unequal — a false failure. Above
+/// any set the perturbations run and give the property its power; the reversal
+/// still runs everywhere.
+fn structural_twin(value: &CValue, in_set: bool) -> CValue {
     match value {
         CValue::Array(items) => CValue::Array(
             items
                 .iter()
-                .map(structural_twin)
+                .map(|item| structural_twin(item, in_set))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         ),
         CValue::Tuple(items) => CValue::Tuple(
             items
                 .iter()
-                .map(structural_twin)
+                .map(|item| structural_twin(item, in_set))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         ),
         CValue::Set(items) => {
-            let mut members: Vec<CValue> = items.iter().map(structural_twin).collect();
+            let mut members: Vec<CValue> = items
+                .iter()
+                .map(|item| structural_twin(item, true))
+                .collect();
             members.reverse();
             CValue::Set(SetItems::new(members))
         }
         CValue::FrozenSet(items) => {
-            let mut members: Vec<CValue> = items.iter().map(structural_twin).collect();
+            let mut members: Vec<CValue> = items
+                .iter()
+                .map(|item| structural_twin(item, true))
+                .collect();
             members.reverse();
             CValue::FrozenSet(SetItems::new(members))
         }
         CValue::Object(map) => {
             let mut entries: Vec<(String, CValue)> = map
                 .iter()
-                .map(|(key, child)| (key.to_string(), structural_twin(child)))
+                .map(|(key, child)| (key.to_string(), structural_twin(child, in_set)))
                 .collect();
             entries.reverse();
             crate::value::Builder::new().object(entries)
         }
+        CValue::DateTime(_) | CValue::Number(_) if in_set => value.clone(),
         CValue::DateTime(dt) => {
             let date = dt.date();
             match dt.utc_offset_seconds() {
@@ -3057,7 +3073,7 @@ proptest! {
     /// would fail here.
     #[test]
     fn dist_key_hash_equal_for_equal_values(value in arb_cvalue()) {
-        let twin = structural_twin(&value);
+        let twin = structural_twin(&value, false);
         prop_assert_eq!(&value, &twin);
         prop_assert_eq!(dist_hash(&value), dist_hash(&twin));
 
