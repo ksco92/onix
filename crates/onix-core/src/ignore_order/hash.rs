@@ -671,7 +671,7 @@ fn scalar_content_key(value: &Value) -> ItemKey {
         Value::DateTime(dt) => ItemKey::DateTime(dt.instant()),
         Value::Date(date) => ItemKey::Date(date.ordinal()),
         Value::Time(time) => ItemKey::Time(time.hash_seconds_of_day()),
-        Value::TimeDelta(value) => ItemKey::TimeDelta(*value),
+        Value::TimeDelta(value) => ItemKey::TimeDelta(value.value()),
         Value::Array(_)
         | Value::Tuple(_)
         | Value::Set(_)
@@ -767,7 +767,7 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
         Value::DateTime(value) => (ItemKey::DateTime(value.instant()), part()),
         Value::Date(value) => (ItemKey::Date(value.ordinal()), part()),
         Value::Time(value) => (ItemKey::Time(value.hash_seconds_of_day()), part()),
-        Value::TimeDelta(value) => (ItemKey::TimeDelta(*value), part()),
+        Value::TimeDelta(value) => (ItemKey::TimeDelta(value.value()), part()),
         Value::Number(n) => {
             let number = if n.is_f64() {
                 let f = n

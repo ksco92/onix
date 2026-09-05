@@ -1,7 +1,7 @@
 use super::IgnoreOrderMemo;
 use crate::diff::DiffOptions;
 use crate::test_support::{
-    cdate, cdt, cdt_at, cfrozen, cobj, cset, ctime, ctimedelta, ctup, cv, cvec,
+    carr, cdate, cdt, cdt_at, cfrozen, cobj, cset, ctime, ctimedelta, ctup, ctuple, cv, cvec,
 };
 use crate::value::{ObjectKey, SetItems, Value as CValue};
 use serde_json::json;
@@ -1043,8 +1043,8 @@ fn dict_python_eq_mixed_rejects_when_only_one_side_has_an_extra_key_or_a_shared_
     let key = |n: i64| ObjectKey::Other(Box::new(cv(&json!(n))));
     let dict =
         |pairs: Vec<(ObjectKey, CValue)>| CValue::Object(crate::value::Object::from_pairs(pairs));
-    let list_of = |value: CValue| CValue::Array(vec![value].into_boxed_slice());
-    let tuple_of = |value: CValue| CValue::Tuple(vec![value].into_boxed_slice());
+    let list_of = |value: CValue| carr(vec![value]);
+    let tuple_of = |value: CValue| ctuple(vec![value]);
 
     let base = || dict(vec![(key(1), cv(&json!("a")))]);
     let with_extra_key = || dict(vec![(key(1), cv(&json!("a"))), (key(2), cv(&json!("b")))]);
@@ -1088,10 +1088,7 @@ fn python_eq_matches_dicts_across_python_equal_but_differently_typed_keys() {
     )]));
 
     assert_eq!(
-        super::distance::type_change_leaf_length(
-            &CValue::Array(vec![dict_int].into_boxed_slice()),
-            &CValue::Tuple(vec![dict_float].into_boxed_slice()),
-        ),
+        super::distance::type_change_leaf_length(&carr(vec![dict_int]), &ctuple(vec![dict_float]),),
         1,
         "reproduced (cost 1): the two dicts are Python-equal despite the differently-typed key"
     );
@@ -1530,11 +1527,6 @@ fn ignore_order_diff_compact(a: &CValue, b: &CValue) -> serde_json::Value {
     .to_json_value()
 }
 
-/// A compact array of compact values, for a list holding a tuple.
-fn carr(items: Vec<CValue>) -> CValue {
-    CValue::Array(items.into_boxed_slice())
-}
-
 #[test]
 fn a_tuple_and_a_list_with_the_same_items_never_hash_match() {
     // DeepHash carries the type, so `[(1, 2)]` vs `[[1, 2]]` does not match
@@ -1646,7 +1638,7 @@ fn the_digest_collision_reaches_tuples_nested_inside_other_containers() {
     // another tuple, in a dict, or in a list collides just the same.
     let wrapped = |item: CValue| {
         (
-            carr(vec![CValue::Tuple(vec![item.clone()].into_boxed_slice())]),
+            carr(vec![ctuple(vec![item.clone()])]),
             carr(vec![cobj_of("k", item.clone())]),
             carr(vec![carr(vec![item])]),
         )
@@ -1695,11 +1687,8 @@ fn a_tuple_digest_cache_hit_reads_its_own_index_not_the_first_ones() {
 fn an_unhashable_tuple_never_collides() {
     // A tuple holding a list or a dict cannot be a Python dict key, so it
     // misses the cache entirely and keeps its own type-strict digest.
-    let list_inside = |first: serde_json::Value| {
-        carr(vec![CValue::Tuple(
-            vec![cv(&first), cv(&json!([1]))].into_boxed_slice(),
-        )])
-    };
+    let list_inside =
+        |first: serde_json::Value| carr(vec![ctuple(vec![cv(&first), cv(&json!([1]))])]);
     assert_eq!(
         ignore_order_diff_compact(&list_inside(json!(1)), &list_inside(json!(1.0))),
         json!({"type_changes": {"root[0][0]": {
@@ -1708,11 +1697,7 @@ fn an_unhashable_tuple_never_collides() {
         }}})
     );
 
-    let dict_inside = |first: serde_json::Value| {
-        carr(vec![CValue::Tuple(
-            vec![cv(&first), cv(&json!({"k": 1}))].into_boxed_slice(),
-        )])
-    };
+    let dict_inside = |first: serde_json::Value| carr(vec![ctup(&[first, json!({"k": 1})])]);
     assert_eq!(
         ignore_order_diff_compact(&dict_inside(json!(1)), &dict_inside(json!(1.0))),
         json!({"type_changes": {"root[0][0]": {
@@ -1769,12 +1754,8 @@ fn a_collided_element_drops_out_of_its_parents_own_comparison() {
     // digest, so only the sibling difference is reported.
     assert_eq!(
         ignore_order_diff_compact(
-            &carr(vec![CValue::Tuple(
-                vec![ctup(&[json!(1)]), cv(&json!("a"))].into_boxed_slice()
-            )]),
-            &carr(vec![CValue::Tuple(
-                vec![ctup(&[json!(1.0)]), cv(&json!("b"))].into_boxed_slice()
-            )]),
+            &carr(vec![ctuple(vec![ctup(&[json!(1)]), cv(&json!("a"))])]),
+            &carr(vec![ctuple(vec![ctup(&[json!(1.0)]), cv(&json!("b"))])]),
         ),
         json!({"values_changed": {"root[0][1]": {
             "new_value": "b", "old_value": "a",
@@ -1813,9 +1794,7 @@ fn python_equality_keeps_container_kinds_distinct_inside_the_coercion_test() {
     // cutoff, and reports as a whole-value change instead of a type change.
     assert_eq!(
         ignore_order_diff_compact(
-            &carr(vec![CValue::Tuple(
-                vec![cv(&json!(1)), ctup(&[json!(2)])].into_boxed_slice()
-            )]),
+            &carr(vec![ctuple(vec![cv(&json!(1)), ctup(&[json!(2)])])]),
             &cv(&json!([[1, [2]]])),
         ),
         json!({"values_changed": {"root[0]": {
@@ -1826,9 +1805,7 @@ fn python_equality_keeps_container_kinds_distinct_inside_the_coercion_test() {
     // With a real list in the same position it does equal, and pairs.
     assert_eq!(
         ignore_order_diff_compact(
-            &carr(vec![CValue::Tuple(
-                vec![cv(&json!(1)), cv(&json!([2]))].into_boxed_slice()
-            )]),
+            &carr(vec![ctuple(vec![cv(&json!(1)), cv(&json!([2]))])]),
             &cv(&json!([[1, [2]]])),
         ),
         json!({"type_changes": {"root[0]": {
@@ -1903,8 +1880,8 @@ fn a_naive_and_an_aware_datetime_at_one_instant_hash_match() {
         ignore_order: true,
         ..DiffOptions::default()
     };
-    let a = CValue::Array(vec![cdt_at(2024, 1, 1, 10, 0, 0, 0, None)].into_boxed_slice());
-    let b = CValue::Array(vec![cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600))].into_boxed_slice());
+    let a = carr(vec![cdt_at(2024, 1, 1, 10, 0, 0, 0, None)]);
+    let b = carr(vec![cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600))]);
 
     assert!(
         crate::diff::diff_with_options(&a, &b, &opts)
@@ -1923,8 +1900,8 @@ fn a_date_and_a_datetime_at_one_midnight_never_hash_match() {
         ignore_order: true,
         ..DiffOptions::default()
     };
-    let a = CValue::Array(vec![cdate(2024, 1, 1)].into_boxed_slice());
-    let b = CValue::Array(vec![cdt(2024, 1, 1, None)].into_boxed_slice());
+    let a = carr(vec![cdate(2024, 1, 1)]);
+    let b = carr(vec![cdt(2024, 1, 1, None)]);
 
     assert_eq!(
         crate::diff::diff_with_options(&a, &b, &opts)
@@ -1945,21 +1922,15 @@ fn a_paired_datetime_is_reported_normalized_while_an_unpaired_one_stays_raw() {
         ignore_order: true,
         ..DiffOptions::default()
     };
-    let a = CValue::Array(
-        vec![
-            cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(-5 * 3600)),
-            cv(&json!("anchor")),
-        ]
-        .into_boxed_slice(),
-    );
-    let b = CValue::Array(
-        vec![
-            cv(&json!("anchor")),
-            cdt_at(2024, 1, 2, 10, 0, 0, 0, Some(-5 * 3600)),
-            cv(&json!("extra")),
-        ]
-        .into_boxed_slice(),
-    );
+    let a = carr(vec![
+        cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(-5 * 3600)),
+        cv(&json!("anchor")),
+    ]);
+    let b = carr(vec![
+        cv(&json!("anchor")),
+        cdt_at(2024, 1, 2, 10, 0, 0, 0, Some(-5 * 3600)),
+        cv(&json!("extra")),
+    ]);
 
     assert_eq!(
         crate::diff::diff_with_options(&a, &b, &opts)
@@ -2076,8 +2047,8 @@ fn a_date_and_a_datetime_pair_by_ordinal_distance_in_either_direction() {
         ignore_order: true,
         ..DiffOptions::default()
     };
-    let date_side = CValue::Array(vec![cdate(2024, 1, 1)].into_boxed_slice());
-    let datetime_side = CValue::Array(vec![cdt(2024, 3, 5, None)].into_boxed_slice());
+    let date_side = carr(vec![cdate(2024, 1, 1)]);
+    let datetime_side = carr(vec![cdt(2024, 3, 5, None)]);
 
     let forward = crate::diff::diff_with_options(&date_side, &datetime_side, &opts).unwrap();
     let backward = crate::diff::diff_with_options(&datetime_side, &date_side, &opts).unwrap();
@@ -2158,10 +2129,11 @@ fn a_calendar_value_and_a_number_share_no_distance_family_and_never_pair() {
         ignore_order: true,
         ..DiffOptions::default()
     };
-    let a = CValue::Array(
-        vec![cdt_at(2024, 1, 1, 10, 0, 0, 0, None), cv(&json!("anchor"))].into_boxed_slice(),
-    );
-    let b = CValue::Array(vec![cv(&json!("anchor")), cv(&json!(5))].into_boxed_slice());
+    let a = carr(vec![
+        cdt_at(2024, 1, 1, 10, 0, 0, 0, None),
+        cv(&json!("anchor")),
+    ]);
+    let b = carr(vec![cv(&json!("anchor")), cv(&json!(5))]);
 
     assert_eq!(
         crate::diff::diff_with_options(&a, &b, &opts)
@@ -2218,7 +2190,7 @@ fn a_calendar_value_pairs_with_its_own_python_str_under_ignore_order() {
     };
     let wrapped = |value: CValue| {
         let mut builder = crate::value::Builder::new();
-        CValue::Array(vec![builder.object(vec![("a".to_string(), value)])].into_boxed_slice())
+        carr(vec![builder.object(vec![("a".to_string(), value)])])
     };
 
     assert_eq!(
@@ -2264,8 +2236,8 @@ fn two_bare_scalars_are_too_far_apart_to_pair_even_when_str_reproduces_one() {
         ignore_order: true,
         ..DiffOptions::default()
     };
-    let a = CValue::Array(vec![cdt(2024, 1, 1, None)].into_boxed_slice());
-    let b = CValue::Array(vec![cv(&json!("2024-01-01 00:00:00"))].into_boxed_slice());
+    let a = carr(vec![cdt(2024, 1, 1, None)]);
+    let b = carr(vec![cv(&json!("2024-01-01 00:00:00"))]);
 
     assert_eq!(
         crate::diff::diff_with_options(&a, &b, &opts)
@@ -2291,8 +2263,8 @@ fn a_pre_epoch_datetime_pairs_with_a_date_by_ordinal_not_by_timestamp() {
         ignore_order: true,
         ..DiffOptions::default()
     };
-    let a = CValue::Array(vec![cdt(1950, 1, 1, None), cv(&json!("anchor"))].into_boxed_slice());
-    let b = CValue::Array(vec![cv(&json!("anchor")), cdate(1990, 1, 1)].into_boxed_slice());
+    let a = carr(vec![cdt(1950, 1, 1, None), cv(&json!("anchor"))]);
+    let b = carr(vec![cv(&json!("anchor")), cdate(1990, 1, 1)]);
 
     assert_eq!(
         crate::diff::diff_with_options(&a, &b, &opts)
@@ -2329,7 +2301,7 @@ fn compact_ignore_order_diff(
 /// A one-item list holding `value`, the shape that puts a set through the
 /// `ignore_order` hashing path rather than through a direct set diff.
 fn listed(value: CValue) -> CValue {
-    CValue::Array(Box::new([value]))
+    CValue::Array(Box::new([value]).into())
 }
 
 /// Each container kind hashes into its own bucket, so two of them holding
@@ -2385,8 +2357,8 @@ fn neither_set_kind_inherits_another_items_digest() {
     );
 
     let plain = compact_ignore_order_diff(
-        &CValue::Array(Box::new([cset(&[json!(1)]), cset(&[json!(1.0)])])),
-        &CValue::Array(Box::new([])),
+        &CValue::Array(Box::new([cset(&[json!(1)]), cset(&[json!(1.0)])]).into()),
+        &CValue::Array(Box::new([]).into()),
     )
     .expect("shallow values diff cleanly");
     assert_eq!(
@@ -2590,7 +2562,7 @@ fn an_unhashable_set_member_keys_structurally() {
 fn unhashable_set_members_of_different_kinds_stay_distinct() {
     let memo = IgnoreOrderMemo::new();
     let key = |value: &CValue| super::set_member_digest(value, &memo);
-    let listed = |value: CValue| CValue::Tuple(Box::new([value]));
+    let listed = |value: CValue| ctuple(vec![value]);
 
     assert_ne!(
         key(&listed(cv(&json!([1])))),
@@ -2628,7 +2600,7 @@ fn a_set_member_collapses_a_calendar_difference_at_the_root_and_below_it() {
     let a = || cdt(2024, 1, 1, Some(0));
     let i = |x: i64| cv(&json!(x));
     let f = |x: f64| cv(&json!(x));
-    let tup = |items: Vec<CValue>| CValue::Tuple(items.into_boxed_slice());
+    let tup = |items: Vec<CValue>| ctuple(items);
     let fz = |items: Vec<CValue>| CValue::FrozenSet(SetItems::new(items));
     let set = |items: Vec<CValue>| CValue::Set(SetItems::new(items));
     let empty = |x: CValue, y: CValue| {
@@ -2693,9 +2665,7 @@ fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
                 value
             };
             let member = |dt: CValue| {
-                CValue::Set(SetItems::new(vec![CValue::Tuple(
-                    vec![dt, chain(cv(&json!(0)))].into_boxed_slice(),
-                )]))
+                CValue::Set(SetItems::new(vec![ctuple(vec![dt, chain(cv(&json!(0)))])]))
             };
             let a = member(cdt(2024, 1, 1, None));
             let b = member(cdt(2024, 1, 1, Some(0)));
@@ -3000,7 +2970,7 @@ fn dist_key_hashing_does_not_overflow_the_native_stack() {
             const DEPTH: usize = 200_000;
             let mut value = cv(&json!(0));
             for _ in 0..DEPTH {
-                value = CValue::Array(vec![value].into_boxed_slice());
+                value = carr(vec![value]);
             }
             let key = super::hash::DistKey::from_rc(std::rc::Rc::new(value));
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -3027,7 +2997,7 @@ fn ignore_order_memo_at_default_budget_on_plain_thread() {
             let build = |leaf: i64| {
                 let mut value = cv(&json!(leaf));
                 for _ in 0..200 {
-                    value = CValue::Array(vec![value].into_boxed_slice());
+                    value = carr(vec![value]);
                 }
                 value
             };
@@ -3202,10 +3172,8 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
     ];
     leaf.prop_recursive(5, 40, 4, |inner| {
         prop_oneof![
-            prop::collection::vec(inner.clone(), 0..4)
-                .prop_map(|v| CValue::Array(v.into_boxed_slice())),
-            prop::collection::vec(inner.clone(), 0..4)
-                .prop_map(|v| CValue::Tuple(v.into_boxed_slice())),
+            prop::collection::vec(inner.clone(), 0..4).prop_map(carr),
+            prop::collection::vec(inner.clone(), 0..4).prop_map(ctuple),
             prop::collection::vec(inner.clone(), 0..4).prop_map(|v| CValue::Set(SetItems::new(v))),
             prop::collection::vec(inner.clone(), 0..4)
                 .prop_map(|v| CValue::FrozenSet(SetItems::new(v))),
@@ -3250,19 +3218,17 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
 /// canonical order or membership, and the twin stays genuinely equal.
 fn structural_twin(value: &CValue, in_set: bool) -> CValue {
     match value {
-        CValue::Array(items) => CValue::Array(
+        CValue::Array(items) => carr(
             items
                 .iter()
                 .map(|item| structural_twin(item, in_set))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+                .collect::<Vec<_>>(),
         ),
-        CValue::Tuple(items) => CValue::Tuple(
+        CValue::Tuple(items) => ctuple(
             items
                 .iter()
                 .map(|item| structural_twin(item, in_set))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+                .collect::<Vec<_>>(),
         ),
         CValue::Set(items) => {
             let mut members: Vec<CValue> = items

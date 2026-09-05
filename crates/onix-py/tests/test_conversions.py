@@ -1,4 +1,4 @@
-"""Conversion-error tests: every documented MVP-unsupported-input path.
+"""Conversion tests: every documented MVP-unsupported-input path, plus subclass acceptance.
 
 Covers `deepdiff_rs.DeepDiff`'s Python-object-to-`Value` conversion (see
 `crates/onix-py/src/convert.rs`'s module doc for the authoritative
@@ -11,6 +11,8 @@ import datetime
 import math
 
 import pytest
+from conftest import _normalize_types
+from deepdiff import DeepDiff as RealDeepDiff
 
 from deepdiff_rs import DeepDiff, diff_json
 
@@ -145,11 +147,78 @@ def test_tuple_dict_key_containing_a_nested_tuple_is_rejected() -> None:
         DeepDiff({}, {((1, 2), 3): "x"})
 
 
-def test_namedtuple_dict_key_is_rejected() -> None:
-    """A tuple *subclass* key is refused, like a tuple subclass value (see the module doc)."""
+def test_namedtuple_dict_key_matches_a_plain_tuple_key_by_value() -> None:
+    """A `namedtuple` key is accepted and matches a plain tuple key with the same elements,
+    unlike a `namedtuple` *value* — `DeepDiff`'s dict-key matching is plain Python `==`/`hash`
+    and never consults `type(obj)`, so no class name is tracked for a key at all."""
     point = collections.namedtuple("Point", "x y")
-    with pytest.raises(TypeError, match="Point"):
-        DeepDiff({}, {point(1, 2): "x"})
+    a = {point(1, 2): "a"}
+    b = {(1, 2): "a"}
+    expected = RealDeepDiff(a, b, verbose_level=2).to_dict()
+    assert DeepDiff(a, b).to_dict() == expected == {}
+
+
+def test_tuple_subclass_dict_key_matches_and_mismatches_by_value() -> None:
+    """A `tuple` subclass key (not a `namedtuple`) is accepted the same way, matching or not
+    purely by element value."""
+
+    class MyTuple(tuple):
+        pass
+
+    matching_a, matching_b = {MyTuple((1, 2)): "a"}, {(1, 2): "a"}
+    expected_match = RealDeepDiff(matching_a, matching_b, verbose_level=2).to_dict()
+    assert DeepDiff(matching_a, matching_b).to_dict() == expected_match == {}
+
+    diff_a, diff_b = {MyTuple((1, 2)): "a"}, {(1, 3): "a"}
+    expected_diff = RealDeepDiff(diff_a, diff_b, verbose_level=2).to_dict()
+    assert DeepDiff(diff_a, diff_b).to_dict() == expected_diff
+    assert expected_diff  # a different key: not the {} a matching key would give
+
+
+def test_a_key_subclass_with_overridden_equality_matches_structurally_not_by_python_eq() -> None:
+    """
+    A documented nuance, not a bug: `onix` matches a subclass key by its base type's
+    *value*, never by an overridden `__eq__`/`__hash__` — that is custom-object territory,
+    out of this MVP's scope (see `crates/onix-py/src/convert.rs`'s `classify_dict_key` doc).
+
+    Real `DeepDiff` uses the key's own (overridden) equality, so two keys this class calls
+    equal collapse into one shared key there (`values_changed` at the surviving key's path);
+    `onix` sees two structurally different keys and reports the whole dict changed instead.
+    """
+
+    class AlwaysEqual(tuple):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __hash__(self) -> int:
+            return 0
+
+    a = {AlwaysEqual((1, 2)): "v1"}
+    b = {AlwaysEqual((3, 4)): "v2"}
+
+    assert RealDeepDiff(a, b, verbose_level=2).to_dict() == {
+        "values_changed": {"root[3][4]": {"new_value": "v2", "old_value": "v1"}}
+    }
+    assert DeepDiff(a, b).to_dict() == {
+        "values_changed": {"root": {"new_value": {(3, 4): "v2"}, "old_value": {(1, 2): "v1"}}}
+    }
+
+
+def test_datetime_subclass_dict_key_matches_and_mismatches_by_value() -> None:
+    """A `datetime`/`date` subclass key (e.g. pandas `Timestamp`) is accepted and matches a
+    plain key with the same instant, or not, purely by value — never by class."""
+
+    class Stamp(datetime.datetime):
+        pass
+
+    matching_a, matching_b = {Stamp(2024, 1, 1): "a"}, {datetime.datetime(2024, 1, 1): "a"}
+    expected_match = RealDeepDiff(matching_a, matching_b, verbose_level=2).to_dict()
+    assert DeepDiff(matching_a, matching_b).to_dict() == expected_match == {}
+
+    diff_a = {Stamp(2024, 1, 1): "a"}
+    diff_b = {datetime.datetime(2024, 1, 2): "a"}
+    expected_diff = _normalize_types(RealDeepDiff(diff_a, diff_b, verbose_level=2).to_dict())
+    assert _normalize_types(DeepDiff(diff_a, diff_b).to_dict()) == expected_diff
 
 
 def test_tuple_is_accepted_and_diffed_positionally() -> None:
@@ -158,12 +227,48 @@ def test_tuple_is_accepted_and_diffed_positionally() -> None:
     assert diff.to_dict() == {"values_changed": {"root[2]": {"new_value": 4, "old_value": 3}}}
 
 
-def test_namedtuple_raises_type_error_naming_the_class() -> None:
-    """A namedtuple is not a plain tuple to DeepDiff (it walks fields), so it is refused."""
-    point = collections.namedtuple("Point", "x y")
+def test_a_list_subclass_is_accepted_and_compares_as_a_list() -> None:
+    """A `list` subclass diffs like a plain list, and reports its own name in a type change."""
 
-    with pytest.raises(TypeError, match="Point"):
-        DeepDiff((point(1, 2),), (point(1, 3),))
+    class MyList(list):
+        pass
+
+    same_type = DeepDiff(MyList([1, 2]), MyList([1, 3]))
+    assert same_type.to_dict() == {"values_changed": {"root[1]": {"new_value": 3, "old_value": 2}}}
+
+    cross_type = DeepDiff(MyList([1, 2]), [1, 2])
+    entry = cross_type.to_dict()["type_changes"]["root"]
+    assert entry == {
+        "old_type": "MyList",
+        "new_type": "list",
+        "old_value": [1, 2],
+        "new_value": [1, 2],
+    }
+
+    real = RealDeepDiff(MyList([1, 2]), [1, 2], verbose_level=2).to_dict()["type_changes"]["root"]
+    assert real["old_type"] is MyList
+    assert real["new_type"] is list
+
+
+def test_a_dict_subclass_is_accepted_and_compares_as_a_dict() -> None:
+    """The same rule holds for `dict`."""
+
+    class MyDict(dict):
+        pass
+
+    same_type = DeepDiff(MyDict(a=1), MyDict(a=2))
+    assert same_type.to_dict() == {
+        "values_changed": {"root['a']": {"new_value": 2, "old_value": 1}}
+    }
+
+    cross_type = DeepDiff(MyDict(a=1), {"a": 1})
+    entry = cross_type.to_dict()["type_changes"]["root"]
+    assert entry == {
+        "old_type": "MyDict",
+        "new_type": "dict",
+        "old_value": {"a": 1},
+        "new_value": {"a": 1},
+    }
 
 
 def test_set_converts_and_diffs() -> None:
@@ -242,44 +347,46 @@ def test_timedelta_is_accepted_and_reports_real_timedelta_objects() -> None:
     }
 
 
-def test_time_subclass_raises_type_error_naming_the_class() -> None:
-    """DeepDiff reports a value under its own type name, so a `time` subclass is refused."""
+def test_a_time_subclass_is_accepted_and_compared_by_value() -> None:
+    """A `time` subclass diffs like a plain `time`, and reports its own name in a type change."""
 
     class Clock(datetime.time):
         pass
 
-    with pytest.raises(TypeError, match="Clock"):
-        DeepDiff(Clock(10), datetime.time(10))
+    same_class = DeepDiff(Clock(10), Clock(11))
+    assert same_class.to_dict() == {
+        "values_changed": {"root": {"old_value": Clock(10), "new_value": Clock(11)}}
+    }
+
+    cross_type = DeepDiff(Clock(10), datetime.time(10))
+    expected = _normalize_types(
+        RealDeepDiff(Clock(10), datetime.time(10), verbose_level=2).to_dict()
+    )
+    assert _normalize_types(cross_type.to_dict()) == expected
+    assert expected["type_changes"]["root"]["old_type"] == "Clock"
+    assert expected["type_changes"]["root"]["new_type"] == "time"
 
 
-def test_timedelta_subclass_raises_type_error_naming_the_class() -> None:
+def test_a_timedelta_subclass_is_accepted_and_compared_by_value() -> None:
     """The same rule for a `timedelta` subclass."""
 
     class Duration(datetime.timedelta):
         pass
 
-    with pytest.raises(TypeError, match="Duration"):
-        DeepDiff(Duration(days=1), datetime.timedelta(days=1))
+    same_class = DeepDiff(Duration(days=1), Duration(days=2))
+    assert same_class.to_dict() == {
+        "values_changed": {
+            "root": {"old_value": Duration(days=1), "new_value": Duration(days=2)}
+        }
+    }
 
-
-def test_datetime_subclass_raises_type_error_naming_the_class() -> None:
-    """DeepDiff reports a value under its own type name, so a subclass is refused."""
-
-    class Stamp(datetime.datetime):
-        pass
-
-    with pytest.raises(TypeError, match="Stamp"):
-        DeepDiff(Stamp(2024, 1, 1), datetime.datetime(2024, 1, 1))
-
-
-def test_date_subclass_raises_type_error_naming_the_class() -> None:
-    """The same rule for a `date` subclass, which the exact cast also refuses."""
-
-    class Day(datetime.date):
-        pass
-
-    with pytest.raises(TypeError, match="Day"):
-        DeepDiff(Day(2024, 1, 1), datetime.date(2024, 1, 1))
+    cross_type = DeepDiff(Duration(days=1), datetime.timedelta(days=1))
+    expected = _normalize_types(
+        RealDeepDiff(Duration(days=1), datetime.timedelta(days=1), verbose_level=2).to_dict()
+    )
+    assert _normalize_types(cross_type.to_dict()) == expected
+    assert expected["type_changes"]["root"]["old_type"] == "Duration"
+    assert expected["type_changes"]["root"]["new_type"] == "timedelta"
 
 
 def test_sub_second_utc_offset_raises_value_error() -> None:

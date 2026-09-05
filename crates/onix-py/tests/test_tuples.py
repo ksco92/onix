@@ -5,8 +5,9 @@ The diff *results* for tuples are pinned by the golden corpus (``tuple_*`` and
 ``test_golden_parity.py``). This file covers the parts that live only in the
 bindings: that a report crossing back into Python carries real ``tuple``
 objects wherever DeepDiff's own ``to_dict()`` does, that ``to_json()`` still
-shows them as arrays, and the two documented edges (namedtuples, and the
-golden corpus's tagged encoding never being interpreted by the product).
+shows them as arrays, tuple/namedtuple subclass support and its one
+documented divergence (positional rather than field-based diffing), and the
+golden corpus's tagged encoding never being interpreted by the product.
 """
 
 import collections
@@ -58,45 +59,63 @@ def test_to_dict_matches_real_deepdiff_on_tuple_values() -> None:
         assert DeepDiff(a, b).to_dict() == expected, (a, b)
 
 
-def test_namedtuple_is_refused_rather_than_diffed_as_a_plain_tuple() -> None:
+def test_namedtuple_is_accepted_and_diffed_positionally_not_by_field() -> None:
     """
-    A namedtuple is a tuple subclass, but DeepDiff diffs it by field, not by index.
+    A namedtuple is a `tuple` subclass; onix accepts it but diffs it positionally.
 
-    Real DeepDiff reports ``root[0].x`` and names the class as the type; this
-    MVP has no field-walking conversion, and returning index paths instead
-    would be a silent disagreement, so the conversion refuses it by name. The
-    real tool's own output is asserted here so the gap stays visible.
+    Real DeepDiff walks a namedtuple's fields (``root[0].x``) instead of its
+    indices; onix diffs any tuple subclass — namedtuple included — the same
+    positional way as a plain tuple (``root[0][0]``), a documented divergence
+    (see `tests/golden/README.md`) rather than an approximation of the
+    field-walking shape. The class name still carries through: a type change
+    between the namedtuple and a plain tuple names it, matching real DeepDiff.
     """
     point = collections.namedtuple("Point", "x")
     a, b = (point(1),), (point(2),)
 
-    with pytest.raises(TypeError, match="Point"):
-        DeepDiff(a, b)
-
+    assert DeepDiff(a, b).to_dict() == {
+        "values_changed": {"root[0][0]": {"new_value": 2, "old_value": 1}}
+    }
     assert RealDeepDiff(a, b, verbose_level=2).to_dict() == {
         "values_changed": {"root[0].x": {"new_value": 2, "old_value": 1}}
     }
 
+    cross_type = DeepDiff(point(1), (1,)).to_dict()["type_changes"]["root"]
+    assert cross_type["old_type"] == "Point"
+    assert cross_type["new_type"] == "tuple"
 
-def test_a_tuple_subclass_is_refused_too() -> None:
+
+def test_a_tuple_subclass_is_accepted_and_compares_as_a_tuple() -> None:
     """
-    Every tuple subclass is refused, not just namedtuples.
+    A tuple subclass diffs like a plain tuple when both sides share it.
 
-    DeepDiff reports each value under its own ``type(obj).__name__``, so a
-    subclass is never a plain tuple there: it reports a type change where
-    diffing the subclass as a tuple would report nothing at all.
+    It reports its own class name in a type change against the base type,
+    or a different subclass, since DeepDiff reports each value under its
+    own ``type(obj).__name__`` and a subclass is never a plain tuple there.
     """
 
     class Pair(tuple):
         pass
 
-    with pytest.raises(TypeError, match="Pair"):
-        DeepDiff(Pair((1, 2)), (1, 2))
+    same_type = DeepDiff(Pair((1, 2)), Pair((1, 3)))
+    assert same_type.to_dict() == {
+        "values_changed": {"root[1]": {"new_value": 3, "old_value": 2}}
+    }
 
-    with pytest.raises(TypeError, match=r"Pair at root\['a'\]"):
-        DeepDiff({"a": Pair((1, 2))}, {"a": (1, 2)})
+    cross_type = DeepDiff(Pair((1, 2)), (1, 2))
+    entry = cross_type.to_dict()["type_changes"]["root"]
+    assert entry == {
+        "old_type": "Pair",
+        "new_type": "tuple",
+        "old_value": (1, 2),
+        "new_value": (1, 2),
+    }
 
-    assert RealDeepDiff(Pair((1, 2)), (1, 2), verbose_level=2).to_dict() == {
+    nested = DeepDiff({"a": Pair((1, 2))}, {"a": (1, 2)})
+    assert nested.to_dict()["type_changes"]["root['a']"]["old_type"] == "Pair"
+
+    real = RealDeepDiff(Pair((1, 2)), (1, 2), verbose_level=2).to_dict()
+    assert real == {
         "type_changes": {
             "root": {
                 "old_type": Pair,

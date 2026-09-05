@@ -46,12 +46,15 @@ Repository = "https://github.com/ksco92/onix"
 # deps: the Arrow table-diff tests feed the same data through pyarrow,
 # polars, and DuckDB and assert identical results, which needs all three
 # installed to run but none of them installed to use diff_tables; pandas is
-# here to prove a TableDiff row member's __arrow_c_stream__ is consumable by
-# it (through pd.api.interchange.from_dataframe, which needs pyarrow
-# installed for its own reasons — see crates/onix-py/src/arrow.rs's module
-# doc). pyarrow is both the `arrow` extra and a test dependency (the tests
-# exercise to_pyarrow() and pyarrow inputs). mypy runs the stub-usability
-# check (see test_stub_mypy.py).
+# also here to prove a TableDiff row member's __arrow_c_stream__ is
+# consumable by it (through pd.api.interchange.from_dataframe, which needs
+# pyarrow installed for its own reasons — see crates/onix-py/src/arrow.rs's
+# module doc), and it supplies `pandas.Timestamp`, the `datetime.datetime`
+# subclass the subclass-support tests probe against real DeepDiff (neither
+# use makes pandas a runtime dependency of the package itself). pyarrow is
+# both the `arrow` extra and a test dependency (the tests exercise
+# to_pyarrow() and pyarrow inputs). mypy runs the stub-usability check (see
+# test_stub_mypy.py).
 test = [
     "pytest>=8",
     "deepdiff==9.1.0 ; python_version >= '3.10'",

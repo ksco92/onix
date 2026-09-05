@@ -318,7 +318,9 @@ pub(crate) fn count_diff_leaves(
         (Value::Date(x), Value::Date(y)) => usize::from(x != y),
         // Plain `_diff_time` equality (see `crate::datetime`'s module doc),
         // matching `diff_at`'s own dispatch for `Time`.
-        (Value::Time(x), Value::Time(y)) => usize::from(!crate::datetime::times_equal(*x, *y)),
+        (Value::Time(x), Value::Time(y)) => {
+            usize::from(!crate::datetime::times_equal(x.value(), y.value()))
+        }
         (Value::TimeDelta(x), Value::TimeDelta(y)) => usize::from(x != y),
         (Value::Number(x), Value::Number(y)) => {
             if x.is_f64() == y.is_f64() {

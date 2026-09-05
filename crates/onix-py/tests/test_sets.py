@@ -297,28 +297,50 @@ def test_an_unsupported_type_under_a_set_member_reports_no_fabricated_index() ->
         DeepDiff({"a": {(1, 1j)}}, {"a": {1}})
 
 
-def test_a_set_subclass_is_refused_like_a_tuple_subclass() -> None:
-    """DeepDiff reports a subclass under its own name, so onix refuses it rather than lying."""
+def test_a_set_subclass_is_accepted_and_compares_as_a_set() -> None:
+    """A `set` subclass diffs like a plain `set`, but a subclass-vs-base pair is a type change."""
 
     class MySet(set):
         pass
 
-    with pytest.raises(TypeError, match="MySet"):
-        DeepDiff(MySet({1}), {1})
+    same_type = DeepDiff(MySet({1, 2}), MySet({1, 3}))
+    assert same_type.to_dict() == {"set_item_added": ["root[3]"], "set_item_removed": ["root[2]"]}
 
-    assert RealDeepDiff(MySet({1}), {1}, verbose_level=2).to_dict()["type_changes"]["root"][
-        "old_type"
-    ] is MySet
+    cross_type = DeepDiff(MySet({1}), {1})
+    entry = cross_type.to_dict()["type_changes"]["root"]
+    assert entry == {"old_type": "MySet", "new_type": "set", "old_value": {1}, "new_value": {1}}
+
+    real = RealDeepDiff(MySet({1}), {1}, verbose_level=2).to_dict()["type_changes"]["root"]
+    assert real["old_type"] is MySet
+    assert real["new_type"] is set
 
 
-def test_a_frozenset_subclass_is_refused() -> None:
-    """The same exact-type rule holds for frozenset."""
+def test_a_frozenset_subclass_is_accepted_and_compares_as_a_frozenset() -> None:
+    """The same rule holds for frozenset."""
 
     class MyFrozenSet(frozenset):
         pass
 
-    with pytest.raises(TypeError, match="MyFrozenSet"):
-        DeepDiff(MyFrozenSet({1}), frozenset({1}))
+    same_type = DeepDiff(MyFrozenSet({1, 2}), MyFrozenSet({1, 3}))
+    assert same_type.to_dict() == {"set_item_added": ["root[3]"], "set_item_removed": ["root[2]"]}
+
+    # Even at equal content, a root-level subclass-vs-base pair is a type
+    # change — real DeepDiff's own `type(t1) != type(t2)` check runs before
+    # any value comparison, matching the `MySet` case above.
+    cross_type = DeepDiff(MyFrozenSet({1}), frozenset({1}))
+    entry = cross_type.to_dict()["type_changes"]["root"]
+    assert entry == {
+        "old_type": "MyFrozenSet",
+        "new_type": "frozenset",
+        "old_value": frozenset({1}),
+        "new_value": frozenset({1}),
+    }
+
+    real = RealDeepDiff(MyFrozenSet({1}), frozenset({1}), verbose_level=2).to_dict()[
+        "type_changes"
+    ]["root"]
+    assert real["old_type"] is MyFrozenSet
+    assert real["new_type"] is frozenset
 
 
 def test_set_tags_are_ordinary_dicts_to_the_json_path() -> None:
