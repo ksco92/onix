@@ -100,6 +100,7 @@ const RESERVED_TAGS: &[&str] = &[
     "$date",
     "$time",
     "$timedelta",
+    "$dict",
 ];
 
 /// Decodes one parsed fixture value into the engine's own value model,
@@ -131,6 +132,7 @@ fn decode_tagged(value: &Value, builder: &mut onix_core::value::Builder) -> onix
             Some("$frozenset") => {
                 onix_core::Value::FrozenSet(decode_set_members(map, "$frozenset", builder))
             }
+            Some("$dict") => decode_tagged_dict(map, builder),
             Some(tag) => {
                 panic!("golden fixture uses the reserved tag {tag:?}, which has no decoder yet")
             }
@@ -144,6 +146,41 @@ fn decode_tagged(value: &Value, builder: &mut onix_core::value::Builder) -> onix
         },
         scalar => onix_core::Value::from(scalar.clone()),
     }
+}
+
+/// Decodes a `$dict` fixture: a JSON object cannot represent a non-`str`
+/// key, so this tag's payload is a list of `[key, value]` pairs (mirroring
+/// `scripts/golden_tags.py`'s `encode_tags`/`decode_tags`) rather than the
+/// object shape every other tag's plain-data fallback uses.
+fn decode_tagged_dict(
+    map: &serde_json::Map<String, Value>,
+    builder: &mut onix_core::value::Builder,
+) -> onix_core::Value {
+    let Some(Value::Array(pairs)) = map.get("$dict") else {
+        panic!("the \"$dict\" tag's payload must be an array");
+    };
+
+    let entries: Vec<(onix_core::value::ObjectKey, onix_core::Value)> = pairs
+        .iter()
+        .map(|pair| {
+            let Value::Array(kv) = pair else {
+                panic!("each \"$dict\" entry must be a [key, value] pair");
+            };
+            let [key, item] = kv.as_slice() else {
+                panic!("each \"$dict\" entry must be a [key, value] pair");
+            };
+
+            let decoded_key = decode_tagged(key, builder);
+            let key = match &decoded_key {
+                onix_core::Value::Str(s) => onix_core::value::ObjectKey::Str(builder.intern(s)),
+                _ => onix_core::value::ObjectKey::Other(Box::new(decoded_key)),
+            };
+
+            (key, decode_tagged(item, builder))
+        })
+        .collect();
+
+    builder.object_with_keys(entries)
 }
 
 /// The decoded members of a `$set`/`$frozenset` fixture.

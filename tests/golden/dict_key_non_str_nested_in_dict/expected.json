@@ -1,0 +1,14 @@
+{
+  "dictionary_item_added": {
+    "root['a'][3]": "z"
+  },
+  "dictionary_item_removed": {
+    "root['a'][2]": "y"
+  },
+  "values_changed": {
+    "root['a'][1]": {
+      "new_value": "x2",
+      "old_value": "x"
+    }
+  }
+}

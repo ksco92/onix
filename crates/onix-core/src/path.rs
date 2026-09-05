@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::datetime::{SECONDS_PER_DAY, div_rem_euclid};
-use crate::value::{Number, Value};
+use crate::value::{Number, ObjectKey, Value};
 
 /// One step in a path: a dict key, a list index, or a set item.
 ///
@@ -32,6 +32,16 @@ use crate::value::{Number, Value};
 pub enum PathSegment {
     /// A dict key access, e.g. the `'a'` in `root['a']`.
     Key(String),
+    /// A dict key access for a non-`str` key, e.g. the `1` in `root[1]` or
+    /// the `1][2` in `root[1][2]` for a `tuple` key `(1, 2)` — carrying the
+    /// key **already rendered** by [`dict_key_repr`], the same
+    /// already-rendered posture [`PathSegment::SetItem`] takes and for the
+    /// identical reason: `DeepDiff` builds this segment from `repr()`, not
+    /// from [`quote_key`]'s dict-key-quoting rule (see [`dict_key_repr`]'s
+    /// doc for why a `tuple` key's own rendering already contains the `][`
+    /// that splits it into several bracket groups, so [`render_path`] wraps
+    /// it in exactly one outer pair, same as any other key).
+    KeyRepr(String),
     /// A list index access, e.g. the `3` in `root[3]`.
     Index(usize),
     /// A set item, e.g. the `1` in `root[1]` for the set `{1}` — carrying
@@ -74,6 +84,11 @@ pub fn render_path(segments: &[PathSegment]) -> String {
             PathSegment::Key(key) => {
                 rendered.push('[');
                 rendered.push_str(&quote_key(key));
+                rendered.push(']');
+            }
+            PathSegment::KeyRepr(key) => {
+                rendered.push('[');
+                rendered.push_str(key);
                 rendered.push(']');
             }
             PathSegment::Index(index) => {
@@ -198,6 +213,43 @@ pub fn set_item_repr(item: &Value) -> String {
     }
 }
 
+/// Renders a non-`str` [`ObjectKey::Other`] the way `DeepDiff` renders it as
+/// a `root[...]` path segment — the text a [`PathSegment::KeyRepr`] carries.
+///
+/// `DeepDiff`'s `ChildRelationship.stringify_param` (`model.py`) special-cases
+/// exactly one non-`str` shape: a `tuple` param renders as
+/// `']['.join(map(repr, param))` — each of the tuple's own top-level members
+/// gets its own bracket group, so the key `(1, 2)` produces `1][2`, which
+/// [`render_path`] then wraps in one outer `[`/`]` to give `root[1][2]`
+/// (confirmed against real `deepdiff==9.1.0`: `{(1, 2): 'x'}` added to `{}`
+/// reports at `root[1][2]`, never `root[(1, 2)]`). A member that is itself a
+/// container (this crate's dict keys allow only a `tuple` **of** the scalar
+/// kinds below, never a nested `tuple`) is out of scope and never reaches
+/// this function — see `onix-py`'s conversion table. Every other key kind
+/// (`None`, `bool`, `int`, `float`, `datetime`, `date`) renders as plain
+/// [`python_repr`], exactly as `stringify_param`'s fallback (`repr(param)`)
+/// does.
+#[must_use]
+pub fn dict_key_repr(key: &Value) -> String {
+    match key {
+        Value::Tuple(items) => items.iter().map(python_repr).collect::<Vec<_>>().join("]["),
+        other => python_repr(other),
+    }
+}
+
+/// The [`PathSegment`] one [`ObjectKey`] contributes: a `str` key through
+/// the existing dict-key quoting rule ([`PathSegment::Key`]/[`quote_key`],
+/// unchanged), any other key through [`dict_key_repr`]
+/// ([`PathSegment::KeyRepr`]). Shared by the diff engine and the Python
+/// bindings' own conversion-error path segments, so the two cannot drift.
+#[must_use]
+pub fn object_key_path_segment(key: &ObjectKey) -> PathSegment {
+    match key {
+        ObjectKey::Str(s) => PathSegment::Key(s.to_string()),
+        ObjectKey::Other(value) => PathSegment::KeyRepr(dict_key_repr(value)),
+    }
+}
+
 /// Renders `value` as Python's `repr()` would.
 ///
 /// `repr()` and `str()` agree on every type this model holds except
@@ -226,7 +278,7 @@ pub fn python_repr(value: &Value) -> String {
         match work {
             Work::Text(text) => out.push_str(text),
             Work::Key(key) => {
-                out.push_str(&python_repr_str(key));
+                out.push_str(&object_key_repr(key));
                 out.push_str(": ");
             }
             Work::Value(value) => write_repr_head(&mut out, &mut stack, value),
@@ -241,7 +293,19 @@ pub fn python_repr(value: &Value) -> String {
 enum Work<'a> {
     Value(&'a Value),
     Text(&'static str),
-    Key(&'a str),
+    Key(&'a ObjectKey),
+}
+
+/// Renders one [`ObjectKey`] the way Python's `repr()` of the whole dict
+/// would show it: a `str` key exactly as [`python_repr_str`] already did
+/// (unchanged for the common case), any other key through [`python_repr`] of
+/// its wrapped [`Value`] — `repr({1: 'x'})` is `"{1: 'x'}"`, not
+/// `"{'1': 'x'}"`.
+fn object_key_repr(key: &ObjectKey) -> String {
+    match key {
+        ObjectKey::Str(s) => python_repr_str(s),
+        ObjectKey::Other(value) => python_repr(value),
+    }
 }
 
 /// Renders `value`'s own text into `out`, pushing any children it still
@@ -536,7 +600,7 @@ fn escape_non_printable(out: &mut String, c: char) {
 /// are in `core::fmt`; no arbitrary-precision arithmetic and no dependency
 /// is involved. Verified against real Python `repr()` over a million random
 /// bit patterns in the bindings suite.
-fn python_float_repr(value: f64) -> String {
+pub(crate) fn python_float_repr(value: f64) -> String {
     let shortest = format!("{value:e}");
     let significant = shortest
         .split_once('e')

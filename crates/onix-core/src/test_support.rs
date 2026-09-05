@@ -7,7 +7,7 @@
 //! identical helpers in every test module.
 
 use crate::datetime::{Date, DateTime, Time, TimeDelta};
-use crate::value::{Number, Object, SetItems, Value};
+use crate::value::{Number, Object, ObjectKey, SetItems, Value};
 
 /// Compact value from a borrowed `serde_json` value.
 pub(crate) fn cv(value: &serde_json::Value) -> Value {
@@ -92,7 +92,12 @@ pub(crate) fn ctimedelta(days: i64, seconds: i64, microseconds: i64) -> Value {
 pub(crate) fn cobj(map: &serde_json::Map<String, serde_json::Value>) -> Object {
     Object::from_pairs(
         map.iter()
-            .map(|(key, value)| (std::sync::Arc::from(key.as_str()), cv(value)))
+            .map(|(key, value)| {
+                (
+                    ObjectKey::Str(std::sync::Arc::from(key.as_str())),
+                    cv(value),
+                )
+            })
             .collect(),
     )
 }

@@ -629,7 +629,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "onix-arrow"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "onix-cli"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "onix-core",
  "serde_json",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "onix-core"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "proptest",
  "serde",
@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "onix-py"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "arrow-array",
  "arrow-ipc",

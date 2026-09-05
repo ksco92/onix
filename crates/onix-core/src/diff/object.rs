@@ -6,7 +6,7 @@ use crate::value::{Object, Value};
 
 use crate::error::Error;
 use crate::ignore_order::IgnoreOrderMemo;
-use crate::path::PathSegment;
+use crate::path::{PathSegment, object_key_path_segment as key_segment};
 use crate::report::{Report, ValuesChangedEntry};
 
 use super::{DiffOptions, check_map_depth, check_value_depth, diff_at, scoped};
@@ -95,6 +95,14 @@ pub(crate) fn object_diff(
         return Ok(report);
     }
 
+    // A non-`str` key needs python-equality matching (`object_diff_mixed`'s
+    // own doc has the rule); dispatched to a separate function, kept off
+    // this function's own frame, to protect the default `max_depth`
+    // budget on the hot `object_diff` <-> `diff_at` recursion.
+    if a.has_non_str_keys() || b.has_non_str_keys() {
+        return object_diff_mixed(path, a, b, depth, opts, memo);
+    }
+
     let mut report = Report::new();
 
     // Stepping into a key — whether it recurses (shared key) or is a leaf
@@ -104,31 +112,73 @@ pub(crate) fn object_diff(
     // `check_value_depth` call needs that same `depth + 1` (the depth its
     // own path sits at), not the *parent* dict's `depth`.
     for (key, old_value) in a {
-        scoped(
-            path,
-            PathSegment::Key(key.to_string()),
-            |path| -> Result<(), Error> {
-                match b.get(key) {
-                    None => {
-                        check_value_depth(path, old_value, depth + 1, opts.max_depth).map(|()| {
-                            report.insert_dictionary_item_removed(path.clone(), old_value.clone());
-                        })
-                    }
-                    Some(new_value) => diff_at(path, old_value, new_value, depth + 1, opts, memo)
-                        .map(|sub_report| report.merge(sub_report)),
-                }
-            },
-        )?;
+        scoped(path, key_segment(key), |path| -> Result<(), Error> {
+            match key.as_str().and_then(|s| b.get_str(s)) {
+                None => check_value_depth(path, old_value, depth + 1, opts.max_depth).map(|()| {
+                    report.insert_dictionary_item_removed(path.clone(), old_value.clone());
+                }),
+                Some(new_value) => diff_at(path, old_value, new_value, depth + 1, opts, memo)
+                    .map(|sub_report| report.merge(sub_report)),
+            }
+        })?;
     }
 
     for (key, new_value) in b {
-        if !a.contains_key(key) {
-            scoped(path, PathSegment::Key(key.to_string()), |path| {
+        if key.as_str().is_none_or(|s| !a.contains_key_str(s)) {
+            scoped(path, key_segment(key), |path| {
                 check_value_depth(path, new_value, depth + 1, opts.max_depth).map(|()| {
                     report.insert_dictionary_item_added(path.clone(), new_value.clone());
                 })
             })?;
         }
+    }
+
+    Ok(report)
+}
+
+/// [`object_diff`]'s walk for the (rare) case where `a` or `b` has a
+/// non-`str` key — kept out of `object_diff`'s own body; see the call
+/// site's doc for why.
+///
+/// A non-`str` key matches across `a` and `b` by Python `==`, not this
+/// crate's own structural `ObjectKey` equality, via
+/// [`crate::ignore_order::match_dict_keys`] — see that function's doc for
+/// the exact rule and `tests/golden/README.md`'s "A dict key matches across
+/// two dicts by Python `==`" section for the confirmed example
+/// (`{1: "a"}` vs `{1.0: "a2"}` reports `root[1.0]`, `b`'s key form).
+///
+/// The `threshold_to_diff_deeper` collapse and the depth-counting
+/// convention are exactly [`object_diff`]'s own — see that function's doc.
+fn object_diff_mixed(
+    path: &mut Vec<PathSegment>,
+    a: &Object,
+    b: &Object,
+    depth: usize,
+    opts: &DiffOptions,
+    memo: &IgnoreOrderMemo,
+) -> Result<Report, Error> {
+    let mut report = Report::new();
+    let matched = crate::ignore_order::match_dict_keys(a, b);
+
+    for (key, old_value, new_value) in matched.shared {
+        scoped(path, key_segment(key), |path| {
+            diff_at(path, old_value, new_value, depth + 1, opts, memo)
+                .map(|sub_report| report.merge(sub_report))
+        })?;
+    }
+    for (key, old_value) in matched.only_a {
+        scoped(path, key_segment(key), |path| {
+            check_value_depth(path, old_value, depth + 1, opts.max_depth).map(|()| {
+                report.insert_dictionary_item_removed(path.clone(), old_value.clone());
+            })
+        })?;
+    }
+    for (key, new_value) in matched.only_b {
+        scoped(path, key_segment(key), |path| {
+            check_value_depth(path, new_value, depth + 1, opts.max_depth).map(|()| {
+                report.insert_dictionary_item_added(path.clone(), new_value.clone());
+            })
+        })?;
     }
 
     Ok(report)

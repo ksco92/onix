@@ -18,7 +18,7 @@ use serde::de::value::{
 
 use serde_json::json;
 
-use super::{Builder, Number, Object, SetItems, Value};
+use super::{Builder, Number, Object, ObjectKey, SetItems, Value};
 use crate::test_support::{cdate, cdt, cdt_at, cfrozen, cset, ctime, ctimedelta, ctup, cv};
 
 /// The convenience alias for `serde`'s in-memory deserializer error type.
@@ -89,30 +89,29 @@ fn object_lookup_and_sorted_iteration() {
     assert!(!obj.is_empty());
 
     // Iteration is in ascending key order regardless of insertion order.
-    let keys: Vec<&str> = obj.keys().collect();
+    let keys: Vec<&str> = obj.keys().filter_map(ObjectKey::as_str).collect();
     assert_eq!(keys, ["a", "b", "c"]);
     let values: Vec<&Value> = obj.values().collect();
     assert_eq!(values.len(), 3);
     assert_eq!(values[0], &Value::Number(Number::from_u64(2)));
 
     // Binary-search lookup, hit and miss.
-    assert_eq!(obj.get("a"), Some(&Value::Number(Number::from_u64(2))));
-    assert!(obj.get("missing").is_none());
-    assert!(obj.contains_key("c"));
-    assert!(!obj.contains_key("missing"));
+    assert_eq!(obj.get_str("a"), Some(&Value::Number(Number::from_u64(2))));
+    assert!(obj.get_str("missing").is_none());
+    assert!(obj.contains_key_str("c"));
+    assert!(!obj.contains_key_str("missing"));
 
     // Entries iterator: size_hint, ExactSizeIterator, and item order.
     let mut entries = obj.iter();
     assert_eq!(entries.size_hint(), (3, Some(3)));
     assert_eq!(entries.len(), 3);
-    assert_eq!(
-        entries.next(),
-        Some(("a", &Value::Number(Number::from_u64(2)))),
-    );
+    let (first_key, first_value) = entries.next().expect("at least one entry");
+    assert_eq!(first_key.as_str(), Some("a"));
+    assert_eq!(first_value, &Value::Number(Number::from_u64(2)));
 
     // &Object: IntoIterator yields the same ascending sequence.
-    let collected: Vec<(&str, &Value)> = obj.into_iter().collect();
-    let collected_keys: Vec<&str> = collected.iter().map(|(k, _)| *k).collect();
+    let collected: Vec<(&ObjectKey, &Value)> = obj.into_iter().collect();
+    let collected_keys: Vec<&str> = collected.iter().filter_map(|(k, _)| k.as_str()).collect();
     assert_eq!(collected_keys, ["a", "b", "c"]);
 }
 
@@ -124,7 +123,7 @@ fn empty_object_is_empty() {
     };
     assert_eq!(obj.len(), 0);
     assert!(obj.is_empty());
-    assert!(obj.get("anything").is_none());
+    assert!(obj.get_str("anything").is_none());
     assert_eq!(obj.iter().count(), 0);
 }
 
@@ -142,7 +141,103 @@ fn duplicate_keys_keep_last_matching_serde_json() {
         panic!("expected object");
     };
     assert_eq!(obj.len(), 1);
-    assert_eq!(obj.get("k"), Some(&Value::Number(Number::from_u64(3))));
+    assert_eq!(obj.get_str("k"), Some(&Value::Number(Number::from_u64(3))));
+}
+
+// --- non-str object keys (issue #62) --------------------------------------
+
+#[test]
+fn object_key_as_str_is_none_for_a_non_str_key() {
+    assert_eq!(ObjectKey::Str(Arc::from("a")).as_str(), Some("a"));
+    assert_eq!(
+        ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1)))).as_str(),
+        None
+    );
+}
+
+#[test]
+fn object_key_ordering_puts_every_str_before_every_other_key() {
+    // See `ObjectKey`'s own `Ord` doc: this is what keeps a `str`-only
+    // object's entry order unchanged from before this variant existed.
+    let str_key = ObjectKey::Str(Arc::from("z"));
+    let other_key = ObjectKey::Other(Box::new(Value::Number(Number::from_i64(-1000))));
+    assert!(str_key < other_key);
+    assert_ne!(str_key, other_key);
+}
+
+#[test]
+fn object_get_and_contains_key_accept_a_non_str_object_key() {
+    let int_key = ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1))));
+    let missing_key = ObjectKey::Other(Box::new(Value::Number(Number::from_u64(2))));
+    let obj = Object::from_pairs(vec![
+        (ObjectKey::Str(Arc::from("a")), Value::Bool(true)),
+        (int_key.clone(), Value::Bool(false)),
+    ]);
+
+    assert_eq!(obj.get(&int_key), Some(&Value::Bool(false)));
+    assert_eq!(obj.get(&missing_key), None);
+    assert!(obj.contains_key(&int_key));
+    assert!(!obj.contains_key(&missing_key));
+}
+
+#[test]
+fn object_get_str_on_a_mixed_object_skips_past_the_non_str_key() {
+    // `get_str`'s binary search must treat the `Other` entry as sorting
+    // after every `str` one (see its own doc) — exercised only when a
+    // mixed object's `str`-key lookup actually probes an index at or past
+    // that `Other` entry, which a single-`str`-key object never does.
+    let obj = Object::from_pairs(vec![
+        (ObjectKey::Str(Arc::from("a")), Value::Bool(true)),
+        (
+            ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1)))),
+            Value::Bool(false),
+        ),
+    ]);
+
+    assert_eq!(obj.get_str("a"), Some(&Value::Bool(true)));
+    assert!(obj.contains_key_str("a"));
+    assert_eq!(obj.get_str("z"), None);
+    assert!(!obj.contains_key_str("z"));
+}
+
+#[test]
+fn object_with_non_str_keys_has_non_str_keys_is_true() {
+    let obj = Object::from_pairs(vec![
+        (ObjectKey::Str(Arc::from("a")), Value::Null),
+        (
+            ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1)))),
+            Value::Null,
+        ),
+    ]);
+    assert!(obj.has_non_str_keys());
+
+    let str_only = Object::from_pairs(vec![(ObjectKey::Str(Arc::from("a")), Value::Null)]);
+    assert!(!str_only.has_non_str_keys());
+}
+
+/// See `tests/golden/README.md`'s nested-non-`str`-dict-key `to_json()`
+/// section, where this test is pinned as the `tuple`-key case.
+#[test]
+fn to_serde_json_stringifies_a_tuple_key_via_python_repr_where_deepdiff_would_crash() {
+    let obj = Value::Object(Object::from_pairs(vec![(
+        ObjectKey::Other(Box::new(ctup(&[json!(1), json!(2)]))),
+        Value::Str("x".into()),
+    )]));
+    assert_eq!(obj.to_serde_json(), json!({"(1, 2)": "x"}));
+}
+
+/// [`to_serde_json_stringifies_a_tuple_key_via_python_repr_where_deepdiff_would_crash`]'s
+/// `datetime`-key twin.
+#[test]
+fn to_serde_json_stringifies_a_datetime_key_via_python_repr_where_deepdiff_would_crash() {
+    let obj = Value::Object(Object::from_pairs(vec![(
+        ObjectKey::Other(Box::new(cdt_at(2024, 1, 1, 10, 30, 0, 0, None))),
+        Value::Str("x".into()),
+    )]));
+    assert_eq!(
+        obj.to_serde_json(),
+        json!({"datetime.datetime(2024, 1, 1, 10, 30)": "x"})
+    );
 }
 
 // --- conversions ---------------------------------------------------------
@@ -381,8 +476,10 @@ fn deeply_nested_values_drop_without_native_recursion() {
 
             let mut nested_objects = Value::Null;
             for _ in 0..DEPTH {
-                nested_objects =
-                    Value::Object(Object::from_pairs(vec![(Arc::from("k"), nested_objects)]));
+                nested_objects = Value::Object(Object::from_pairs(vec![(
+                    ObjectKey::Str(Arc::from("k")),
+                    nested_objects,
+                )]));
             }
             drop(nested_objects);
         })
@@ -807,7 +904,11 @@ fn object_entries_iterate_from_both_ends() {
     let Value::Object(object) = &value else {
         panic!("a JSON object converts to Value::Object");
     };
-    let keys: Vec<&str> = object.iter().rev().map(|(key, _)| key).collect();
+    let keys: Vec<&str> = object
+        .iter()
+        .rev()
+        .filter_map(|(key, _)| key.as_str())
+        .collect();
     assert_eq!(keys, ["c", "b", "a"]);
 }
 

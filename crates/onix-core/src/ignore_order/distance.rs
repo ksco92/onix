@@ -5,7 +5,7 @@
 //! (`super::hash`) at all — every function here operates directly on the
 //! crate's compact [`Value`].
 
-use crate::value::{Number, Object, Value};
+use crate::value::{Number, Object, ObjectKey, Value};
 
 use crate::diff::DiffOptions;
 
@@ -256,7 +256,10 @@ pub(crate) fn item_length(value: &Value) -> usize {
 /// "new value" is a whole map, not a [`Value`]) can share it directly.
 fn item_length_of_map(map: &Object) -> usize {
     map.iter()
-        .filter(|(key, _)| !is_length_excluded_key(key))
+        // A non-`str` key can never match the literal exclusion list below,
+        // so it is always counted — `Option::is_none_or` reads as "excluded
+        // only when this is a `str` key that matches".
+        .filter(|(key, _)| key.as_str().is_none_or(|s| !is_length_excluded_key(s)))
         .map(|(_, v)| item_length(v))
         .sum()
 }
@@ -425,13 +428,21 @@ fn python_eq(a: &Value, b: &Value) -> bool {
         (Value::Set(x) | Value::FrozenSet(x), Value::Set(y) | Value::FrozenSet(y)) => {
             unordered_python_eq(x, y)
         }
+        // A non-`str` key needs `match_dict_keys`'s python-equality
+        // matching (see its doc); dispatched to a separate function, kept
+        // off this frame for the reason `crate::diff::object::object_diff`'s
+        // own dispatch documents.
         (Value::Object(x), Value::Object(y)) => {
-            x.len() == y.len()
-                && x.iter()
-                    .zip(y.iter())
-                    .all(|((x_key, x_value), (y_key, y_value))| {
-                        x_key == y_key && python_eq(x_value, y_value)
-                    })
+            if x.has_non_str_keys() || y.has_non_str_keys() {
+                dict_python_eq_mixed(x, y)
+            } else {
+                x.len() == y.len()
+                    && x.iter()
+                        .zip(y.iter())
+                        .all(|((x_key, x_value), (y_key, y_value))| {
+                            x_key == y_key && python_eq(x_value, y_value)
+                        })
+            }
         }
         _ => match (
             crate::lcs::python_scalar_key(a),
@@ -443,6 +454,20 @@ fn python_eq(a: &Value, b: &Value) -> bool {
             _ => false,
         },
     }
+}
+
+/// [`python_eq`]'s dict case for the (rare) pair where `a` or `b` has a
+/// non-`str` key — python-equality key matching via [`match_dict_keys`],
+/// kept out of [`python_eq`]'s own body for the reason its call site
+/// documents.
+fn dict_python_eq_mixed(a: &Object, b: &Object) -> bool {
+    let matched = match_dict_keys(a, b);
+    matched.only_a.is_empty()
+        && matched.only_b.is_empty()
+        && matched
+            .shared
+            .iter()
+            .all(|(_, a_value, b_value)| python_eq(a_value, b_value))
 }
 
 /// Element-wise [`python_eq`] over two sequences of the same length — what
@@ -693,13 +718,133 @@ fn coerce_to_python_str(value: &Value) -> Option<String> {
 /// producing a completely different pairing decision).
 pub(crate) const THRESHOLD_TO_DIFF_DEEPER: f64 = 0.33;
 
+/// A dict key's Python-equality identity — see [`match_dict_keys`]'s doc
+/// for the matching rule this backs and what a `None` result means.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum DictKeyIdentity {
+    Scalar(crate::lcs::ScalarKey),
+    Tuple(Vec<crate::lcs::ScalarKey>),
+}
+
+fn dict_key_identity(key: &ObjectKey) -> Option<DictKeyIdentity> {
+    match key {
+        ObjectKey::Str(s) => Some(DictKeyIdentity::Scalar(crate::lcs::ScalarKey::Str(
+            s.to_string(),
+        ))),
+        ObjectKey::Other(value) => match value.as_ref() {
+            Value::Tuple(items) => items
+                .iter()
+                .map(crate::lcs::python_scalar_key)
+                .collect::<Option<Vec<_>>>()
+                .map(DictKeyIdentity::Tuple),
+            other => crate::lcs::python_scalar_key(other).map(DictKeyIdentity::Scalar),
+        },
+    }
+}
+
+/// The result of matching two [`Object`]s' keys by [`DictKeyIdentity`] — see
+/// [`match_dict_keys`].
+pub(crate) struct DictKeyMatch<'a> {
+    /// A key present (by identity) on both sides: `b`'s own key (the one
+    /// `DeepDiff` renders and recurses with — see `crate::diff::object`'s
+    /// doc), `a`'s value, then `b`'s value.
+    pub(crate) shared: Vec<(&'a ObjectKey, &'a Value, &'a Value)>,
+    /// A key present only in `a`.
+    pub(crate) only_a: Vec<(&'a ObjectKey, &'a Value)>,
+    /// A key present only in `b`.
+    pub(crate) only_b: Vec<(&'a ObjectKey, &'a Value)>,
+}
+
+/// Matches `a`'s and `b`'s keys by [`DictKeyIdentity`] rather than
+/// [`Object::get`]/[`Object::contains_key`]'s structural [`ObjectKey`]
+/// equality — the rule every dict-vs-dict comparison in this crate needs
+/// once either side has a non-`str` key: `DeepDiff`'s own `dict`'s `==`
+/// (`_diff_dict`'s `SetOrdered` key intersection) collapses `1`, `1.0` and
+/// `True` into one key and compares a `tuple` key element-wise, confirmed
+/// against real `deepdiff==9.1.0`: `{1: "a"}` vs `{1.0: "a"}` is `{}`, not
+/// a removed+added pair. A key `dict_key_identity` cannot classify
+/// (unreachable from `onix-py`'s conversion, which restricts a dict key to
+/// `None`/`bool`/`int`/`float`/`str`/`datetime`/`date`/a `tuple` of those)
+/// is always reported as added/removed instead of matched.
+/// `crate::diff::object_diff`, [`count_object_diff_leaves`] and
+/// [`is_below_threshold_to_diff_deeper`] each call this once
+/// [`Object::has_non_str_keys`] says either side needs it, so an ordinary
+/// all-`str` object — the overwhelming common case — never builds the
+/// `BTreeMap` this does.
+///
+/// `O((n + m) log(n + m))`: one lookup map built from `b`'s keys, probed
+/// once per `a` key — the same complexity class `Object::get`'s binary
+/// search already gave the `str`-only path (`n` lookups at `O(log n)`
+/// each), not a quadratic case a non-`str` key newly introduces.
+pub(crate) fn match_dict_keys<'a>(a: &'a Object, b: &'a Object) -> DictKeyMatch<'a> {
+    let mut b_by_identity: std::collections::BTreeMap<DictKeyIdentity, usize> =
+        std::collections::BTreeMap::new();
+    let b_entries: Vec<(&ObjectKey, &Value)> = b.iter().collect();
+    for (index, (key, _)) in b_entries.iter().enumerate() {
+        if let Some(identity) = dict_key_identity(key) {
+            b_by_identity.insert(identity, index);
+        }
+    }
+
+    let mut matched_b: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    let mut shared = Vec::new();
+    let mut only_a = Vec::new();
+
+    for (key, a_value) in a {
+        let found =
+            dict_key_identity(key).and_then(|identity| b_by_identity.get(&identity).copied());
+        match found {
+            Some(index) => {
+                matched_b.insert(index);
+                let (b_key, b_value) = b_entries[index];
+                shared.push((b_key, a_value, b_value));
+            }
+            None => only_a.push((key, a_value)),
+        }
+    }
+
+    let only_b = b_entries
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !matched_b.contains(index))
+        .map(|(_, entry)| entry)
+        .collect();
+
+    DictKeyMatch {
+        shared,
+        only_a,
+        only_b,
+    }
+}
+
 /// The shared `threshold_to_diff_deeper` ratio check backing both
 /// [`count_object_diff_leaves`] (the count-only distance mirror) and
 /// `crate::diff::object_diff`'s own unconditional collapse — see
 /// [`THRESHOLD_TO_DIFF_DEEPER`]'s own doc for why both exist.
 pub(crate) fn is_below_threshold_to_diff_deeper(a: &Object, b: &Object) -> bool {
-    let union_len = a.keys().chain(b.keys()).collect::<HashSet<_>>().len();
-    let intersect_len = a.keys().filter(|key| b.contains_key(key)).count();
+    let (union_len, intersect_len) = if a.has_non_str_keys() || b.has_non_str_keys() {
+        let matched = match_dict_keys(a, b);
+        (
+            matched.shared.len() + matched.only_a.len() + matched.only_b.len(),
+            matched.shared.len(),
+        )
+    } else {
+        // Unchanged from before `ObjectKey` existed: every key here is a
+        // `Str`, so structural and python-equality matching coincide, and
+        // `as_str` never filters anything out.
+        let union_len = a
+            .keys()
+            .filter_map(ObjectKey::as_str)
+            .chain(b.keys().filter_map(ObjectKey::as_str))
+            .collect::<HashSet<_>>()
+            .len();
+        let intersect_len = a
+            .keys()
+            .filter_map(ObjectKey::as_str)
+            .filter(|key| b.contains_key_str(key))
+            .count();
+        (union_len, intersect_len)
+    };
     #[allow(
         clippy::cast_precision_loss,
         reason = "key counts are small, far under f64's exact-integer range"
@@ -734,18 +879,52 @@ pub(crate) fn count_object_diff_leaves(
         return item_length_of_map(b);
     }
 
+    // Dispatched to a separate function, kept off this frame for the
+    // reason `crate::diff::object::object_diff`'s own dispatch documents.
+    if a.has_non_str_keys() || b.has_non_str_keys() {
+        return count_object_diff_leaves_mixed(a, b, depth, opts, memo);
+    }
+
     let mut total = 0;
 
     for (key, old_value) in a {
-        total += match b.get(key) {
+        total += match key.as_str().and_then(|s| b.get_str(s)) {
             None => item_length(old_value),
             Some(new_value) => count_diff_leaves(old_value, new_value, depth + 1, opts, memo),
         };
     }
     for (key, new_value) in b {
-        if !a.contains_key(key) {
+        if key.as_str().is_none_or(|s| !a.contains_key_str(s)) {
             total += item_length(new_value);
         }
+    }
+
+    total
+}
+
+/// [`count_object_diff_leaves`]'s walk for the (rare) case where `a` or `b`
+/// has a non-`str` key — matches keys the same way
+/// `crate::diff::object::object_diff_mixed` does (python-equality, via
+/// [`match_dict_keys`]); kept out of [`count_object_diff_leaves`]'s own
+/// body for the reason its call site documents.
+fn count_object_diff_leaves_mixed(
+    a: &Object,
+    b: &Object,
+    depth: usize,
+    opts: &DiffOptions,
+    memo: &IgnoreOrderMemo,
+) -> usize {
+    let matched = match_dict_keys(a, b);
+    let mut total = 0;
+
+    for (_, old_value, new_value) in &matched.shared {
+        total += count_diff_leaves(old_value, new_value, depth + 1, opts, memo);
+    }
+    for (_, old_value) in &matched.only_a {
+        total += item_length(old_value);
+    }
+    for (_, new_value) in &matched.only_b {
+        total += item_length(new_value);
     }
 
     total

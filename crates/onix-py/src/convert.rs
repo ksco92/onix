@@ -14,7 +14,7 @@
 //! | `int` | `Number` | must fit in `i64` or `u64`; see below |
 //! | `float` | `Number` | must be finite; see below |
 //! | `str` | `Str` | must be encodable as UTF-8; see below |
-//! | `dict` (`str` keys only) | `Object` | keys interned across the whole walk |
+//! | `dict` | `Object` | keys below; `str` keys interned across the whole walk |
 //! | `list` | `Array` | |
 //! | `tuple` | `Tuple` | exactly `tuple`; every subclass is rejected, see below |
 //! | `set` | `Set` | exactly `set`; members restricted, see below |
@@ -35,10 +35,24 @@
 //!   `"\udc80"`) raises [`PyValueError`] naming the exact path: it has no
 //!   UTF-8 encoding. See `tests/golden/README.md` for why this diverges from
 //!   real `DeepDiff`.
-//! - A `dict` key that is not a `str` raises [`PyTypeError`] naming the
-//!   key's type and the path to the dict containing it; a `str` key with a
-//!   lone surrogate raises [`PyValueError`] the same way, naming the dict's
-//!   path (the key itself has no path segment of its own).
+//! - A `dict` key may be `str`, `None`, `bool`, `int`, `float`, `datetime`,
+//!   `date`, or a `tuple` of those (never a nested `tuple`, and never a
+//!   `tuple` *subclass* — the same exactness rule a `tuple` value follows,
+//!   see below). A key of any other type — including `time`/`timedelta`,
+//!   a custom object, or a `tuple` that nests another `tuple` — raises
+//!   [`PyTypeError`] naming the key's type and the path to the dict
+//!   containing it; a `str` key (bare, or nested inside a `tuple` key) with
+//!   a lone surrogate raises [`PyValueError`] the same way, naming the
+//!   dict's path (the key itself has no path segment of its own). Path
+//!   rendering for a non-`str` key follows `DeepDiff`'s own rule
+//!   ([`onix_core::path::dict_key_repr`]): `repr()` for every kind but
+//!   `tuple`, which instead splits into one bracket group per element
+//!   (`root[1][2]`, never `root[(1, 2)]`). Two keys that are Python-equal
+//!   but not the same type (`1`/`1.0`/`True`) are matched as *one* key
+//!   between two dicts being diffed — real Python `dict`/`set` semantics —
+//!   even though this crate's own `Value` keeps them structurally distinct
+//!   everywhere else; see `crate::ignore_order::match_dict_keys`'s doc in
+//!   `onix-core`.
 //! - A `tzinfo` whose `utcoffset()` is not a whole number of seconds raises
 //!   [`PyValueError`]: the value model carries an offset in seconds. Applies
 //!   equally to a `datetime` and a `time`.
@@ -143,8 +157,8 @@
 use onix_core::datetime::{
     Date as CDate, DateTime as CDateTime, Time as CTime, TimeDelta as CTimeDelta,
 };
-use onix_core::path::{PathSegment, render_path};
-use onix_core::value::{Builder, Entries, SetItems};
+use onix_core::path::{PathSegment, object_key_path_segment as key_path_segment, render_path};
+use onix_core::value::{Builder, Entries, ObjectKey, SetItems};
 use onix_core::{Number as CNumber, Value as CValue};
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -230,8 +244,8 @@ enum Frame<'py> {
     },
     Dict {
         remaining: BoundDictIterator<'py>,
-        built: Vec<(String, CValue)>,
-        current_key: String,
+        built: Vec<(ObjectKey, CValue)>,
+        current_key: ObjectKey,
     },
 }
 
@@ -247,7 +261,7 @@ enum Step<'py> {
     },
     Dict {
         iter: BoundDictIterator<'py>,
-        first_key: String,
+        first_key: ObjectKey,
         first_value: Bound<'py, PyAny>,
     },
 }
@@ -346,8 +360,8 @@ fn classify<'py>(
     if !set_member && let Ok(dict) = current.cast::<PyDict>() {
         let mut iter = dict.iter();
 
-        return Ok(match next_dict_entry(&mut iter, path)? {
-            None => Step::Done(builder.object(Vec::new())),
+        return Ok(match next_dict_entry(&mut iter, path, builder)? {
+            None => Step::Done(builder.object_with_keys(Vec::new())),
             Some((first_key, first_value)) => Step::Dict {
                 iter,
                 first_key,
@@ -438,9 +452,9 @@ fn advance_frame<'py>(
         } => {
             built.push((current_key, value));
 
-            match next_dict_entry(&mut remaining, path)? {
+            match next_dict_entry(&mut remaining, path, builder)? {
                 Some((key, next_value)) => {
-                    path.push(PathSegment::Key(key.clone()));
+                    path.push(key_path_segment(&key));
                     Ok(Advance::NeedsChild {
                         // The child's depth is the path length once its key
                         // segment is pushed above.
@@ -452,7 +466,7 @@ fn advance_frame<'py>(
                         },
                     })
                 }
-                None => Ok(Advance::Done(builder.object(built))),
+                None => Ok(Advance::Done(builder.object_with_keys(built))),
             }
         }
     }
@@ -510,7 +524,7 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
                     first_value,
                 } => {
                     let child_depth = depth + 1;
-                    path.push(PathSegment::Key(first_key.clone()));
+                    path.push(key_path_segment(&first_key));
                     let capacity = iter.len().saturating_add(1);
                     stack.push(Frame::Dict {
                         remaining: iter,
@@ -564,37 +578,110 @@ fn child_segment(set_member: bool, index: usize) -> PathSegment {
     }
 }
 
-/// Pulls the next `(key, value)` pair out of a dict iterator, validating that
-/// the key is a `str` — shared by [`to_value`]'s initial descent into a dict
-/// and its `Frame::Dict` advance step, so the validation (and its error
+/// Pulls the next `(key, value)` pair out of a dict iterator, classifying
+/// and validating the key — shared by [`to_value`]'s initial descent into a
+/// dict and its `Frame::Dict` advance step, so the validation (and its error
 /// message) is written exactly once.
 ///
 /// `dict_path` is the path to the *dict itself* (not the entry) — that is
-/// deliberately what a bad key's error reports, since a key that fails to
-/// even parse as a `str` has no path segment of its own to report.
+/// deliberately what a bad key's error reports, since a key that fails
+/// classification has no path segment of its own to report. `builder`
+/// interns a `str` key exactly as every other object key in this walk is
+/// interned; a non-`str` key needs no interning (see the module doc's
+/// key-type table).
 fn next_dict_entry<'py>(
     iter: &mut BoundDictIterator<'py>,
     dict_path: &[PathSegment],
-) -> PyResult<Option<(String, Bound<'py, PyAny>)>> {
+    builder: &mut Builder,
+) -> PyResult<Option<(ObjectKey, Bound<'py, PyAny>)>> {
     let Some((key, value)) = iter.next() else {
         return Ok(None);
     };
 
-    let key = key.cast::<PyString>().map_err(|_| {
-        PyTypeError::new_err(format!(
-            "dict keys must be str, got key of type {} at {}; non-str dict keys are not \
-             supported in this MVP",
-            type_name(&key),
-            render_path(dict_path),
-        ))
-    })?;
-
-    let key = key
-        .to_cow()
-        .map_err(|_| lone_surrogate_error(dict_path, true))?
-        .into_owned();
+    let key = classify_dict_key(&key, dict_path, builder)?;
 
     Ok(Some((key, value)))
+}
+
+/// Classifies one Python dict key into an [`ObjectKey`] — the `str` case
+/// (interned, as always) plus every other key `DeepDiff` also accepts:
+/// `None`, `bool`, `int`, `float`, `datetime`, `date`, or a `tuple` of those
+/// (never a nested `tuple` — see the module doc's key-type table and
+/// [`classify_key_scalar`], which this delegates every non-`tuple` case to).
+fn classify_dict_key(
+    key: &Bound<'_, PyAny>,
+    dict_path: &[PathSegment],
+    builder: &mut Builder,
+) -> PyResult<ObjectKey> {
+    if let Ok(s) = key.cast::<PyString>() {
+        let s = s
+            .to_cow()
+            .map_err(|_| lone_surrogate_error(dict_path, true))?;
+        return Ok(ObjectKey::Str(builder.intern(&s)));
+    }
+
+    // Exact, like every other tuple check in this module (see the module
+    // doc): a tuple *subclass* key falls through to `classify_key_scalar`'s
+    // own error below, the same way a tuple subclass *value* is refused.
+    if let Ok(tuple) = key.cast_exact::<PyTuple>() {
+        let mut items = Vec::with_capacity(tuple.len());
+        for item in tuple.iter() {
+            items.push(classify_key_scalar(&item, dict_path)?);
+        }
+        return Ok(ObjectKey::Other(Box::new(CValue::Tuple(
+            items.into_boxed_slice(),
+        ))));
+    }
+
+    Ok(ObjectKey::Other(Box::new(classify_key_scalar(
+        key, dict_path,
+    )?)))
+}
+
+/// Classifies one Python object as a dict-key **scalar**: every key type
+/// [`classify_dict_key`] accepts except `str` (interned separately, at the
+/// top level only) and `tuple` (split out there, since a tuple key may not
+/// itself nest one — see the module doc). Shared between a bare key and
+/// each element of a `tuple` key.
+fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyResult<CValue> {
+    if obj.is_none() {
+        return Ok(CValue::Null);
+    }
+
+    // `bool` before `int`: see the module doc.
+    if let Ok(b) = obj.cast::<PyBool>() {
+        return Ok(CValue::Bool(b.is_true()));
+    }
+
+    if let Ok(i) = obj.cast::<PyInt>() {
+        return int_to_value(i);
+    }
+
+    if let Ok(f) = obj.cast::<PyFloat>() {
+        return float_to_value(f.value());
+    }
+
+    if let Ok(s) = obj.cast::<PyString>() {
+        let s = s
+            .to_cow()
+            .map_err(|_| lone_surrogate_error(dict_path, true))?;
+        return Ok(CValue::Str(s.into_owned().into_boxed_str()));
+    }
+
+    if obj.cast_exact::<PyDateTime>().is_ok() {
+        return datetime_to_value(obj, dict_path);
+    }
+
+    if obj.cast_exact::<PyDate>().is_ok() {
+        return Ok(CValue::Date(date_fields(obj, dict_path)?));
+    }
+
+    Err(PyTypeError::new_err(format!(
+        "unsupported type for a dict key: {} at {}; a dict key must be \
+         None/bool/int/float/str/datetime/date, or a tuple of those",
+        type_name(obj),
+        render_path(dict_path),
+    )))
 }
 
 /// Reads a `date`'s (or a `datetime`'s) `year`/`month`/`day` attributes.
@@ -824,7 +911,7 @@ enum RenderFrame<'py, 'v> {
     Object {
         remaining: Entries<'v>,
         built: Bound<'py, PyDict>,
-        current_key: &'v str,
+        current_key: &'v ObjectKey,
     },
 }
 
@@ -924,7 +1011,7 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                 built,
                 current_key,
             }) => {
-                built.set_item(current_key, rendered)?;
+                built.set_item(object_key_to_pyobject(py, current_key)?, rendered)?;
 
                 match remaining.next() {
                     Some((key, next_value)) => {
@@ -939,6 +1026,22 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                 }
             }
         }
+    }
+}
+
+/// Rebuilds one [`ObjectKey`] as the Python object [`value_to_pyobject`]
+/// hands back as a dict key: a `str` key directly, any other key by
+/// recursively rendering its wrapped [`CValue`] the same way any other
+/// value in the tree renders. That recursive call is a bounded native-stack
+/// use, not the deep-nesting hazard [`value_to_pyobject`]'s own iterative
+/// design exists to close: a dict key's `Value` is at most a `tuple` of
+/// scalars (`onix-py`'s conversion enforces this — see the module doc), so
+/// the recursion is at most two levels deep regardless of how deep the
+/// containing report is.
+fn object_key_to_pyobject(py: Python<'_>, key: &ObjectKey) -> PyResult<Py<PyAny>> {
+    match key {
+        ObjectKey::Str(s) => s.as_ref().into_py_any(py),
+        ObjectKey::Other(value) => value_to_pyobject(py, value),
     }
 }
 

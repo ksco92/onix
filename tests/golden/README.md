@@ -39,6 +39,7 @@ literal. A case that needs one writes it as a **tagged object**: a JSON object w
 | `$date` | `datetime.date` | supported (ISO 8601 string) |
 | `$time` | `datetime.time` | supported (ISO 8601 string, offset optional) |
 | `$timedelta` | `datetime.timedelta` | supported (`{"days": D, "seconds": S, "microseconds": U}`) |
+| `$dict` | `dict` with a non-`str` key | supported (list of `[key, value]` pairs) |
 
 So `{"$tuple": [1, 2]}` is the tuple `(1, 2)`, `{"$set": [1, 2]}` is the set
 `{1, 2}`, `[{"$tuple": []}]` is a list holding the empty tuple,
@@ -52,8 +53,15 @@ instead of one ISO string, because a single flattened microsecond count
 overflows even a 64-bit integer at Python's own extreme `days=999_999_999`
 (see `onix_core::datetime::TimeDelta`'s own doc); a set's members are always
 *written* in the canonical order documented below, which is what makes a
-fixture holding one byte-identical between runs. **Any other object is
-plain data**, including one that has a
+fixture holding one byte-identical between runs. `$dict` is the one tag whose
+payload is a list of pairs rather than a list of items or a bare string: a
+plain JSON object can only ever have `str` keys, so a `dict` with any other
+key kind (`int`, `bool`, `float`, `None`, `datetime`, `date`, or a `tuple` of
+those) has no other shape to write it in — `{"$dict": [[1, "x"], [true,
+"y"]]}` is `{1: "x", True: "y"}`. Each pair's key is itself tagged where its
+type needs it (a `$tuple`/`$datetime`/`$date` key encodes exactly like a
+value of that type would). **Any other object is plain data**, including one
+that has a
 reserved key alongside others (`{"$tuple": [1], "x": 2}` is a two-key dict). The
 reserved names are claimed all at once, before their types are supported, so a
 fixture can never use one as an ordinary dict key and then change meaning later; a
@@ -496,6 +504,55 @@ generated — so it is pinned in `test_sets.py` instead.
   it reproduces (`model.py::TextResult._from_tree_set_item_added_or_removed`)
   and the `set_str_item_*` and `set_str_inside_tuple_item` cases that pin it.
 
+- **A non-`str` dict key's path renders via `repr()`, with a `tuple` key
+  split into one bracket group per element.** `DeepDiff`'s
+  `ChildRelationship.stringify_param` (`model.py`) special-cases exactly one
+  non-`str` shape: `isinstance(param, tuple)` renders
+  `']['.join(map(repr, param))`, so the key `(1, 2)` produces `root[1][2]`,
+  never `root[(1, 2)]` — confirmed against real `deepdiff==9.1.0`. Every
+  other non-`str` key kind (`None`, `bool`, `int`, `float`, `datetime`,
+  `date`) renders as plain `repr(param)`. See
+  `onix_core::path::dict_key_repr`'s doc for the exact upstream code and
+  the `dict_key_*` golden cases for coverage of each kind.
+
+- **A dict key matches across two dicts by Python `==`, not by type.**
+  `DeepDiff`'s `_diff_dict` (diff.py) builds its added/removed/shared key
+  sets with `t2_keys & t1_keys` (`SetOrdered` intersection, itself built on
+  Python `==`/`hash()`), so `1`, `1.0`, and `True` are the *same key*
+  between two dicts even though `onix`'s own `ObjectKey` keeps them
+  structurally distinct everywhere else (the same split `SetItems` already
+  documents for set members) — confirmed: `DeepDiff({1: "a"}, {1.0: "a"})`
+  is `{}`, not a removed+added pair. `SetOrdered.intersection` also keeps
+  *its own* (`t2`'s, i.e. the "new"/`b`) key object when a match is
+  found — via `intersection`'s own `items = (item for item in self if item
+  in common)`, `self` being `t2` — which is why `{1: "a"}` vs
+  `{1.0: "a2"}` reports `root[1.0]`, `b`'s form, never `a`'s. `onix`
+  reproduces both halves in `crate::ignore_order::match_dict_keys`, used by
+  `crate::diff::object::object_diff_mixed` whenever either side has a
+  non-`str` key (an all-`str` object never builds this — see
+  `Object::has_non_str_keys`'s doc).
+
+- **`to_json()` on a *nested* dict value with a non-`str` key mirrors
+  Python's `json.dumps` key-stringification rule where it has one, and
+  diverges (by design) where `DeepDiff` itself crashes.** A *top-level*
+  path segment always renders via `repr()` (the bullet above); a nested
+  dict *value* embedded inside a JSON payload is different, because JSON
+  itself has no non-`str`-key literal. Python's `json.dumps` stringifies a
+  `bool`/`None`/`int`/`float` dict key (`"true"`/`"false"`, `"null"`, the
+  decimal text, the same shortest-round-trip form a float *value* gets)
+  rather than rejecting it, and `onix` matches that exactly
+  (`dict_key_nested_value_stringifies_bool_none_float_keys`). A
+  `datetime`/`date`/`tuple` key has no such rule: Python's `json.dumps`
+  (and so `DeepDiff.to_json()`) *raises* `TypeError` on one — confirmed
+  against real `deepdiff==9.1.0` — so per this crate's compatibility policy
+  (crash → pick the simpler, deterministic behavior, and document it)
+  `onix` renders the same `repr()` text that key would get as a top-level
+  path segment instead of failing; no golden fixture can pin this case
+  (the generator cannot capture real `DeepDiff` output that does not
+  exist), so it is pinned directly in `crates/onix-core/src/value_tests.rs`
+  instead (`to_serde_json_stringifies_a_tuple_key_via_python_repr_where_deepdiff_would_crash`
+  and the `datetime` twin).
+
 - **A key can make path rendering collide, in both tools.** `path_rendering_collision`:
   a dict key whose own text contains `']['`-shaped syntax (e.g. `p'"]["q'`)
   renders identically to an unrelated, differently-nested path (e.g.
@@ -691,14 +748,29 @@ nested array pair now measures a nested dict-vs-dict candidate through
 this same real `object_diff` collapse, so no inflated leaf count can flip
 a pairing decision.
 
+**An empty-`tuple` (`()`) dict key is a real, narrow `DeepDiff` bug, not
+reproduced.** `stringify_param` (`model.py`) renders a `tuple` param as
+`']['.join(map(repr, param))`, which for `()` is the *empty string* —
+and its caller's `if result:` check treats an empty string as "no path
+representation at all", so the change level's path comes back Python
+`None` instead of a string. That `None` then becomes a literal `"null"`
+dict key when `to_dict()`'s report reaches `to_json()`. `onix` renders
+`root[]` instead — deterministic, and at least a real (if unusual) path —
+per the compatibility policy (pick the simpler, deterministic behavior over
+a genuine upstream quirk, and document it). The differential fuzz batch
+that generates `tuple` dict keys (issue #62) excludes the empty tuple for
+this reason; see `crates/onix-py/tests/test_differential_fuzz.py`'s
+`_gen_non_str_dict_key`.
+
 Every other divergence found while building the corpus was fixed in `onix-core` to match
 `DeepDiff` exactly. The path-rendering collision exception, the multi-member
 nested-`frozenset`-rendering exception (both above), the three
 set-iteration-order differences, the list-LCS `2^53` limitation, the
 naive-datetime pairing timezone above, the `time` seconds-of-day hashing
-quirk under `ignore_order` above, the lone-surrogate `ValueError` just
-described, and the Unicode-version `str`-repr divergence documented under
-"Pinned versions" above are the only accepted, documented exceptions —
+quirk under `ignore_order` above, the lone-surrogate `ValueError`, the
+empty-tuple-key bug just described, and the Unicode-version `str`-repr
+divergence documented under "Pinned versions" above are the only accepted,
+documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
 `scripts/differential_fuzz.py`) found zero *other* unexplained

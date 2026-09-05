@@ -69,13 +69,87 @@ def test_finite_float_is_accepted() -> None:
     assert diff.to_dict()["values_changed"]["root"]["old_value"] == 1.5
 
 
-# unsupported dict keys and types
+# non-str dict keys (see crates/onix-core/src/value.rs's `ObjectKey`)
 
 
-def test_non_str_dict_key_raises_type_error() -> None:
-    """A dict with a non-str key raises TypeError naming the key's type."""
-    with pytest.raises(TypeError, match="int"):
-        DeepDiff({1: "a"}, {1: "b"})
+def test_int_dict_key_is_accepted_and_diffed() -> None:
+    """An int dict key converts and diffs like real DeepDiff, at its own repr'd path."""
+    diff = DeepDiff({1: "a"}, {1: "b"})
+    assert diff.to_dict() == {"values_changed": {"root[1]": {"new_value": "b", "old_value": "a"}}}
+
+
+def test_bool_none_and_float_dict_keys_are_accepted() -> None:
+    """`bool`, `None`, and `float` dict keys all convert, each at its own repr'd path."""
+    diff = DeepDiff(
+        {"z": 0, True: 1, None: 2, 1.5: 3},
+        {"z": 0, True: 10, None: 20, 1.5: 30},
+    )
+    assert diff.to_dict() == {
+        "values_changed": {
+            "root[True]": {"new_value": 10, "old_value": 1},
+            "root[None]": {"new_value": 20, "old_value": 2},
+            "root[1.5]": {"new_value": 30, "old_value": 3},
+        }
+    }
+
+
+def test_datetime_and_date_dict_keys_are_accepted() -> None:
+    """A `datetime`/`date` dict key converts, at a path rendered via Python's own `repr()`."""
+    dt = datetime.datetime(2024, 1, 1, 10, 30)
+    d = datetime.date(2024, 1, 1)
+    diff = DeepDiff({"z": 0, dt: "a", d: "b"}, {"z": 0, dt: "a2", d: "b2"})
+    assert diff.to_dict() == {
+        "values_changed": {
+            "root[datetime.datetime(2024, 1, 1, 10, 30)]": {
+                "new_value": "a2",
+                "old_value": "a",
+            },
+            "root[datetime.date(2024, 1, 1)]": {"new_value": "b2", "old_value": "b"},
+        }
+    }
+
+
+def test_tuple_dict_key_is_accepted_and_splits_the_path_per_element() -> None:
+    """A tuple dict key of scalars converts; the path splits into one subscript per element,
+    matching real `DeepDiff` (not `root[(1, 2)]`)."""
+    diff = DeepDiff({}, {(1, 2): "x"})
+    assert diff.to_dict() == {"dictionary_item_added": {"root[1][2]": "x"}}
+
+
+def test_int_and_float_dict_keys_match_by_python_equality() -> None:
+    """`1` and `1.0` are the same *key* to `DeepDiff` (Python `dict` equality), so this is a
+    values_changed at the shared key, not an added+removed pair."""
+    diff = DeepDiff({1: "a"}, {1.0: "b"})
+    assert diff.to_dict() == {"values_changed": {"root[1.0]": {"new_value": "b", "old_value": "a"}}}
+
+
+def test_to_dict_returns_the_original_non_str_key_object_in_a_nested_value() -> None:
+    """`to_dict()` hands back a reported *value* that is itself a dict with its real, non-`str`
+    key objects intact (an `int`, not `"1"`) — unlike `to_json()`, which must stringify it."""
+    diff = DeepDiff({}, {"a": {1: "x"}})
+    nested = diff.to_dict()["dictionary_item_added"]["root['a']"]
+    assert nested == {1: "x"}
+    (key,) = nested.keys()
+    assert isinstance(key, int) and not isinstance(key, bool)
+
+
+def test_complex_dict_key_raises_type_error() -> None:
+    """A dict key of a type outside the accepted set raises TypeError naming it."""
+    with pytest.raises(TypeError, match="complex"):
+        DeepDiff({complex(1, 2): "a"}, {})
+
+
+def test_tuple_dict_key_containing_a_nested_tuple_is_rejected() -> None:
+    """A tuple dict key may not itself nest another tuple — only the scalar kinds it wraps."""
+    with pytest.raises(TypeError, match=r"tuple at root"):
+        DeepDiff({}, {((1, 2), 3): "x"})
+
+
+def test_namedtuple_dict_key_is_rejected() -> None:
+    """A tuple *subclass* key is refused, like a tuple subclass value (see the module doc)."""
+    point = collections.namedtuple("Point", "x y")
+    with pytest.raises(TypeError, match="Point"):
+        DeepDiff({}, {point(1, 2): "x"})
 
 
 def test_tuple_is_accepted_and_diffed_positionally() -> None:
@@ -244,10 +318,11 @@ def test_unsupported_type_at_root_reports_bare_root_path() -> None:
         DeepDiff(1j, 2j)
 
 
-def test_non_str_dict_key_error_reports_path_to_the_dict() -> None:
-    """A non-str dict key error reports the path to the dict containing it, not just the type."""
-    with pytest.raises(TypeError, match=r"int at root\['a'\]"):
-        DeepDiff({"a": {1: "x"}}, {"a": {1: "y"}})
+def test_unsupported_dict_key_error_reports_path_to_the_dict() -> None:
+    """An unsupported dict key error reports the path to the dict containing it, not just the
+    key's type — the key itself has no path segment of its own to report."""
+    with pytest.raises(TypeError, match=r"complex at root\['a'\]"):
+        DeepDiff({"a": {complex(1, 2): "x"}}, {"a": {complex(1, 2): "y"}})
 
 
 # lone (unpaired) surrogates: legal in a Python str, not representable as UTF-8; see

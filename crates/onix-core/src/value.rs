@@ -8,12 +8,13 @@
 //! spends most of its footprint on empty slots, and repeats every key
 //! `String` once per occurrence. [`Value`] replaces both costs:
 //!
-//! * **Objects** are an exactly-sized, key-sorted `Box<[(Arc<str>, Value)]>`
+//! * **Objects** are an exactly-sized, key-sorted `Box<[(ObjectKey, Value)]>`
 //!   — one heap block holding precisely the entries present, no spare slots.
-//!   Sorted by key string means lookups are a binary search and iteration is
-//!   in the same lexicographic order [`serde_json`]'s `BTreeMap` produces, so
-//!   anything rendered from a [`Value`] stays byte-identical.
-//! * **Keys** are interned within one conversion/parse session (see
+//!   Sorted by key means lookups are a binary search and iteration is in the
+//!   same order [`serde_json`]'s `BTreeMap` produces for a `str`-only
+//!   object, so anything rendered from a [`Value`] stays byte-identical. See
+//!   [`ObjectKey`] for the (additive) non-`str` key case.
+//! * **`str` keys** are interned within one conversion/parse session (see
 //!   `Interner`): the handful of distinct keys a real payload repeats
 //!   thousands of times collapse to one `Arc<str>` each, shared by cheap
 //!   refcount bumps.
@@ -135,6 +136,85 @@ pub enum Value {
     Object(Object),
 }
 
+/// One [`Object`] key: the `str` fast path this crate has always had
+/// ([`ObjectKey::Str`]), or any other key `DeepDiff` also accepts
+/// ([`ObjectKey::Other`]) — see `onix-py`'s conversion table for the exact
+/// set. No `Hash` impl; see `crate::ignore_order::hash`'s
+/// `object_key_item_key` for how a content hash of one is computed instead.
+#[derive(Debug, Clone)]
+pub enum ObjectKey {
+    /// A `str` key, interned the same way [`Object`] has always interned
+    /// its keys.
+    Str(Arc<str>),
+    /// Any other key `DeepDiff` accepts: `None`, `bool`, `int`, `float`,
+    /// `datetime`, `date`, or a `tuple` of those — never itself a `str`
+    /// (that always takes the [`ObjectKey::Str`] arm) and never a container
+    /// other than that restricted `tuple` (`onix-py`'s conversion layer is
+    /// the boundary that enforces this; this type does not).
+    Other(Box<Value>),
+}
+
+impl ObjectKey {
+    /// This key's `str` content, or `None` for [`ObjectKey::Other`] — the
+    /// convenience every call site that only ever handled `str` keys before
+    /// this variant existed still needs.
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            ObjectKey::Str(s) => Some(s.as_ref()),
+            ObjectKey::Other(_) => None,
+        }
+    }
+}
+
+/// Structural equality, consistent with [`ObjectKey`]'s [`Ord`]
+/// (`object_key_cmp`): two `str` keys compare by content, two `Other` keys
+/// by [`Value`]'s own structural equality, and a `Str` never equals an
+/// `Other` (`DeepDiff` never treats a `str` key as equal to any other key
+/// kind either).
+impl PartialEq for ObjectKey {
+    fn eq(&self, other: &Self) -> bool {
+        object_key_cmp(self, other).is_eq()
+    }
+}
+
+impl Eq for ObjectKey {}
+
+impl PartialOrd for ObjectKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Total order backing [`Object`]'s own sort/binary-search: every `Str` key
+/// sorts before every `Other` key (so an all-`str` object's entries land in
+/// exactly the order they always have — this variant changes nothing about
+/// it), `Str`-vs-`Str` by string content, and `Other`-vs-`Other` by
+/// `canonical_cmp` (the same structural order [`SetItems`] sorts its
+/// members with). This is an internal storage/lookup order, unrelated to
+/// `DeepDiff`'s own (unreproducible) dict iteration order — see
+/// `crate::diff::object` for the *matching* rule (Python `==`, which treats
+/// `1`/`1.0`/`True` as one key) applied on top of this when two [`Object`]s
+/// are diffed against each other.
+impl Ord for ObjectKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        object_key_cmp(self, other)
+    }
+}
+
+/// [`ObjectKey`]'s comparison, factored out so [`PartialEq`] and [`Ord`]
+/// cannot drift (equality is exactly `Ordering::Equal`).
+fn object_key_cmp(a: &ObjectKey, b: &ObjectKey) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    match (a, b) {
+        (ObjectKey::Str(x), ObjectKey::Str(y)) => x.cmp(y),
+        (ObjectKey::Str(_), ObjectKey::Other(_)) => Ordering::Less,
+        (ObjectKey::Other(_), ObjectKey::Str(_)) => Ordering::Greater,
+        (ObjectKey::Other(x), ObjectKey::Other(y)) => canonical_cmp(x, y),
+    }
+}
+
 /// Delegates to the iterative `structural_eq`. The result is exactly what a
 /// derived `PartialEq` produces, verified by a differential property test
 /// against the derive before it was replaced. See the [module
@@ -176,11 +256,51 @@ impl Value {
             Value::Object(obj) => {
                 let mut map = serde_json::Map::with_capacity(obj.len());
                 for (key, value) in obj {
-                    map.insert(key.to_owned(), value.to_serde_json());
+                    map.insert(object_key_json_string(key), value.to_serde_json());
                 }
                 serde_json::Value::Object(map)
             }
         }
+    }
+}
+
+/// Renders one [`ObjectKey`] as the JSON string key
+/// [`Value::to_serde_json`] embeds it under.
+///
+/// A `Str` key renders as its own text, unchanged (the only case a JSON
+/// object can ever hold in the first place). An `Other` key mirrors Python's
+/// `json.dumps`, which stringifies a non-`str` dict key rather than
+/// rejecting it — `bool` to `"true"`/`"false"`, `None` to `"null"`, `int` to
+/// its decimal text, and `float` through the identical shortest-round-trip
+/// `repr()` [`crate::path::python_repr`] uses for a float *value* — so a
+/// report embedding one of these four kinds as a nested key matches real
+/// `DeepDiff`'s own `to_json()` byte-for-byte.
+///
+/// A `datetime`, `date`, or `tuple` key has no such rule to match: Python's
+/// `json.dumps` (and so `DeepDiff.to_json()`) *raises* `TypeError` rather
+/// than serializing one — confirmed against real `deepdiff==9.1.0` — so per
+/// this crate's compatibility policy (crash → pick the simpler,
+/// deterministic behavior, and document it) this renders the same
+/// [`crate::path::python_repr`] text the key would get as a *top-level*
+/// path segment, which is at least useful output instead of a hard failure.
+/// See `tests/golden/README.md`'s "Known `DeepDiff` quirks" section.
+fn object_key_json_string(key: &ObjectKey) -> String {
+    match key {
+        ObjectKey::Str(s) => s.to_string(),
+        ObjectKey::Other(value) => match value.as_ref() {
+            Value::Null => "null".to_string(),
+            Value::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
+            Value::Number(n) if n.is_f64() => crate::path::python_float_repr(
+                n.as_f64()
+                    .expect("Number::is_f64 guarantees as_f64 succeeds"),
+            ),
+            Value::Number(n) => n
+                .as_i64()
+                .map(|i| i.to_string())
+                .or_else(|| n.as_u64().map(|u| u.to_string()))
+                .expect("a non-float Number always has an i64 or u64 representation"),
+            other => crate::path::python_repr(other),
+        },
     }
 }
 
@@ -212,7 +332,12 @@ fn from_serde(value: serde_json::Value, interner: &mut Interner) -> Value {
         serde_json::Value::Object(map) => {
             let pairs = map
                 .into_iter()
-                .map(|(key, value)| (interner.intern(&key), from_serde(value, interner)))
+                .map(|(key, value)| {
+                    (
+                        ObjectKey::Str(interner.intern(&key)),
+                        from_serde(value, interner),
+                    )
+                })
                 .collect();
             Value::Object(Object::from_pairs(pairs))
         }
@@ -668,7 +793,7 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     /// tie-break a container falls back on once its elements all matched.
     enum Work<'a> {
         Values(&'a Value, &'a Value),
-        Keys(&'a str, &'a str),
+        Keys(&'a ObjectKey, &'a ObjectKey),
         Lengths(usize, usize),
     }
 
@@ -791,29 +916,34 @@ fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
 }
 
 /// A JSON object: key-sorted, exactly-sized entries backed by a single
-/// `Box<[(Arc<str>, Value)]>`, with binary-search lookup
+/// `Box<[(ObjectKey, Value)]>`, with binary-search lookup
 /// ([`get`](Object::get)/[`contains_key`](Object::contains_key)) and
 /// ascending-key iteration.
 ///
-/// See the [module documentation](self) for why entries are sorted and keys
-/// interned (byte-identical rendering and small-map footprint).
+/// See the [module documentation](self) for why entries are sorted and
+/// `str` keys interned (byte-identical rendering and small-map footprint),
+/// and [`ObjectKey`]'s own doc for why every other key kind is a second,
+/// additive case rather than a change to that representation.
 #[derive(Debug, Clone)]
 pub struct Object {
     /// Key-sorted, duplicate-free entries. Invariant: strictly ascending by
-    /// key string (enforced by [`Object::from_pairs`]).
-    entries: Box<[(Arc<str>, Value)]>,
+    /// [`ObjectKey`]'s own [`Ord`] (enforced by [`Object::from_pairs`]) —
+    /// every [`ObjectKey::Str`] entry before every [`ObjectKey::Other`] one,
+    /// so [`Object::has_non_str_keys`] can check the last entry alone.
+    entries: Box<[(ObjectKey, Value)]>,
 }
 
 impl Object {
     /// Builds an object from arbitrary `(key, value)` pairs: sorts them by
-    /// key string and collapses duplicate keys keeping the last value seen
-    /// (matching [`serde_json`], whose `BTreeMap` insert overwrites), so the
-    /// stored entries satisfy the strictly-ascending invariant.
-    pub(crate) fn from_pairs(mut pairs: Vec<(Arc<str>, Value)>) -> Self {
+    /// [`ObjectKey`]'s own order and collapses duplicate keys keeping the
+    /// last value seen (matching [`serde_json`], whose `BTreeMap` insert
+    /// overwrites), so the stored entries satisfy the strictly-ascending
+    /// invariant.
+    pub(crate) fn from_pairs(mut pairs: Vec<(ObjectKey, Value)>) -> Self {
         // Stable sort keeps duplicate keys in their original order, so the
         // overwrite loop below retains the *last* occurrence's value.
         pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
-        let mut entries: Vec<(Arc<str>, Value)> = Vec::with_capacity(pairs.len());
+        let mut entries: Vec<(ObjectKey, Value)> = Vec::with_capacity(pairs.len());
         for (key, value) in pairs {
             if let Some(last) = entries.last_mut()
                 && last.0 == key
@@ -831,19 +961,43 @@ impl Object {
     /// Returns the value for `key`, or `None` if the object has no such key.
     /// `O(log n)` binary search over the sorted entries.
     #[must_use]
-    pub fn get(&self, key: &str) -> Option<&Value> {
+    pub fn get(&self, key: &ObjectKey) -> Option<&Value> {
         self.entries
-            .binary_search_by(|(entry_key, _)| (**entry_key).cmp(key))
+            .binary_search_by(|(entry_key, _)| entry_key.cmp(key))
             .ok()
             .map(|index| &self.entries[index].1)
     }
 
     /// Returns `true` if the object contains `key`. `O(log n)`.
     #[must_use]
-    pub fn contains_key(&self, key: &str) -> bool {
+    pub fn contains_key(&self, key: &ObjectKey) -> bool {
         self.entries
-            .binary_search_by(|(entry_key, _)| (**entry_key).cmp(key))
+            .binary_search_by(|(entry_key, _)| entry_key.cmp(key))
             .is_ok()
+    }
+
+    /// [`Object::get`] for a plain `&str`, with no [`ObjectKey`] to
+    /// construct: every [`ObjectKey::Str`] entry sorts before every
+    /// [`ObjectKey::Other`] one (see [`ObjectKey`]'s `Ord`), so comparing an
+    /// `Other` entry as "greater than any `str`" keeps the binary search
+    /// correct without allocating — the same `O(log n)`, zero-allocation
+    /// lookup this crate has always given a `str`-only object, now also
+    /// available on one that mixes in a non-`str` key elsewhere.
+    #[must_use]
+    pub fn get_str(&self, key: &str) -> Option<&Value> {
+        self.entries
+            .binary_search_by(|(entry_key, _)| match entry_key {
+                ObjectKey::Str(s) => s.as_ref().cmp(key),
+                ObjectKey::Other(_) => std::cmp::Ordering::Greater,
+            })
+            .ok()
+            .map(|index| &self.entries[index].1)
+    }
+
+    /// [`Object::contains_key`] for a plain `&str` — see [`Object::get_str`].
+    #[must_use]
+    pub fn contains_key_str(&self, key: &str) -> bool {
+        self.get_str(key).is_some()
     }
 
     /// The number of entries.
@@ -858,6 +1012,18 @@ impl Object {
         self.entries.is_empty()
     }
 
+    /// Returns `true` if any key is an [`ObjectKey::Other`] — `O(1)`, since
+    /// `Object::from_pairs`'s sort always puts every `Other` key after
+    /// every `Str` one, so the last entry alone answers the question. Every
+    /// dict-diffing call site that would otherwise pay for python-equality
+    /// key matching (`crate::diff::object`, `crate::ignore_order::distance`)
+    /// checks this first and takes an unchanged, allocation-free path when
+    /// both sides answer `false`.
+    #[must_use]
+    pub fn has_non_str_keys(&self) -> bool {
+        matches!(self.entries.last(), Some((ObjectKey::Other(_), _)))
+    }
+
     /// Iterates `(key, value)` pairs in ascending key order.
     #[must_use]
     pub fn iter(&self) -> Entries<'_> {
@@ -867,8 +1033,8 @@ impl Object {
     }
 
     /// Iterates keys in ascending order.
-    pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().map(|(key, _)| key.as_ref())
+    pub fn keys(&self) -> impl Iterator<Item = &ObjectKey> {
+        self.entries.iter().map(|(key, _)| key)
     }
 
     /// Iterates values in ascending key order.
@@ -878,7 +1044,7 @@ impl Object {
 }
 
 impl<'a> IntoIterator for &'a Object {
-    type Item = (&'a str, &'a Value);
+    type Item = (&'a ObjectKey, &'a Value);
     type IntoIter = Entries<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -889,14 +1055,14 @@ impl<'a> IntoIterator for &'a Object {
 /// Iterator over an [`Object`]'s `(key, value)` entries in ascending key
 /// order, yielded by [`Object::iter`] and `&Object`'s [`IntoIterator`].
 pub struct Entries<'a> {
-    inner: std::slice::Iter<'a, (Arc<str>, Value)>,
+    inner: std::slice::Iter<'a, (ObjectKey, Value)>,
 }
 
 impl<'a> Iterator for Entries<'a> {
-    type Item = (&'a str, &'a Value);
+    type Item = (&'a ObjectKey, &'a Value);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|(key, value)| (key.as_ref(), value))
+        self.inner.next().map(|(key, value)| (key, value))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -906,9 +1072,7 @@ impl<'a> Iterator for Entries<'a> {
 
 impl DoubleEndedIterator for Entries<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.inner
-            .next_back()
-            .map(|(key, value)| (key.as_ref(), value))
+        self.inner.next_back().map(|(key, value)| (key, value))
     }
 }
 
@@ -989,9 +1153,29 @@ impl Builder {
     pub fn object(&mut self, entries: Vec<(String, Value)>) -> Value {
         let pairs = entries
             .into_iter()
-            .map(|(key, value)| (self.interner.intern(&key), value))
+            .map(|(key, value)| (ObjectKey::Str(self.interner.intern(&key)), value))
             .collect();
         Value::Object(Object::from_pairs(pairs))
+    }
+
+    /// Interns `key` against this builder's session, exactly as
+    /// [`Builder::object`] does internally — exposed so a caller building an
+    /// [`ObjectKey`] directly (for [`Builder::object_with_keys`], because the
+    /// dict it is converting has a non-`str` key somewhere) still shares one
+    /// `str` key's allocation across every object that repeats it.
+    #[must_use]
+    pub fn intern(&mut self, key: &str) -> Arc<str> {
+        self.interner.intern(key)
+    }
+
+    /// Builds an object [`Value`] from `entries`, which may carry any
+    /// [`ObjectKey`] — the general form of [`Builder::object`] for a caller
+    /// that has already classified its keys (`onix-py`'s conversion, which
+    /// must tell a `str` key needing [`Builder::intern`] apart from any other
+    /// kind).
+    #[must_use]
+    pub fn object_with_keys(&mut self, entries: Vec<(ObjectKey, Value)>) -> Value {
+        Value::Object(Object::from_pairs(entries))
     }
 }
 
@@ -1116,9 +1300,9 @@ impl<'de> Visitor<'de> for ValueVisitor<'_> {
     where
         A: MapAccess<'de>,
     {
-        let mut pairs: Vec<(Arc<str>, Value)> = Vec::new();
+        let mut pairs: Vec<(ObjectKey, Value)> = Vec::new();
         while let Some(key) = map.next_key::<Cow<'_, str>>()? {
-            let interned = self.interner.intern(&key);
+            let interned = ObjectKey::Str(self.interner.intern(&key));
             let value = map.next_value_seed(ValueSeed {
                 interner: self.interner,
             })?;

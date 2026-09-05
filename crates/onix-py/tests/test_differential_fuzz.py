@@ -4,7 +4,7 @@ Runs through the actual `deepdiff_rs.DeepDiff` class (not the fast JSON-string
 path), so this exercises the Python-object-to-`Value` conversion layer itself,
 not just the diff engine underneath it.
 
-Eight batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
+Nine batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
 and `ignore_order=True`): the JSON-shaped types; the same plus tuples, as
 containers in their own right and as elements of lists, dicts and other
 tuples; the same plus sets and frozensets, likewise; the same plus naive and
@@ -16,8 +16,10 @@ is the shape the `str()` coercion decides; at `COMBINED_SEED_COUNT`
 cases, the full alphabet drawn together in one generator run — tuples, sets,
 frozensets, datetimes and dates all able to appear at any depth, including a
 calendar value as a bare or nested set item (issue #21's own combination);
-and multi-line strings, whose str->str changes reach DeepDiff's `_diff_str`
-and the `diff` field it adds at `verbose_level=2` (issue #28).
+multi-line strings, whose str->str changes reach DeepDiff's `_diff_str`
+and the `diff` field it adds at `verbose_level=2` (issue #28); and dicts whose
+keys may be `int`/`bool`/`float`/`None`/`datetime`/`date`/a `tuple` of those,
+alongside tuples and calendar values as ordinary leaves too (issue #62).
 Every batch compares `to_json()` (canonically, i.e. parsed, since neither
 tool promises a key order) *and* `to_dict()` by `==`, the comparison that can
 see a tuple, a set, a `datetime` or a `date` where the JSON one cannot.
@@ -140,6 +142,22 @@ MULTILINE_STRINGS: Final[list[str]] = [
 MULTILINE_ALPHABET: Final[list[JsonValue]] = [
     *MULTILINE_STRINGS, None, True, False, 0, 1, 1.5,
 ]
+
+# The non-str dict key batch (issue #62): its own seed range, independent of
+# every batch above.
+DICT_KEY_SEED_BASE: Final[int] = 8_000_000
+
+# How often a generated dict key is drawn from the non-str alphabet below
+# rather than the pre-existing `DICT_KEYS` strings, when the `dict_keys` flag
+# is set. The RNG is only consulted for this when the flag is set, so every
+# pre-existing (`dict_keys=False`) batch draws dict keys exactly as it always
+# has -- see `_gen_dict_key`'s own doc.
+NON_STR_KEY_PROBABILITY: Final[float] = 0.4
+
+# The scalar leaves a generated non-str dict key's `tuple` case may hold --
+# deliberately not itself a `tuple` (a dict key may not nest one, see
+# `crates/onix-py/src/convert.rs`'s module doc).
+NON_STR_KEY_TUPLE_LEAVES: Final[list[JsonValue]] = [1, "x", True, None, 2.5]
 
 # The calendar batch's leaves: naive and aware datetimes across a bounded range,
 # plus bare dates. The offsets deliberately include one that is not a whole
@@ -273,12 +291,70 @@ def _gen_calendar(rng: random.Random) -> JsonValue:
     return value.replace(tzinfo=datetime.timezone(datetime.timedelta(seconds=offset)))
 
 
+def _gen_non_str_dict_key(rng: random.Random) -> JsonValue:
+    """
+    Pick a random non-`str` dict key: `int`, `bool`, `float`, `None`,
+    `datetime`, `date`, or a `tuple` of scalars (issue #62).
+
+    `NON_STR_KEY_TUPLE_LEAVES` holds both `1` and `True`, so a generated
+    tuple key's own elements may land on a Python-equal-but-differently-typed
+    pair (e.g. `(1, True)`) -- deliberately in scope, exercising the same
+    element-wise `ScalarKey` matching a tuple *key* needs, not a generator
+    bug to avoid.
+
+    :param rng: Seeded RNG.
+    :return: A non-`str` dict key.
+    """
+    kind = rng.random()
+
+    if kind < 0.2:
+        return rng.randint(-5, 5)
+
+    if kind < 0.35:
+        return rng.choice([True, False])
+
+    if kind < 0.5:
+        return rng.choice([0.5, 1.5, -2.5, 3.0])
+
+    if kind < 0.6:
+        return None
+
+    value = CALENDAR_EPOCH + datetime.timedelta(seconds=rng.randrange(CALENDAR_SPAN_SECONDS))
+
+    if kind < 0.8:
+        return value if kind < 0.7 else value.date()
+
+    # Never the empty tuple: a real, narrow DeepDiff bug, not reproduced --
+    # see tests/golden/README.md's empty-tuple-key section.
+    length = rng.randint(1, 2)
+
+    return tuple(rng.choice(NON_STR_KEY_TUPLE_LEAVES) for _ in range(length))
+
+
+def _gen_dict_key(rng: random.Random, dict_keys: bool) -> JsonValue:
+    """
+    Pick a random dict key: a `str` from `DICT_KEYS`, or (when `dict_keys` is
+    set) sometimes one of the other types `DeepDiff` also accepts.
+
+    :param rng: Seeded RNG.
+    :param dict_keys: Whether a non-`str` key may be generated. The RNG is
+        only consulted for this choice when it is set, so a caller that never
+        sets it draws exactly `rng.choice(DICT_KEYS)`.
+    :return: A dict key.
+    """
+    if dict_keys and rng.random() < NON_STR_KEY_PROBABILITY:
+        return _gen_non_str_dict_key(rng)
+
+    return rng.choice(DICT_KEYS)
+
+
 def _gen_value(
     rng: random.Random,
     depth: int,
     scalars: list[JsonValue] | None = None,
     tuples: bool = False,
     calendar: bool = False,
+    dict_keys: bool = False,
 ) -> JsonValue:
     """
     Generate a random JSON-shaped value, nesting up to `depth` levels.
@@ -293,6 +369,10 @@ def _gen_value(
     :param calendar: Whether leaves may be datetimes and dates. As with
         `tuples`, the RNG is only consulted for this when it is set, so the
         two pre-existing corpora are bit-for-bit the ones they were.
+    :param dict_keys: Whether a dict's keys may be non-`str` (issue #62). As
+        with `tuples`/`calendar`, unset means the dict-key draw is the exact
+        `rng.sample(DICT_KEYS, ...)` call every pre-existing corpus used, so
+        those corpora stay bit-for-bit the ones they were.
     :return: A random value built from the MVP-supported types only.
     """
     if depth <= 0:
@@ -307,16 +387,30 @@ def _gen_value(
 
     if kind < 0.75:
         length = rng.randint(0, 4)
-        items = [_gen_value(rng, depth - 1, scalars, tuples, calendar) for _ in range(length)]
+        items = [
+            _gen_value(rng, depth - 1, scalars, tuples, calendar, dict_keys)
+            for _ in range(length)
+        ]
 
         return tuple(items) if tuples and rng.random() < 0.5 else items
 
-    keys = rng.sample(DICT_KEYS, rng.randint(0, len(DICT_KEYS)))
-    return {key: _gen_value(rng, depth - 1, scalars, tuples, calendar) for key in keys}
+    if dict_keys:
+        count = rng.randint(0, len(DICT_KEYS))
+        keys = list(dict.fromkeys(_gen_dict_key(rng, dict_keys) for _ in range(count)))
+    else:
+        keys = rng.sample(DICT_KEYS, rng.randint(0, len(DICT_KEYS)))
+
+    return {
+        key: _gen_value(rng, depth - 1, scalars, tuples, calendar, dict_keys) for key in keys
+    }
 
 
 def _mutate(
-    rng: random.Random, value: JsonValue, tuples: bool = False, calendar: bool = False
+    rng: random.Random,
+    value: JsonValue,
+    tuples: bool = False,
+    calendar: bool = False,
+    dict_keys: bool = False,
 ) -> JsonValue:
     """
     Build a related-but-different copy of `value` (shuffle + selective mutation).
@@ -329,6 +423,10 @@ def _mutate(
     :param value: The value to derive a mutated copy from.
     :param tuples: Whether replacement values may themselves be tuples.
     :param calendar: Whether replacement values may be datetimes and dates.
+    :param dict_keys: Whether a newly added dict key may be non-`str` (issue
+        #62). Unset means the exact `rng.choice(DICT_KEYS)` every
+        pre-existing corpus used, so those stay bit-for-bit the ones they
+        were.
     :return: A structurally related, partially mutated copy.
     """
     if isinstance(value, (list, tuple)):
@@ -337,7 +435,9 @@ def _mutate(
 
         for index in range(len(mutated)):
             if rng.random() < 0.3:
-                mutated[index] = _gen_value(rng, 2, tuples=tuples, calendar=calendar)
+                mutated[index] = _gen_value(
+                    rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys
+                )
 
         return tuple(mutated) if isinstance(value, tuple) else mutated
 
@@ -346,18 +446,23 @@ def _mutate(
 
         for key in list(mutated):
             if rng.random() < 0.3:
-                mutated[key] = _gen_value(rng, 2, tuples=tuples, calendar=calendar)
+                mutated[key] = _gen_value(
+                    rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys
+                )
 
         if rng.random() < 0.3:
-            mutated[rng.choice(DICT_KEYS)] = _gen_value(rng, 2, tuples=tuples, calendar=calendar)
+            new_key = _gen_dict_key(rng, dict_keys) if dict_keys else rng.choice(DICT_KEYS)
+            mutated[new_key] = _gen_value(
+                rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys
+            )
 
         return mutated
 
-    return _gen_value(rng, 2, tuples=tuples, calendar=calendar)
+    return _gen_value(rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
 
 
 def _generate_case(
-    seed: int, tuples: bool = False, calendar: bool = False
+    seed: int, tuples: bool = False, calendar: bool = False, dict_keys: bool = False
 ) -> tuple[JsonValue, JsonValue]:
     """
     Generate one seeded `(a, b)` pair.
@@ -365,11 +470,12 @@ def _generate_case(
     :param seed: The seed driving this case's RNG.
     :param tuples: Whether the pair may contain tuples.
     :param calendar: Whether the pair may contain datetimes and dates.
+    :param dict_keys: Whether a dict's keys may be non-`str` (issue #62).
     :return: A related-but-different `(a, b)` pair.
     """
     rng = random.Random(seed)
-    a = _gen_value(rng, 3, tuples=tuples, calendar=calendar)
-    b = _mutate(rng, a, tuples=tuples, calendar=calendar)
+    a = _gen_value(rng, 3, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
+    b = _mutate(rng, a, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
 
     if tuples:
         b = _tuple_edge_mutations(rng, b)
@@ -499,12 +605,25 @@ def _diverges(a: JsonValue, b: JsonValue, ignore_order: bool) -> tuple[JsonValue
 
     # The mapping only matters for the calendar batch, where a report can carry
     # a `date` that DeepDiff's stock `to_json()` refuses to serialize; it is a
-    # no-op for every other value. See `scripts/golden_tags.py`.
-    expected_json = json.loads(real.to_json(default_mapping=JSON_DEFAULT_MAPPING))
-    actual_json = json.loads(onix.to_json())
+    # no-op for every other value. See `scripts/golden_tags.py`. A report
+    # that carries a raw `frozenset` value, or a *nested* dict value keyed by
+    # a `datetime`/`date`/`tuple` (issue #62 -- a dict key any deeper than
+    # the top-level path segment has no json.dumps rule at all, unlike
+    # `int`/`bool`/`float`/`None`, which DeepDiff's own `to_json()` already
+    # stringifies), makes `to_json()` raise `TypeError` outright; both are
+    # real DeepDiff crashes, so the comparison falls back to `to_dict()`
+    # alone rather than treating a crash as a divergence to report.
+    try:
+        expected_json = json.loads(real.to_json(default_mapping=JSON_DEFAULT_MAPPING))
+        real_to_json_crashed = False
+    except TypeError:
+        real_to_json_crashed = True
 
-    if actual_json != expected_json:
-        return expected_json, actual_json
+    if not real_to_json_crashed:
+        actual_json = json.loads(onix.to_json())
+
+        if actual_json != expected_json:
+            return expected_json, actual_json
 
     expected_dict = _normalize_types(real.to_dict())
     actual_dict = _normalize_types(onix.to_dict())
@@ -516,7 +635,7 @@ def _diverges(a: JsonValue, b: JsonValue, ignore_order: bool) -> tuple[JsonValue
 
 
 def _run_batch(
-    seeds: range, tuples: bool, calendar: bool = False
+    seeds: range, tuples: bool, calendar: bool = False, dict_keys: bool = False
 ) -> list[tuple[int, bool, JsonValue, JsonValue, JsonValue, JsonValue]]:
     """
     Run one batch of seeded cases through both engines, ordered and ignore_order.
@@ -524,12 +643,13 @@ def _run_batch(
     :param seeds: The seeds to generate cases from.
     :param tuples: Whether the generated cases may contain tuples.
     :param calendar: Whether the generated cases may contain datetimes and dates.
+    :param dict_keys: Whether a dict's keys may be non-`str` (issue #62).
     :return: One entry per diverging (seed, ignore_order) combination.
     """
     mismatches = []
 
     for seed in seeds:
-        a, b = _generate_case(seed, tuples=tuples, calendar=calendar)
+        a, b = _generate_case(seed, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
 
         for ignore_order in (False, True):
             divergence = _diverges(a, b, ignore_order)
@@ -1425,4 +1545,15 @@ def test_differential_fuzz_with_multiline_strings_matches_real_deepdiff() -> Non
     assert not mismatches, (
         f"{len(mismatches)} of {SEED_COUNT * 2} multi-line string fuzz cases diverged from "
         f"real DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+def test_differential_fuzz_with_non_str_dict_keys_matches_real_deepdiff() -> None:
+    """Run a ninth SEED_COUNT-case batch whose dicts may carry non-`str` keys (issue #62)."""
+    seeds = range(DICT_KEY_SEED_BASE, DICT_KEY_SEED_BASE + SEED_COUNT)
+    mismatches = _run_batch(seeds, tuples=True, calendar=True, dict_keys=True)
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} dict-key fuzz cases diverged from real DeepDiff "
+        f"(showing up to 3): {mismatches[:3]}"
     )

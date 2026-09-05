@@ -519,25 +519,28 @@ fn to_value_preserves_a_tuple_that_to_json_value_flattens_to_an_array() {
     let CValue::Object(root) = &rendered else {
         panic!("a report renders to an object");
     };
-    let CValue::Object(added) = root.get("dictionary_item_added").expect("category present") else {
+    let CValue::Object(added) = root
+        .get_str("dictionary_item_added")
+        .expect("category present")
+    else {
         panic!("a category renders to an object");
     };
     assert!(matches!(
-        added.get("root['s']").expect("path present"),
+        added.get_str("root['s']").expect("path present"),
         CValue::Tuple(_)
     ));
-    let CValue::Object(changed) = root.get("values_changed").expect("category present") else {
+    let CValue::Object(changed) = root.get_str("values_changed").expect("category present") else {
         panic!("a category renders to an object");
     };
-    let CValue::Object(entry) = changed.get("root[0]").expect("path present") else {
+    let CValue::Object(entry) = changed.get_str("root[0]").expect("path present") else {
         panic!("an entry renders to an object");
     };
     assert!(matches!(
-        entry.get("old_value").expect("old_value present"),
+        entry.get_str("old_value").expect("old_value present"),
         CValue::Tuple(_)
     ));
     assert!(matches!(
-        entry.get("new_value").expect("new_value present"),
+        entry.get_str("new_value").expect("new_value present"),
         CValue::Array(_)
     ));
 

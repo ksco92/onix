@@ -3,7 +3,7 @@ use crate::diff::DiffOptions;
 use crate::test_support::{
     cdate, cdt, cdt_at, cfrozen, cobj, cset, ctime, ctimedelta, ctup, cv, cvec,
 };
-use crate::value::{SetItems, Value as CValue};
+use crate::value::{ObjectKey, SetItems, Value as CValue};
 use serde_json::json;
 
 // Thin wrappers routing each `serde_json`-literal-based test through the real
@@ -980,6 +980,123 @@ fn count_object_diff_leaves_accumulates_distinct_contributions_by_addition() {
     assert_eq!(count_object_diff_leaves(&a, &b, 0, &opts), 2 + 3 + 4);
 }
 
+/// `count_object_diff_leaves_mixed` sums a shared key's changed-value cost
+/// with every removed-only and added-only key's own length.
+#[test]
+fn count_object_diff_leaves_mixed_sums_shared_added_and_removed_non_str_keys() {
+    let a = crate::value::Object::from_pairs(vec![
+        (
+            ObjectKey::Other(Box::new(cv(&json!(3)))),
+            cv(&json!([9, 9])),
+        ),
+        (
+            ObjectKey::Other(Box::new(cv(&json!(1)))),
+            cv(&json!([1, 2, 3])),
+        ),
+    ]);
+    let b = crate::value::Object::from_pairs(vec![
+        (
+            ObjectKey::Other(Box::new(cv(&json!(3)))),
+            cv(&json!([1, 2])),
+        ),
+        (
+            ObjectKey::Other(Box::new(cv(&json!(2)))),
+            cv(&json!([1, 2, 3, 4])),
+        ),
+    ]);
+
+    assert_eq!(
+        super::distance::count_object_diff_leaves(
+            &a,
+            &b,
+            0,
+            &DiffOptions::default(),
+            &super::IgnoreOrderMemo::new(),
+        ),
+        2 + 3 + 4
+    );
+}
+
+/// `count_object_diff_leaves_mixed`'s shared-key recursion steps `depth` by
+/// exactly one, matching the trial sub-diff's own remaining-budget bound.
+#[test]
+fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact() {
+    let key = || ObjectKey::Other(Box::new(cv(&json!(5))));
+    let a = crate::value::Object::from_pairs(vec![(key(), cv(&json!([{"a": {"b": 1}}])))]);
+    let b = crate::value::Object::from_pairs(vec![(key(), cv(&json!([{"a": {"b": 9}}])))]);
+    let opts = DiffOptions {
+        max_depth: 3,
+        ignore_order: false,
+    };
+
+    assert_eq!(
+        super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &super::IgnoreOrderMemo::new()),
+        0
+    );
+}
+
+/// `dict_python_eq_mixed` rejects a pair when either side has an extra key
+/// or a shared key's value differs, never just papering over one with another.
+#[test]
+fn dict_python_eq_mixed_rejects_when_only_one_side_has_an_extra_key_or_a_shared_value_differs() {
+    let leaves = super::distance::type_change_leaf_length;
+    let key = |n: i64| ObjectKey::Other(Box::new(cv(&json!(n))));
+    let dict =
+        |pairs: Vec<(ObjectKey, CValue)>| CValue::Object(crate::value::Object::from_pairs(pairs));
+    let list_of = |value: CValue| CValue::Array(vec![value].into_boxed_slice());
+    let tuple_of = |value: CValue| CValue::Tuple(vec![value].into_boxed_slice());
+
+    let base = || dict(vec![(key(1), cv(&json!("a")))]);
+    let with_extra_key = || dict(vec![(key(1), cv(&json!("a"))), (key(2), cv(&json!("b")))]);
+    let with_changed_value = || dict(vec![(key(1), cv(&json!("z")))]);
+
+    // `only_a` non-empty (a key present only on the list side): the first
+    // `&&` operand alone must fail the whole chain.
+    assert_ne!(
+        leaves(&list_of(with_extra_key()), &tuple_of(base())),
+        1,
+        "not reproduced: the list side has an extra key the tuple side never had"
+    );
+
+    // `only_b` non-empty: the second `&&` operand alone must fail the chain.
+    assert_ne!(
+        leaves(&list_of(base()), &tuple_of(with_extra_key())),
+        1,
+        "not reproduced: the tuple side has an extra key the list side never had"
+    );
+
+    // Same keys, a shared value differs: the third operand (`shared.all`)
+    // alone must fail the chain.
+    assert_ne!(
+        leaves(&list_of(base()), &tuple_of(with_changed_value())),
+        1,
+        "not reproduced: the shared key's value differs"
+    );
+}
+
+/// `python_eq`'s dict arm treats two dicts as equal across a Python-equal
+/// but differently-typed key (`1` vs `1.0`), matching real Python `==`.
+#[test]
+fn python_eq_matches_dicts_across_python_equal_but_differently_typed_keys() {
+    let dict_int = CValue::Object(crate::value::Object::from_pairs(vec![(
+        ObjectKey::Other(Box::new(cv(&json!(1)))),
+        cv(&json!("a")),
+    )]));
+    let dict_float = CValue::Object(crate::value::Object::from_pairs(vec![(
+        ObjectKey::Other(Box::new(cv(&json!(1.0)))),
+        cv(&json!("a")),
+    )]));
+
+    assert_eq!(
+        super::distance::type_change_leaf_length(
+            &CValue::Array(vec![dict_int].into_boxed_slice()),
+            &CValue::Tuple(vec![dict_float].into_boxed_slice()),
+        ),
+        1,
+        "reproduced (cost 1): the two dicts are Python-equal despite the differently-typed key"
+    );
+}
+
 // --- item_key ---------------------------------------------------
 
 #[test]
@@ -1771,7 +1888,7 @@ fn tuple_and_list_leaf_lengths_follow_python_equality() {
 /// `serde_json` literal cannot express.
 fn cobj_of(key: &str, value: CValue) -> CValue {
     CValue::Object(crate::value::Object::from_pairs(vec![(
-        std::sync::Arc::from(key),
+        ObjectKey::Str(std::sync::Arc::from(key)),
         value,
     )]))
 }
@@ -3120,12 +3237,16 @@ fn structural_twin(value: &CValue, in_set: bool) -> CValue {
             CValue::FrozenSet(SetItems::new(members))
         }
         CValue::Object(map) => {
-            let mut entries: Vec<(String, CValue)> = map
+            // Keys are carried over unchanged (not "twinned") — exactly
+            // what the pre-`ObjectKey` version of this function did too,
+            // since every key was a `str` reproduced verbatim by
+            // `key.to_string()`; only child values get reconstructed.
+            let mut entries: Vec<(ObjectKey, CValue)> = map
                 .iter()
-                .map(|(key, child)| (key.to_string(), structural_twin(child, in_set)))
+                .map(|(key, child)| (key.clone(), structural_twin(child, in_set)))
                 .collect();
             entries.reverse();
-            crate::value::Builder::new().object(entries)
+            crate::value::Builder::new().object_with_keys(entries)
         }
         CValue::DateTime(dt) if !in_set => {
             let date = dt.date();
