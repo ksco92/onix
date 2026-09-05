@@ -175,30 +175,22 @@ pub fn diff_tables(
     let changes = diff_schemas(&left_schema, &right_schema)?;
 
     for key in options.key() {
-        let Ok(left_field) = left_schema.field_with_name(key) else {
+        let Ok(_left_field) = left_schema.field_with_name(key) else {
             return Err(TableDiffError::KeyColumnMissing {
                 column: key.clone(),
                 side: Side::Left,
             });
         };
-        let Ok(right_field) = right_schema.field_with_name(key) else {
+        let Ok(_right_field) = right_schema.field_with_name(key) else {
             return Err(TableDiffError::KeyColumnMissing {
                 column: key.clone(),
                 side: Side::Right,
             });
         };
 
-        // A key must be a value-hashable scalar on both sides (checked up front
-        // so an empty table with, say, a list key still errors cleanly rather
-        // than diffing to an empty result).
-        for field in [left_field, right_field] {
-            if !row_diff::is_hashable(field.data_type()) {
-                return Err(TableDiffError::UnsupportedRowType {
-                    column: key.clone(),
-                    data_type: field.data_type().to_string(),
-                });
-            }
-        }
+        // The key's own hashability (a nested or otherwise unhashable key) is
+        // checked, along with every other column, by `row_diff::diff_rows`; only
+        // key existence and the type-mismatch below live here.
 
         // A key whose normalized type differs across sides is a schema type
         // change; refuse it rather than guess row identity across a changed key

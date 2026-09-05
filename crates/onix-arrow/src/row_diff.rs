@@ -341,13 +341,21 @@ fn common_value_columns(left: &Schema, right: &Schema, key: &[String]) -> Vec<St
     names
 }
 
-/// Refuses any non-nested column of `schema` that [`is_hashable`] cannot hash,
-/// so an invalid scalar type (including one present on only one side) fails
-/// before `RecordBatch::new_empty` would panic building its empty array. Nested
-/// columns are left to the per-column skip/refuse rules.
-fn reject_unhashable_columns(schema: &Schema) -> Result<(), TableDiffError> {
+/// Refuses, up front, every column [`hash_cell`] could not hash if it reached
+/// it: a key column that is not hashable (a nested key, or a scalar the crate
+/// refuses), and any non-key non-nested column that is not hashable (a scalar
+/// the crate refuses, e.g. `RunEndEncoded`, including one present on only one
+/// side). A non-key *nested* column is skipped (out of scope), so it is left
+/// alone here. Running before any batch or empty output is built, this also
+/// keeps `RecordBatch::new_empty` from panicking on an invalid scalar type's
+/// empty array.
+fn reject_unhashable_columns(schema: &Schema, key: &[String]) -> Result<(), TableDiffError> {
     for field in schema.fields() {
-        if !is_nested(field.data_type()) && !is_hashable(field.data_type()) {
+        if is_hashable(field.data_type()) {
+            continue;
+        }
+        let is_key = key.iter().any(|k| k == field.name());
+        if is_key || !is_nested(field.data_type()) {
             return Err(TableDiffError::UnsupportedRowType {
                 column: field.name().clone(),
                 data_type: field.data_type().to_string(),
@@ -1084,15 +1092,9 @@ pub(crate) fn diff_rows(
 ) -> Result<RowDiff, TableDiffError> {
     let hasher = RowHasher::new()?;
 
-    // Refuse every non-nested-but-unhashable column of *either* full schema up
-    // front (a `RunEndEncoded`, or a `Time32`/`Time64` unit or `FixedSizeBinary`
-    // width arrow-rs has no array type for), including a column present on only
-    // one side: such a column reaches `RecordBatch::new_empty` through the
-    // added/removed output even when it is never compared, and building its
-    // empty array would panic. Nested columns are fine (their empty array
-    // builds), so only non-nested columns are checked here.
-    reject_unhashable_columns(left_schema)?;
-    reject_unhashable_columns(right_schema)?;
+    // Refuse unhashable columns of either full schema up front (see the fn doc).
+    reject_unhashable_columns(left_schema, key)?;
+    reject_unhashable_columns(right_schema, key)?;
 
     let common_values = common_value_columns(left_schema, right_schema, key);
     let key_names: Vec<&str> = key.iter().map(String::as_str).collect();
@@ -1761,6 +1763,25 @@ mod tests {
         let error = diff_rows(&make(), &make(), &sch, &sch, &key()).unwrap_err();
         assert!(
             matches!(error, TableDiffError::UnsupportedRowType { column, .. } if column == "v")
+        );
+    }
+
+    #[test]
+    fn hash_cell_refuses_an_unsupported_scalar_type() {
+        // The up-front column check normally refuses these first; this pins the
+        // belt-and-braces refusal in `hash_cell` itself for a type it cannot
+        // hash (a run-end-encoded cell reached directly).
+        use arrow_array::RunArray;
+        let run_ends = Int32Array::from(vec![1]);
+        let values = Int64Array::from(vec![10]);
+        let run: RunArray<arrow_array::types::Int32Type> =
+            RunArray::try_new(&run_ends, &values).unwrap();
+        let array: ArrayRef = Arc::new(run);
+        let hasher = super::RowHasher::new().unwrap();
+        let mut cell = hasher.start(super::DOMAIN_ROW);
+        let error = super::hash_cell(&mut cell, &array, "c", 0).unwrap_err();
+        assert!(
+            matches!(error, TableDiffError::UnsupportedRowType { column, .. } if column == "c")
         );
     }
 
