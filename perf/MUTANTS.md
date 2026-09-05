@@ -1,8 +1,8 @@
 # Mutation testing results
 
-Summary of a full `cargo-mutants` run over `onix-core` and `onix-cli`. Line
-coverage proves every line ran; mutation testing proves a test would fail if
-that line's logic were wrong.
+Summary of a full `cargo-mutants` run over `onix-core`, `onix-cli`, and
+`onix-arrow`. Line coverage proves every line ran; mutation testing proves a
+test would fail if that line's logic were wrong.
 
 ## Tooling and reproduce
 
@@ -10,7 +10,7 @@ that line's logic were wrong.
 
 ```sh
 cargo install cargo-mutants --locked
-make mutants        # cargo mutants --package onix-core --package onix-cli
+make mutants        # cargo mutants --package onix-core --package onix-cli --package onix-arrow
 ```
 
 `onix-py` is out of scope; the `Makefile`'s `mutants` target documents why
@@ -18,8 +18,9 @@ make mutants        # cargo mutants --package onix-core --package onix-cli
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **1000** mutants (20 in `onix-cli`,
-980 in `onix-core`). Its classification of each mutant into
+`make mutants` enumerates a deterministic **1061** mutants (20 in `onix-cli`,
+980 in `onix-core`, 61 in `onix-arrow` — of which 42 are viable and all
+caught, 19 do not compile). Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
 depends on wall-clock time (a slow mutant is a "timeout" on one machine and
 "missed"/"caught" on another) and, in this workspace, on build caching (a
