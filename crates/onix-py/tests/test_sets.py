@@ -391,13 +391,10 @@ def test_a_frozenset_never_inherits_another_ones_digest() -> None:
 
 
 def test_a_frozenset_bool_vs_float_member_hits_the_same_shared_cache_rule() -> None:
-    """The equality class in ``test_a_frozenset_never_inherits_another_ones_digest`` is Python
-    ``==``, not "numeric": ``False == 0.0`` closes it the same way ``1 == 1.0`` does.
-
-        DeepDiff([frozenset({False})], [frozenset({0.0})], ignore_order=True) -> {}
-
-    onix again keys by membership, so the two are different items. Minimized from
-    combined-alphabet fuzz seed 120000708.
+    """A frozenset list element whose member is Python-equal but differently typed matches
+    in DeepDiff through its shared digest cache (``False == 0.0`` closes the equality
+    class the same way ``1 == 1.0`` does); onix keys a frozenset by its own membership
+    always, so the two stay distinct items here.
     """
     assert DeepDiff([frozenset({False})], [frozenset({0.0})], ignore_order=True).to_dict() == {
         "values_changed": {
