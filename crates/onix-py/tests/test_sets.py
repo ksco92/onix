@@ -36,12 +36,8 @@ FLOAT_BATCH_SIZE: Final[int] = 5_000
 # differential below (one call per batch keeps the full sweep fast).
 BMP_BATCH_SIZE: Final[int] = 2_000
 
-# A deterministic sample covering every general category the full BMP sweep
-# below cannot reach: characters that need the `\UXXXXXXXX` (8 hex digit)
-# escape width, or none at all. A printable letter, symbol and combining
-# mark (left bare, matching Python `repr()`), plus `Format`, two
-# `PrivateUse` and three `Unassigned` code points (escaped) — see path.rs's
-# `is_non_printable`.
+# Beyond-BMP sample: one code point per category needing the `\UXXXXXXXX`
+# escape width, plus three printable ones left bare.
 SUPPLEMENTARY_SAMPLE: Final[list[int]] = [
     0x10000,  # Lo, printable
     0x1F600,  # So, printable (emoji)
@@ -55,46 +51,6 @@ SUPPLEMENTARY_SAMPLE: Final[list[int]] = [
     0x40000,  # Cn, non-printable (unassigned)
     0x10FFFF,  # Cn, non-printable (last valid code point)
 ]
-
-# Code points whose printability bucket (path.rs's `is_non_printable`)
-# differs between Unicode 13.0.0 (Python 3.9/3.10's `unicodedata`, the
-# oldest table this crate's `requires-python` floor can carry) and the
-# crate's own pinned Unicode 16.0.0: each was `Cn` (unassigned, thus
-# non-printable) under 13.0.0 and had become an assigned, printable category
-# by 16.0.0. Excluded from the full BMP sweep below whenever the running
-# interpreter's `unicodedata.unidata_version` is not `16.0.0`, so the sweep
-# holds on every Python this crate supports rather than only 3.14 — see the
-# "Unicode" pin in `tests/golden/README.md`'s "Pinned versions" section.
-#
-# Generated once, offline, by diffing `unicodedata.category(chr(cp))` for
-# every `cp` in `range(0x10000)` (excluding surrogates) between a Python 3.9
-# interpreter and a Python 3.14 one, keeping only the code points where that
-# category change also flips the printability bucket (most category changes
-# below don't: e.g. `Mn` to `Mc` at U+1734 is printable either way and so is
-# not in this list). Every intermediate Python (3.11-3.13) ships a Unicode
-# table between these two, so its own divergent set is always a subset of
-# this one — Unicode assignment is monotonic, nothing already assigned by
-# 13.0.0 becomes unassigned later.
-UNICODE_13_0_DIVERGENT_CODE_POINTS: Final[frozenset[int]] = frozenset(
-    {
-        0x061D, 0x0870, 0x0871, 0x0872, 0x0873, 0x0874, 0x0875, 0x0876, 0x0877, 0x0878,
-        0x0879, 0x087A, 0x087B, 0x087C, 0x087D, 0x087E, 0x087F, 0x0880, 0x0881, 0x0882,
-        0x0883, 0x0884, 0x0885, 0x0886, 0x0887, 0x0888, 0x0889, 0x088A, 0x088B, 0x088C,
-        0x088D, 0x088E, 0x0897, 0x0898, 0x0899, 0x089A, 0x089B, 0x089C, 0x089D, 0x089E,
-        0x089F, 0x08B5, 0x08C8, 0x08C9, 0x08CA, 0x08CB, 0x08CC, 0x08CD, 0x08CE, 0x08CF,
-        0x08D0, 0x08D1, 0x08D2, 0x0C3C, 0x0C5D, 0x0CDD, 0x0CF3, 0x0ECE, 0x170D, 0x1715,
-        0x171F, 0x180F, 0x1AC1, 0x1AC2, 0x1AC3, 0x1AC4, 0x1AC5, 0x1AC6, 0x1AC7, 0x1AC8,
-        0x1AC9, 0x1ACA, 0x1ACB, 0x1ACC, 0x1ACD, 0x1ACE, 0x1B4C, 0x1B4E, 0x1B4F, 0x1B7D,
-        0x1B7E, 0x1B7F, 0x1C89, 0x1C8A, 0x1DFA, 0x20C0, 0x2427, 0x2428, 0x2429, 0x2C2F,
-        0x2C5F, 0x2E53, 0x2E54, 0x2E55, 0x2E56, 0x2E57, 0x2E58, 0x2E59, 0x2E5A, 0x2E5B,
-        0x2E5C, 0x2E5D, 0x2FFC, 0x2FFD, 0x2FFE, 0x2FFF, 0x31E4, 0x31E5, 0x31EF, 0x9FFD,
-        0x9FFE, 0x9FFF, 0xA7C0, 0xA7C1, 0xA7CB, 0xA7CC, 0xA7CD, 0xA7D0, 0xA7D1, 0xA7D3,
-        0xA7D5, 0xA7D6, 0xA7D7, 0xA7D8, 0xA7D9, 0xA7DA, 0xA7DB, 0xA7DC, 0xA7F2, 0xA7F3,
-        0xA7F4, 0xFBC2, 0xFD40, 0xFD41, 0xFD42, 0xFD43, 0xFD44, 0xFD45, 0xFD46, 0xFD47,
-        0xFD48, 0xFD49, 0xFD4A, 0xFD4B, 0xFD4C, 0xFD4D, 0xFD4E, 0xFD4F, 0xFDCF, 0xFDFE,
-        0xFDFF,
-    }
-)
 
 
 def test_set_items_are_reported_as_added_and_removed_paths() -> None:
@@ -286,15 +242,7 @@ def _assert_batch_matches_python_repr(code_points: list[int]) -> None:
     """
     Diff one batch of one-element `(chr(cp),)` tuple set items against real Python `repr()`.
 
-    Compares the two rendered path *sets* (never a sorted zip: once one
-    string sorts differently than real `repr()` would, every entry after it
-    misaligns too, scrambling the failure into a wall of unrelated-looking
-    pairs). On a mismatch, checks each code point in the batch individually
-    to report the first true divergence by value.
-
     :param code_points: The batch to check, distinct code points.
-    :raises AssertionError: naming the first code point whose rendering
-        diverges from Python's own `repr()`.
     """
     strings = [chr(cp) for cp in code_points]
     items = {(s,) for s in strings}
@@ -312,73 +260,24 @@ def _assert_batch_matches_python_repr(code_points: list[int]) -> None:
 
 
 def test_bmp_printability_table_matches_the_running_interpreter_on_3_14() -> None:
-    """Pins the assumption the full sweep below relies on: the crate tracks CPython 3.14 exactly.
-
-    Skipped on every other interpreter — see
-    `UNICODE_13_0_DIVERGENT_CODE_POINTS`'s doc for how the reduced sweep
-    stays safe there instead.
-    """
+    """Pins the assumption the sweep below relies on: 3.14 must ship Unicode 16.0.0."""
     if sys.version_info[:2] != (3, 14):
         pytest.skip("only meaningful on the crate's pinned reference interpreter, 3.14")
     assert unicodedata.unidata_version == "16.0.0"
 
 
-def _full_bmp_code_points() -> list[int]:
-    """
-    Every BMP code point except the lone-surrogate range.
-
-    :return: Candidate code points, excluding `0xD800..0xDFFF` (refused
-        before rendering — see test_conversions.py's surrogate tests).
-    """
-    return [cp for cp in range(0x10000) if not 0xD800 <= cp <= 0xDFFF]
-
-
-def test_str_inside_tuple_matches_python_repr_over_the_full_bmp_on_3_14() -> None:
-    """The unrestricted sweep: every BMP code point, on the crate's own pinned reference interpreter.
-
-    Runs only where `unicodedata.unidata_version` is exactly `16.0.0`
-    (matching the crate's `unicode-general-category` pin); see
-    `test_str_inside_tuple_matches_python_repr_over_the_reduced_bmp_on_older_pythons`
-    for the interpreter-independent counterpart that still covers users on
-    an older Python.
-    """
+def test_str_inside_tuple_matches_python_repr_over_the_full_bmp() -> None:
+    """Every BMP code point escapes exactly like Python `repr()`, against Unicode 16.0.0."""
     if unicodedata.unidata_version != "16.0.0":
-        pytest.skip("full, unrestricted sweep only valid against Unicode 16.0.0")
+        pytest.skip("valid only against Unicode 16.0.0 (Python 3.14); see tests/golden/README.md")
 
-    code_points = _full_bmp_code_points()
-    for start in range(0, len(code_points), BMP_BATCH_SIZE):
-        _assert_batch_matches_python_repr(code_points[start : start + BMP_BATCH_SIZE])
-
-
-def test_str_inside_tuple_matches_python_repr_over_the_reduced_bmp_on_older_pythons() -> None:
-    """The same sweep, minus the code points an older Unicode table could disagree about.
-
-    Runs on every interpreter *except* the crate's pinned reference one (that
-    case is the unrestricted sweep above) — including in CI, on whichever
-    Python `uv sync` would otherwise have resolved, and for anyone running
-    this suite locally on an older Python. See
-    `UNICODE_13_0_DIVERGENT_CODE_POINTS`'s doc for how the exclusion set was
-    derived and why it stays valid for every Python between the package's
-    floor (3.10, Unicode 13.0.0) and 16.0.0.
-    """
-    if unicodedata.unidata_version == "16.0.0":
-        pytest.skip("covered by the unrestricted sweep instead")
-
-    code_points = [
-        cp for cp in _full_bmp_code_points() if cp not in UNICODE_13_0_DIVERGENT_CODE_POINTS
-    ]
+    code_points = [cp for cp in range(0x10000) if not 0xD800 <= cp <= 0xDFFF]
     for start in range(0, len(code_points), BMP_BATCH_SIZE):
         _assert_batch_matches_python_repr(code_points[start : start + BMP_BATCH_SIZE])
 
 
 def test_str_inside_tuple_matches_python_repr_beyond_the_bmp() -> None:
-    """The `\\UXXXXXXXX` escape width, and printable astral text left bare.
-
-    See `SUPPLEMENTARY_SAMPLE`'s doc for which category each entry covers;
-    every one is stable between Unicode 13.0.0 and 16.0.0 (checked against
-    both interpreters when the sample was chosen), so unlike the BMP sweep
-    above this needs no interpreter-dependent exclusion.
-    """
+    """The `\\UXXXXXXXX` escape width, and printable astral text left bare."""
     _assert_batch_matches_python_repr(SUPPLEMENTARY_SAMPLE)
 
 

@@ -621,10 +621,12 @@ this same real `object_diff` collapse, so no inflated leaf count can flip
 a pairing decision.
 
 Every other divergence found while building the corpus was fixed in `onix-core` to match
-`DeepDiff` exactly. The path-rendering collision exception above, the three
+`DeepDiff` exactly. The path-rendering collision exception, the multi-member
+nested-`frozenset`-rendering exception (both above), the three
 set-iteration-order differences, the list-LCS `2^53` limitation, the
-naive-datetime pairing timezone above, and the lone-surrogate `ValueError`
-just described are the only accepted, documented exceptions —
+naive-datetime pairing timezone above, the lone-surrogate `ValueError` just
+described, and the Unicode-version `str`-repr divergence documented under
+"Pinned versions" above are the only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
 `scripts/differential_fuzz.py`) found zero *other* unexplained

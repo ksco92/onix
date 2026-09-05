@@ -163,7 +163,7 @@ is byte-identical (canonical JSON) to real DeepDiff's `to_json()` output at
 documented exceptions in [`tests/golden/README.md`](tests/golden/README.md).
 Each case directory carries its own `options.json`, read per case.
 
-Regenerate the corpus from real DeepDiff (Python 3.13 and `deepdiff==9.1.0`,
+Regenerate the corpus from real DeepDiff (Python 3.14 and `deepdiff==9.1.0`,
 both pinned in the script and installed on demand by `uv`):
 
 ```sh

@@ -53,11 +53,7 @@ jobs:
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch @ 2026-08-05
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-      # Pinned to 3.14, matching crates/onix-py/.python-version: the crate's
-      # str-repr escaping is checked against this interpreter's own
-      # `unicodedata` table (see test_sets.py), so an unpinned `uv sync`
-      # resolving whatever CPython the runner ships (an older Unicode
-      # revision) is a false-failure risk, not just a version drift.
+      # Pinned to 3.14, Unicode 16.0.0; see tests/golden/README.md, Pinned versions.
       - name: Install Python 3.14
         run: uv python install 3.14
       # Caches only dependency crates, never this workspace's own build
