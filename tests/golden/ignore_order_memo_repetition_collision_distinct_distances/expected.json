@@ -1,0 +1,24 @@
+{
+  "iterable_item_added": {
+    "root['q'][0][1]": 8
+  },
+  "iterable_item_removed": {
+    "root['q'][0][8]": 4
+  },
+  "values_changed": {
+    "root['p'][0]": {
+      "new_value": [
+        9,
+        8
+      ],
+      "old_value": [
+        3,
+        4
+      ]
+    },
+    "root['q'][0][0]": {
+      "new_value": 9,
+      "old_value": 3
+    }
+  }
+}

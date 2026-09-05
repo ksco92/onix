@@ -5,6 +5,7 @@
 //! how this fits into the algorithm end to end.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use crate::lcs::{ScalarKey, mix_float_bits, python_scalar_key};
@@ -12,6 +13,126 @@ use crate::value::Value;
 
 use super::IgnoreOrderMemo;
 use super::fxhash::HashMap;
+
+// ---------------------------------------------------------------------
+// Distance-memo cache key
+// ---------------------------------------------------------------------
+
+/// The distance memo's cache key for one side of a candidate pair: a value's
+/// **exact** structural identity.
+///
+/// [`ItemKey`] cannot serve here. It is deliberately order- and
+/// repetition-*insensitive* for a list/tuple (its `List`/`Tuple` payload is a
+/// [`BTreeSet`], matching `DeepHash`'s item-matching rules), but the distance a
+/// candidate pair is ranked by reads multiplicity — [`super::distance::rough_length`]
+/// counts every repeated element, and the trial diff's leaf count depends on
+/// each list's first-occurrence representative — so two values that share an
+/// `ItemKey` can have genuinely different distances. Keying the memo by
+/// `ItemKey` handed one such value's cached distance to the other (issue #31).
+///
+/// This keys by [`Value`]'s own `PartialEq` instead, which is exact:
+/// order- and repetition-preserving for lists and tuples, variant-sensitive
+/// for numbers, by-instant for datetimes. Two entries therefore share a cache
+/// slot only when their values are structurally identical and so their
+/// distance is provably equal — the memo is decision-neutral by construction.
+/// The [`Rc`] lets the shared value outlive the per-level [`HashedList`] that
+/// produced it and keeps a cache entry two pointers wide.
+#[derive(Clone)]
+pub(crate) struct DistKey(Rc<Value>);
+
+impl DistKey {
+    /// Interns a copy of `value` as a cache key: the value is cloned once per
+    /// distinct candidate (added/removed) entry, not once per pair, so the
+    /// `A * R` cache entries one pairing records cost only a refcount bump of
+    /// memory each. Per-*lookup* work is not constant, however — every probe
+    /// hashes the key ([`hash_value`] walks the whole value) and, on a bucket
+    /// match, compares two keys structurally — so a pairing's distance work is
+    /// proportional to record size, a constant-factor cost the `ignore_order`
+    /// input-size cap already covers (measured 2.3x-5.6x slower than a
+    /// deduplicating `ItemKey` key only on a crafted worst case: large values
+    /// whose `ItemKey` collapses to a tiny set; every realistic shape is
+    /// faster). The clone recurses natively like the report's own value clones
+    /// and is bounded by the same [`crate::diff::check_value_depth`] pre-pass;
+    /// the hashing the key is looked up by is iterative (see [`hash_value`]).
+    pub(crate) fn new(value: &Value) -> Self {
+        Self(Rc::new(value.clone()))
+    }
+
+    /// Wraps an already-owned value with no clone — the test hook that lets the
+    /// stack-safety probe hash a value deeper than a native clone could build.
+    #[cfg(test)]
+    pub(crate) fn from_rc(value: Rc<Value>) -> Self {
+        Self(value)
+    }
+}
+
+impl PartialEq for DistKey {
+    fn eq(&self, other: &Self) -> bool {
+        // `Value`'s own iterative structural equality — exact, and stack-safe
+        // on the deep values `Rc::ptr_eq` would miss across nesting levels.
+        self.0 == other.0
+    }
+}
+
+impl Eq for DistKey {}
+
+impl Hash for DistKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_value(&self.0, state);
+    }
+}
+
+/// Hashes a value consistently with its structural `PartialEq` (equal values
+/// hash equal): a per-variant discriminant, then the fields that equality
+/// compares — numbers through [`number_key`] (so `-0.0`/`0.0` agree and an
+/// int and an equal-valued float stay distinct), a datetime by its instant, a
+/// date by its ordinal, a list/tuple by its length and elements (order and
+/// repetition preserving), a set/frozenset by its canonical members, a dict by
+/// its sorted keys and their values. The exact byte sequence is unspecified;
+/// only its determinism and its agreement with [`Value`]'s equality matter.
+///
+/// **Iterative** (an explicit work-stack, never native recursion), like the
+/// engine's own [`Value`] `Drop`/`PartialEq`: a value's nesting is
+/// user-controlled and can reach the caller-raised `max_depth`, so a recursive
+/// hasher would reopen the uncatchable native-stack-overflow class those
+/// iterative primitives exist to close — the default budget being safe is
+/// coincidence, not a property. The walk hashes each node before pushing its
+/// children, so two structurally equal values drive identical stack operations
+/// and hash identically; children are pushed so a container's length prefix and
+/// per-variant discriminant keep distinct shapes apart.
+fn hash_value<H: Hasher>(root: &Value, state: &mut H) {
+    let mut stack: Vec<&Value> = vec![root];
+    while let Some(value) = stack.pop() {
+        core::mem::discriminant(value).hash(state);
+        match value {
+            Value::Null => {}
+            Value::Bool(b) => b.hash(state),
+            Value::Number(n) => number_key(n).hash(state),
+            Value::Str(s) => s.hash(state),
+            Value::DateTime(dt) => dt.instant().hash(state),
+            Value::Date(date) => date.ordinal().hash(state),
+            Value::Array(items) | Value::Tuple(items) => {
+                items.len().hash(state);
+                stack.extend(items.iter());
+            }
+            Value::Set(items) | Value::FrozenSet(items) => {
+                items.len().hash(state);
+                stack.extend(items.iter());
+            }
+            Value::Object(map) => {
+                map.len().hash(state);
+                // Keys carry the association and are hashed here in sorted
+                // order; the values are pushed and hashed as they pop. The
+                // order values come back in is deterministic, which is all
+                // equality-consistency needs.
+                for (key, _) in map {
+                    key.hash(state);
+                }
+                stack.extend(map.values());
+            }
+        }
+    }
+}
 
 /// A canonical hash-equivalence key for one JSON value, matching
 /// `DeepHash`'s default semantics for **item matching** under
@@ -667,9 +788,11 @@ fn tuple_keyed(items: &[Value], memo: &IgnoreOrderMemo) -> (ItemKey, Option<PyHa
 pub(crate) struct HashedList<'a> {
     /// Distinct keys, in first-occurrence (ascending original index) order
     /// — this is `SetOrdered(full_t{1,2}_hashtable.keys())`'s own iteration
-    /// order (a Python dict's insertion order).
-    pub(crate) distinct_order: Vec<ItemKey>,
-    info: HashMap<ItemKey, (usize, &'a Value)>,
+    /// order (a Python dict's insertion order). Each key sits behind an [`Rc`]
+    /// shared with [`Self::info`] and the distance-memo cache keys (see
+    /// [`super::memo::DistanceKey`]).
+    pub(crate) distinct_order: Vec<Rc<ItemKey>>,
+    info: HashMap<Rc<ItemKey>, (usize, &'a Value)>,
 }
 
 impl<'a> HashedList<'a> {
@@ -680,12 +803,12 @@ impl<'a> HashedList<'a> {
     /// builds its two hashtables against one shared `hashes` dict.
     pub(crate) fn build(items: &'a [Value], memo: &IgnoreOrderMemo) -> Self {
         let mut distinct_order = Vec::new();
-        let mut info: HashMap<ItemKey, (usize, &'a Value)> = HashMap::default();
+        let mut info: HashMap<Rc<ItemKey>, (usize, &'a Value)> = HashMap::default();
 
         for (idx, item) in items.iter().enumerate() {
-            let key = item_key(item, memo);
+            let key = Rc::new(item_key(item, memo));
 
-            if let std::collections::hash_map::Entry::Vacant(entry) = info.entry(key.clone()) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = info.entry(Rc::clone(&key)) {
                 distinct_order.push(key);
                 entry.insert((idx, item));
             }

@@ -21,8 +21,9 @@
 //! candidate that embeds it (a depth-25 nested list dropped from tens of
 //! seconds to milliseconds). A *polynomial* (super-linear) cost in nesting
 //! depth remains, though, in **both time and memory**: the memo holds one
-//! entry per distinct container pair, keyed by the full recursive `ItemKey`,
-//! so a caller diffing untrusted input must bound its nesting *depth* as well
+//! entry per distinct container pair, keyed by [`hash::DistKey`] (a value's
+//! exact structural identity), each holding a shared [`Rc`] to that value, so a
+//! caller diffing untrusted input must bound its nesting *depth* as well
 //! as its *width* — a few-KB input nested many hundreds of levels deep still
 //! costs seconds and hundreds of MB, all under the default `max_depth`.
 //! (Scalar candidate pairs never recurse and bypass the memo entirely, so
@@ -160,6 +161,8 @@ use crate::path::PathSegment;
 use crate::report::Report;
 
 use fxhash::{HashMap, HashSet};
+use std::rc::Rc;
+
 use hash::{HashedList, ItemKey};
 use pairing::compute_pairs;
 
@@ -208,13 +211,13 @@ pub(crate) fn ignore_order_array_diff(
     let t1 = HashedList::build(a, memo);
     let t2 = HashedList::build(b, memo);
 
-    let hashes_added: Vec<ItemKey> = t2
+    let hashes_added: Vec<Rc<ItemKey>> = t2
         .distinct_order
         .iter()
         .filter(|key| !t1.contains(key))
         .cloned()
         .collect();
-    let hashes_removed: Vec<ItemKey> = t1
+    let hashes_removed: Vec<Rc<ItemKey>> = t1
         .distinct_order
         .iter()
         .filter(|key| !t2.contains(key))
@@ -238,13 +241,13 @@ pub(crate) fn ignore_order_array_diff(
     };
 
     let mut report = Report::new();
-    let mut consumed_removed: HashSet<ItemKey> = HashSet::default();
+    let mut consumed_removed: HashSet<Rc<ItemKey>> = HashSet::default();
 
     for added_key in &hashes_added {
         let (new_idx, new_value) = t2.get(added_key);
 
         if let Some(removed_key) = pairs.get(added_key) {
-            consumed_removed.insert(removed_key.clone());
+            consumed_removed.insert(Rc::clone(removed_key));
             let (old_idx, old_value) = t1.get(removed_key);
             let prefix_depth = path.len();
             let sub_report = scoped(path, PathSegment::Index(old_idx), |path| {

@@ -2583,3 +2583,503 @@ fn set_and_list_member_interning_scales_near_linearly() {
         );
     }
 }
+
+// --- distance-memo repetition-collision regression (issue #31) ---
+
+/// Two sibling subtrees whose list elements share an `ItemKey` (order- and
+/// repetition-insensitive) but differ in element repetition have different
+/// distances, so the distance memo must not hand one's cached answer to the
+/// other. `[3, 4]` and `[3]*8 + [4]*8` both key as the set `{3, 4}`; paired
+/// against `[9, 8]`, the short list is close enough to pair (a whole-element
+/// `values_changed`) while the long list is not (it recurses). Keying the memo
+/// by `ItemKey` conflated them; keying by the exact structural `DistKey` does
+/// not. Verified by the memo being decision-neutral (enabled == disabled) and
+/// by the two sibling keys never contaminating each other.
+#[test]
+fn memo_does_not_conflate_lists_sharing_itemkey_but_differing_repetition() {
+    let short = json!([3, 4]);
+    let long = json!([3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4]);
+    let other = json!([9, 8]);
+    let opts = DiffOptions {
+        ignore_order: true,
+        max_depth: 1_000,
+    };
+
+    // Both key orders: the memo processes candidates in order, so a short-then-
+    // long and a long-then-short sibling arrangement stress it differently.
+    for (p_a, q_a) in [(&short, &long), (&long, &short)] {
+        let a = cv(&json!({"p": [p_a], "q": [q_a]}));
+        let b = cv(&json!({"p": [other], "q": [other]}));
+
+        let memoized = crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::new())
+            .expect("memoized diff succeeds");
+        let unmemoized =
+            crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::disabled())
+                .expect("unmemoized diff succeeds");
+        assert_eq!(
+            memoized.to_json_value().to_string(),
+            unmemoized.to_json_value().to_string(),
+            "the memo changed the report for arrangement p={p_a}, q={q_a}"
+        );
+
+        // No cross-key contamination: the whole diff must equal the two
+        // sibling subtrees diffed in isolation and merged. If the memo leaked
+        // one sibling's distance into the other, this would differ.
+        let mut isolated = crate::diff::diff_with_options(
+            &cv(&json!({"p": [p_a]})),
+            &cv(&json!({"p": [other]})),
+            &opts,
+        )
+        .expect("p-only diff succeeds");
+        let q_only = crate::diff::diff_with_options(
+            &cv(&json!({"q": [q_a]})),
+            &cv(&json!({"q": [other]})),
+            &opts,
+        )
+        .expect("q-only diff succeeds");
+        isolated.merge(q_only);
+        assert_eq!(
+            memoized.to_json_value(),
+            isolated.to_json_value(),
+            "sibling subtrees contaminated each other for arrangement p={p_a}, q={q_a}"
+        );
+    }
+}
+
+/// A list of 1..12 elements drawn from a tiny scalar alphabet, so distinct
+/// lists frequently share an `ItemKey` (the deduplicated set of members) while
+/// differing in element repetition — exactly the shape that made the distance
+/// memo unsound when keyed by `ItemKey`.
+fn arb_repeating_list() -> impl Strategy<Value = serde_json::Value> {
+    prop::collection::vec(
+        prop_oneof![Just(json!(0)), Just(json!(1)), Just(json!(2))],
+        1..12,
+    )
+    .prop_map(serde_json::Value::Array)
+}
+
+/// An `(a, b)` pair engineered to stress the distance memo: `a` is a dict of
+/// four sibling keys each wrapping its own repetition-varying list, while `b`
+/// gives *every* sibling the same "other" list. So each sibling pairs its inner
+/// list against one shared other list, and two siblings whose lists share a
+/// member set (frequent over a 3-symbol alphabet) present the same `(removed,
+/// added)` `ItemKey` pair with genuinely different distances — the exact
+/// collision the memo must not act on. The list lengths make those distances
+/// straddle the 0.3 cutoff.
+fn arb_repeating_siblings_pair() -> impl Strategy<Value = (serde_json::Value, serde_json::Value)> {
+    let siblings = (
+        arb_repeating_list(),
+        arb_repeating_list(),
+        arb_repeating_list(),
+        arb_repeating_list(),
+    );
+    (siblings, arb_repeating_list()).prop_map(|((p, q, r, s), other)| {
+        let wrap = |v: serde_json::Value| serde_json::Value::Array(vec![v]);
+        let a = serde_json::json!({
+            "p": wrap(p),
+            "q": wrap(q),
+            "r": wrap(r),
+            "s": wrap(s),
+        });
+        let b = serde_json::json!({
+            "p": wrap(other.clone()),
+            "q": wrap(other.clone()),
+            "r": wrap(other.clone()),
+            "s": wrap(other),
+        });
+        (a, b)
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(800))]
+
+    /// Targeted at the repetition-collision regression (issue #31): over dicts
+    /// of single-element lists wrapping repetition-varying lists — the shape
+    /// where sibling candidates
+    /// share an `ItemKey` but not a distance, and where those distances
+    /// straddle the 0.3 pairing cutoff — the distance memo must still change no
+    /// decision. Fails on the pre-fix `ItemKey`-keyed cache.
+    #[test]
+    fn memo_neutral_on_repetition_varying_siblings(
+        (a, b) in arb_repeating_siblings_pair(),
+    ) {
+        let a = crate::value::Value::from(a);
+        let b = crate::value::Value::from(b);
+        let opts = DiffOptions {
+            ignore_order: true,
+            max_depth: 1_000,
+        };
+        let with = crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::new());
+        let without =
+            crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::disabled());
+        prop_assert_eq!(
+            with.map(|report| report.to_json_value().to_string()),
+            without.map(|report| report.to_json_value().to_string()),
+        );
+    }
+}
+
+/// The distance memo's two caching conditions are load-bearing, so pin each:
+/// a scalar-only `ignore_order` diff must cache nothing (scalar distances never
+/// recurse, so `is_container` gates them out), and a `disabled()` memo must
+/// cache nothing regardless of shape (so the with/without differential tests
+/// genuinely exercise the uncached path). Both also guard the caching gate
+/// against being widened to "always cache", which would make the memo do
+/// redundant work.
+#[test]
+fn distance_memo_only_caches_container_pairs_when_enabled() {
+    let opts = DiffOptions {
+        ignore_order: true,
+        max_depth: 1_000,
+    };
+
+    // Scalars never recurse, so an enabled memo caches nothing for them.
+    let scalar_memo = IgnoreOrderMemo::new();
+    crate::diff::diff_with_options_memo(
+        &cv(&json!([1, 2, 3])),
+        &cv(&json!([3, 4, 5])),
+        &opts,
+        &scalar_memo,
+    )
+    .expect("scalar diff succeeds");
+    assert_eq!(
+        scalar_memo.cache_len(),
+        0,
+        "scalar-only ignore_order diff must not populate the distance cache"
+    );
+
+    // Container pairs do populate an enabled memo...
+    let container_a = cv(&json!([[1, 2], [3, 4], "anchor"]));
+    let container_b = cv(&json!(["anchor", [1, 9], [3, 8]]));
+    let enabled_memo = IgnoreOrderMemo::new();
+    crate::diff::diff_with_options_memo(&container_a, &container_b, &opts, &enabled_memo)
+        .expect("container diff succeeds");
+    assert!(
+        enabled_memo.cache_len() > 0,
+        "container ignore_order diff should populate the distance cache"
+    );
+
+    // ...but a disabled memo caches nothing, whatever the shape.
+    let disabled_memo = IgnoreOrderMemo::disabled();
+    crate::diff::diff_with_options_memo(&container_a, &container_b, &opts, &disabled_memo)
+        .expect("container diff succeeds");
+    assert_eq!(
+        disabled_memo.cache_len(),
+        0,
+        "a disabled memo must never populate the distance cache"
+    );
+}
+
+// --- DistKey hashing stack safety (issue #31) -------------------------
+
+/// [`DistKey`]'s `Hash` walks the value with an explicit stack, never native
+/// recursion, so hashing a distance-cache key can never overflow the native
+/// stack however deep the value — the same posture the engine's `Value`
+/// `Drop`/`PartialEq` hold. Isolated from the key's own value clone (which,
+/// like the report's clones, recurses): the chain is built iteratively and
+/// wrapped without copying, so the only thing exercised on the deliberately
+/// tiny 256 KiB stack is the hash. A recursive hasher overflows here.
+#[test]
+fn dist_key_hashing_does_not_overflow_the_native_stack() {
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            const DEPTH: usize = 200_000;
+            let mut value = cv(&json!(0));
+            for _ in 0..DEPTH {
+                value = CValue::Array(vec![value].into_boxed_slice());
+            }
+            let key = super::hash::DistKey::from_rc(std::rc::Rc::new(value));
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&key, &mut hasher);
+            let _ = std::hash::Hasher::finish(&hasher);
+        })
+        .expect("probe thread spawns");
+    handle
+        .join()
+        .expect("DistKey hashing completes on a small stack");
+}
+
+/// The same memo-driven `ignore_order` path at the default budget on an
+/// ordinary main-thread-sized (8 MiB) stack — the common case a caller hits
+/// without raising `max_depth` or spawning a special thread. (Rust runs each
+/// `#[test]` on a 2 MiB worker thread, smaller than a real main thread, so the
+/// probe sizes the stack to an ordinary 8 MiB rather than relying on the test
+/// harness's own reduced default.)
+#[test]
+fn ignore_order_memo_at_default_budget_on_plain_thread() {
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let build = |leaf: i64| {
+                let mut value = cv(&json!(leaf));
+                for _ in 0..200 {
+                    value = CValue::Array(vec![value].into_boxed_slice());
+                }
+                value
+            };
+            let opts = DiffOptions {
+                ignore_order: true,
+                max_depth: crate::diff::DEFAULT_MAX_DEPTH,
+            };
+            let report = crate::diff::diff_with_options(&build(1), &build(2), &opts)
+                .expect("default-budget ignore_order diff succeeds");
+            assert!(!report.is_empty());
+        })
+        .expect("probe thread spawns");
+    handle
+        .join()
+        .expect("default-budget ignore_order diff completes on an ordinary stack");
+}
+
+/// The distance-cache key's hash of a value, for the agreement tests below.
+fn dist_hash(value: &CValue) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let key = super::hash::DistKey::from_rc(std::rc::Rc::new(value.clone()));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// `DistKey`'s `Hash` must agree with its `Eq` (equal values hash equal), or the
+/// distance memo silently stops hitting and the pairing goes exponential. The
+/// explicit-stack rewrite is the usual place this breaks (a differing child
+/// visit order, or a length hashed at the wrong spot), so pin the equal-but-
+/// differently-built cases the value model treats as equal: signed-zero and
+/// integral floats, sets/frozensets whose members arrive in different insertion
+/// orders (`SetItems` canonicalizes them equal), and datetimes equal by instant
+/// though built with different offsets (a naive value read as UTC, and an
+/// aware pair shifted by its offset to the same moment).
+#[test]
+fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
+    let float = |f: f64| CValue::Number(crate::value::Number::from_f64(f).unwrap());
+    let nested_set = |order: [i64; 3]| {
+        CValue::Set(SetItems::new(vec![
+            ctup(&[json!(order[0])]),
+            ctup(&[json!(order[1])]),
+            ctup(&[json!(order[2])]),
+        ]))
+    };
+    let pairs: &[(CValue, CValue)] = &[
+        // Signed zero: Value equality treats +0.0 == -0.0.
+        (float(0.0), float(-0.0)),
+        // Set members in different insertion orders canonicalize equal.
+        (
+            cset(&[json!(1), json!(2), json!(3)]),
+            cset(&[json!(3), json!(1), json!(2)]),
+        ),
+        (
+            cfrozen(&[json!("b"), json!("a")]),
+            cfrozen(&[json!("a"), json!("b")]),
+        ),
+        // A set of tuples, members reordered: exercises the nested walk.
+        (nested_set([1, 2, 3]), nested_set([3, 2, 1])),
+        // A naive datetime (read as UTC) and an aware one at the same instant:
+        // Value equality compares datetimes by instant, so these are equal and
+        // must hash equal — they would not if the hash mixed in the offset.
+        (cdt(2024, 6, 1, None), cdt(2024, 6, 1, Some(0))),
+        // Two aware datetimes at the same instant but different wall clock and
+        // offset: 12:00+00:00 == 13:00+01:00.
+        (
+            cdt_at(2024, 6, 1, 12, 0, 0, 0, Some(0)),
+            cdt_at(2024, 6, 1, 13, 0, 0, 0, Some(3600)),
+        ),
+    ];
+    for (a, b) in pairs {
+        assert_eq!(a, b, "test inputs must be Value-equal: {a:?} vs {b:?}");
+        assert_eq!(
+            dist_hash(a),
+            dist_hash(b),
+            "equal values must hash equal: {a:?} vs {b:?}"
+        );
+    }
+}
+
+/// An `arbitrary` compact value covering every equality class the distance-key
+/// hash must respect — including the ones JSON cannot express, so they are
+/// actually generated: tuples, sets, frozensets, datetimes (naive and aware),
+/// dates, and floats (signed zero and integral values among them).
+fn arb_cvalue() -> impl Strategy<Value = CValue> {
+    let arb_datetime = (
+        2000i32..2025,
+        1u8..=12,
+        1u8..=28,
+        0u8..24,
+        0u8..60,
+        0u8..60,
+        prop_oneof![
+            Just(None),
+            Just(Some(0)),
+            Just(Some(3600)),
+            Just(Some(-3600))
+        ],
+    )
+        .prop_map(|(y, mo, d, h, mi, s, off)| cdt_at(y, mo, d, h, mi, s, 0, off));
+    let arb_date = (2000i32..2025, 1u8..=12, 1u8..=28).prop_map(|(y, m, d)| cdate(y, m, d));
+    let arb_float = prop_oneof![
+        Just(0.0f64),
+        Just(-0.0f64),
+        Just(1.0f64),
+        Just(2.0f64),
+        any::<f64>(),
+    ]
+    .prop_filter_map("finite floats only", |f| {
+        crate::value::Number::from_f64(f).map(CValue::Number)
+    });
+    let leaf = prop_oneof![
+        Just(CValue::Null),
+        any::<bool>().prop_map(CValue::Bool),
+        any::<i64>().prop_map(|i| CValue::Number(crate::value::Number::from_i64(i))),
+        arb_float,
+        "[a-z]{0,3}".prop_map(|s| CValue::Str(s.into_boxed_str())),
+        arb_datetime,
+        arb_date,
+    ];
+    leaf.prop_recursive(5, 40, 4, |inner| {
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..4)
+                .prop_map(|v| CValue::Array(v.into_boxed_slice())),
+            prop::collection::vec(inner.clone(), 0..4)
+                .prop_map(|v| CValue::Tuple(v.into_boxed_slice())),
+            prop::collection::vec(inner.clone(), 0..4).prop_map(|v| CValue::Set(SetItems::new(v))),
+            prop::collection::vec(inner.clone(), 0..4)
+                .prop_map(|v| CValue::FrozenSet(SetItems::new(v))),
+            prop::collection::vec(("[a-c]", inner), 0..3)
+                .prop_map(|entries| crate::value::Builder::new().object(entries)),
+        ]
+    })
+}
+
+/// Rebuilds `value` into a twin that is equal by [`Value`]'s rules but differs
+/// **structurally**, so the hash-agreement property has real power. The
+/// load-bearing arms are the two places `Value` equality is coarser than
+/// structure:
+///
+/// - a **datetime** is re-expressed at the same instant with different fields —
+///   a naive value (read as UTC) becomes aware `+00:00`, and an aware value's
+///   wall clock and offset shift together by one hour (e.g. `12:00+00:00` ->
+///   `13:00+01:00`), which `Value::eq` compares equal by instant;
+/// - a **signed zero** flips sign (`+0.0` <-> `-0.0`), which `Value::eq`
+///   compares equal though the bit patterns differ.
+///
+/// Set/frozenset members and dict entries are also reversed before rebuilding
+/// (they re-canonicalize to the same stored order, so this is only a
+/// construction-path check, not where the power comes from). Recurses over
+/// proptest-bounded depth (safe).
+///
+/// The datetime and signed-zero perturbations are suppressed once the walk is
+/// **below a set or frozenset** (`in_set`, sticky through nested arrays, tuples
+/// and dicts). A set's canonical storage order is *finer* than value equality
+/// for signed zero (`-0.0` sorts before `0.0` in [`SetItems`], and `Value::eq`
+/// on sets zips stored order), so perturbing a member there would reorder the
+/// enclosing set and make the twin genuinely unequal — a false failure. Above
+/// any set the perturbations run and give the property its power; the reversal
+/// still runs everywhere.
+fn structural_twin(value: &CValue, in_set: bool) -> CValue {
+    match value {
+        CValue::Array(items) => CValue::Array(
+            items
+                .iter()
+                .map(|item| structural_twin(item, in_set))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ),
+        CValue::Tuple(items) => CValue::Tuple(
+            items
+                .iter()
+                .map(|item| structural_twin(item, in_set))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ),
+        CValue::Set(items) => {
+            let mut members: Vec<CValue> = items
+                .iter()
+                .map(|item| structural_twin(item, true))
+                .collect();
+            members.reverse();
+            CValue::Set(SetItems::new(members))
+        }
+        CValue::FrozenSet(items) => {
+            let mut members: Vec<CValue> = items
+                .iter()
+                .map(|item| structural_twin(item, true))
+                .collect();
+            members.reverse();
+            CValue::FrozenSet(SetItems::new(members))
+        }
+        CValue::Object(map) => {
+            let mut entries: Vec<(String, CValue)> = map
+                .iter()
+                .map(|(key, child)| (key.to_string(), structural_twin(child, in_set)))
+                .collect();
+            entries.reverse();
+            crate::value::Builder::new().object(entries)
+        }
+        CValue::DateTime(dt) if !in_set => {
+            let date = dt.date();
+            match dt.utc_offset_seconds() {
+                None => cdt_at(
+                    date.year(),
+                    date.month(),
+                    date.day(),
+                    dt.hour(),
+                    dt.minute(),
+                    dt.second(),
+                    dt.microsecond(),
+                    Some(0),
+                ),
+                Some(offset) => {
+                    let (hour, offset) = if dt.hour() < 23 {
+                        (dt.hour() + 1, offset + 3600)
+                    } else {
+                        (dt.hour() - 1, offset - 3600)
+                    };
+                    cdt_at(
+                        date.year(),
+                        date.month(),
+                        date.day(),
+                        hour,
+                        dt.minute(),
+                        dt.second(),
+                        dt.microsecond(),
+                        Some(offset),
+                    )
+                }
+            }
+        }
+        CValue::Number(n) if n.is_f64() && !in_set => {
+            let f = n.as_f64().expect("is_f64 guarantees as_f64");
+            let flipped = if f == 0.0 { -f } else { f };
+            CValue::Number(
+                crate::value::Number::from_f64(flipped).expect("finite float stays finite"),
+            )
+        }
+        scalar => scalar.clone(),
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    /// Over generated nested shapes spanning every equality class (see
+    /// `arb_cvalue`), a value hashes identically to a [`structural_twin`] that
+    /// is `Value`-equal but structurally different: an equal-instant datetime
+    /// at a different offset and a sign-flipped zero (the two places `Value`
+    /// equality is coarser than structure), plus reversed set/dict order.
+    /// Guards the `DistKey` `Hash`/`Eq` agreement the memo's soundness depends
+    /// on — a hash that mixed in the UTC offset or the raw signed-zero bits
+    /// would fail here.
+    #[test]
+    fn dist_key_hash_equal_for_equal_values(value in arb_cvalue()) {
+        let twin = structural_twin(&value, false);
+        prop_assert_eq!(&value, &twin);
+        prop_assert_eq!(dist_hash(&value), dist_hash(&twin));
+
+        // A set of the value wrapped, built from two orders, stays equal.
+        let s1 = CValue::Set(SetItems::new(vec![value.clone(), CValue::Null, cv(&json!("z"))]));
+        let s2 = CValue::Set(SetItems::new(vec![cv(&json!("z")), value, CValue::Null]));
+        prop_assert_eq!(&s1, &s2);
+        prop_assert_eq!(dist_hash(&s1), dist_hash(&s2));
+    }
+}

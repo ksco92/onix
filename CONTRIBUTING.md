@@ -110,7 +110,7 @@ picks the simpler, deterministic behavior and documents the difference in
 [`tests/golden/README.md`](tests/golden/README.md) plus one sentence in this
 repository's `README.md`. No machinery is added solely to reproduce such a nuance.
 
-The differences shipped as of 0.4.0 — name and pointer only; the rationale for
+The differences shipped as of 0.5.0 — name and pointer only; the rationale for
 each lives at its pointer, not restated here:
 
 - **Entry order** — the order of `set_item_added`/`set_item_removed` entries

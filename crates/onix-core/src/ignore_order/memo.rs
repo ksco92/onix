@@ -40,12 +40,14 @@
 //!   `max_depth - depth - 1` — the trial always completes. So the structural
 //!   result depends only on content too.
 //!
-//! Since [`ItemKey`] is an *exact* structural identity (the full recursive
-//! key, not a lossy digest — and signed zeros are normalized the same way
-//! `numeric_distance` treats them), the `(removed, added)` `ItemKey` pair
-//! keys `rough_distance` losslessly. Caching by it is therefore
-//! observationally identical to recomputing — verified empirically by the
-//! with/without differential test in `super::tests`.
+//! Caching is therefore decision-neutral **as long as the key distinguishes
+//! every value pair whose distance differs** — which is exactly why the cache
+//! is keyed by [`super::hash::DistKey`] (a value's exact structural identity),
+//! not by the order- and repetition-insensitive `ItemKey` that conflated
+//! repetition-differing values into one slot (issue #31); see `DistKey`'s own
+//! doc for that rationale. Verified empirically by the with/without
+//! differential test in `super::tests` (including a repetition-only sibling
+//! divergence).
 //!
 //! # Tuple digests
 //!
@@ -129,11 +131,24 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use super::fxhash::HashMap;
-use super::hash::{ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId};
+use super::hash::{
+    DistKey, ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId,
+};
+
+/// A `(removed, added)` container-pair distance-cache key — see
+/// [`super::hash::DistKey`] for why each side is a value's exact structural
+/// identity (not its order/repetition-insensitive `ItemKey`). Memory per
+/// entry is a refcount bump: each side's value is interned once per candidate
+/// and the `A * R` entries one pairing records just share those [`Rc`]s. The
+/// *lookup* cost is not constant, though — every probe hashes both keys (a
+/// full walk of each value) and, on a bucket match, compares them structurally
+/// — so per-pair work is proportional to record size (see [`super::hash::DistKey`]).
+type DistanceKey = (DistKey, DistKey);
 
 /// The per-top-level-diff caches described in this module's doc: container-pair
-/// [`rough_distance`] results keyed by the `(removed, added)` [`ItemKey`]
-/// pair, the tuple-digest interning table for list-item matching, and the two
+/// [`rough_distance`] results keyed by the `(removed, added)` [`DistKey`]
+/// pair (each side a value's exact structural identity), the tuple-digest
+/// interning table for list-item matching, and the two
 /// set-member interning tables. Created in `crate::diff::diff_with_options`,
 /// threaded (by shared reference, interior mutability) through the whole
 /// recursive diff, and dropped when it returns. No eviction and no tuning
@@ -141,7 +156,7 @@ use super::hash::{ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepI
 ///
 /// [`rough_distance`]: super::distance::rough_distance
 pub(crate) struct IgnoreOrderMemo {
-    cache: RefCell<HashMap<(ItemKey, ItemKey), f64>>,
+    cache: RefCell<HashMap<DistanceKey, f64>>,
     /// Interns each distinct hashable-tuple identity to its place in
     /// `tuple_digests`, so a nested tuple can be named by one [`TupleId`]
     /// inside its parent's identity instead of by a copy of its own.
@@ -194,22 +209,33 @@ impl IgnoreOrderMemo {
         }
     }
 
-    /// Whether a candidate pair should be routed through the cache: only when
-    /// enabled *and* both sides are containers. Scalar-involving pairs never
-    /// recurse (so never re-compute), so they skip the cache entirely — no
-    /// key clone, no map operation — which keeps flat `ignore_order` shapes
-    /// (a list of numbers, say) free of any memoization overhead.
-    pub(crate) fn should_cache(&self, removed: &ItemKey, added: &ItemKey) -> bool {
-        self.enabled && is_container(removed) && is_container(added)
+    /// Whether distance memoization is live for this run. A candidate pair is
+    /// additionally only cached when both sides are containers (see
+    /// [`is_container`]): scalar-involving pairs never recurse, so they never
+    /// re-compute and skip the cache entirely, keeping flat `ignore_order`
+    /// shapes (a list of numbers, say) free of any memoization overhead. The
+    /// `disabled()` cache reports `false` here so the with/without differential
+    /// test runs the identical code path with the cache inert.
+    pub(crate) fn caching_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// The number of distinct container-pair distances currently memoized.
+    /// Test-only: lets the gate tests assert that scalar pairs are never
+    /// cached and that a `disabled()` memo caches nothing, pinning the two
+    /// conditions `caching_enabled`/`is_container` guard.
+    #[cfg(test)]
+    pub(crate) fn cache_len(&self) -> usize {
+        self.cache.borrow().len()
     }
 
     /// The cached distance for `key`, if present.
-    pub(crate) fn get(&self, key: &(ItemKey, ItemKey)) -> Option<f64> {
+    pub(crate) fn get(&self, key: &DistanceKey) -> Option<f64> {
         self.cache.borrow().get(key).copied()
     }
 
     /// Records `value` for `key` (moving the already-cloned key in).
-    pub(crate) fn put(&self, key: (ItemKey, ItemKey), value: f64) {
+    pub(crate) fn put(&self, key: DistanceKey, value: f64) {
         self.cache.borrow_mut().insert(key, value);
     }
 
@@ -286,7 +312,8 @@ impl IgnoreOrderMemo {
 }
 
 /// Whether `key` is a container (list/tuple/dict) rather than a scalar — the
-/// variants whose distance is computed by a recursive trial diff.
-fn is_container(key: &ItemKey) -> bool {
+/// variants whose distance is computed by a recursive trial diff, and so the
+/// only ones worth memoizing.
+pub(crate) fn is_container(key: &ItemKey) -> bool {
     matches!(key, ItemKey::List(_) | ItemKey::Tuple(_) | ItemKey::Dict(_))
 }

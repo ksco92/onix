@@ -693,6 +693,18 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
         ["y", 0.0, 2, [{}]],
         {"ignore_order": True},
     ),
+    # Two sibling subtrees whose inner lists share a DeepHash item key (the
+    # order- and repetition-insensitive set {3, 4}) but differ in element
+    # repetition: paired against [9, 8], the short list is close enough to pair
+    # (a whole-element values_changed) while the long list recurses. onix's
+    # distance memo must not hand the short list's cached distance to the long
+    # one -- it keys the cache by each value's exact structural identity, not by
+    # the item key (issue #31). DeepDiff is stable across PYTHONHASHSEED here.
+    "ignore_order_memo_repetition_collision_distinct_distances": (
+        {"p": [[3, 4]], "q": [[3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4]]},
+        {"p": [[9, 8]], "q": [[9, 8]]},
+        {"ignore_order": True},
+    ),
     # Tuples under ignore_order: the tuple itself is hash-paired like a list
     # (including new_path on a drifted pairing), a tuple nested as an element
     # hashes order-insensitively like a nested list, and a tuple never
