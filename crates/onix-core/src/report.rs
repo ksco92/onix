@@ -73,11 +73,21 @@ pub struct ValuesChangedEntry {
     /// place, rather than needing to re-parse an already-rendered path
     /// string — see that method's own doc for the case this fixes.
     pub new_path: Option<Vec<PathSegment>>,
+    /// The unified diff `DeepDiff` attaches at `verbose_level=2` when both
+    /// values are strings and one of them contains a newline
+    /// (`_diff_str` -> `difflib.unified_diff`; the port lives in the
+    /// crate-private `unified_diff` module). `None` for every non-string
+    /// change and for a string change with no newline — and, deliberately,
+    /// for a `values_changed` produced by the `merge_mutual_add_removes`
+    /// pass, whose `DeepDiff` counterpart is a post-hoc tree merge that never
+    /// runs `_diff_str` (confirmed empirically: such an entry carries no
+    /// `diff`).
+    pub diff: Option<String>,
 }
 
 impl ValuesChangedEntry {
     fn to_json_value(&self) -> serde_json::Value {
-        let mut map = serde_json::Map::with_capacity(3);
+        let mut map = serde_json::Map::with_capacity(4);
         map.insert("new_value".to_string(), self.new_value.to_serde_json());
         map.insert("old_value".to_string(), self.old_value.to_serde_json());
         if let Some(new_path) = &self.new_path {
@@ -85,6 +95,9 @@ impl ValuesChangedEntry {
                 "new_path".to_string(),
                 serde_json::Value::String(render_path(new_path)),
             );
+        }
+        if let Some(diff) = &self.diff {
+            map.insert("diff".to_string(), serde_json::Value::String(diff.clone()));
         }
         serde_json::Value::Object(map)
     }
@@ -96,6 +109,12 @@ impl ValuesChangedEntry {
         ];
         if let Some(new_path) = &self.new_path {
             entries.push(("new_path".to_string(), rendered(new_path)));
+        }
+        if let Some(diff) = &self.diff {
+            entries.push((
+                "diff".to_string(),
+                Value::Str(diff.clone().into_boxed_str()),
+            ));
         }
         builder.object(entries)
     }
@@ -533,6 +552,10 @@ impl Report {
                     old_value,
                     new_value,
                     new_path: None,
+                    // DeepDiff's own merge (`mutual_add_removes_to_become_
+                    // value_changes`) never runs `_diff_str`, so a
+                    // merge-produced `values_changed` carries no `diff`.
+                    diff: None,
                 },
             );
         }

@@ -15,14 +15,22 @@ fn scalar_key(value: &serde_json::Value) -> super::ScalarKey {
 }
 
 /// Python-`==` equality for two JSON scalars, per [`super::ScalarKey`]'s
-/// doc. Test-only: production code has no remaining use for this as a
-/// standalone function (see [`super::find_longest_match`]'s doc on why
-/// its own extend-by-direct-comparison step was removed) — it survives
+/// doc. Test-only: the engine compares scalars directly by
+/// [`super::ScalarKey`] (including [`super::find_longest_match`]'s autojunk
+/// extension step) rather than through a standalone predicate — this survives
 /// here purely to assert the hashability/cross-type-equality semantics
-/// directly, and to state the `Replace`-opcode non-matching-pair
-/// invariant precisely in [`replace_opcode_ranges_never_share_a_matching_element`].
+/// directly, and to state the `Replace`-opcode non-matching-pair invariant
+/// precisely in [`replace_opcode_ranges_never_share_a_matching_element`].
 fn python_scalar_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     scalar_key(a) == scalar_key(b)
+}
+
+fn grouped_opcodes(
+    a: &[serde_json::Value],
+    b: &[serde_json::Value],
+    n: usize,
+) -> Vec<Vec<super::Opcode>> {
+    super::grouped_opcodes(&cvec(a), &cvec(b), n)
 }
 
 // --- all_basic_scalars ---------------------------------------------
@@ -560,4 +568,135 @@ fn mix_float_bits_spreads_low_bits_of_integral_and_half_integer_floats() {
         super::mix_float_bits(1.0_f64.to_bits()),
         super::mix_float_bits(2.0_f64.to_bits())
     );
+}
+
+// --- grouped_opcodes -----------------------------------------------
+
+#[test]
+fn grouped_opcodes_of_empty_inputs_yields_no_groups() {
+    // `get_opcodes` is empty for two empty sequences, so the fallback dummy
+    // "equal" opcode is inserted and then dropped as a trivial single-equal
+    // group — no group is emitted. (`unified_diff` never reaches this, since
+    // its trigger requires a newline, but the port mirrors difflib exactly.)
+    assert!(grouped_opcodes(&[], &[], 3).is_empty());
+}
+
+#[test]
+fn grouped_opcodes_of_identical_inputs_yields_no_groups() {
+    let same = vec![json!("a"), json!("b"), json!("c")];
+    assert!(grouped_opcodes(&same, &same, 3).is_empty());
+}
+
+#[test]
+fn grouped_opcodes_splits_far_apart_changes_into_separate_groups() {
+    // Changes at index 1 and 15 with >2n unchanged lines between them, so the
+    // long equal run splits the opcodes into two groups (difflib's cluster
+    // isolation).
+    let a: Vec<serde_json::Value> = (0..20).map(|i| json!(format!("L{i}"))).collect();
+    let b: Vec<serde_json::Value> = (0..20)
+        .map(|i| match i {
+            1 => json!("X1"),
+            15 => json!("X15"),
+            _ => json!(format!("L{i}")),
+        })
+        .collect();
+    assert_eq!(grouped_opcodes(&a, &b, 3).len(), 2);
+}
+
+// --- find_longest_match extension step (autojunk-only) --------------
+//
+// These call `find_longest_match` directly with a `b2j` that deliberately
+// omits a "popular" element (as `build_b2j`'s autojunk purge would), so the
+// DP chain cannot match that element and only the greedy extension step can
+// re-bridge it. The window and match offsets are asymmetric between the two
+// sides so each loop bound (`best_a > alo`, `best_b > blo`, and the two
+// forward `< ahi`/`< bhi` checks) is exercised as the binding constraint.
+
+fn scalar_keys(
+    items: &[serde_json::Value],
+) -> std::collections::HashMap<super::ScalarKey, Vec<usize>> {
+    // A b2j built by hand so a chosen key can be omitted (purged).
+    let mut map: std::collections::HashMap<super::ScalarKey, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, v) in items.iter().enumerate() {
+        map.entry(scalar_key(v)).or_default().push(i);
+    }
+    map
+}
+
+#[test]
+fn extension_bridges_a_purged_element_backward() {
+    // a = [P, P, u], b = [P, u]; P is purged from b2j, so the DP only finds
+    // `u` (a[2] == b[1]); the backward extension must re-bridge one `P` to
+    // give the full match a[1..3] == b[0..2].
+    let a = cvec(&[json!("P"), json!("P"), json!("u")]);
+    let b = cvec(&[json!("P"), json!("u")]);
+    let mut b2j = scalar_keys(&[json!("P"), json!("u")]);
+    b2j.remove(&scalar_key(&json!("P")));
+    let window = super::Window {
+        alo: 0,
+        ahi: a.len(),
+        blo: 0,
+        bhi: b.len(),
+    };
+    assert_eq!(
+        super::find_longest_match(&a, &b, window, &b2j, true),
+        (1, 0, 2),
+    );
+}
+
+#[test]
+fn extension_bridges_a_purged_element_forward() {
+    // a = [u, P], b = [u, P, P]; P purged, DP finds only `u` (a[0] == b[0]);
+    // the forward extension must re-bridge one `P`, giving a[0..2] == b[0..2].
+    let a = cvec(&[json!("u"), json!("P")]);
+    let b = cvec(&[json!("u"), json!("P"), json!("P")]);
+    let mut b2j = scalar_keys(&[json!("u"), json!("P"), json!("P")]);
+    b2j.remove(&scalar_key(&json!("P")));
+    let window = super::Window {
+        alo: 0,
+        ahi: a.len(),
+        blo: 0,
+        bhi: b.len(),
+    };
+    assert_eq!(
+        super::find_longest_match(&a, &b, window, &b2j, false),
+        (0, 0, 1),
+        "with extend=false the purged P is not bridged"
+    );
+    assert_eq!(
+        super::find_longest_match(&a, &b, window, &b2j, true),
+        (0, 0, 2),
+        "with extend=true the forward extension bridges one P"
+    );
+}
+
+// --- build_b2j autojunk purge --------------------------------------
+
+#[test]
+fn build_b2j_purges_only_above_the_autojunk_threshold() {
+    // 200 elements: `ntest = 200 / 100 + 1 = 3`. "pop" (4 occurrences) is
+    // purged; "keep3" (exactly 3) is kept, as is every unique filler.
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    items.extend(std::iter::repeat_n(json!("pop"), 4));
+    items.extend(std::iter::repeat_n(json!("keep3"), 3));
+    for i in 0..193 {
+        items.push(json!(format!("u{i}")));
+    }
+    assert_eq!(items.len(), 200);
+    let b = cvec(&items);
+
+    let purged = super::build_b2j(&b, true);
+    assert!(
+        !purged.contains_key(&scalar_key(&json!("pop"))),
+        "pop occurs 4 times (> ntest 3) and must be purged"
+    );
+    assert!(
+        purged.contains_key(&scalar_key(&json!("keep3"))),
+        "keep3 occurs exactly 3 times (== ntest) and must be kept"
+    );
+
+    // With autojunk off, nothing is ever purged even past 200 elements.
+    let unpurged = super::build_b2j(&b, false);
+    assert!(unpurged.contains_key(&scalar_key(&json!("pop"))));
 }

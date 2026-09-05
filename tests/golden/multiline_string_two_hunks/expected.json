@@ -1,0 +1,9 @@
+{
+  "values_changed": {
+    "root": {
+      "diff": "--- \n+++ \n@@ -1,5 +1,5 @@\n L0\n-L1\n+CHANGED1\n L2\n L3\n L4\n@@ -13,7 +13,7 @@\n L12\n L13\n L14\n-L15\n+CHANGED15\n L16\n L17\n L18",
+      "new_value": "L0\nCHANGED1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nCHANGED15\nL16\nL17\nL18\nL19",
+      "old_value": "L0\nL1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19"
+    }
+  }
+}
