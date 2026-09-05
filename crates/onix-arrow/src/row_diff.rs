@@ -1266,7 +1266,7 @@ fn value_domain(data_type: &DataType) -> ValueDomain {
         DataType::Dictionary(_, value) => value_domain(value),
         other => unreachable!(
             "value_domain reached {other:?}, which is not hashable; \
-             reject_unhashable_columns must gate every caller"
+             reject_unhashable_columns must reject it before any caller"
         ),
     }
 }
