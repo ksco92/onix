@@ -122,11 +122,40 @@ def test_identical_results_across_input_libraries(left_lib: str, right_lib: str)
     }
 
 
-def test_record_batch_array_protocol_input() -> None:
-    """A pyarrow RecordBatch (the __arrow_c_array__ path) is accepted."""
+def _struct_array(table: pa.Table) -> pa.StructArray:
+    """
+    Build a StructArray (an __arrow_c_array__-only object) from a table's columns.
+
+    :param table: The source table (single chunk per column).
+    :return: A struct array with one field per column.
+    """
+    return pa.StructArray.from_arrays(
+        [table.column(name).combine_chunks() for name in table.column_names],
+        names=table.column_names,
+    )
+
+
+def test_struct_array_c_array_protocol_input() -> None:
+    """A pyarrow StructArray (the __arrow_c_array__ path, no stream) is accepted."""
+    left_pa, right_pa = _int_tables()
+    left = _struct_array(left_pa)
+    right = _struct_array(right_pa)
+    assert not hasattr(left, "__arrow_c_stream__")
+    diff = diff_tables(left, right, key=["id"])
+
+    assert _by_change(diff) == {
+        "added": ["only_right"],
+        "removed": ["only_left"],
+        "type_changed": ["changed"],
+    }
+
+
+def test_record_batch_stream_protocol_input() -> None:
+    """A pyarrow RecordBatch (which exposes __arrow_c_stream__) is accepted."""
     left_pa, right_pa = _int_tables()
     left_batch = left_pa.to_batches()[0]
     right_batch = right_pa.to_batches()[0]
+    assert hasattr(left_batch, "__arrow_c_stream__")
     diff = diff_tables(left_batch, right_batch, key=["id"])
 
     assert _by_change(diff) == {
@@ -134,6 +163,62 @@ def test_record_batch_array_protocol_input() -> None:
         "removed": ["only_left"],
         "type_changed": ["changed"],
     }
+
+
+def test_record_batch_reader_input() -> None:
+    """A pyarrow RecordBatchReader is accepted; only its schema is read in this version."""
+    left_pa, right_pa = _int_tables()
+    left = pa.RecordBatchReader.from_batches(left_pa.schema, left_pa.to_batches())
+    right = pa.RecordBatchReader.from_batches(right_pa.schema, right_pa.to_batches())
+    diff = diff_tables(left, right, key=["id"])
+
+    assert _by_change(diff) == {
+        "added": ["only_right"],
+        "removed": ["only_left"],
+        "type_changed": ["changed"],
+    }
+
+
+def test_multi_chunk_table_input() -> None:
+    """A table with more than one chunk is accepted (schema read only)."""
+    left_pa, right_pa = _int_tables()
+    left = pa.concat_tables([left_pa, left_pa])
+    right = pa.concat_tables([right_pa, right_pa])
+    assert left.column("id").num_chunks == 2
+    diff = diff_tables(left, right, key=["id"])
+
+    assert _by_change(diff) == {
+        "added": ["only_right"],
+        "removed": ["only_left"],
+        "type_changed": ["changed"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("left_lib", "right_lib"),
+    [
+        ("pyarrow", "pyarrow"),
+        ("polars", "polars"),
+        ("duckdb", "duckdb"),
+        ("polars", "pyarrow"),
+        ("duckdb", "polars"),
+    ],
+)
+def test_string_columns_identical_across_libraries(left_lib: str, right_lib: str) -> None:
+    """
+    A string column present on both sides is never a type change, whatever library supplies it.
+
+    polars exports strings as Utf8View and pyarrow/DuckDB as Utf8; without physical-encoding
+    normalization this would report every string column as type_changed.
+
+    :param left_lib: The library providing the left table.
+    :param right_lib: The library providing the right table.
+    """
+    left_pa = pa.table({"id": pa.array([1], pa.int64()), "name": pa.array(["a"], pa.string())})
+    right_pa = pa.table({"id": pa.array([1], pa.int64()), "name": pa.array(["b"], pa.string())})
+    diff = diff_tables(_as(left_lib, left_pa), _as(right_lib, right_pa), key=["id"])
+
+    assert diff.schema == []
 
 
 # Schema-comparison semantics tests
@@ -190,6 +275,34 @@ def test_dictionary_encoded_string_matches_plain_string() -> None:
     """A dictionary-encoded string column equals a plain string column."""
     left = _keyed({"name": pa.array(["a"]).dictionary_encode()})
     right = _keyed({"name": pa.array(["a"], pa.string())})
+    diff = diff_tables(left, right, key=["id"])
+
+    assert diff.schema == []
+
+
+def test_large_utf8_equals_utf8() -> None:
+    """A LargeUtf8 column equals a plain Utf8 column."""
+    left = pa.schema([pa.field("id", pa.int64()), pa.field("name", pa.large_string())]).empty_table()
+    right = pa.schema([pa.field("id", pa.int64()), pa.field("name", pa.string())]).empty_table()
+    diff = diff_tables(left, right, key=["id"])
+
+    assert diff.schema == []
+
+
+def test_list_of_dictionary_equals_list_of_string() -> None:
+    """A list-of-dictionary-string column equals a large-list-of-large-string column."""
+    left = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("tags", pa.list_(pa.dictionary(pa.int32(), pa.string()))),
+        ],
+    ).empty_table()
+    right = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("tags", pa.large_list(pa.large_string())),
+        ],
+    ).empty_table()
     diff = diff_tables(left, right, key=["id"])
 
     assert diff.schema == []
@@ -334,6 +447,21 @@ def test_non_arrow_input_raises_type_error() -> None:
         diff_tables({"id": [1]}, right, key=["id"])
 
 
+def test_duplicate_column_on_left_is_rejected() -> None:
+    """A side with two columns of the same name raises ValueError naming it."""
+    left = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("x", pa.int64()),
+            pa.field("x", pa.string()),
+        ],
+    ).empty_table()
+    right = pa.schema([pa.field("id", pa.int64())]).empty_table()
+
+    with pytest.raises(ValueError, match='more than one column named "x"'):
+        diff_tables(left, right, key=["id"])
+
+
 def test_row_level_members_not_implemented() -> None:
     """The row-level members raise NotImplementedError in this version."""
     left, right = _int_tables()
@@ -408,6 +536,50 @@ def test_empty_diff_exports_empty_table() -> None:
     assert table.num_columns == 6
 
 
+def test_schema_arrow_exports_schema_capsule() -> None:
+    """schema_arrow exposes __arrow_c_schema__, consumable by pa.schema()."""
+    left, right = _int_tables()
+    diff = diff_tables(left, right, key=["id"])
+    schema = pa.schema(diff.schema_arrow)
+
+    assert schema.names == [
+        "column",
+        "change",
+        "left_type",
+        "right_type",
+        "left_nullable",
+        "right_nullable",
+    ]
+
+
+def test_reprs() -> None:
+    """TableDiff and ArrowTable have informative reprs."""
+    left, right = _int_tables()
+    diff = diff_tables(left, right, key=["id"])
+
+    assert repr(diff) == "TableDiff(columns_added=1, columns_removed=1, columns_type_changed=1)"
+    assert repr(diff.schema_arrow) == "ArrowTable(3 rows x 6 columns)"
+
+
+def test_bad_requested_schema_capsule_raises_value_error() -> None:
+    """A malformed requested_schema capsule raises ValueError, not a native crash or PanicException."""
+    import ctypes
+
+    left, right = _int_tables()
+    diff = diff_tables(left, right, key=["id"])
+
+    new_capsule = ctypes.pythonapi.PyCapsule_New
+    new_capsule.restype = ctypes.py_object
+    new_capsule.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+    # A zeroed ArrowSchema: its format pointer is NULL, which the arrow importer
+    # asserts against (a panic), never a valid schema. Kept alive for the call.
+    buffer = (ctypes.c_char * 256)()
+    capsule = new_capsule(ctypes.cast(buffer, ctypes.c_void_p), b"arrow_schema", None)
+
+    with pytest.raises(ValueError, match="not a valid Arrow C schema"):
+        diff.schema_arrow.__arrow_c_stream__(requested_schema=capsule)
+
+
 # Optional-dependency tests
 
 
@@ -465,6 +637,64 @@ def test_import_and_diff_without_pyarrow() -> None:
             assert "deepdiff-rs[arrow]" in str(error), str(error)
         else:
             raise AssertionError("expected ImportError from to_pyarrow without pyarrow")
+
+        print("OK")
+        """,
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("OK")
+
+
+def test_to_pyarrow_propagates_a_broken_pyarrow() -> None:
+    """A pyarrow that fails to import for a reason other than absence is propagated, not masked."""
+    program = textwrap.dedent(
+        """
+        import importlib.abc
+        import importlib.machinery
+        import sys
+
+
+        class BoomLoader(importlib.abc.Loader):
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                raise ImportError("pyarrow is installed but broken")
+
+
+        class BrokenPyarrow(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path=None, target=None):
+                if name == "pyarrow" or name.startswith("pyarrow."):
+                    return importlib.machinery.ModuleSpec(name, BoomLoader())
+                return None
+
+
+        sys.modules.pop("pyarrow", None)
+        sys.meta_path.insert(0, BrokenPyarrow())
+
+        import duckdb
+        import deepdiff_rs
+
+        left = duckdb.sql("SELECT CAST(1 AS BIGINT) AS id, 1 AS a")
+        right = duckdb.sql("SELECT CAST(1 AS BIGINT) AS id, 1 AS b")
+        diff = deepdiff_rs.diff_tables(left, right, key=["id"])
+
+        try:
+            diff.schema_arrow.to_pyarrow()
+        except ImportError as error:
+            # The real failure is propagated; the install-the-extra hint is only
+            # for a genuinely-absent pyarrow (ModuleNotFoundError).
+            assert "installed but broken" in str(error), str(error)
+            assert "deepdiff-rs[arrow]" not in str(error), str(error)
+        else:
+            raise AssertionError("expected the broken pyarrow's ImportError to propagate")
 
         print("OK")
         """,

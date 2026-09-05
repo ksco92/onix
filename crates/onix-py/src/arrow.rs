@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch, RecordBatchIterator, RecordBatchReader, StructArray};
 use arrow_schema::{Field, FieldRef};
-use pyo3::exceptions::{PyImportError, PyNotImplementedError, PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyImportError, PyModuleNotFoundError, PyNotImplementedError, PyTypeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyDict, PyList, PyString};
 use pyo3_arrow::ffi::{ArrayIterator, ArrayReader, to_schema_pycapsule, to_stream_pycapsule};
@@ -270,7 +272,20 @@ impl ArrowTable {
         let reader: Box<dyn ArrayReader + Send> =
             Box::new(ArrayIterator::new(std::iter::once(Ok(array)), field));
 
-        Ok(to_stream_pycapsule(py, reader, requested_schema)?)
+        // A malformed `requested_schema` capsule (e.g. one carrying a zeroed
+        // ArrowSchema) makes the arrow importer panic; catch it here and raise
+        // a catchable `ValueError` instead of letting a `PanicException`
+        // escape, matching the never-crash posture of the other entry points.
+        let capsule = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            to_stream_pycapsule(py, reader, requested_schema)
+        }))
+        .map_err(|_| {
+            PyValueError::new_err(
+                "the requested_schema passed to __arrow_c_stream__ is not a valid Arrow C schema",
+            )
+        })?;
+
+        Ok(capsule?)
     }
 
     /// Exports the schema of this table as an Arrow C schema in a `PyCapsule`.
@@ -286,13 +301,23 @@ impl ArrowTable {
     /// `__arrow_c_stream__` (which those libraries call for you) instead.
     fn to_pyarrow<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
-        let pyarrow = py.import("pyarrow").map_err(|_| {
-            PyImportError::new_err(
-                "pyarrow is required for to_pyarrow(); install it with \
-                 'pip install deepdiff-rs[arrow]'. Consuming this result with polars or pandas \
-                 needs no pyarrow.",
-            )
-        })?;
+        let pyarrow = match py.import("pyarrow") {
+            Ok(module) => module,
+            // Only a genuinely-absent pyarrow becomes the install-the-extra
+            // hint; any other import failure (a broken or partial pyarrow) is
+            // propagated with its own message, kept as the cause so the real
+            // error is not hidden.
+            Err(error) if error.is_instance_of::<PyModuleNotFoundError>(py) => {
+                let hint = PyImportError::new_err(
+                    "pyarrow is required for to_pyarrow(); install it with \
+                     'pip install deepdiff-rs[arrow]'. Consuming this result with polars or \
+                     pandas needs no pyarrow.",
+                );
+                hint.set_cause(py, Some(error));
+                return Err(hint);
+            }
+            Err(error) => return Err(error),
+        };
 
         pyarrow.getattr("table")?.call1((slf,))
     }
