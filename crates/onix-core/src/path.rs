@@ -870,7 +870,7 @@ mod tests {
             ("a\u{10ffff}b", r"'a\U0010ffffb'"),
         ];
         for (input, expected) in cases {
-            let item = Value::Tuple(Box::new([Value::Str(input.into())]));
+            let item = Value::Tuple(Box::new([Value::Str(input.into())]).into());
             assert_eq!(
                 python_repr(&item),
                 format!("({expected},)"),
@@ -884,7 +884,7 @@ mod tests {
     /// one exception `is_non_printable` must apply.
     #[test]
     fn python_repr_str_does_not_escape_plain_space() {
-        let item = Value::Tuple(Box::new([Value::Str("a b".into())]));
+        let item = Value::Tuple(Box::new([Value::Str("a b".into())]).into());
         assert_eq!(python_repr(&item), "('a b',)");
     }
 
