@@ -62,7 +62,10 @@ test = [
 # `scripts/golden_tags.py` (repo root) defines the golden corpus's tagged
 # encoding for values JSON cannot express; tests/test_golden_parity.py decodes
 # fixtures with it rather than keeping a second copy of the same rule.
-pythonpath = ["../../scripts"]
+# `perf/arrow` holds the seeded fixture generator and the DuckDB oracle the
+# keyed-row-diff tests check onix against (test_table_row_diff.py).
+pythonpath = ["../../scripts", "../../perf/arrow"]
+markers = ["slow: exercises the 100k or 1M fixture pair; skipped with -m 'not slow'"]
 
 [tool.maturin]
 bindings = "pyo3"

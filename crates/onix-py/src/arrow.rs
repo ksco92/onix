@@ -5,7 +5,7 @@
 //! polars `DataFrame`, `DuckDB` relation) or `__arrow_c_array__` (pyarrow
 //! `RecordBatch`/`StructArray`) — imports it into native Arrow record batches
 //! with no Python round trip (via `pyo3-arrow`'s C Data Interface bridge),
-//! and diffs the two schemas with [`onix_arrow`].
+//! and diffs the two tables — schema and keyed rows — with [`onix_arrow`].
 //!
 //! `pyarrow` is not needed to *call* `diff_tables`: polars and `DuckDB` expose
 //! the same protocol, so `import deepdiff_rs` and diffing their tables work
@@ -15,10 +15,13 @@
 //! `__arrow_c_stream__`, so polars and pandas can consume it without pyarrow
 //! either.
 
+use std::fs::File;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow_array::{ArrayRef, RecordBatch, RecordBatchIterator, RecordBatchReader, StructArray};
-use arrow_schema::{Field, FieldRef};
+use arrow_schema::{Field, FieldRef, SchemaRef};
 use pyo3::exceptions::{
     PyImportError, PyModuleNotFoundError, PyNotImplementedError, PyTypeError, PyValueError,
 };
@@ -28,12 +31,88 @@ use pyo3_arrow::ffi::{ArrayIterator, ArrayReader, to_schema_pycapsule, to_stream
 use pyo3_arrow::input::AnyRecordBatch;
 
 use onix_arrow::{
-    SchemaChange, TableDiff as CoreTableDiff, TableDiffError, TableDiffOptions,
+    SchemaChange, TableDiff as CoreTableDiff, TableDiffError, TableDiffOptions, TableInput,
     diff_tables as core_diff_tables,
 };
 
 /// A record batch reader over one imported input, with its schema attached.
 type ImportedReader = RecordBatchIterator<Box<dyn RecordBatchReader + Send>>;
+
+/// A temporary Arrow IPC file that is deleted when dropped, so a diff that
+/// errors midway leaves nothing behind.
+struct SpoolFile {
+    path: PathBuf,
+}
+
+impl SpoolFile {
+    /// A unique spool path in the system temp directory.
+    fn new() -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!("onix-arrow-{}-{}.arrows", std::process::id(), seq));
+        Self { path }
+    }
+}
+
+impl Drop for SpoolFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// One diff input, spooled to a temporary Arrow IPC stream file so the core's
+/// two-pass row diff can re-read it. Each input is imported and fully drained
+/// before the next is imported, so two one-shot Python streams (a pair of
+/// `DuckDB` relations sharing one connection, say) are never open at once.
+struct SpooledInput {
+    spool: SpoolFile,
+    schema: SchemaRef,
+}
+
+impl TableInput for SpooledInput {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn open(&self) -> Result<Box<dyn RecordBatchReader + Send>, TableDiffError> {
+        let file = File::open(&self.spool.path).map_err(|e| TableDiffError::Read {
+            message: e.to_string(),
+        })?;
+        let reader =
+            arrow_ipc::reader::StreamReader::try_new_buffered(file, None).map_err(|e| {
+                TableDiffError::Read {
+                    message: e.to_string(),
+                }
+            })?;
+
+        Ok(Box::new(reader))
+    }
+}
+
+/// Imports one Python Arrow input and spools every batch to a temporary IPC
+/// stream file, draining and closing its (possibly one-shot) source before
+/// returning.
+fn spool_input(obj: &Bound<'_, PyAny>) -> PyResult<SpooledInput> {
+    let reader = import_reader(obj)?;
+    let schema = reader.schema();
+    let spool = SpoolFile::new();
+
+    let file = File::create(&spool.path)?;
+    let mut writer = arrow_ipc::writer::StreamWriter::try_new_buffered(file, &schema)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    for batch in reader {
+        let batch = batch.map_err(|e| PyValueError::new_err(e.to_string()))?;
+        writer
+            .write(&batch)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    }
+    writer
+        .finish()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(SpooledInput { spool, schema })
+}
 
 /// Diffs two Arrow tables.
 ///
@@ -63,10 +142,12 @@ pub(crate) fn diff_tables(
 
     crate::guard::run_on_worker(py, move || {
         Python::attach(|py| {
-            let left_reader = import_reader(left.bind(py))?;
-            let right_reader = import_reader(right.bind(py))?;
+            // Each input is imported and fully spooled before the next, so two
+            // one-shot Python streams are never open at the same time.
+            let left_input = spool_input(left.bind(py))?;
+            let right_input = spool_input(right.bind(py))?;
             let options = TableDiffOptions::new(key);
-            let core = core_diff_tables(left_reader, right_reader, &options)
+            let core = core_diff_tables(&left_input, &right_input, &options)
                 .map_err(|e| map_table_error(&e))?;
 
             TableDiff::from_core(&core)
@@ -176,14 +257,23 @@ impl TableDiff {
         ArrowTable::new(self.schema_batch.clone())
     }
 
-    /// Counts of each kind of schema change: `columns_added`,
-    /// `columns_removed`, `columns_type_changed`.
+    /// Counts of each kind of change: the schema counts (`columns_added`,
+    /// `columns_removed`, `columns_type_changed`) and the row counts
+    /// (`rows_added`, `rows_removed`, `rows_changed`, `duplicate_keys`,
+    /// `null_keys`). Duplicate keys are reported separately and excluded from
+    /// the added/removed/changed row counts; `null_keys` is an informational
+    /// count of distinct keys with a null component.
     fn summary<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let summary = self.core.summary();
         let dict = PyDict::new(py);
         dict.set_item("columns_added", summary.columns_added)?;
         dict.set_item("columns_removed", summary.columns_removed)?;
         dict.set_item("columns_type_changed", summary.columns_type_changed)?;
+        dict.set_item("rows_added", summary.rows_added)?;
+        dict.set_item("rows_removed", summary.rows_removed)?;
+        dict.set_item("rows_changed", summary.rows_changed)?;
+        dict.set_item("duplicate_keys", summary.duplicate_keys)?;
+        dict.set_item("null_keys", summary.null_keys)?;
 
         Ok(dict)
     }
@@ -193,8 +283,8 @@ impl TableDiff {
         &self.json
     }
 
-    /// Rows present only on the right. Raises `NotImplementedError` until a
-    /// later version fills it in.
+    /// Rows present only on the right (added), in the right table's schema and
+    /// excluding duplicate keys.
     fn rows_added(&self) -> PyResult<ArrowTable> {
         self.core
             .rows_added()
@@ -202,8 +292,8 @@ impl TableDiff {
             .map_err(|e| map_table_error(&e))
     }
 
-    /// Rows present only on the left. Raises `NotImplementedError` until a
-    /// later version fills it in.
+    /// Rows present only on the left (removed), in the left table's schema and
+    /// excluding duplicate keys.
     fn rows_removed(&self) -> PyResult<ArrowTable> {
         self.core
             .rows_removed()
@@ -220,8 +310,8 @@ impl TableDiff {
             .map_err(|e| map_table_error(&e))
     }
 
-    /// Keys appearing more than once on either side. Raises
-    /// `NotImplementedError` until a later version fills it in.
+    /// Keys appearing more than once on either side: the key columns, then
+    /// `left_count` and `right_count`.
     fn duplicate_keys(&self) -> PyResult<ArrowTable> {
         self.core
             .duplicate_keys()
@@ -233,8 +323,15 @@ impl TableDiff {
         let summary = self.core.summary();
 
         format!(
-            "TableDiff(columns_added={}, columns_removed={}, columns_type_changed={})",
-            summary.columns_added, summary.columns_removed, summary.columns_type_changed,
+            "TableDiff(columns_added={}, columns_removed={}, columns_type_changed={}, \
+             rows_added={}, rows_removed={}, rows_changed={}, duplicate_keys={})",
+            summary.columns_added,
+            summary.columns_removed,
+            summary.columns_type_changed,
+            summary.rows_added,
+            summary.rows_removed,
+            summary.rows_changed,
+            summary.duplicate_keys,
         )
     }
 }

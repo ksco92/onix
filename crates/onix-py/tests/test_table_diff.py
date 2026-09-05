@@ -111,6 +111,11 @@ def test_identical_results_across_input_libraries(left_lib: str, right_lib: str)
         "columns_added": 1,
         "columns_removed": 1,
         "columns_type_changed": 1,
+        "rows_added": 0,
+        "rows_removed": 0,
+        "rows_changed": 0,
+        "duplicate_keys": 0,
+        "null_keys": 0,
     }
 
 
@@ -223,9 +228,9 @@ def test_list_view_normalizes_like_list() -> None:
 
 
 def test_identical_schemas_have_no_changes() -> None:
-    """Two tables with the same schema report no schema changes."""
+    """Two tables with the same schema and equal rows report no changes."""
     left = _keyed({"a": pa.array([1], pa.int64())})
-    right = _keyed({"a": pa.array([9], pa.int64())})
+    right = _keyed({"a": pa.array([1], pa.int64())})
     diff = diff_tables(left, right, key=["id"])
 
     assert diff.schema == []
@@ -233,6 +238,11 @@ def test_identical_schemas_have_no_changes() -> None:
         "columns_added": 0,
         "columns_removed": 0,
         "columns_type_changed": 0,
+        "rows_added": 0,
+        "rows_removed": 0,
+        "rows_changed": 0,
+        "duplicate_keys": 0,
+        "null_keys": 0,
     }
 
 
@@ -450,14 +460,16 @@ def test_duplicate_column_on_left_is_rejected() -> None:
         diff_tables(left, right, key=["id"])
 
 
-def test_row_level_members_not_implemented() -> None:
-    """The row-level members raise NotImplementedError in this version."""
+def test_cells_changed_not_implemented() -> None:
+    """cells_changed raises NotImplementedError in this version; the other row members return tables."""
     left, right = _int_tables()
     diff = diff_tables(left, right, key=["id"])
 
-    for member in ("rows_added", "rows_removed", "cells_changed", "duplicate_keys"):
-        with pytest.raises(NotImplementedError):
-            getattr(diff, member)()
+    with pytest.raises(NotImplementedError):
+        diff.cells_changed()
+
+    for member in ("rows_added", "rows_removed", "duplicate_keys"):
+        assert len(getattr(diff, member)()) == 0
 
 
 # Output and export tests
@@ -545,7 +557,10 @@ def test_reprs() -> None:
     left, right = _int_tables()
     diff = diff_tables(left, right, key=["id"])
 
-    assert repr(diff) == "TableDiff(columns_added=1, columns_removed=1, columns_type_changed=1)"
+    assert repr(diff) == (
+        "TableDiff(columns_added=1, columns_removed=1, columns_type_changed=1, "
+        "rows_added=0, rows_removed=0, rows_changed=0, duplicate_keys=0)"
+    )
     assert repr(diff.schema_arrow) == "ArrowTable(3 rows x 6 columns)"
 
 
