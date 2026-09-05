@@ -34,9 +34,9 @@ ground truth that isn't derived from the oracle itself.
 
 **Determinism is the whole point of this file**, same as
 `perf/generate_fixtures.py`: a single `random.Random(seed)` instance drives
-every draw in a fixed order, row order is always construction order, and
-parquet is written with fixed writer options (see `_write_pair`). Two runs
-of this script with the same `--rows`/`--seed` must produce byte-identical
+every draw in a fixed order, and row order is always construction order (see
+`generate`). Two runs of this script with the same `--rows`/`--seed` must
+produce byte-identical
 `a.parquet`/`b.parquet`/`manifest.json`. To prove it:
 
     cd perf/arrow
@@ -57,7 +57,7 @@ import random
 import string
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Final, Self
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -184,7 +184,7 @@ def _select_mutated_indices(
 class _Counters:
     """Running exact counts for the sidecar manifest, updated row by row."""
 
-    def __init__(self: "_Counters") -> None:
+    def __init__(self: Self) -> None:
         """Zero-initialize every counter."""
         self.deleted = 0
         self.modified_amount = 0

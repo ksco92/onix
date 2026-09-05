@@ -72,7 +72,6 @@ stdout (comparable against `generate_fixtures.py`'s sidecar `manifest.json`).
 import argparse
 import json
 from pathlib import Path
-from typing import Final
 
 import duckdb
 
@@ -121,8 +120,8 @@ def _schema_diff(con: duckdb.DuckDBPyConnection, left: Path, right: Path) -> lis
 
     def classify(left_type: str | None, right_type: str | None) -> str:
         """
-        :param left_type: The column's type in `va`, or `None` if absent.
-        :param right_type: The column's type in `vb`, or `None` if absent.
+        :param left_type: The column's type in `left`, or `None` if absent.
+        :param right_type: The column's type in `right`, or `None` if absent.
         :return: `"added"`, `"removed"`, or `"type_changed"`.
         """
         if left_type is None:
