@@ -57,9 +57,12 @@
 //!   `Float16`/`Float32`/`Float64`; `Decimal128` and `Decimal256`; `Utf8`,
 //!   `LargeUtf8`, `Utf8View`; `Binary`, `LargeBinary`, `BinaryView`,
 //!   `FixedSizeBinary`; `Timestamp` (any unit, with or without a zone); `Date32`
-//!   and `Date64`; `Time32`/`Time64` and `Duration` (by raw value tagged with
-//!   their unit); `Interval` (by its per-variant fields); and a `Dictionary` of
-//!   any of these (decoded first).
+//!   and `Date64` (both by day count, so a `Date32` and a whole-day `Date64` of
+//!   the same calendar day hash equal; a non-whole-day `Date64`, which Arrow's
+//!   whole-day contract forbids, keeps its raw value distinctly); `Time32`,
+//!   `Time64`, and `Duration` (by raw value tagged with their unit, so a unit
+//!   change reads as a value change); `Interval` (by its per-variant fields);
+//!   and a `Dictionary` of any of these (decoded first).
 //! - **Refused** with [`TableDiffError::UnsupportedRowType`], key or non-key:
 //!   any other scalar type this list does not name — today `RunEndEncoded`. A
 //!   scalar column is always hashed or refused, never silently skipped.
@@ -487,16 +490,12 @@ fn hash_cell(
             hash_timestamp(hasher, raw, *unit, tz.is_some());
         }
         DataType::Date32 => {
-            hasher.tag(TAG_DATE);
-            hasher.write_i64(i64::from(array.as_primitive::<Date32Type>().value(row)));
+            hash_day(
+                hasher,
+                i64::from(array.as_primitive::<Date32Type>().value(row)),
+            );
         }
-        DataType::Date64 => {
-            hasher.tag(TAG_DATE);
-            // Date64 is milliseconds since epoch; Arrow's contract is a whole
-            // number of days, so the raw value already distinguishes distinct
-            // dates and two equal dates hash equal without a lossy divide.
-            hasher.write_i64(array.as_primitive::<Date64Type>().value(row));
-        }
+        DataType::Date64 => hash_date64(hasher, array.as_primitive::<Date64Type>().value(row)),
         DataType::Time32(unit) => hash_time32(hasher, array, *unit, row),
         DataType::Time64(unit) => hash_time64(hasher, array, *unit, row),
         DataType::Duration(unit) => {
@@ -517,6 +516,33 @@ fn hash_cell(
     }
 
     Ok(())
+}
+
+/// Number of milliseconds in a whole day, the `Date64` unit.
+const MILLIS_PER_DAY: i64 = 86_400_000;
+
+/// Writes a whole-day date by its day count (discriminant `0`), so a `Date32`
+/// and a whole-day `Date64` of the same calendar day hash equal.
+fn hash_day(hasher: &mut CellHasher, days: i64) {
+    hasher.tag(TAG_DATE);
+    hasher.write(&[0]);
+    hasher.write_i64(days);
+}
+
+/// Writes a `Date64` (milliseconds since epoch). Arrow's contract is a whole
+/// number of days: a whole-day value folds to its day count (via *exact*
+/// division, so it hashes equal to the matching `Date32`), and a
+/// non-whole-day value — which the contract forbids but the hash must still
+/// distinguish — keeps its raw millisecond value under a separate discriminant,
+/// so it neither collides with a day count nor is truncated.
+fn hash_date64(hasher: &mut CellHasher, ms: i64) {
+    if ms % MILLIS_PER_DAY == 0 {
+        hash_day(hasher, ms / MILLIS_PER_DAY);
+    } else {
+        hasher.tag(TAG_DATE);
+        hasher.write(&[1]);
+        hasher.write_i64(ms);
+    }
 }
 
 /// A stable per-`TimeUnit` byte, so the same raw value at different units never
@@ -1430,11 +1456,35 @@ mod tests {
     }
 
     #[test]
-    fn date64_hashes_by_raw_value() {
-        // Date64 hashes its raw millisecond value: equal values are unchanged,
-        // and two distinct raw values (even within one calendar day, which
-        // Arrow's whole-day contract forbids but the hash still distinguishes)
-        // are a change.
+    fn date32_and_date64_same_day_are_unchanged() {
+        // A Date32 and a whole-day Date64 of the same calendar day compare equal
+        // (day 3 == 3 * 86_400_000 ms), so a schema migration between the two
+        // types is not reported as a row change.
+        let left_schema = schema(vec![id_field(), Field::new("d", DataType::Date32, false)]);
+        let right_schema = schema(vec![id_field(), Field::new("d", DataType::Date64, false)]);
+        let left = reader(
+            &left_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(Date32Array::from(vec![3])),
+            ],
+        );
+        let right = reader(
+            &right_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(Date64Array::from(vec![3 * 86_400_000])),
+            ],
+        );
+        let diff = diff_rows(&left, &right, &left_schema, &right_schema, &key()).unwrap();
+        assert_eq!(diff.counts.rows_changed, 0);
+    }
+
+    #[test]
+    fn date64_distinguishes_distinct_and_non_whole_day_values() {
+        // Equal values are unchanged; a whole-day value and a sub-day value
+        // within the same calendar day (which Arrow's whole-day contract forbids
+        // but the hash still distinguishes) are a change.
         let sch = schema(vec![id_field(), Field::new("d", DataType::Date64, false)]);
         let with = |v: i64| {
             reader(
