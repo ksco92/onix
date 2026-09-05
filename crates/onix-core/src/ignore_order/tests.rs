@@ -2865,6 +2865,14 @@ fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
     let pairs: &[(CValue, CValue)] = &[
         // Signed zero: Value equality treats +0.0 == -0.0.
         (float(0.0), float(-0.0)),
+        // A set built directly from both signed zeros dedups to the same
+        // single-member set regardless of which sign came first (SetItems::new
+        // now folds the two into one canonical slot, matching a real Python
+        // set, which can never hold both).
+        (
+            CValue::Set(SetItems::new(vec![float(0.0), float(-0.0)])),
+            CValue::Set(SetItems::new(vec![float(-0.0)])),
+        ),
         // Set members in different insertion orders canonicalize equal.
         (
             cset(&[json!(1), json!(2), json!(3)]),
@@ -2969,14 +2977,22 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
 /// construction-path check, not where the power comes from). Recurses over
 /// proptest-bounded depth (safe).
 ///
-/// The datetime and signed-zero perturbations are suppressed once the walk is
-/// **below a set or frozenset** (`in_set`, sticky through nested arrays, tuples
-/// and dicts). A set's canonical storage order is *finer* than value equality
-/// for signed zero (`-0.0` sorts before `0.0` in [`SetItems`], and `Value::eq`
-/// on sets zips stored order), so perturbing a member there would reorder the
-/// enclosing set and make the twin genuinely unequal — a false failure. Above
-/// any set the perturbations run and give the property its power; the reversal
-/// still runs everywhere.
+/// The datetime perturbation is suppressed once the walk is **below a set or
+/// frozenset** (`in_set`, sticky through nested arrays, tuples and dicts). A
+/// set's canonical storage order is *finer* than value equality for a
+/// naive/aware pair (`canonical_cmp` orders a `datetime` by instant then by
+/// whether it is aware, so the two never compare equal there, while
+/// `Value::eq` compares only the instant), so shifting a datetime's offset
+/// below a set would reorder the enclosing set and make the twin genuinely
+/// unequal — a false failure. Above any set the datetime perturbation runs
+/// and gives the property its power there; the reversal still runs
+/// everywhere.
+///
+/// The signed-zero perturbation has no such restriction: `canonical_cmp`'s
+/// number case (`number_cmp`) folds `-0.0` into `+0.0` before ordering, the
+/// same equivalence `Value::eq` already uses, so flipping a zero's sign
+/// anywhere — including a bare set member — never changes `SetItems`'
+/// canonical order or membership, and the twin stays genuinely equal.
 fn structural_twin(value: &CValue, in_set: bool) -> CValue {
     match value {
         CValue::Array(items) => CValue::Array(
@@ -3049,7 +3065,7 @@ fn structural_twin(value: &CValue, in_set: bool) -> CValue {
                 }
             }
         }
-        CValue::Number(n) if n.is_f64() && !in_set => {
+        CValue::Number(n) if n.is_f64() => {
             let f = n.as_f64().expect("is_f64 guarantees as_f64");
             let flipped = if f == 0.0 { -f } else { f };
             CValue::Number(

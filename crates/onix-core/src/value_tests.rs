@@ -641,21 +641,59 @@ fn set_items_drop_a_member_equal_to_an_earlier_one() {
     assert_eq!(&*items, &[Value::Null, Value::Str("x".into())]);
 }
 
-/// Deduplication is structural, so every one of these survives — including
-/// the two signed zeros, which render differently (`0.0` and `-0.0`).
+/// Deduplication is structural, so every one of these survives: an integral
+/// float stays distinct from the equal-valued integer (`1`/`1.0`), and every
+/// number below is a genuinely different value. Signed zero is the one
+/// exception — see `set_items_dedup_signed_zero_like_a_real_python_set`.
 #[test]
 fn set_items_keep_members_that_only_look_alike() {
     let items = SetItems::new(vec![
         Value::Number(Number::from_u64(1)),
         Value::Number(Number::from_f64(1.0).expect("finite")),
         Value::Bool(true),
-        Value::Number(Number::from_f64(0.0).expect("finite")),
-        Value::Number(Number::from_f64(-0.0).expect("finite")),
+        Value::Number(Number::from_f64(2.0).expect("finite")),
         Value::Number(Number::from_u64(u64::MAX)),
         Value::Number(Number::from_i64(-1)),
     ]);
 
-    assert_eq!(items.len(), 7);
+    assert_eq!(items.len(), 6);
+}
+
+/// A real Python `set` can never hold both `-0.0` and `0.0` — they compare
+/// and hash equal, so the second `.add()` is a no-op — confirmed against
+/// `deepdiff==9.1.0`: `DeepDiff({0.0, -0.0}, {0.0})` is `{}`. `SetItems::new`
+/// must dedup the pair the same way, keeping the first-inserted
+/// representative (whichever the caller's `items` order put first), exactly
+/// like the existing same-value dedup for any other equal pair.
+#[test]
+fn set_items_dedup_signed_zero_like_a_real_python_set() {
+    let items = SetItems::new(vec![
+        Value::Number(Number::from_f64(-0.0).expect("finite")),
+        Value::Number(Number::from_f64(0.0).expect("finite")),
+    ]);
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0],
+        Value::Number(Number::from_f64(0.0).expect("finite"))
+    );
+    assert_eq!(items[0].to_serde_json().to_string(), "-0.0");
+
+    // Reversed input order keeps the other representative — first inserted
+    // wins either way.
+    let items = SetItems::new(vec![
+        Value::Number(Number::from_f64(0.0).expect("finite")),
+        Value::Number(Number::from_f64(-0.0).expect("finite")),
+    ]);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].to_serde_json().to_string(), "0.0");
+
+    // The pair still dedups nested inside a container that is itself a
+    // set member: `(-0.0,)` and `(0.0,)` are `Value`-equal (tuples compare
+    // element-wise, and `Number` equality treats the two zeros as one), so a
+    // set built directly from both keeps only one, matching what a real
+    // Python `{(-0.0,), (0.0,)}` does.
+    let items = SetItems::new(vec![ctup(&[json!(-0.0)]), ctup(&[json!(0.0)])]);
+    assert_eq!(items.len(), 1);
 }
 
 /// Two members Python would call equal but that are structurally different

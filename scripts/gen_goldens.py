@@ -271,10 +271,22 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
     "set_bool_vs_int_are_distinct_items": ({True}, {1}),
     "set_int_vs_float_are_distinct_items": ({1}, {1.0}),
     "set_float_item_reprs": ({1.0, 0.1, 1e16, 1e-05, -0.0}, {2.0}),
-    # A set holding both signed zeros, which Python can only express by
-    # nesting them: canonical order is a *total* float order, so `-0.0`
-    # sorts before `0.0` where Python's own `<` calls them equal.
-    "set_signed_zero_members_order_totally": ({}, {"s": {(0.0,), (-0.0, -1)}}),
+    # Two tuple members whose leading elements are `-0.0` and `0.0`: those
+    # fold together in canonical order (matching Python's own `set`, which
+    # treats the two zeros as equal too), so the pair ranks by the one thing
+    # left to compare once that element ties: length.
+    "set_signed_zero_tuple_members_ranked_by_length": ({}, {"s": {(0.0,), (-0.0, -1)}}),
+    # A bare `-0.0` and `0.0` are one Python-equal, one-element set apiece
+    # (`{0.0}` and `{-0.0}` are each single-member sets, never a two-zero
+    # set — a real `set` collapses that pair before it ever reaches onix),
+    # so comparing the two sets reports nothing.
+    "set_bare_signed_zero_members_compare_equal": ({0.0}, {-0.0}),
+    # The same equality one level down, alongside an unrelated shared member
+    # that keeps the outer list genuinely worth comparing.
+    "set_signed_zero_members_compare_equal_nested": ([{0.0, 1}], [{-0.0, 1}]),
+    # A set holding a bare zero next to another member, diffed against a set
+    # missing it: the removed item renders as the sign it was given, `0.0`.
+    "set_bare_zero_item_removed": ({0.0, 1}, {1}),
     "set_str_items": ({"a"}, {"b"}),
     "set_str_item_with_single_quote": ({"it's"}, {"x"}),
     "set_str_item_with_double_quote": ({'he said "hi"'}, {"x"}),
@@ -845,6 +857,26 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
     # dispatches to the same set diff either way; and a set/frozenset is
     # hashed in its own bucket, so it never hash-matches a list or a tuple.
     "ignore_order_set_diff_is_unaffected": ({1, 2}, {2, 3}, {"ignore_order": True}),
+    # Signed zero under ignore_order: a set has no order to ignore, so these
+    # three answer identically with the flag on or off (see the plain
+    # `set_bare_signed_zero_members_compare_equal`,
+    # `set_signed_zero_members_compare_equal_nested` and
+    # `set_bare_zero_item_removed` cases above).
+    "ignore_order_set_bare_signed_zero_members_compare_equal": (
+        {0.0},
+        {-0.0},
+        {"ignore_order": True},
+    ),
+    "ignore_order_set_signed_zero_members_compare_equal_nested": (
+        [{0.0, 1}],
+        [{-0.0, 1}],
+        {"ignore_order": True},
+    ),
+    "ignore_order_set_bare_zero_item_removed": (
+        {0.0, 1},
+        {1},
+        {"ignore_order": True},
+    ),
     "ignore_order_list_of_sets_pairs": (
         [{1, 2}, {3}],
         [{3}, {1, 2}],

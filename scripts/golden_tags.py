@@ -28,7 +28,6 @@ against the same fixtures.
 
 import datetime
 import json
-import math
 from collections.abc import Callable
 from typing import Final, Protocol
 
@@ -340,10 +339,14 @@ def _order_key(value: object) -> tuple[object, ...]:
         return (2, value)
 
     if isinstance(value, float):
-        # A total order, matching Rust's `f64::total_cmp`: Python's own `<`
-        # calls the two signed zeros equal, which would leave a set holding
-        # both in whatever order it arrived in.
-        return (3, math.copysign(1.0, value) > 0.0, value)
+        # Folds -0.0 into +0.0 before ordering, mirroring
+        # `onix_core::value::number_cmp`: the two compare and hash equal
+        # (Python's own `<` already calls them equal), so a set holding both
+        # -- directly built, since a real Python `set` can never contain the
+        # pair -- must dedup them the same way `SetItems::new` does, and a
+        # container holding one of each (`(-0.0, -1)` vs `(0.0,)`) must rank
+        # by nothing else once their zeros compare equal.
+        return (3, value + 0.0)
 
     if isinstance(value, str):
         return (4, value)
