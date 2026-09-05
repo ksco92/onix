@@ -749,9 +749,9 @@ fn map_deeper_than_recurses_with_incrementing_not_constant_depth() {
 
 #[test]
 fn deeper_than_handles_a_deeply_nested_value_without_crashing() {
-    // Security-gate regression: `deeper_than` itself must be immune to
-    // the very depth it is measuring — RECURSION_OVERFLOW_DEPTH (see its
-    // doc) reuses this file's own established native-recursion-overflow
+    // Guards `deeper_than` itself against being vulnerable to the very
+    // depth it is measuring — RECURSION_OVERFLOW_DEPTH (see its doc)
+    // reuses this file's own established native-recursion-overflow
     // threshold. Built iteratively (a flat loop, not recursion); the
     // whole test runs on `run_on_a_large_stack` so it is genuinely
     // dropped afterwards instead of leaked.
@@ -761,7 +761,7 @@ fn deeper_than_handles_a_deeply_nested_value_without_crashing() {
     });
 }
 
-// --- Security-gate regression: a shallow finding carrying a deep VALUE
+// --- A shallow finding carrying a deep VALUE
 // (dictionary_item_added/removed/type_changes/values_changed) must
 // error cleanly via check_value_depth, never clone the deep value. ---
 
@@ -919,8 +919,7 @@ fn scalar_diff_rejects_a_value_whose_own_nesting_exceeds_max_depth_on_the_new_si
 
 // --- Compounding-depth regression: a value reached through a shallow
 // finding must not be allowed its own full max_depth on top of the path
-// depth already consumed to reach it. A value's own nesting and the path
-// depth it is found at share ONE combined max_depth budget, not one each. ---
+// depth already consumed to reach it. ---
 
 #[test]
 fn value_depth_full_budget_at_a_shallow_finding_is_accepted() {
@@ -1115,9 +1114,10 @@ fn sibling_after_a_deeply_nested_key_gets_its_own_shallow_path_not_the_deep_ones
 }
 
 #[test]
-fn security_poc_shallow_finding_with_a_value_past_the_guard_errors_cleanly() {
-    // The exact security-gate PoC shape: diff({}, {"x": <deep array>})
-    // at DEFAULT_MAX_DEPTH. `check_value_depth`/`deeper_than` reject a
+fn shallow_finding_with_a_value_past_the_guard_errors_cleanly() {
+    // Exercises the shallow-finding-with-a-too-deep-value shape:
+    // diff({}, {"x": <deep array>}) at DEFAULT_MAX_DEPTH.
+    // `check_value_depth`/`deeper_than` reject a
     // too-deep value by walking at most `max_depth + 1` levels of it
     // before short-circuiting (see `check_value_depth`'s doc), so
     // PAST_DEFAULT_MAX_DEPTH exercises identical behavior to the
@@ -1202,7 +1202,7 @@ fn compounding_depth_regression_max_depth_20_000_traversal_plus_deep_added_value
 
 #[test]
 fn threshold_collapse_rejects_a_deep_side_on_a_constrained_stack_instead_of_crashing() {
-    // Security-gate regression for the `threshold_to_diff_deeper` collapse:
+    // Guards the `threshold_to_diff_deeper` collapse:
     // the collapse clones the whole `a`/`b` dict into a finding,
     // so cloning before checking depth would hand an attacker-controlled,
     // `RECURSION_OVERFLOW_DEPTH`-deep value straight to `serde_json::Value`'s
