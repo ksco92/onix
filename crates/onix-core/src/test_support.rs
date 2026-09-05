@@ -109,6 +109,6 @@ pub(crate) fn cnum(n: &serde_json::Number) -> Number {
     } else if let Some(i) = n.as_i64() {
         Number::from_i64(i)
     } else {
-        Number::from_f64(n.as_f64().expect("serde Number is u64/i64/f64")).expect("finite")
+        Number::from_f64(n.as_f64().expect("serde Number is u64/i64/f64"))
     }
 }

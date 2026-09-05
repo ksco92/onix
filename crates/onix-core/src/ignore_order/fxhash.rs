@@ -59,6 +59,14 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// hence `mix_float_bits`, so the hazard does not reach the new key either — a
 /// *non-adversarial* run of integral/half-integer floats, whose raw bit
 /// patterns share ~50 trailing zeros, does not accidentally collide.
+/// `ItemKey::Float` additionally maps *every* `NaN`, regardless of its own
+/// bits, onto one fixed representative (`deephash_float_bits`, matching
+/// `DeepHash`'s `str(obj)`-based digest — see that function's own doc): a
+/// deliberate full key collapse, not merely a hash collision, so a run of
+/// `NaN`s in one of these tables costs *less* than the equivalent run of
+/// distinct floats would (they fold to a single entry), not more — this
+/// changes which values these tables treat as the same item, not their
+/// per-lookup cost.
 ///
 /// For those remaining `ignore_order`-only tables the trade is deliberate and
 /// measured. Re-keying them to `SipHash` (`RandomState`) added a material,

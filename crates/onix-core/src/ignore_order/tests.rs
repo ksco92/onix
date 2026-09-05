@@ -3065,7 +3065,7 @@ fn dist_hash(value: &CValue) -> u64 {
 /// aware pair shifted by its offset to the same moment).
 #[test]
 fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
-    let float = |f: f64| CValue::Number(crate::value::Number::from_f64(f).unwrap());
+    let float = |f: f64| CValue::Number(crate::value::Number::from_f64(f));
     let nested_set = |order: [i64; 3]| {
         CValue::Set(SetItems::new(vec![
             ctup(&[json!(order[0])]),
@@ -3116,6 +3116,37 @@ fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
     }
 }
 
+/// `NaN` cannot appear among the pairs above — no two `NaN`s are ever
+/// `Value`-equal (`NaN != NaN`, matching Python), so there is no equal-values
+/// case to add. What NEEDS pinning instead is the deliberately *coarser*
+/// hash: `DistKey`'s `Hash` collapses every `NaN` bit pattern onto one bucket
+/// (`crate::ignore_order::hash::number_key`, matching `DeepHash`'s own
+/// `NaN`-insensitive digest — see that function's own doc), so two
+/// genuinely distinct, never-`Value`-equal `NaN`s hash *equal* here — the
+/// opposite direction from the property above, and safe only because a hash
+/// collision is not itself a lookup match: `DistKey`'s `Eq` is `Value`'s
+/// real equality, and it must still tell the two apart, or the memo would
+/// silently hand one `NaN`'s cached distance to the other.
+#[test]
+fn dist_key_hash_collision_on_distinct_nans_never_becomes_equality() {
+    let nan_a = CValue::Number(crate::value::Number::from_f64(f64::NAN));
+    let nan_b = CValue::Number(crate::value::Number::from_f64(-f64::NAN));
+
+    assert_ne!(nan_a, nan_b, "two NaN values are never Value-equal");
+    assert_eq!(
+        dist_hash(&nan_a),
+        dist_hash(&nan_b),
+        "NaN's dist-key hash deliberately ignores sign/payload"
+    );
+
+    let key_a = super::hash::DistKey::new(&nan_a);
+    let key_b = super::hash::DistKey::new(&nan_b);
+    assert!(
+        key_a != key_b,
+        "a hash collision must not make DistKey::eq treat two distinct NaNs as the same cache entry"
+    );
+}
+
 /// An `arbitrary` compact value covering every equality class the distance-key
 /// hash must respect — including the ones JSON cannot express, so they are
 /// actually generated: tuples, sets, frozensets, datetimes (naive and aware),
@@ -3137,15 +3168,28 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
     )
         .prop_map(|(y, mo, d, h, mi, s, off)| cdt_at(y, mo, d, h, mi, s, 0, off));
     let arb_date = (2000i32..2025, 1u8..=12, 1u8..=28).prop_map(|(y, m, d)| cdate(y, m, d));
+    // `NaN` is excluded, not `any::<f64>()`'s non-finite values generally:
+    // `Infinity`/`-Infinity` are ordinary equal-to-themselves floats and
+    // `structural_twin` leaves them untouched (only a signed zero gets
+    // perturbed), so they exercise this property harmlessly. A `NaN` cannot:
+    // `Value::eq` never calls two `NaN`s equal (matching Python's
+    // `nan != nan`), so `prop_assert_eq!(&value, &twin)` below would fail on
+    // any tree containing one, structural twin or not — this proptest is
+    // about the hash/equality *agreement*, which a `NaN` leaf has no
+    // meaningful instance of (see
+    // `dist_key_hash_collision_on_distinct_nans_never_becomes_equality` for
+    // the coverage a `NaN` does need).
     let arb_float = prop_oneof![
         Just(0.0f64),
         Just(-0.0f64),
         Just(1.0f64),
         Just(2.0f64),
+        Just(f64::INFINITY),
+        Just(f64::NEG_INFINITY),
         any::<f64>(),
     ]
-    .prop_filter_map("finite floats only", |f| {
-        crate::value::Number::from_f64(f).map(CValue::Number)
+    .prop_filter_map("not NaN", |f| {
+        (!f.is_nan()).then(|| CValue::Number(crate::value::Number::from_f64(f)))
     });
     let leaf = prop_oneof![
         Just(CValue::Null),
@@ -3283,9 +3327,7 @@ fn structural_twin(value: &CValue, in_set: bool) -> CValue {
         CValue::Number(n) if n.is_f64() => {
             let f = n.as_f64().expect("is_f64 guarantees as_f64");
             let flipped = if f == 0.0 { -f } else { f };
-            CValue::Number(
-                crate::value::Number::from_f64(flipped).expect("finite float stays finite"),
-            )
+            CValue::Number(crate::value::Number::from_f64(flipped))
         }
         scalar => scalar.clone(),
     }

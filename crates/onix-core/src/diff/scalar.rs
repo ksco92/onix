@@ -207,14 +207,17 @@ pub(crate) fn numbers_equal(old: &Number, new: &Number) -> bool {
 }
 /// Compares two floats for exact equality.
 ///
-/// This mirrors Python's `==` semantics for floats (including
-/// `0.0 == -0.0`), with no implicit epsilon; NaN/Infinity are out of scope
-/// for this JSON value model, so exact IEEE-754 equality is the correct
+/// This mirrors Python's `==` semantics for floats: `0.0 == -0.0`, and —
+/// with no special-casing needed — `NaN != NaN` (matching real `DeepDiff`
+/// for two independently-obtained `NaN` values; see `tests/golden/README.md`'s
+/// "Non-finite floats" section for the one case this crate cannot
+/// reproduce, where `DeepDiff` short-circuits on `t1 is t2`), no implicit
+/// epsilon, and `Infinity == Infinity`. Exact IEEE-754 `==` is the correct
 /// (and only) rule here.
 fn floats_equal(a: f64, b: f64) -> bool {
     #[allow(
         clippy::float_cmp,
-        reason = "exact IEEE-754 equality is the intended rule (Python == semantics, including 0.0 == -0.0); NaN/Infinity are out of scope for this JSON value model"
+        reason = "exact IEEE-754 equality is the intended rule (Python == semantics, including 0.0 == -0.0 and NaN != NaN)"
     )]
     {
         a == b

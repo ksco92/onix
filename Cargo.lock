@@ -629,7 +629,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "onix-arrow"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "onix-cli"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "onix-core",
  "serde_json",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "onix-core"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "proptest",
  "serde",
@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "onix-py"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -997,7 +997,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -1050,9 +1050,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.4"
+version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
+checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1199,7 +1199,7 @@ dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
  "wasm-bindgen-shared",
 ]
 
