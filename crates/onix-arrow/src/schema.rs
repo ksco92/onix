@@ -63,21 +63,29 @@ pub struct SchemaChange {
 /// Normalizes a data type to the canonical form used for comparison, so that
 /// columns whose types differ only in a *physical* encoding compare equal —
 /// what a data engineer means by "the same type". The rules, applied
-/// recursively through `List`/`LargeList`/`ListView`/`LargeListView`,
-/// `Struct`, and `Map` children:
+/// recursively through list, struct, and map children:
 ///
-/// - a dictionary-encoded type becomes its value type (so a dictionary-encoded
-///   string equals a plain string, and `list<dictionary<int32, string>>`
-///   equals `list<string>` — polars and `DuckDB` emit dictionary/categorical
+/// - a dictionary-encoded type becomes its value type (dictionary-encoded
+///   string == plain string; `list<dictionary<int32, string>>` ==
+///   `list<string>` — polars and `DuckDB` emit dictionary/categorical
 ///   encodings routinely);
-/// - `Utf8View` and `LargeUtf8` become `Utf8` (polars exports strings as
-///   `Utf8View`, pyarrow and `DuckDB` as `Utf8`);
-/// - `BinaryView` and `LargeBinary` become `Binary`;
-/// - `LargeList`, `ListView`, and `LargeListView` become `List`.
+/// - `Utf8View` and `LargeUtf8` become `Utf8`, `BinaryView`/`LargeBinary`
+///   become `Binary`;
+/// - every list variant (`List`/`LargeList`/`ListView`/`LargeListView`)
+///   becomes `List`, and its element field's name and nullability are dropped
+///   (canonicalized to `item`, nullable), because producers disagree on both
+///   (`DuckDB` names the element `l`, pyarrow `item`, Parquet `element`);
+/// - a `Map`, and a `LargeList<Struct<key, value>>` (how polars re-exports an
+///   Arrow map), both become one canonical `Map` shape, so a map column
+///   compares equal across libraries.
 ///
 /// Every other parameter — timestamp unit and timezone, decimal precision and
-/// scale — is preserved and does count as a difference. Nullability is handled
-/// separately (it never counts) and is not touched here.
+/// scale — is preserved and counts as a difference. Nullability never counts
+/// and is canonicalized away at every level.
+///
+/// Recursive, but only ever called on a type already checked by
+/// [`depth_exceeds`], so its native recursion is bounded by
+/// [`crate::MAX_NESTING_DEPTH`].
 fn normalized_type(data_type: &DataType) -> DataType {
     match data_type {
         DataType::Dictionary(_, value) => normalized_type(value),
@@ -86,21 +94,67 @@ fn normalized_type(data_type: &DataType) -> DataType {
         DataType::List(field)
         | DataType::LargeList(field)
         | DataType::ListView(field)
-        | DataType::LargeListView(field) => DataType::List(normalized_field(field)),
-        DataType::Struct(fields) => DataType::Struct(fields.iter().map(normalized_field).collect()),
-        DataType::Map(field, sorted) => DataType::Map(normalized_field(field), *sorted),
+        | DataType::LargeListView(field) => match map_entries(field.data_type()) {
+            Some((key, value)) => canonical_map(key, value),
+            None => DataType::List(Arc::new(Field::new(
+                "item",
+                normalized_type(field.data_type()),
+                true,
+            ))),
+        },
+        DataType::Map(entries, _) => {
+            if let DataType::Struct(fields) = entries.data_type()
+                && fields.len() == 2
+            {
+                return canonical_map(fields[0].data_type(), fields[1].data_type());
+            }
+            data_type.clone()
+        }
+        DataType::Struct(fields) => DataType::Struct(
+            fields
+                .iter()
+                .map(|f| Field::new(f.name(), normalized_type(f.data_type()), true))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
 
-/// Normalizes a field's data type (see [`normalized_type`]), keeping its name
-/// and nullability so nested structs still compare by member names.
-fn normalized_field(field: &FieldRef) -> FieldRef {
-    Arc::new(Field::new(
-        field.name(),
-        normalized_type(field.data_type()),
-        field.is_nullable(),
-    ))
+/// The one canonical shape both an Arrow `Map` and polars'
+/// `LargeList<Struct<key, value>>` map export normalize to: a `Map` whose
+/// entries are a struct with a non-null `key` and a nullable `value`, both
+/// types normalized. Field names, the sorted flag, and the entries-field
+/// nullability are all canonicalized away.
+fn canonical_map(key: &DataType, value: &DataType) -> DataType {
+    DataType::Map(
+        Arc::new(Field::new(
+            "entries",
+            DataType::Struct(
+                vec![
+                    Field::new("key", normalized_type(key), false),
+                    Field::new("value", normalized_type(value), true),
+                ]
+                .into(),
+            ),
+            false,
+        )),
+        false,
+    )
+}
+
+/// If `element` is a two-field struct named `key`/`value` — the element type of
+/// a `LargeList` that polars produces for an Arrow map — returns the key and
+/// value types so it can be treated as a map. `None` for any other element.
+fn map_entries(element: &DataType) -> Option<(&DataType, &DataType)> {
+    if let DataType::Struct(fields) = element
+        && fields.len() == 2
+        && fields[0].name() == "key"
+        && fields[1].name() == "value"
+    {
+        return Some((fields[0].data_type(), fields[1].data_type()));
+    }
+
+    None
 }
 
 /// Whether two column types are considered equal: equal after
@@ -108,6 +162,64 @@ fn normalized_field(field: &FieldRef) -> FieldRef {
 /// comparison.
 fn types_equal(left: &DataType, right: &DataType) -> bool {
     normalized_type(left) == normalized_type(right)
+}
+
+/// Whether `data_type` is nested deeper than `limit` levels, counting each
+/// nesting wrapper (dictionary, any list, struct, map, union, run-end) as one
+/// level. **Iterative** — an explicit heap work-stack, no native recursion —
+/// so it is itself safe to run on any input depth, and it is the guard that
+/// keeps [`normalized_type`], the type's `Display` (used to render the report),
+/// and the type's own `Drop` from overflowing the native stack on
+/// adversarially deep input.
+fn depth_exceeds(data_type: &DataType, limit: usize) -> bool {
+    let mut stack: Vec<(&DataType, usize)> = vec![(data_type, 0)];
+
+    while let Some((dt, depth)) = stack.pop() {
+        if depth > limit {
+            return true;
+        }
+
+        let child_depth = depth + 1;
+
+        match dt {
+            DataType::Dictionary(_, value) => stack.push((value, child_depth)),
+            DataType::List(f)
+            | DataType::LargeList(f)
+            | DataType::ListView(f)
+            | DataType::LargeListView(f)
+            | DataType::FixedSizeList(f, _)
+            | DataType::Map(f, _)
+            | DataType::RunEndEncoded(_, f) => stack.push((f.data_type(), child_depth)),
+            DataType::Struct(fields) => {
+                for field in fields {
+                    stack.push((field.data_type(), child_depth));
+                }
+            }
+            DataType::Union(fields, _) => {
+                for (_, field) in fields.iter() {
+                    stack.push((field.data_type(), child_depth));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+/// Rejects a schema with any column nested deeper than
+/// [`crate::MAX_NESTING_DEPTH`], before any recursive walk touches it.
+fn check_depths(schema: &Schema) -> Result<(), TableDiffError> {
+    for field in schema.fields() {
+        if depth_exceeds(field.data_type(), crate::MAX_NESTING_DEPTH) {
+            return Err(TableDiffError::MaxDepthExceeded {
+                column: field.name().clone(),
+                max_depth: crate::MAX_NESTING_DEPTH,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Indexes a schema's fields by name, rejecting a side with a duplicate name.
@@ -134,9 +246,14 @@ fn index_by_name(schema: &Schema, side: Side) -> Result<HashMap<&str, &FieldRef>
 ///
 /// # Errors
 ///
-/// [`TableDiffError::DuplicateColumn`] if either side has two columns with the
-/// same name, naming the column and the side.
+/// - [`TableDiffError::MaxDepthExceeded`] if a column's type is nested past
+///   [`crate::MAX_NESTING_DEPTH`] (checked first, before any recursive walk).
+/// - [`TableDiffError::DuplicateColumn`] if either side has two columns with
+///   the same name, naming the column and the side.
 pub fn diff_schemas(left: &Schema, right: &Schema) -> Result<Vec<SchemaChange>, TableDiffError> {
+    check_depths(left)?;
+    check_depths(right)?;
+
     let left_by_name = index_by_name(left, Side::Left)?;
     let right_by_name = index_by_name(right, Side::Right)?;
     let mut changes = Vec::new();
@@ -434,6 +551,233 @@ mod tests {
 
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].change, ChangeKind::TypeChanged);
+    }
+
+    #[test]
+    fn list_element_field_name_and_nullability_are_ignored() {
+        // DuckDB names the list element `l` and pyarrow `item`; a non-null vs
+        // nullable element must not matter either.
+        let left = schema(vec![Field::new(
+            "xs",
+            DataType::List(std::sync::Arc::new(Field::new("l", DataType::Int64, false))),
+            true,
+        )]);
+        let right = schema(vec![Field::new(
+            "xs",
+            DataType::List(std::sync::Arc::new(Field::new(
+                "item",
+                DataType::Int64,
+                true,
+            ))),
+            true,
+        )]);
+        assert!(diff_schemas(&left, &right).unwrap().is_empty());
+    }
+
+    #[test]
+    fn arrow_map_equals_polars_large_list_of_key_value_struct() {
+        let arrow_map = map_with(DataType::Int64);
+        let polars_style = DataType::LargeList(std::sync::Arc::new(Field::new(
+            "item",
+            DataType::Struct(
+                vec![
+                    // polars re-exports the key as nullable Utf8View
+                    Field::new("key", DataType::Utf8View, true),
+                    Field::new("value", DataType::Int64, true),
+                ]
+                .into(),
+            ),
+            true,
+        )));
+        let left = schema(vec![Field::new("m", arrow_map, true)]);
+        let right = schema(vec![Field::new("m", polars_style, true)]);
+        assert!(diff_schemas(&left, &right).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_of_non_map_struct_is_not_treated_as_map() {
+        // A list of a two-field struct NOT named key/value stays a list; it
+        // must not collapse to the map canonical form.
+        let point = DataType::Struct(
+            vec![
+                Field::new("x", DataType::Int64, true),
+                Field::new("y", DataType::Int64, true),
+            ]
+            .into(),
+        );
+        let left = schema(vec![Field::new("pts", list_of(point), true)]);
+        let right = schema(vec![Field::new("pts", map_with(DataType::Int64), true)]);
+        let changes = diff_schemas(&left, &right).unwrap();
+
+        assert_eq!(changes.len(), 1, "a list of points is not a map");
+        assert_eq!(changes[0].change, ChangeKind::TypeChanged);
+    }
+
+    fn nested_struct(depth: usize) -> DataType {
+        let mut ty = DataType::Int64;
+
+        for _ in 0..depth {
+            ty = DataType::Struct(vec![Field::new("f", ty, true)].into());
+        }
+
+        ty
+    }
+
+    #[test]
+    fn depth_at_the_limit_is_accepted() {
+        // A column exactly at the bound compares normally (no MaxDepthExceeded).
+        let ty = nested_struct(crate::MAX_NESTING_DEPTH);
+        let left = schema(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("x", ty.clone(), true),
+        ]);
+        let right = schema(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("x", ty, true),
+        ]);
+        assert!(diff_schemas(&left, &right).unwrap().is_empty());
+    }
+
+    #[test]
+    fn depth_past_the_limit_is_a_typed_error_not_a_crash() {
+        // Control: depth_exceeds itself is iterative, so this construction and
+        // check cannot overflow the stack even far past the bound.
+        let ty = nested_struct(crate::MAX_NESTING_DEPTH + 1);
+        assert!(super::depth_exceeds(&ty, crate::MAX_NESTING_DEPTH));
+
+        let left = schema(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("deep", ty, true),
+        ]);
+        let right = schema(vec![Field::new("id", DataType::Int64, false)]);
+        assert_eq!(
+            diff_schemas(&left, &right),
+            Err(TableDiffError::MaxDepthExceeded {
+                column: "deep".to_string(),
+                max_depth: crate::MAX_NESTING_DEPTH,
+            })
+        );
+    }
+
+    #[test]
+    fn deeply_nested_dictionary_is_rejected() {
+        // Each dictionary wrapper counts as one level, so a dictionary nested
+        // past the bound is refused; if the depth check skipped dictionary
+        // wrappers this would slip through.
+        let mut ty = DataType::Int64;
+        for _ in 0..(crate::MAX_NESTING_DEPTH + 5) {
+            ty = DataType::Dictionary(Box::new(DataType::Int32), Box::new(ty));
+        }
+        let left = schema(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("deep", ty, true),
+        ]);
+        let right = schema(vec![Field::new("id", DataType::Int64, false)]);
+        assert!(matches!(
+            diff_schemas(&left, &right),
+            Err(TableDiffError::MaxDepthExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn deeply_nested_union_is_rejected() {
+        use arrow_schema::{UnionFields, UnionMode};
+
+        let mut ty = DataType::Int64;
+        for _ in 0..(crate::MAX_NESTING_DEPTH + 5) {
+            let union_fields: UnionFields = [(0i8, std::sync::Arc::new(Field::new("f", ty, true)))]
+                .into_iter()
+                .collect();
+            ty = DataType::Union(union_fields, UnionMode::Sparse);
+        }
+        let left = schema(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("deep", ty, true),
+        ]);
+        let right = schema(vec![Field::new("id", DataType::Int64, false)]);
+        assert!(matches!(
+            diff_schemas(&left, &right),
+            Err(TableDiffError::MaxDepthExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn depth_check_covers_list_nesting_without_native_recursion() {
+        // A list nested far past what a recursive walk (or `DataType`'s own
+        // recursive `Drop`) could survive is rejected cleanly, proving the
+        // check is iterative. The fixture is built iteratively and `forget`en
+        // rather than dropped, so its recursive teardown cannot crash this
+        // (non-subprocess) test harness and mask the result — the crashing
+        // path itself is covered end to end in the Python subprocess tests.
+        let mut ty = DataType::Int64;
+        for _ in 0..50_000 {
+            ty = DataType::List(std::sync::Arc::new(Field::new("item", ty, true)));
+        }
+        let left = schema(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("deep", ty, true),
+        ]);
+        let right = schema(vec![Field::new("id", DataType::Int64, false)]);
+        assert!(matches!(
+            diff_schemas(&left, &right),
+            Err(TableDiffError::MaxDepthExceeded { .. })
+        ));
+
+        std::mem::forget(left);
+    }
+
+    #[test]
+    fn depth_check_traverses_every_nested_variant() {
+        use arrow_schema::{UnionFields, UnionMode};
+
+        let item = || std::sync::Arc::new(Field::new("item", DataType::Int64, true));
+        let union_fields: UnionFields = [
+            (
+                0i8,
+                std::sync::Arc::new(Field::new("a", DataType::Int64, true)),
+            ),
+            (
+                1i8,
+                std::sync::Arc::new(Field::new("b", DataType::Utf8, true)),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let union = DataType::Union(union_fields, UnionMode::Sparse);
+        let run_end = DataType::RunEndEncoded(
+            std::sync::Arc::new(Field::new("run_ends", DataType::Int32, false)),
+            item(),
+        );
+        let fields = vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("fsl", DataType::FixedSizeList(item(), 3), true),
+            Field::new("llv", DataType::LargeListView(item()), true),
+            Field::new("u", union, true),
+            Field::new("ree", run_end, true),
+        ];
+        let left = schema(fields.clone());
+        let right = schema(fields);
+        // Identical schemas including every nested variant: the depth check
+        // walks each arm, and nothing is reported.
+        assert!(diff_schemas(&left, &right).unwrap().is_empty());
+    }
+
+    #[test]
+    fn map_with_non_two_field_entries_is_left_as_is() {
+        // A structurally-malformed Map (entries struct without exactly two
+        // fields) is not treated as a canonical map; identical ones still
+        // compare equal.
+        let malformed = DataType::Map(
+            std::sync::Arc::new(Field::new(
+                "entries",
+                DataType::Struct(vec![Field::new("only", DataType::Int64, true)].into()),
+                false,
+            )),
+            false,
+        );
+        let left = schema(vec![Field::new("m", malformed.clone(), true)]);
+        let right = schema(vec![Field::new("m", malformed, true)]);
+        assert!(diff_schemas(&left, &right).unwrap().is_empty());
     }
 
     #[test]

@@ -57,6 +57,19 @@ pub enum TableDiffError {
         /// The side whose schema contains the duplicate.
         side: Side,
     },
+    /// A column's Arrow type is nested more deeply than the diff will walk.
+    /// Arrow nesting depth is attacker-controlled and unbounded, and every
+    /// recursive walk over a [`arrow_schema::DataType`] (the comparison here,
+    /// plus the type's own `Display`, `Clone`, and `Drop`) is a native-stack
+    /// sink; this bound turns a would-be stack overflow into a recoverable
+    /// error. The bound is far above any real schema — see
+    /// [`crate::MAX_NESTING_DEPTH`].
+    MaxDepthExceeded {
+        /// The column whose type is too deeply nested.
+        column: String,
+        /// The maximum nesting depth allowed.
+        max_depth: usize,
+    },
     /// A member of [`crate::TableDiff`] that a later version fills in was
     /// asked for before that version exists. Schema diffing is complete in
     /// this version; row-level results (`rows_added`, `rows_removed`,
@@ -81,6 +94,11 @@ impl fmt::Display for TableDiffError {
                 f,
                 "the {side} table has more than one column named {column:?}; \
                  column names must be unique on each side"
+            ),
+            TableDiffError::MaxDepthExceeded { column, max_depth } => write!(
+                f,
+                "column {column:?} has an Arrow type nested deeper than the maximum of \
+                 {max_depth}; diffing it could overflow the native stack, so it is refused"
             ),
             TableDiffError::NotImplemented { feature } => write!(
                 f,
@@ -130,6 +148,17 @@ mod tests {
         assert!(message.contains("\"x\""));
         assert!(message.contains("left"));
         assert!(message.contains("unique"));
+    }
+
+    #[test]
+    fn max_depth_exceeded_message_names_column_and_bound() {
+        let error = TableDiffError::MaxDepthExceeded {
+            column: "deep".to_string(),
+            max_depth: 128,
+        };
+        let message = error.to_string();
+        assert!(message.contains("\"deep\""));
+        assert!(message.contains("128"));
     }
 
     #[test]

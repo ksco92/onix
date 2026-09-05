@@ -79,6 +79,31 @@ pub use options::TableDiffOptions;
 pub use schema::{ChangeKind, SchemaChange, diff_schemas};
 pub use table_diff::{TableDiff, TableDiffSummary};
 
+/// The maximum column-type nesting depth [`diff_tables`] will compare; a
+/// column nested deeper is refused with [`TableDiffError::MaxDepthExceeded`].
+///
+/// Arrow `DataType` nesting depth is attacker-controlled and unbounded, and
+/// every recursive walk over one — the comparison, the type's `Display` (which
+/// renders the report), and its own `Clone`/`Drop` — is a native-stack sink
+/// that would abort the process with an uncatchable overflow, not a Python
+/// exception (pyarrow's own recursive `str()` survives depths where these
+/// die, so the producer is not a backstop). This bound is checked iteratively,
+/// before any recursive walk runs, and converts that hazard into a recoverable
+/// error.
+///
+/// The value, 128, is far above any real Arrow schema (nesting beyond a
+/// handful of levels is exotic; a hundred is unheard of) yet small enough that
+/// the deepest permitted recursion stays well within a small thread stack: at
+/// a measured worst case near 2.8 KiB per level (nested structs overflow an
+/// 8 MiB stack around depth 3,000 once the FFI import, the comparison, and the
+/// drop are counted together), 128 levels is on the order of 360 KiB, safe
+/// even on the 512 KiB stacks worker threads sometimes use. The Python
+/// bindings additionally run the whole operation — the recursive FFI import
+/// and the drop of the imported types included — on a large stack-sized worker
+/// thread, so this bound is the clean-error ceiling rather than the sole
+/// backstop.
+pub const MAX_NESTING_DEPTH: usize = 128;
+
 /// Diffs two tables presented as Arrow [`RecordBatchReader`]s.
 ///
 /// Only the readers' schemas are read in this version, so their batches are
@@ -88,6 +113,8 @@ pub use table_diff::{TableDiff, TableDiffSummary};
 /// # Errors
 ///
 /// - [`TableDiffError::EmptyKey`] if `options` has no key columns.
+/// - [`TableDiffError::MaxDepthExceeded`] if a column's type is nested past
+///   [`MAX_NESTING_DEPTH`].
 /// - [`TableDiffError::DuplicateColumn`] if either input has two columns with
 ///   the same name.
 /// - [`TableDiffError::KeyColumnMissing`] if a key column is absent from
