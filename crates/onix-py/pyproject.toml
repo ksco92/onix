@@ -18,6 +18,14 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+# The `arrow` extra pulls in pyarrow, needed only for TableDiff.to_pyarrow()
+# and for passing pyarrow objects to diff_tables(). Importing deepdiff_rs and
+# diffing polars/DuckDB tables need none of it: those libraries expose the
+# Arrow PyCapsule interface themselves. Install with
+# `pip install deepdiff-rs[arrow]`.
+arrow = ["pyarrow>=14"]
+
 [project.urls]
 Homepage = "https://github.com/ksco92/onix"
 Repository = "https://github.com/ksco92/onix"
@@ -36,7 +44,19 @@ Repository = "https://github.com/ksco92/onix"
 # scripts under ../../scripts/ and ../../perf/, which do pin an exact
 # version): `uv sync` resolves whatever Python >=3.10 it finds/manages, and
 # the abi3 wheel this crate builds works identically across all of them.
-test = ["pytest>=8", "deepdiff==9.1.0 ; python_version >= '3.10'"]
+# polars and duckdb are here (test group) only, never as runtime deps: the
+# Arrow table-diff tests feed the same data through pyarrow, polars, and
+# DuckDB and assert identical results, which needs all three installed to run
+# but none of them installed to use diff_tables. pyarrow is both the `arrow`
+# extra and a test dependency (the tests exercise to_pyarrow() and pyarrow
+# inputs).
+test = [
+    "pytest>=8",
+    "deepdiff==9.1.0 ; python_version >= '3.10'",
+    "pyarrow>=14",
+    "polars>=1",
+    "duckdb>=1",
+]
 
 [tool.pytest.ini_options]
 # `scripts/golden_tags.py` (repo root) defines the golden corpus's tagged

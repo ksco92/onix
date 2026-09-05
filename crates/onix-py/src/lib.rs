@@ -22,6 +22,7 @@
 //! adversarially deep input — escape as anything else. `guard` holds the
 //! shared native-stack-overflow hardening (the `max_depth` ceiling and the
 //! sized diff worker thread) both entry points route their diff through.
+mod arrow;
 mod convert;
 mod deepdiff;
 mod errors;
@@ -33,6 +34,9 @@ use pyo3::prelude::*;
 #[pymodule]
 fn deepdiff_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<deepdiff::DeepDiff>()?;
+    m.add_class::<arrow::TableDiff>()?;
+    m.add_class::<arrow::ArrowTable>()?;
+    m.add_function(wrap_pyfunction!(arrow::diff_tables, m)?)?;
     m.add_function(wrap_pyfunction!(fast_path::diff_json, m)?)?;
     m.add("MaxDepthError", py.get_type::<errors::MaxDepthError>())?;
     m.add("MAX_DEPTH_CEILING", guard::MAX_DEPTH_CEILING)?;

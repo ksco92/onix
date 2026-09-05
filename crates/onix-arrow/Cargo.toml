@@ -1,0 +1,23 @@
+[package]
+name = "onix-arrow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Arrow table diffing (schema and, in later versions, rows) built on the onix diff engine"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Pinned to an exact Arrow version so this crate and the `pyo3-arrow` bridge
+# in `onix-py` (which requires `arrow` ^59) resolve to the identical Arrow
+# types — a mismatch would make the record batches handed across the FFI
+# boundary a different, incompatible type. 59.3.0 is the newest 59.x at the
+# time this crate landed. Only the schema/array sub-crates are pulled in: the
+# C Data Interface glue lives in `onix-py` behind `pyo3-arrow`, so this crate
+# needs no `ffi` feature.
+arrow-schema = "=59.3.0"
+arrow-array = "=59.3.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

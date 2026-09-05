@@ -196,6 +196,23 @@ after a change is `maturin develop --release`; if a fix does not bump the
 version, run `uv cache clean` first so the reinstall cannot serve a cached
 pre-fix binary.
 
+The Arrow table-diff tests are part of the same suite
+(`tests/test_table_diff.py`). They feed the same data through pyarrow, polars,
+and DuckDB and assert identical results, so `uv sync --group test` installs all
+three (they are test-only, never runtime, dependencies); `pyarrow` is also the
+optional `arrow` extra. To run only them:
+
+```sh
+cd crates/onix-py
+uv run --group test pytest tests/test_table_diff.py -q
+```
+
+One test spawns a subprocess with `pyarrow` made unimportable, proving
+`import deepdiff_rs` and `diff_tables` on a DuckDB table work without pyarrow
+and that `to_pyarrow()` then raises a clear `ImportError`. The pure-Rust schema
+logic lives in `crates/onix-arrow` and is covered by `cargo test` /
+`make check` like the other Rust crates.
+
 ## Benchmarking
 
 Two benchmarks live in the repo; both are reproduced from source here, and the

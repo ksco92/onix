@@ -17,6 +17,7 @@ Status (September 2026): `deepdiff-rs` 0.x is live on PyPI (Python 3.9+, wheels 
 
 - [Install](#install)
 - [Quickstart](#quickstart)
+- [Diffing tables](#diffing-tables)
 - [Known limitations](#known-limitations)
 - [Performance](#performance)
 - [Reference](#reference)
@@ -95,6 +96,42 @@ $ onix diff left.json right.json
 
 Pass `--ignore-order` to compare every list by value instead of by position, mirroring `DeepDiff(..., ignore_order=True)`.
 
+## Diffing tables
+
+`diff_tables` compares two tables the way `DeepDiff` compares two objects. It takes any object implementing the [Arrow PyCapsule interface](https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html) — a pyarrow `Table` or `RecordBatch`, a polars `DataFrame`, a DuckDB relation — and imports it with no Python round trip. The two tables are matched on a required, non-empty set of key columns (the table's primary key).
+
+This version reports the **schema** diff: which columns were added, removed, or changed type. Row-level results (which rows were added or removed and which cells changed) arrive in a later version; the `rows_added`, `rows_removed`, `cells_changed`, and `duplicate_keys` members exist now but raise `NotImplementedError`.
+
+```python
+import pyarrow as pa
+from deepdiff_rs import diff_tables
+
+left = pa.table({
+    "id": pa.array([1, 2], pa.int64()),
+    "amount": pa.array([1, 2], pa.int32()),
+})
+right = pa.table({
+    "id": pa.array([1, 2], pa.int64()),
+    "amount": pa.array([1, 2], pa.int64()),
+    "note": pa.array(["a", "b"], pa.string()),
+})
+
+diff = diff_tables(left, right, key=["id"])
+print(diff.summary())
+for change in diff.schema:
+    print(change["column"], change["change"], change["left_type"], change["right_type"])
+```
+
+```
+{'columns_added': 1, 'columns_removed': 0, 'columns_type_changed': 1}
+amount type_changed Int32 Int64
+note added None Utf8
+```
+
+Type comparison uses the full Arrow type, including timestamp unit and timezone and decimal precision and scale; nullability is ignored (but reported in each record), and a dictionary-encoded column is compared as its value type, so a dictionary-encoded string and a plain string are the same type. `diff.schema_arrow` is the same result as an Arrow table: it implements `__arrow_c_stream__`, so `polars.DataFrame(diff.schema_arrow)` and `pandas` consume it directly, and `diff.schema_arrow.to_pyarrow()` returns a `pyarrow.Table`.
+
+`pyarrow` is optional: install it with `pip install deepdiff-rs[arrow]`. It is needed only for `to_pyarrow()` and for passing pyarrow objects in — importing `deepdiff_rs` and diffing polars or DuckDB tables need it not at all. Passing an object that implements neither Arrow protocol raises `TypeError`; calling `to_pyarrow()` without pyarrow installed raises `ImportError` naming the extra.
+
 ## Known limitations
 
 - Only the core diff is implemented: `exclude_paths`, `significant_digits`, custom operators, `verbose_level != 2`, and delta/patch are not (yet) supported.
@@ -163,6 +200,7 @@ Both reports carry their full methodology, fairness rules, and the reproduce com
 - `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`: diffs two live Python objects of supported value types — `None`, `bool`, `int`, `float`, `str`, `dict` (with `str` keys), `list`, `tuple`, `set`, `frozenset`, `datetime.datetime`, and `datetime.date` (see [Known limitations](#known-limitations) for the exact restrictions and exclusions); `.to_json()` returns the DeepDiff-compatible JSON string, `.to_dict()` the same report as a dict — with Python types preserved, so a value the diff found in a `tuple`, `set` or `frozenset` comes back as one and a `datetime`/`date` comes back as a real `datetime`/`date` — and the instance is falsy when there is no difference. The `set_item_added`/`set_item_removed` categories are lists of path strings, each ending in the item itself (`root['a'][2]`, `root['x']`, `root[(1, 2)]`).
 - `diff_json(a, b, ignore_order=False, max_depth=None) -> str`: diffs two JSON strings entirely in Rust and returns the report as a JSON string.
 - `MaxDepthError` (a `ValueError` subclass) is raised when input exceeds `max_depth`; `MAX_DEPTH_CEILING` (20,000) is the hard upper bound on `max_depth`.
+- `diff_tables(left, right, key=[...]) -> TableDiff`: diffs two Arrow tables (see [Diffing tables](#diffing-tables)). `TableDiff.schema` is the list of changed columns, `.schema_arrow` the same as an Arrow table, `.summary()` the change counts, `.to_json()` both as JSON; `.rows_added()`, `.rows_removed()`, `.cells_changed()`, and `.duplicate_keys()` raise `NotImplementedError` until a later version.
 
 **CLI.** `onix diff <a.json> <b.json> [--max-depth N] [--ignore-order] [--timing]` reads both files as JSON and prints a compact, single-line DeepDiff-compatible report to stdout (`{}` when there is no difference).
 
@@ -184,6 +222,7 @@ Exit codes:
 ```
 crates/onix-core   # the diff engine (library, no I/O)
 crates/onix-cli    # the `onix` binary (thin CLI over the core)
+crates/onix-arrow  # Arrow table diffing (schema diff; rows in a later version)
 crates/onix-py     # PyO3 bindings, published as `deepdiff-rs`
 scripts/           # gen_goldens.py: regenerates tests/golden/ from real DeepDiff
 tests/golden       # DeepDiff-generated expected outputs (the compatibility corpus)

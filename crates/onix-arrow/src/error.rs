@@ -1,0 +1,123 @@
+//! Error type returned by [`crate::diff_tables`] and the row-level members
+//! of [`crate::TableDiff`].
+
+use std::fmt;
+
+/// Which of the two inputs a problem was found on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// The `left` input to [`crate::diff_tables`].
+    Left,
+    /// The `right` input to [`crate::diff_tables`].
+    Right,
+}
+
+impl Side {
+    /// The lowercase word used for this side in error messages.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Side::Left => "left",
+            Side::Right => "right",
+        }
+    }
+}
+
+impl fmt::Display for Side {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Errors that can occur while diffing two tables.
+///
+/// Marked `#[non_exhaustive]` because the later row-diff slices add their own
+/// variants (streaming/read failures and the like); matching on it must keep
+/// a wildcard arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TableDiffError {
+    /// The key column set was empty. A table diff is keyed on a primary key
+    /// the way a database table is, so at least one key column is required.
+    EmptyKey,
+    /// A requested key column is absent from one of the inputs' schemas.
+    KeyColumnMissing {
+        /// The name of the key column that was not found.
+        column: String,
+        /// The side whose schema lacks the column.
+        side: Side,
+    },
+    /// A member of [`crate::TableDiff`] that a later version fills in was
+    /// asked for before that version exists. Schema diffing is complete in
+    /// this version; row-level results (`rows_added`, `rows_removed`,
+    /// `cells_changed`, `duplicate_keys`) are not.
+    NotImplemented {
+        /// The name of the member that is not implemented yet.
+        feature: &'static str,
+    },
+}
+
+impl fmt::Display for TableDiffError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TableDiffError::EmptyKey => f.write_str(
+                "the key column set is empty; a table diff requires at least one key column",
+            ),
+            TableDiffError::KeyColumnMissing { column, side } => write!(
+                f,
+                "key column {column:?} is missing from the {side} table's schema"
+            ),
+            TableDiffError::NotImplemented { feature } => write!(
+                f,
+                "{feature} is not implemented in this version; \
+                 only the schema diff is available yet"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TableDiffError {}
+
+#[cfg(test)]
+mod tests {
+    use super::{Side, TableDiffError};
+
+    #[test]
+    fn side_renders_lowercase() {
+        assert_eq!(Side::Left.to_string(), "left");
+        assert_eq!(Side::Right.to_string(), "right");
+    }
+
+    #[test]
+    fn empty_key_message_names_the_requirement() {
+        let message = TableDiffError::EmptyKey.to_string();
+        assert!(message.contains("at least one key column"));
+    }
+
+    #[test]
+    fn key_column_missing_message_names_column_and_side() {
+        let error = TableDiffError::KeyColumnMissing {
+            column: "id".to_string(),
+            side: Side::Right,
+        };
+        let message = error.to_string();
+        assert!(message.contains("\"id\""));
+        assert!(message.contains("right"));
+    }
+
+    #[test]
+    fn not_implemented_message_names_the_feature() {
+        let error = TableDiffError::NotImplemented {
+            feature: "rows_added",
+        };
+        let message = error.to_string();
+        assert!(message.contains("rows_added"));
+        assert!(message.contains("not implemented"));
+    }
+
+    #[test]
+    fn error_implements_std_error() {
+        let error = TableDiffError::EmptyKey;
+        let _: &dyn std::error::Error = &error;
+    }
+}
