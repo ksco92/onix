@@ -341,6 +341,23 @@ fn common_value_columns(left: &Schema, right: &Schema, key: &[String]) -> Vec<St
     names
 }
 
+/// Refuses any non-nested column of `schema` that [`is_hashable`] cannot hash,
+/// so an invalid scalar type (including one present on only one side) fails
+/// before `RecordBatch::new_empty` would panic building its empty array. Nested
+/// columns are left to the per-column skip/refuse rules.
+fn reject_unhashable_columns(schema: &Schema) -> Result<(), TableDiffError> {
+    for field in schema.fields() {
+        if !is_nested(field.data_type()) && !is_hashable(field.data_type()) {
+            return Err(TableDiffError::UnsupportedRowType {
+                column: field.name().clone(),
+                data_type: field.data_type().to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 /// Whether a type is a nested (container) type — the types the row diff is out
 /// of scope for, skipped when non-key and refused when key. A `Dictionary` is
 /// *not* nested: it is a scalar encoding, decoded before hashing.
@@ -623,7 +640,9 @@ fn hash_time32(hasher: &mut CellHasher, array: &ArrayRef, unit: TimeUnit, row: u
         TimeUnit::Millisecond => {
             i64::from(array.as_primitive::<Time32MillisecondType>().value(row))
         }
-        TimeUnit::Microsecond | TimeUnit::Nanosecond => return,
+        TimeUnit::Microsecond | TimeUnit::Nanosecond => {
+            unreachable!("is_hashable refuses this Time32 unit before any row is read")
+        }
     };
     hash_time_like(hasher, TAG_TIME, time_unit_discriminant(unit), raw);
 }
@@ -635,7 +654,9 @@ fn hash_time64(hasher: &mut CellHasher, array: &ArrayRef, unit: TimeUnit, row: u
     let raw = match unit {
         TimeUnit::Microsecond => array.as_primitive::<Time64MicrosecondType>().value(row),
         TimeUnit::Nanosecond => array.as_primitive::<Time64NanosecondType>().value(row),
-        TimeUnit::Second | TimeUnit::Millisecond => return,
+        TimeUnit::Second | TimeUnit::Millisecond => {
+            unreachable!("is_hashable refuses this Time64 unit before any row is read")
+        }
     };
     hash_time_like(hasher, TAG_TIME, time_unit_discriminant(unit), raw);
 }
@@ -1062,26 +1083,18 @@ pub(crate) fn diff_rows(
     key: &[String],
 ) -> Result<RowDiff, TableDiffError> {
     let hasher = RowHasher::new()?;
+
+    // Refuse every non-nested-but-unhashable column of *either* full schema up
+    // front (a `RunEndEncoded`, or a `Time32`/`Time64` unit or `FixedSizeBinary`
+    // width arrow-rs has no array type for), including a column present on only
+    // one side: such a column reaches `RecordBatch::new_empty` through the
+    // added/removed output even when it is never compared, and building its
+    // empty array would panic. Nested columns are fine (their empty array
+    // builds), so only non-nested columns are checked here.
+    reject_unhashable_columns(left_schema)?;
+    reject_unhashable_columns(right_schema)?;
+
     let common_values = common_value_columns(left_schema, right_schema, key);
-
-    // Refuse a non-nested-but-unhashable common column (e.g. `RunEndEncoded`,
-    // or a `Time32`/`Time64` unit or `FixedSizeBinary` width arrow-rs has no
-    // array type for) up front, before any batch or empty output is built —
-    // such a column cannot be silently skipped, and building its empty array
-    // for an all-matching output would otherwise panic.
-    for name in &common_values {
-        for schema in [left_schema, right_schema] {
-            if let Ok(field) = schema.field_with_name(name)
-                && !is_hashable(field.data_type())
-            {
-                return Err(TableDiffError::UnsupportedRowType {
-                    column: name.clone(),
-                    data_type: field.data_type().to_string(),
-                });
-            }
-        }
-    }
-
     let key_names: Vec<&str> = key.iter().map(String::as_str).collect();
     let value_names: Vec<&str> = common_values.iter().map(String::as_str).collect();
 
@@ -2297,7 +2310,9 @@ mod tests {
         // Scalar types arrow-rs has no array for (invalid Time32/Time64 units,
         // a negative-width FixedSizeBinary) are refused up front, so an empty
         // table with such a column errors cleanly instead of panicking when the
-        // empty output array is built.
+        // empty output array is built — whether the column is on both sides or
+        // on one side only (a one-sided column still reaches the added/removed
+        // output's full schema).
         let invalid = [
             DataType::Time32(TimeUnit::Microsecond),
             DataType::Time32(TimeUnit::Nanosecond),
@@ -2306,13 +2321,24 @@ mod tests {
             DataType::FixedSizeBinary(-1),
         ];
         for dt in invalid {
-            let sch = schema(vec![id_field(), Field::new("v", dt.clone(), true)]);
-            let empty = MemoryInput::new(sch.clone(), Vec::new());
-            let error = diff_rows(&empty, &empty, &sch, &sch, &key()).unwrap_err();
-            assert!(
-                matches!(error, TableDiffError::UnsupportedRowType { ref column, .. } if column == "v"),
-                "{dt:?} should be refused, got {error:?}"
-            );
+            let with = schema(vec![id_field(), Field::new("v", dt.clone(), true)]);
+            let without = schema(vec![id_field()]);
+            let empty_with = MemoryInput::new(with.clone(), Vec::new());
+            let empty_without = MemoryInput::new(without.clone(), Vec::new());
+
+            // Both sides, left-only, and right-only all refuse cleanly.
+            for (left_input, left_schema, right_input, right_schema) in [
+                (&empty_with, &with, &empty_with, &with),
+                (&empty_with, &with, &empty_without, &without),
+                (&empty_without, &without, &empty_with, &with),
+            ] {
+                let error = diff_rows(left_input, right_input, left_schema, right_schema, &key())
+                    .unwrap_err();
+                assert!(
+                    matches!(error, TableDiffError::UnsupportedRowType { ref column, .. } if column == "v"),
+                    "{dt:?} should be refused, got {error:?}"
+                );
+            }
         }
     }
 
