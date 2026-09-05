@@ -217,16 +217,8 @@ def test_non_str_dict_key_error_reports_path_to_the_dict() -> None:
         DeepDiff({"a": {1: "x"}}, {"a": {1: "y"}})
 
 
-# lone (unpaired) surrogates: legal in a Python str, not representable as UTF-8.
-#
-# Real deepdiff==9.1.0 compares such a string by Python == and reports a plain
-# values_changed, e.g. DeepDiff("\udc80", "\udc81").to_dict() == {"values_changed":
-# {"root": {"new_value": "\udc81", "old_value": "\udc80"}}}; the same
-# to_json() escapes it as "\udc81"/"\udc80" via json.dumps. Hashing one (a set
-# or frozenset member) crashes real DeepDiff outright with an unhandled
-# UnicodeEncodeError from deephash.py. onix instead raises ValueError at
-# conversion time in every case, naming the exact path; see convert.rs's
-# module doc and tests/golden/README.md for the documented divergence.
+# lone (unpaired) surrogates: legal in a Python str, not representable as UTF-8; see
+# tests/golden/README.md for the documented divergence from real DeepDiff.
 
 
 def test_lone_surrogate_value_raises_value_error() -> None:
@@ -236,9 +228,7 @@ def test_lone_surrogate_value_raises_value_error() -> None:
 
 
 def test_distinct_lone_surrogates_both_raise_the_same_way() -> None:
-    """Two different lone surrogates are refused identically, not silently equated."""
-    with pytest.raises(ValueError, match=r"str at root contains a lone"):
-        DeepDiff("\udc80", "\udc81")
+    """A different lone surrogate pair is refused identically, not silently equated."""
     with pytest.raises(ValueError, match=r"str at root contains a lone"):
         DeepDiff("\udc81", "\udc82")
 

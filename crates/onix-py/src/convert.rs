@@ -29,21 +29,14 @@
 //!   `DeepDiff` supports them natively).
 //! - A `NaN` or infinite `float` raises [`PyValueError`] (JSON has no
 //!   representation for either).
-//! - A `str` containing a lone (unpaired) surrogate code point — legal in a
-//!   Python `str`, e.g. `"\udc80"` — raises [`PyValueError`] naming the
-//!   exact path: the value model is UTF-8 and such a code point has no UTF-8
-//!   encoding. This is a deliberate divergence from real `DeepDiff`, which
-//!   compares such a string by Python `==`/hash and would report a change
-//!   (or, inside a `set`/`frozenset`, crashes with an unhandled
-//!   `UnicodeEncodeError` trying to hash it) — see `tests/golden/README.md`.
-//!   A genuine non-BMP character (e.g. `"😀"`, one Python `str` character,
-//!   `U+1F600`) is valid UTF-8 and converts normally; only an *unpaired*
-//!   surrogate is refused.
+//! - A `str` containing a lone (unpaired) surrogate code point (e.g.
+//!   `"\udc80"`) raises [`PyValueError`] naming the exact path: it has no
+//!   UTF-8 encoding. See `tests/golden/README.md` for why this diverges from
+//!   real `DeepDiff`.
 //! - A `dict` key that is not a `str` raises [`PyTypeError`] naming the
-//!   key's type and the path to the dict containing it; a `str` key
-//!   containing a lone surrogate raises [`PyValueError`] the same way a
-//!   value does, naming the path to the dict containing it (the key itself
-//!   has no path segment to name — it never parses as one).
+//!   key's type and the path to the dict containing it; a `str` key with a
+//!   lone surrogate raises [`PyValueError`] the same way, naming the dict's
+//!   path (the key itself has no path segment of its own).
 //! - A `tzinfo` whose `utcoffset()` is not a whole number of seconds raises
 //!   [`PyValueError`]: the value model carries an offset in seconds.
 //! - A `set`/`frozenset` member that is not one of the types this MVP allows
@@ -655,15 +648,10 @@ fn out_of_range_error(type_name: &str, path: &[PathSegment]) -> PyErr {
     ))
 }
 
-/// A Python `str` containing a lone (unpaired) surrogate code point — legal
-/// in a Python `str` but not encodable as UTF-8, which is what onix's value
-/// model requires. `to_str`/`to_cow`'s own `UnicodeEncodeError` is discarded
-/// in favor of this, so the message names the exact path the way every other
-/// conversion error in this module does; see the module doc for why this is
-/// a `ValueError` rather than a lossy conversion (real `DeepDiff` compares
-/// such a string by Python `==` and reports it as changed like any other
-/// string, and even crashes outright hashing one inside a `set`/`frozenset`
-/// — see `tests/golden/README.md`).
+/// `to_cow`'s own `UnicodeEncodeError` is discarded in favor of this, so the
+/// message names the exact path the way every other conversion error in this
+/// module does; see the module doc and `tests/golden/README.md` for why this
+/// diverges from real `DeepDiff`.
 ///
 /// `is_key` distinguishes the two call sites' wording: a dict key that fails
 /// this check has no path segment of its own yet (like a non-`str` key, see
