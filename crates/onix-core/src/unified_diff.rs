@@ -1,3 +1,7 @@
+// Portions of this module reimplement algorithms from CPython 3.14.6's
+// `difflib` standard-library module (`unified_diff` and
+// `_format_range_unified`), used under the PSF License Agreement version 2.
+// See THIRD-PARTY-NOTICES.md at the repository root.
 //! The `diff` field `DeepDiff` attaches to a `values_changed` entry, at
 //! `verbose_level=2`, when a `str`→`str` change involves a newline — a
 //! faithful port of `DeepDiff._diff_str`'s convenience diff
@@ -71,12 +75,12 @@ fn str_diff(t1: &str, t2: &str) -> Option<String> {
     // are exactly `"--- "` and `"+++ "` (trailing space, no newline).
     let mut out: Vec<String> = vec!["--- ".to_string(), "+++ ".to_string()];
     for group in &groups {
-        let first = group
+        // `grouped_opcodes` guarantees every group is non-empty (see its
+        // doc), so this cannot panic.
+        let (first, last) = group
             .first()
-            .expect("grouped_opcodes never yields an empty group");
-        let last = group
-            .last()
-            .expect("grouped_opcodes never yields an empty group");
+            .zip(group.last())
+            .expect("grouped_opcodes yields only non-empty groups");
         out.push(format!(
             "@@ -{} +{} @@",
             format_range_unified(first.a1, last.a2),

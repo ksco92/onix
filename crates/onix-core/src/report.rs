@@ -552,9 +552,7 @@ impl Report {
                     old_value,
                     new_value,
                     new_path: None,
-                    // DeepDiff's own merge (`mutual_add_removes_to_become_
-                    // value_changes`) never runs `_diff_str`, so a
-                    // merge-produced `values_changed` carries no `diff`.
+                    // No `diff`: see `ValuesChangedEntry::diff`.
                     diff: None,
                 },
             );

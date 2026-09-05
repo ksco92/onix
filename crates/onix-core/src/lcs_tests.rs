@@ -612,14 +612,16 @@ fn grouped_opcodes_splits_far_apart_changes_into_separate_groups() {
 // sides so each loop bound (`best_a > alo`, `best_b > blo`, and the two
 // forward `< ahi`/`< bhi` checks) is exercised as the binding constraint.
 
-fn scalar_keys(
-    items: &[serde_json::Value],
-) -> std::collections::HashMap<super::ScalarKey, Vec<usize>> {
+fn keys(items: &[serde_json::Value]) -> Vec<super::ScalarKey> {
+    items.iter().map(scalar_key).collect()
+}
+
+fn b2j_from(keys: &[super::ScalarKey]) -> std::collections::HashMap<super::ScalarKey, Vec<usize>> {
     // A b2j built by hand so a chosen key can be omitted (purged).
     let mut map: std::collections::HashMap<super::ScalarKey, Vec<usize>> =
         std::collections::HashMap::new();
-    for (i, v) in items.iter().enumerate() {
-        map.entry(scalar_key(v)).or_default().push(i);
+    for (i, k) in keys.iter().enumerate() {
+        map.entry(k.clone()).or_default().push(i);
     }
     map
 }
@@ -629,18 +631,18 @@ fn extension_bridges_a_purged_element_backward() {
     // a = [P, P, u], b = [P, u]; P is purged from b2j, so the DP only finds
     // `u` (a[2] == b[1]); the backward extension must re-bridge one `P` to
     // give the full match a[1..3] == b[0..2].
-    let a = cvec(&[json!("P"), json!("P"), json!("u")]);
-    let b = cvec(&[json!("P"), json!("u")]);
-    let mut b2j = scalar_keys(&[json!("P"), json!("u")]);
+    let a_keys = keys(&[json!("P"), json!("P"), json!("u")]);
+    let b_keys = keys(&[json!("P"), json!("u")]);
+    let mut b2j = b2j_from(&b_keys);
     b2j.remove(&scalar_key(&json!("P")));
     let window = super::Window {
         alo: 0,
-        ahi: a.len(),
+        ahi: a_keys.len(),
         blo: 0,
-        bhi: b.len(),
+        bhi: b_keys.len(),
     };
     assert_eq!(
-        super::find_longest_match(&a, &b, window, &b2j, true),
+        super::find_longest_match(&a_keys, &b_keys, window, &b2j, true),
         (1, 0, 2),
     );
 }
@@ -649,23 +651,23 @@ fn extension_bridges_a_purged_element_backward() {
 fn extension_bridges_a_purged_element_forward() {
     // a = [u, P], b = [u, P, P]; P purged, DP finds only `u` (a[0] == b[0]);
     // the forward extension must re-bridge one `P`, giving a[0..2] == b[0..2].
-    let a = cvec(&[json!("u"), json!("P")]);
-    let b = cvec(&[json!("u"), json!("P"), json!("P")]);
-    let mut b2j = scalar_keys(&[json!("u"), json!("P"), json!("P")]);
+    let a_keys = keys(&[json!("u"), json!("P")]);
+    let b_keys = keys(&[json!("u"), json!("P"), json!("P")]);
+    let mut b2j = b2j_from(&b_keys);
     b2j.remove(&scalar_key(&json!("P")));
     let window = super::Window {
         alo: 0,
-        ahi: a.len(),
+        ahi: a_keys.len(),
         blo: 0,
-        bhi: b.len(),
+        bhi: b_keys.len(),
     };
     assert_eq!(
-        super::find_longest_match(&a, &b, window, &b2j, false),
+        super::find_longest_match(&a_keys, &b_keys, window, &b2j, false),
         (0, 0, 1),
         "with extend=false the purged P is not bridged"
     );
     assert_eq!(
-        super::find_longest_match(&a, &b, window, &b2j, true),
+        super::find_longest_match(&a_keys, &b_keys, window, &b2j, true),
         (0, 0, 2),
         "with extend=true the forward extension bridges one P"
     );
@@ -684,9 +686,9 @@ fn build_b2j_purges_only_above_the_autojunk_threshold() {
         items.push(json!(format!("u{i}")));
     }
     assert_eq!(items.len(), 200);
-    let b = cvec(&items);
+    let b_keys = keys(&items);
 
-    let purged = super::build_b2j(&b, true);
+    let purged = super::build_b2j(&b_keys, true);
     assert!(
         !purged.contains_key(&scalar_key(&json!("pop"))),
         "pop occurs 4 times (> ntest 3) and must be purged"
@@ -697,6 +699,6 @@ fn build_b2j_purges_only_above_the_autojunk_threshold() {
     );
 
     // With autojunk off, nothing is ever purged even past 200 elements.
-    let unpurged = super::build_b2j(&b, false);
+    let unpurged = super::build_b2j(&b_keys, false);
     assert!(unpurged.contains_key(&scalar_key(&json!("pop"))));
 }
