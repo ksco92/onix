@@ -704,7 +704,7 @@ def render_energy_section() -> str:
     if energy["available"]:
         return """## Energy
 
-`sudo powermetrics` sampling ran successfully on this machine, see
+`sudo powermetrics` sampling ran successfully on this machine; see
 `perf/bench_raw/powermetrics_onix.txt` for the raw sampler output (not
 committed; regenerate via `perf/run_bench.sh` with passwordless `sudo`
 available).
