@@ -43,9 +43,19 @@ pub(crate) struct DistKey(Rc<Value>);
 impl DistKey {
     /// Interns a copy of `value` as a cache key. Cloned once per distinct
     /// candidate (added/removed) entry, not once per pair, so the `A * R`
-    /// entries one pairing records cost a refcount bump each.
+    /// entries one pairing records cost a refcount bump each. The clone
+    /// recurses natively like the report's own value clones and is bounded by
+    /// the same [`crate::diff::check_value_depth`] pre-pass; the hashing this
+    /// key is looked up by is iterative (see [`hash_value`]).
     pub(crate) fn new(value: &Value) -> Self {
         Self(Rc::new(value.clone()))
+    }
+
+    /// Wraps an already-owned value with no clone — the test hook that lets the
+    /// stack-safety probe hash a value deeper than a native clone could build.
+    #[cfg(test)]
+    pub(crate) fn from_rc(value: Rc<Value>) -> Self {
+        Self(value)
     }
 }
 
@@ -69,40 +79,49 @@ impl Hash for DistKey {
 /// hash equal): a per-variant discriminant, then the fields that equality
 /// compares — numbers through [`number_key`] (so `-0.0`/`0.0` agree and an
 /// int and an equal-valued float stay distinct), a datetime by its instant, a
-/// date by its ordinal, a list/tuple by its elements *in order with
-/// repetition*, a set/frozenset by its canonical members, a dict by its sorted
-/// entries.
+/// date by its ordinal, a list/tuple by its length and elements (order and
+/// repetition preserving), a set/frozenset by its canonical members, a dict by
+/// its sorted keys and their values. The exact byte sequence is unspecified;
+/// only its determinism and its agreement with [`Value`]'s equality matter.
 ///
-/// Recurses natively, like [`item_key`] and [`super::rough_length`] — safe for
-/// the same reason: every caller first proves the value's nesting is within the
-/// crate's depth budget via [`crate::diff::check_value_depth`] (see this
-/// module's parent "Depth safety" doc section).
-fn hash_value<H: Hasher>(value: &Value, state: &mut H) {
-    core::mem::discriminant(value).hash(state);
-    match value {
-        Value::Null => {}
-        Value::Bool(b) => b.hash(state),
-        Value::Number(n) => number_key(n).hash(state),
-        Value::Str(s) => s.hash(state),
-        Value::DateTime(dt) => dt.instant().hash(state),
-        Value::Date(date) => date.ordinal().hash(state),
-        Value::Array(items) | Value::Tuple(items) => {
-            items.len().hash(state);
-            for item in items {
-                hash_value(item, state);
+/// **Iterative** (an explicit work-stack, never native recursion), like the
+/// engine's own [`Value`] `Drop`/`PartialEq`: a value's nesting is
+/// user-controlled and can reach the caller-raised `max_depth`, so a recursive
+/// hasher would reopen the uncatchable native-stack-overflow class those
+/// iterative primitives exist to close — the default budget being safe is
+/// coincidence, not a property. The walk hashes each node before pushing its
+/// children, so two structurally equal values drive identical stack operations
+/// and hash identically; children are pushed so a container's length prefix and
+/// per-variant discriminant keep distinct shapes apart.
+fn hash_value<H: Hasher>(root: &Value, state: &mut H) {
+    let mut stack: Vec<&Value> = vec![root];
+    while let Some(value) = stack.pop() {
+        core::mem::discriminant(value).hash(state);
+        match value {
+            Value::Null => {}
+            Value::Bool(b) => b.hash(state),
+            Value::Number(n) => number_key(n).hash(state),
+            Value::Str(s) => s.hash(state),
+            Value::DateTime(dt) => dt.instant().hash(state),
+            Value::Date(date) => date.ordinal().hash(state),
+            Value::Array(items) | Value::Tuple(items) => {
+                items.len().hash(state);
+                stack.extend(items.iter());
             }
-        }
-        Value::Set(items) | Value::FrozenSet(items) => {
-            items.len().hash(state);
-            for item in items {
-                hash_value(item, state);
+            Value::Set(items) | Value::FrozenSet(items) => {
+                items.len().hash(state);
+                stack.extend(items.iter());
             }
-        }
-        Value::Object(map) => {
-            map.len().hash(state);
-            for (key, child) in map {
-                key.hash(state);
-                hash_value(child, state);
+            Value::Object(map) => {
+                map.len().hash(state);
+                // Keys carry the association and are hashed here in sorted
+                // order; the values are pushed and hashed as they pop. The
+                // order values come back in is deterministic, which is all
+                // equality-consistency needs.
+                for (key, _) in map {
+                    key.hash(state);
+                }
+                stack.extend(map.values());
             }
         }
     }

@@ -2769,3 +2769,138 @@ fn distance_memo_only_caches_container_pairs_when_enabled() {
         "a disabled memo must never populate the distance cache"
     );
 }
+
+// --- DistKey hashing stack safety (issue #31 round 3) -------------------
+
+/// [`DistKey`]'s `Hash` walks the value with an explicit stack, never native
+/// recursion, so hashing a distance-cache key can never overflow the native
+/// stack however deep the value — the same posture the engine's `Value`
+/// `Drop`/`PartialEq` hold. Isolated from the key's own value clone (which,
+/// like the report's clones, recurses): the chain is built iteratively and
+/// wrapped without copying, so the only thing exercised on the deliberately
+/// tiny 256 KiB stack is the hash. A recursive hasher overflows here.
+#[test]
+fn dist_key_hashing_does_not_overflow_the_native_stack() {
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            const DEPTH: usize = 200_000;
+            let mut value = cv(&json!(0));
+            for _ in 0..DEPTH {
+                value = CValue::Array(vec![value].into_boxed_slice());
+            }
+            let key = super::hash::DistKey::from_rc(std::rc::Rc::new(value));
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&key, &mut hasher);
+            let _ = std::hash::Hasher::finish(&hasher);
+        })
+        .expect("probe thread spawns");
+    handle
+        .join()
+        .expect("DistKey hashing completes on a small stack");
+}
+
+/// The same memo-driven `ignore_order` path at the default budget on an
+/// ordinary main-thread-sized (8 MiB) stack — the common case a caller hits
+/// without raising `max_depth` or spawning a special thread. (Rust runs each
+/// `#[test]` on a 2 MiB worker thread, smaller than a real main thread, so the
+/// probe sizes the stack to an ordinary 8 MiB rather than relying on the test
+/// harness's own reduced default.)
+#[test]
+fn ignore_order_memo_at_default_budget_on_plain_thread() {
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let build = |leaf: i64| {
+                let mut value = cv(&json!(leaf));
+                for _ in 0..200 {
+                    value = CValue::Array(vec![value].into_boxed_slice());
+                }
+                value
+            };
+            let opts = DiffOptions {
+                ignore_order: true,
+                max_depth: crate::diff::DEFAULT_MAX_DEPTH,
+            };
+            let report = crate::diff::diff_with_options(&build(1), &build(2), &opts)
+                .expect("default-budget ignore_order diff succeeds");
+            assert!(!report.is_empty());
+        })
+        .expect("probe thread spawns");
+    handle
+        .join()
+        .expect("default-budget ignore_order diff completes on an ordinary stack");
+}
+
+/// `DistKey`'s `Hash` must agree with its `Eq` (equal values hash equal), or the
+/// distance memo silently stops hitting and the pairing goes exponential. The
+/// explicit-stack rewrite is the usual place this breaks (a differing child
+/// visit order, or a length hashed at the wrong spot), so pin the equal-but-
+/// differently-built cases the value model treats as equal: signed-zero and
+/// integral floats, and sets/frozensets whose members arrive in different
+/// insertion orders (`SetItems` canonicalizes them equal).
+#[cfg(test)]
+fn dist_hash(value: &CValue) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let key = super::hash::DistKey::from_rc(std::rc::Rc::new(value.clone()));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[test]
+fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
+    let float = |f: f64| CValue::Number(crate::value::Number::from_f64(f).unwrap());
+    let nested_set = |order: [i64; 3]| {
+        CValue::Set(SetItems::new(vec![
+            ctup(&[json!(order[0])]),
+            ctup(&[json!(order[1])]),
+            ctup(&[json!(order[2])]),
+        ]))
+    };
+    let pairs: &[(CValue, CValue)] = &[
+        // Signed zero: Value equality treats +0.0 == -0.0.
+        (float(0.0), float(-0.0)),
+        // Set members in different insertion orders canonicalize equal.
+        (
+            cset(&[json!(1), json!(2), json!(3)]),
+            cset(&[json!(3), json!(1), json!(2)]),
+        ),
+        (
+            cfrozen(&[json!("b"), json!("a")]),
+            cfrozen(&[json!("a"), json!("b")]),
+        ),
+        // A set of tuples, members reordered: exercises the nested walk.
+        (nested_set([1, 2, 3]), nested_set([3, 2, 1])),
+    ];
+    for (a, b) in pairs {
+        assert_eq!(a, b, "test inputs must be Value-equal: {a:?} vs {b:?}");
+        assert_eq!(
+            dist_hash(a),
+            dist_hash(b),
+            "equal values must hash equal: {a:?} vs {b:?}"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    /// Over generated nested shapes, a value hashes identically to a structural
+    /// twin built through a different path (round-tripped through the value
+    /// model), and reordering a set's members leaves the hash unchanged. Guards
+    /// the `DistKey` `Hash`/`Eq` agreement the memo's soundness depends on.
+    #[test]
+    fn dist_key_hash_equal_for_equal_values(a in arb_nested()) {
+        let value = crate::value::Value::from(a.clone());
+        let twin = crate::value::Value::from(a);
+        prop_assert_eq!(&value, &twin);
+        prop_assert_eq!(dist_hash(&value), dist_hash(&twin));
+
+        // A set of the value wrapped, built from two orders, stays equal.
+        let s1 = CValue::Set(SetItems::new(vec![value.clone(), CValue::Null, cv(&json!("z"))]));
+        let s2 = CValue::Set(SetItems::new(vec![cv(&json!("z")), value, CValue::Null]));
+        prop_assert_eq!(&s1, &s2);
+        prop_assert_eq!(dist_hash(&s1), dist_hash(&s2));
+    }
+}
