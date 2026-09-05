@@ -119,6 +119,48 @@ def test_identical_results_across_input_libraries(left_lib: str, right_lib: str)
     }
 
 
+def _row_diff_pair() -> tuple[pa.Table, pa.Table]:
+    """A left/right pair exercising every row outcome: a duplicate, a removed, a changed, an added, and a null key."""
+    left = pa.table(
+        {
+            "id": pa.array([1, 1, 2, 3, None], pa.int64()),
+            "v": pa.array([10, 11, 20, 30, 50], pa.int64()),
+        },
+    )
+    right = pa.table(
+        {
+            "id": pa.array([3, 4, None], pa.int64()),
+            "v": pa.array([31, 40, 50], pa.int64()),
+        },
+    )
+
+    return left, right
+
+
+def _row_fingerprint(diff: object) -> tuple:
+    """A comparable snapshot of a diff's row results (summary plus the added/removed/duplicate key sets)."""
+    added = sorted(pa.table(diff.rows_added()).column("id").to_pylist(), key=lambda x: (x is None, x))
+    removed = sorted(pa.table(diff.rows_removed()).column("id").to_pylist(), key=lambda x: (x is None, x))
+    dups = sorted(pa.table(diff.duplicate_keys()).column("id").to_pylist(), key=lambda x: (x is None, x))
+
+    return (tuple(sorted(diff.summary().items())), tuple(added), tuple(removed), tuple(dups))
+
+
+@pytest.mark.parametrize(("left_lib", "right_lib"), _LIBRARY_PAIRS)
+def test_row_diff_identical_across_input_libraries(left_lib: str, right_lib: str) -> None:
+    """The full row diff (added, removed, changed, duplicate, null keys) is identical no matter which library supplies each table."""
+    left_pa, right_pa = _row_diff_pair()
+    baseline = _row_fingerprint(diff_tables(left_pa, right_pa, key=["id"]))
+    diff = diff_tables(_as(left_lib, left_pa), _as(right_lib, right_pa), key=["id"])
+
+    assert _row_fingerprint(diff) == baseline
+    assert diff.summary()["rows_added"] == 1
+    assert diff.summary()["rows_removed"] == 1
+    assert diff.summary()["rows_changed"] == 1
+    assert diff.summary()["duplicate_keys"] == 1
+    assert diff.summary()["null_keys"] == 1
+
+
 def _struct_array(table: pa.Table) -> pa.StructArray:
     """Build a StructArray (an __arrow_c_array__-only object) from a table's columns."""
     return pa.StructArray.from_arrays(
@@ -227,10 +269,10 @@ def test_list_view_normalizes_like_list() -> None:
 # Schema-comparison semantics tests
 
 
-def test_identical_schemas_have_no_changes() -> None:
-    """Two tables with the same schema and equal rows report no changes."""
+def test_identical_schemas_have_no_schema_changes_but_report_row_changes() -> None:
+    """Two tables with the same schema report no schema changes; a differing non-key cell is a row change."""
     left = _keyed({"a": pa.array([1], pa.int64())})
-    right = _keyed({"a": pa.array([1], pa.int64())})
+    right = _keyed({"a": pa.array([9], pa.int64())})
     diff = diff_tables(left, right, key=["id"])
 
     assert diff.schema == []
@@ -240,7 +282,7 @@ def test_identical_schemas_have_no_changes() -> None:
         "columns_type_changed": 0,
         "rows_added": 0,
         "rows_removed": 0,
-        "rows_changed": 0,
+        "rows_changed": 1,
         "duplicate_keys": 0,
         "null_keys": 0,
     }

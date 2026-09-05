@@ -632,13 +632,16 @@ name = "onix-arrow"
 version = "0.6.2"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
  "arrow-cast",
  "arrow-schema",
  "arrow-select",
+ "getrandom 0.3.4",
  "half",
  "proptest",
  "serde",
  "serde_json",
+ "siphasher",
 ]
 
 [[package]]
@@ -671,6 +674,7 @@ dependencies = [
  "pyo3",
  "pyo3-arrow",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

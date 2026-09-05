@@ -175,16 +175,40 @@ pub fn diff_tables(
     let changes = diff_schemas(&left_schema, &right_schema)?;
 
     for key in options.key() {
-        if left_schema.field_with_name(key).is_err() {
+        let Ok(left_field) = left_schema.field_with_name(key) else {
             return Err(TableDiffError::KeyColumnMissing {
                 column: key.clone(),
                 side: Side::Left,
             });
-        }
-        if right_schema.field_with_name(key).is_err() {
+        };
+        let Ok(right_field) = right_schema.field_with_name(key) else {
             return Err(TableDiffError::KeyColumnMissing {
                 column: key.clone(),
                 side: Side::Right,
+            });
+        };
+
+        // A key must be a value-hashable scalar on both sides (checked up front
+        // so an empty table with, say, a list key still errors cleanly rather
+        // than diffing to an empty result).
+        for field in [left_field, right_field] {
+            if !row_diff::is_hashable(field.data_type()) {
+                return Err(TableDiffError::UnsupportedRowType {
+                    column: key.clone(),
+                    data_type: field.data_type().to_string(),
+                });
+            }
+        }
+
+        // A key whose normalized type differs across sides is a schema type
+        // change; the two sides' key hashes could not match, so refuse it. The
+        // schema diff above already computed this.
+        if changes
+            .iter()
+            .any(|change| &change.column == key && change.change == ChangeKind::TypeChanged)
+        {
+            return Err(TableDiffError::KeyTypeMismatch {
+                column: key.clone(),
             });
         }
     }
@@ -242,6 +266,46 @@ mod tests {
                 side: Side::Right,
             })
         );
+    }
+
+    #[test]
+    fn key_type_mismatch_int_versus_float_is_rejected() {
+        let left = reader(vec![Field::new("id", DataType::Int64, false)]);
+        let right = reader(vec![Field::new("id", DataType::Float64, false)]);
+        let options = TableDiffOptions::new(vec!["id".to_string()]);
+        assert_eq!(
+            diff_tables(&left, &right, &options),
+            Err(TableDiffError::KeyTypeMismatch {
+                column: "id".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn key_type_mismatch_int_widths_is_rejected() {
+        let left = reader(vec![Field::new("id", DataType::Int32, false)]);
+        let right = reader(vec![Field::new("id", DataType::Int64, false)]);
+        let options = TableDiffOptions::new(vec!["id".to_string()]);
+        assert_eq!(
+            diff_tables(&left, &right, &options),
+            Err(TableDiffError::KeyTypeMismatch {
+                column: "id".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn nested_key_column_is_rejected_up_front() {
+        // An empty table with a list key errors before any row is read, rather
+        // than diffing to an empty result.
+        let list = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
+        let left = reader(vec![Field::new("k", list.clone(), true)]);
+        let right = reader(vec![Field::new("k", list, true)]);
+        let options = TableDiffOptions::new(vec!["k".to_string()]);
+        assert!(matches!(
+            diff_tables(&left, &right, &options),
+            Err(TableDiffError::UnsupportedRowType { column, .. }) if column == "k"
+        ));
     }
 
     #[test]

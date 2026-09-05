@@ -1,5 +1,6 @@
 """Tests for the keyed row diff: added/removed/changed/duplicate/null rows, oracle parity, and a property test."""
 
+import decimal
 import random
 from collections import defaultdict
 from pathlib import Path
@@ -150,8 +151,56 @@ def test_nested_key_column_raises() -> None:
     schema = pa.schema([pa.field("k", pa.list_(pa.int64())), pa.field("v", pa.int64())])
     left = pa.table({"k": pa.array([[1, 2]], pa.list_(pa.int64())), "v": pa.array([1], pa.int64())}, schema=schema)
 
-    with pytest.raises(ValueError, match="scalar columns"):
+    with pytest.raises(ValueError, match="row diff cannot"):
         diff_tables(left, left, key=["k"])
+
+
+def test_empty_table_with_list_key_raises() -> None:
+    """A nested key is refused up front, so an empty table with a list key errors rather than diffing to empty."""
+    schema = pa.schema([pa.field("k", pa.list_(pa.int64())), pa.field("v", pa.int64())])
+    empty = schema.empty_table()
+
+    with pytest.raises(ValueError, match="row diff cannot"):
+        diff_tables(empty, empty, key=["k"])
+
+
+@pytest.mark.parametrize(
+    ("left_type", "right_type"),
+    [(pa.int64(), pa.float64()), (pa.int32(), pa.int64())],
+)
+def test_key_type_mismatch_across_sides_raises(left_type: pa.DataType, right_type: pa.DataType) -> None:
+    """A key column whose type differs across sides is refused rather than coerced."""
+    left = pa.table({"id": pa.array([1], left_type)})
+    right = pa.table({"id": pa.array([1], right_type)})
+
+    with pytest.raises(ValueError, match="same type on both sides"):
+        diff_tables(left, right, key=["id"])
+
+
+# Scalar-type coverage: a changed value in each supported non-key type is reported
+
+
+@pytest.mark.parametrize(
+    ("column_type", "left_value", "right_value"),
+    [
+        (pa.time32("s"), 1, 2),
+        (pa.time64("us"), 1, 2),
+        (pa.duration("s"), 1, 2),
+        (pa.decimal256(40, 2), decimal.Decimal("1.00"), decimal.Decimal("2.00")),
+        (pa.month_day_nano_interval(), (1, 0, 0), (2, 0, 0)),
+    ],
+)
+def test_changed_value_in_each_scalar_type_is_reported(
+    column_type: pa.DataType,
+    left_value: object,
+    right_value: object,
+) -> None:
+    """A differing non-key cell of each supported scalar type is a row change, never silently skipped."""
+    left = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([left_value], column_type)})
+    right = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([right_value], column_type)})
+    diff = diff_tables(left, right, key=["id"])
+
+    assert diff.summary()["rows_changed"] == 1
 
 
 # Oracle parity

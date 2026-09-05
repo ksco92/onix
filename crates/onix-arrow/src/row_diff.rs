@@ -6,58 +6,91 @@
 //!
 //! Two passes, so the full decoded tables never sit in memory at once:
 //!
-//! 1. **Hash pass.** Each side is streamed batch by batch. Every row yields a
-//!    keyed 128-bit hash of its key columns and a keyed 128-bit hash of its
-//!    non-key columns (the value semantics are in [`hash_cell`]). The pairs are
-//!    collected into one `(key_hash, row_hash)` vector per side — 32 bytes per
-//!    row, the only state that grows with the input — while the batches
-//!    themselves are spooled to a temporary Arrow IPC file and dropped. Set
-//!    arithmetic on the two sorted vectors then classifies every key: only on
-//!    the left (removed), only on the right (added), on both with different row
-//!    hashes (changed), on both with equal row hashes (unchanged, never
-//!    materialized), or appearing more than once on either side (a duplicate
-//!    key, excluded from the other three and reported with its per-side counts).
-//! 2. **Materialize pass.** The two spool files are re-read and filtered to the
-//!    rows whose keys landed in the added / removed sets, plus one row per
-//!    duplicate key for the duplicate-key report. Only the differing rows are
-//!    ever built into an output batch.
+//! 1. **Hash pass.** Each side is opened and streamed batch by batch. Every row
+//!    yields a keyed 128-bit hash of its key columns and a keyed 128-bit hash of
+//!    its non-key columns (the value semantics are in [`hash_cell`]). The pairs
+//!    are collected into one `(key_hash, row_hash)` vector per side — 32 bytes
+//!    per row, the only per-row state that grows with the input — while the
+//!    batches themselves are dropped as they are consumed. Set arithmetic on the
+//!    two sorted vectors then classifies every key: only on the left (removed),
+//!    only on the right (added), on both with different row hashes (changed), on
+//!    both with equal row hashes (unchanged, never materialized), or appearing
+//!    more than once on either side (a duplicate key, excluded from the other
+//!    three and reported with its per-side counts).
+//! 2. **Materialize pass.** Each side is opened again (a [`TableInput`] is
+//!    re-openable) and filtered to the rows whose keys landed in the added /
+//!    removed sets, plus one row per duplicate key for the duplicate-key report.
+//!    Only the differing rows are ever built into an output batch.
+//!
+//! Memory beyond the per-row hash vectors: the duplicate-key report holds the
+//! actual key values of every *distinct duplicated* key, so a duplicate-heavy
+//! input adds a term proportional to the number of distinct duplicated keys
+//! times the key width (see the README's Known-limitations bullet for measured
+//! figures).
 //!
 //! # Hashing
 //!
-//! The 128 bits are two independent std [`RandomState`]-seeded hashers
-//! (SipHash-family, keyed) run over the same bytes and concatenated. The keys
-//! are random per call, so the row-identity table cannot be forced into
-//! collisions by chosen input, and no unkeyed content hash table is used on
-//! this default (no-flag) path. Two distinct key values colliding to the same
-//! 128-bit hash — the only way this can misclassify — has probability on the
-//! order of `n² / 2¹²⁸`, negligible for any real table.
+//! Row identity is a single keyed 128-bit SipHash-1-3 ([`siphasher`]), keyed
+//! from 16 bytes of OS randomness ([`getrandom`]) drawn once per diff. Both
+//! sides of one diff share the key, so their hashes are comparable; a different
+//! diff draws a fresh key. Because the key is secret and random per run, the
+//! row-matching table cannot be forced into collisions by chosen input, and no
+//! unkeyed content hash table is used on this default (no-flag) path. Two
+//! distinct keys colliding to the same 128-bit hash — the only way this can
+//! misclassify — has probability on the order of `n² / 2¹²⁸`, negligible for
+//! any real table.
 //!
 //! # Value semantics
 //!
 //! Cell hashing matches how onix's core compares scalars: integers and integral
 //! floats within `±2⁵³` fold to one integer form (so `1`, `1.0`, `-0.0`, and a
 //! dictionary-encoded `1` all hash equal), other floats hash by their bit
-//! pattern, decimals hash by their exact value with trailing zeros removed (so
-//! `1.00` equals `1.0000`), timestamps hash by their UTC instant in nanoseconds
-//! (so the same instant stored at microsecond and millisecond precision hashes
-//! equal), and a null is a distinct value that equals only another null — the
-//! `IS DISTINCT FROM` semantics the `DuckDB` oracle uses. Only scalar columns are
-//! supported; a nested column (list, struct, map, union) is rejected with
-//! [`TableDiffError::UnsupportedRowType`], so cell hashing has no recursion and
-//! needs no depth guard beyond the one [`crate::diff_schemas`] already applies.
+//! pattern, decimals (128- and 256-bit) hash by their exact value with trailing
+//! zeros removed (so `1.00` equals `1.0000`), timestamps hash by their UTC
+//! instant in nanoseconds (so the same instant at microsecond and millisecond
+//! precision hashes equal), and a null is a distinct value that equals only
+//! another null — the `IS DISTINCT FROM` semantics the `DuckDB` oracle uses.
+//!
+//! # Which column types are hashed, refused, or skipped
+//!
+//! - **Hashed** (compared): boolean; every signed and unsigned integer width;
+//!   `Float16`/`Float32`/`Float64`; `Decimal128` and `Decimal256`; `Utf8`,
+//!   `LargeUtf8`, `Utf8View`; `Binary`, `LargeBinary`, `BinaryView`,
+//!   `FixedSizeBinary`; `Timestamp` (any unit, with or without a zone); `Date32`
+//!   and `Date64`; `Time32`/`Time64` and `Duration` (by raw value tagged with
+//!   their unit); `Interval` (by its per-variant fields); and a `Dictionary` of
+//!   any of these (decoded first).
+//! - **Refused** with [`TableDiffError::UnsupportedRowType`], key or non-key:
+//!   any other scalar type this list does not name — today `RunEndEncoded`. A
+//!   scalar column is always hashed or refused, never silently skipped.
+//! - **Skipped** (not compared, so a change in it is not reported): a *nested*
+//!   non-key column (`List` and its variants, `FixedSizeList`, `Struct`, `Map`,
+//!   `Union`), which is out of scope for the row diff. A nested *key* column is
+//!   refused.
+//!
+//! [`hash_cell`] itself is non-recursive; the one recursive walk here,
+//! [`is_hashable`] over a dictionary value type, is bounded by the
+//! [`crate::MAX_NESTING_DEPTH`] depth check [`crate::diff_schemas`] runs before
+//! any row is read.
 
-use std::collections::hash_map::{DefaultHasher, RandomState};
 use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasher, Hasher};
+use std::hash::Hasher;
+
+use siphasher::sip128::{Hasher128, SipHasher13};
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{
-    Date32Type, Date64Type, Decimal128Type, Float16Type, Float32Type, Float64Type, Int8Type,
-    Int16Type, Int32Type, Int64Type, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    Date32Type, Date64Type, Decimal128Type, Decimal256Type, DurationMicrosecondType,
+    DurationMillisecondType, DurationNanosecondType, DurationSecondType, Float16Type, Float32Type,
+    Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, IntervalDayTimeType,
+    IntervalMonthDayNanoType, IntervalYearMonthType, Time32MillisecondType, Time32SecondType,
+    Time64MicrosecondType, Time64NanosecondType, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt8Type, UInt16Type,
+    UInt32Type, UInt64Type,
 };
 use arrow_array::{Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, RecordBatchReader};
-use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow_buffer::i256;
+use arrow_schema::{ArrowError, DataType, Field, IntervalUnit, Schema, SchemaRef, TimeUnit};
 
 /// A re-openable source of one table's record batches.
 ///
@@ -135,45 +168,52 @@ const TAG_STR: u8 = 4;
 const TAG_BIN: u8 = 5;
 const TAG_TS: u8 = 6;
 const TAG_DATE: u8 = 7;
+const TAG_TIME: u8 = 8;
+const TAG_DURATION: u8 = 9;
+const TAG_INTERVAL: u8 = 10;
 
-/// Per-call random keys for the two hashers whose 64-bit outputs concatenate
-/// into one 128-bit keyed hash.
+/// The per-diff SipHash-1-3 key (`k0`, `k1`), 16 bytes of OS randomness. Both
+/// sides of one diff share it so their hashes are comparable; a different diff
+/// draws a fresh key, so a chosen input cannot precompute collisions.
 struct RowHasher {
-    low: RandomState,
-    high: RandomState,
+    k0: u64,
+    k1: u64,
 }
 
 impl RowHasher {
-    /// Fresh random keys for this diff. Both sides of one diff share the same
-    /// [`RowHasher`], so their hashes are comparable; a different diff gets
-    /// different keys.
-    fn new() -> Self {
-        Self {
-            low: RandomState::new(),
-            high: RandomState::new(),
-        }
+    /// Draws a fresh random key for this diff from the OS CSPRNG.
+    ///
+    /// # Errors
+    ///
+    /// [`TableDiffError::Read`] if the OS random source is unavailable.
+    fn new() -> Result<Self, TableDiffError> {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|e| TableDiffError::Read {
+            message: format!("could not obtain a random hash key from the OS: {e}"),
+        })?;
+        Ok(Self {
+            k0: u64::from_le_bytes(bytes[..8].try_into().unwrap_or_default()),
+            k1: u64::from_le_bytes(bytes[8..].try_into().unwrap_or_default()),
+        })
     }
 
-    /// A pair of hashers primed with this call's keys.
-    fn start(&self) -> DualHasher {
-        DualHasher {
-            low: self.low.build_hasher(),
-            high: self.high.build_hasher(),
-        }
+    /// A fresh keyed hasher primed with this diff's key and the domain tag, so a
+    /// key hash and a row hash of the same cells cannot collide.
+    fn start(&self, domain: u8) -> CellHasher {
+        let mut sip = SipHasher13::new_with_keys(self.k0, self.k1);
+        sip.write(&[domain]);
+        CellHasher(sip)
     }
 }
 
-/// Two keyed hashers fed the identical byte stream; their 64-bit finishes
-/// concatenate into a 128-bit value.
-struct DualHasher {
-    low: DefaultHasher,
-    high: DefaultHasher,
-}
+/// One row's keyed 128-bit hash in progress. Values are written little-endian so
+/// the byte stream is stable within a run (cross-run stability is not needed —
+/// the key is per-run).
+struct CellHasher(SipHasher13);
 
-impl DualHasher {
+impl CellHasher {
     fn write(&mut self, bytes: &[u8]) {
-        self.low.write(bytes);
-        self.high.write(bytes);
+        self.0.write(bytes);
     }
 
     fn tag(&mut self, tag: u8) {
@@ -193,7 +233,7 @@ impl DualHasher {
     }
 
     fn finish(self) -> u128 {
-        (u128::from(self.low.finish()) << 64) | u128::from(self.high.finish())
+        self.0.finish128().as_u128()
     }
 }
 
@@ -257,11 +297,12 @@ fn side_columns(schema: &Schema, key: &[String], common_values: &[String]) -> Si
     SideColumns { key, value }
 }
 
-/// The non-key columns compared for row changes: those present on both schemas
-/// with a value-hashable (scalar) type on each side, by name, sorted. A column
-/// on only one side is a schema change, never a cell change; a nested column is
-/// out of scope for the row diff and is skipped rather than compared. Sorting
-/// makes both sides agree on the hashing order.
+/// The non-key columns compared for row changes: the columns present on both
+/// schemas that are *not* nested on either side, by name, sorted. A column on
+/// only one side is a schema change, never a cell change; a nested column is out
+/// of scope for the row diff and is skipped. A non-nested (scalar) column is
+/// kept even if [`hash_cell`] cannot hash it, so it is refused there rather than
+/// silently skipped. Sorting makes both sides agree on the hashing order.
 fn common_value_columns(left: &Schema, right: &Schema, key: &[String]) -> Vec<String> {
     let mut names: Vec<String> = left
         .fields()
@@ -269,10 +310,10 @@ fn common_value_columns(left: &Schema, right: &Schema, key: &[String]) -> Vec<St
         .filter(|field| {
             let name = field.name().as_str();
             !key.iter().any(|k| k == name)
-                && is_hashable(field.data_type())
+                && !is_nested(field.data_type())
                 && right
                     .field_with_name(name)
-                    .is_ok_and(|right_field| is_hashable(right_field.data_type()))
+                    .is_ok_and(|right_field| !is_nested(right_field.data_type()))
         })
         .map(|field| field.name().clone())
         .collect();
@@ -280,11 +321,35 @@ fn common_value_columns(left: &Schema, right: &Schema, key: &[String]) -> Vec<St
     names
 }
 
+/// Whether a type is a nested (container) type — the types the row diff is out
+/// of scope for, skipped when non-key and refused when key. A `Dictionary` is
+/// *not* nested: it is a scalar encoding, decoded before hashing.
+fn is_nested(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::List(_)
+            | DataType::LargeList(_)
+            | DataType::ListView(_)
+            | DataType::LargeListView(_)
+            | DataType::FixedSizeList(_, _)
+            | DataType::Struct(_)
+            | DataType::Map(_, _)
+            | DataType::Union(_, _)
+    )
+}
+
 /// Whether a column of this type can be hashed by value (see [`hash_cell`]): a
-/// scalar type, or a dictionary of one. Nested, decimal-256, duration, time,
-/// and interval types are not — they are skipped when non-key, and a key of
-/// such a type is a [`TableDiffError::UnsupportedRowType`].
-fn is_hashable(data_type: &DataType) -> bool {
+/// scalar type this crate handles, or a dictionary of one. Used to validate key
+/// columns up front — a key of a non-hashable type (nested, or a scalar the
+/// crate refuses such as `RunEndEncoded`) is a
+/// [`TableDiffError::UnsupportedRowType`] before any row is read. The
+/// enumeration matches [`hash_cell`]'s.
+///
+/// Recurses through the dictionary value type, but only after
+/// [`crate::diff_schemas`]'s `check_depths` has rejected any column nested past
+/// [`crate::MAX_NESTING_DEPTH`], so the recursion is bounded and cannot overflow
+/// the native stack (see `.claude/rules/arrow-nesting-depth.md`).
+pub(crate) fn is_hashable(data_type: &DataType) -> bool {
     match data_type {
         DataType::Boolean
         | DataType::Int8
@@ -299,6 +364,7 @@ fn is_hashable(data_type: &DataType) -> bool {
         | DataType::Float32
         | DataType::Float64
         | DataType::Decimal128(_, _)
+        | DataType::Decimal256(_, _)
         | DataType::Utf8
         | DataType::LargeUtf8
         | DataType::Utf8View
@@ -308,7 +374,11 @@ fn is_hashable(data_type: &DataType) -> bool {
         | DataType::FixedSizeBinary(_)
         | DataType::Timestamp(_, _)
         | DataType::Date32
-        | DataType::Date64 => true,
+        | DataType::Date64
+        | DataType::Time32(_)
+        | DataType::Time64(_)
+        | DataType::Duration(_)
+        | DataType::Interval(_) => true,
         DataType::Dictionary(_, value) => is_hashable(value),
         _ => false,
     }
@@ -348,7 +418,7 @@ fn integer_value(array: &ArrayRef, row: usize) -> Option<i128> {
 /// A null writes only [`TAG_NULL`]; every other kind writes its tag then a
 /// canonical form of the value (see the module docs' value semantics).
 fn hash_cell(
-    hasher: &mut DualHasher,
+    hasher: &mut CellHasher,
     array: &ArrayRef,
     column: &str,
     row: usize,
@@ -378,7 +448,14 @@ fn hash_cell(
         DataType::Decimal128(_, scale) => {
             hash_decimal(
                 hasher,
-                array.as_primitive::<Decimal128Type>().value(row),
+                i256::from_i128(array.as_primitive::<Decimal128Type>().value(row)),
+                *scale,
+            );
+        }
+        DataType::Decimal256(_, scale) => {
+            hash_decimal(
+                hasher,
+                array.as_primitive::<Decimal256Type>().value(row),
                 *scale,
             );
         }
@@ -415,10 +492,22 @@ fn hash_cell(
         }
         DataType::Date64 => {
             hasher.tag(TAG_DATE);
-            // Date64 is milliseconds since epoch, always a whole day; fold to a
-            // day count so it hashes equal to the matching Date32.
-            hasher.write_i64(array.as_primitive::<Date64Type>().value(row) / 86_400_000);
+            // Date64 is milliseconds since epoch; Arrow's contract is a whole
+            // number of days, so the raw value already distinguishes distinct
+            // dates and two equal dates hash equal without a lossy divide.
+            hasher.write_i64(array.as_primitive::<Date64Type>().value(row));
         }
+        DataType::Time32(unit) => hash_time32(hasher, array, *unit, row),
+        DataType::Time64(unit) => hash_time64(hasher, array, *unit, row),
+        DataType::Duration(unit) => {
+            hash_time_like(
+                hasher,
+                TAG_DURATION,
+                time_unit_discriminant(*unit),
+                duration_value(array, *unit, row),
+            );
+        }
+        DataType::Interval(unit) => hash_interval(hasher, array, *unit, row),
         other => {
             return Err(TableDiffError::UnsupportedRowType {
                 column: column.to_string(),
@@ -428,6 +517,91 @@ fn hash_cell(
     }
 
     Ok(())
+}
+
+/// A stable per-`TimeUnit` byte, so the same raw value at different units never
+/// collides.
+fn time_unit_discriminant(unit: TimeUnit) -> u8 {
+    match unit {
+        TimeUnit::Second => 0,
+        TimeUnit::Millisecond => 1,
+        TimeUnit::Microsecond => 2,
+        TimeUnit::Nanosecond => 3,
+    }
+}
+
+/// Writes an integer-backed time or duration by its raw value tagged with a
+/// unit discriminant (raw value, not normalized across units, so a unit change
+/// reads as a value change).
+fn hash_time_like(hasher: &mut CellHasher, tag: u8, unit_discriminant: u8, raw: i64) {
+    hasher.tag(tag);
+    hasher.write(&[unit_discriminant]);
+    hasher.write_i64(raw);
+}
+
+/// Hashes a `Time32` cell (seconds or milliseconds).
+fn hash_time32(hasher: &mut CellHasher, array: &ArrayRef, unit: TimeUnit, row: usize) {
+    let raw = if unit == TimeUnit::Second {
+        array.as_primitive::<Time32SecondType>().value(row)
+    } else {
+        array.as_primitive::<Time32MillisecondType>().value(row)
+    };
+    hash_time_like(
+        hasher,
+        TAG_TIME,
+        time_unit_discriminant(unit),
+        i64::from(raw),
+    );
+}
+
+/// Hashes a `Time64` cell (microseconds or nanoseconds).
+fn hash_time64(hasher: &mut CellHasher, array: &ArrayRef, unit: TimeUnit, row: usize) {
+    let raw = if unit == TimeUnit::Microsecond {
+        array.as_primitive::<Time64MicrosecondType>().value(row)
+    } else {
+        array.as_primitive::<Time64NanosecondType>().value(row)
+    };
+    hash_time_like(hasher, TAG_TIME, time_unit_discriminant(unit), raw);
+}
+
+/// Reads a `Duration` cell's raw integer in `unit`.
+fn duration_value(array: &ArrayRef, unit: TimeUnit, row: usize) -> i64 {
+    match unit {
+        TimeUnit::Second => array.as_primitive::<DurationSecondType>().value(row),
+        TimeUnit::Millisecond => array.as_primitive::<DurationMillisecondType>().value(row),
+        TimeUnit::Microsecond => array.as_primitive::<DurationMicrosecondType>().value(row),
+        TimeUnit::Nanosecond => array.as_primitive::<DurationNanosecondType>().value(row),
+    }
+}
+
+/// Writes an interval by its exact per-variant fields, tagged with the variant
+/// so the three interval kinds never collide.
+fn hash_interval(hasher: &mut CellHasher, array: &ArrayRef, unit: IntervalUnit, row: usize) {
+    hasher.tag(TAG_INTERVAL);
+    match unit {
+        IntervalUnit::YearMonth => {
+            hasher.write(&[0]);
+            hasher.write(
+                &array
+                    .as_primitive::<IntervalYearMonthType>()
+                    .value(row)
+                    .to_le_bytes(),
+            );
+        }
+        IntervalUnit::DayTime => {
+            hasher.write(&[1]);
+            let v = array.as_primitive::<IntervalDayTimeType>().value(row);
+            hasher.write(&v.days.to_le_bytes());
+            hasher.write(&v.milliseconds.to_le_bytes());
+        }
+        IntervalUnit::MonthDayNano => {
+            hasher.write(&[2]);
+            let v = array.as_primitive::<IntervalMonthDayNanoType>().value(row);
+            hasher.write(&v.months.to_le_bytes());
+            hasher.write(&v.days.to_le_bytes());
+            hasher.write(&v.nanoseconds.to_le_bytes());
+        }
+    }
 }
 
 /// Reads a timestamp cell as its raw integer in `unit`, regardless of the
@@ -443,7 +617,7 @@ fn timestamp_value(array: &ArrayRef, unit: TimeUnit, row: usize) -> i64 {
 
 /// Writes an integer in the shared integer form: `1`, `1.0`, and a
 /// dictionary-encoded `1` all reach this.
-fn hash_int(hasher: &mut DualHasher, value: i128) {
+fn hash_int(hasher: &mut CellHasher, value: i128) {
     hasher.tag(TAG_INT);
     hasher.write_i128(value);
 }
@@ -455,7 +629,7 @@ fn hash_int(hasher: &mut DualHasher, value: i128) {
 /// range folds to the integer form (so `-0.0` and `0.0` both become `0`);
 /// anything else keeps its raw bit pattern, so two NaNs hash equal only when
 /// bit-identical.
-fn hash_float(hasher: &mut DualHasher, value: f64) {
+fn hash_float(hasher: &mut CellHasher, value: f64) {
     if value.fract() == 0.0 && value.abs() <= MAX_EXACT_F64_INT {
         // `fract() == 0.0` and the magnitude bound guarantee an exact cast.
         #[allow(clippy::cast_possible_truncation)]
@@ -467,24 +641,27 @@ fn hash_float(hasher: &mut DualHasher, value: f64) {
 }
 
 /// Writes a decimal by its exact value with trailing decimal zeros removed, so
-/// `1.00` (scale 2) and `1.0000` (scale 4) hash equal.
-fn hash_decimal(hasher: &mut DualHasher, mut value: i128, scale: i8) {
+/// `1.00` (scale 2) and `1.0000` (scale 4) hash equal. `Decimal128` cells are
+/// widened to `i256` first, so a 128-bit and a 256-bit decimal of the same value
+/// hash equal.
+fn hash_decimal(hasher: &mut CellHasher, mut value: i256, scale: i8) {
+    let ten = i256::from_i128(10);
     let mut scale = i32::from(scale);
-    if value == 0 {
+    if value == i256::ZERO {
         scale = 0;
     } else {
-        while value % 10 == 0 {
-            value /= 10;
+        while value.wrapping_rem(ten) == i256::ZERO {
+            value = value.wrapping_div(ten);
             scale -= 1;
         }
     }
     hasher.tag(TAG_DECIMAL);
-    hasher.write_i128(value);
+    hasher.write(&value.to_le_bytes());
     hasher.write(&scale.to_le_bytes());
 }
 
 /// Writes a byte string (UTF-8 or binary) under the given tag.
-fn hash_bytes(hasher: &mut DualHasher, tag: u8, bytes: &[u8]) {
+fn hash_bytes(hasher: &mut CellHasher, tag: u8, bytes: &[u8]) {
     hasher.tag(tag);
     hasher.write_u64(bytes.len() as u64);
     hasher.write(bytes);
@@ -496,7 +673,7 @@ fn hash_bytes(hasher: &mut DualHasher, tag: u8, bytes: &[u8]) {
 /// `onix-core`'s `ScalarKey::DateTime { aware, instant }` in
 /// `crates/onix-core/src/lcs.rs` (instant plus an aware flag); the two are kept
 /// consistent by hand, the crates being decoupled by design.
-fn hash_timestamp(hasher: &mut DualHasher, raw: i64, unit: TimeUnit, has_tz: bool) {
+fn hash_timestamp(hasher: &mut CellHasher, raw: i64, unit: TimeUnit, has_tz: bool) {
     let nanos = i128::from(raw)
         * match unit {
             TimeUnit::Second => 1_000_000_000,
@@ -518,8 +695,7 @@ fn hash_row(
     names: &[&str],
     row: usize,
 ) -> Result<u128, TableDiffError> {
-    let mut dual = hasher.start();
-    dual.tag(domain);
+    let mut dual = hasher.start(domain);
     for (array, name) in arrays.iter().zip(names) {
         hash_cell(&mut dual, array, name, row)?;
     }
@@ -809,7 +985,7 @@ pub(crate) fn diff_rows(
     right_schema: &Schema,
     key: &[String],
 ) -> Result<RowDiff, TableDiffError> {
-    let hasher = RowHasher::new();
+    let hasher = RowHasher::new()?;
     let common_values = common_value_columns(left_schema, right_schema, key);
 
     let key_names: Vec<&str> = key.iter().map(String::as_str).collect();
@@ -894,11 +1070,15 @@ mod tests {
     use arrow_array::cast::AsArray;
     use arrow_array::types::Int64Type;
     use arrow_array::{
-        Array, ArrayRef, Date32Array, Date64Array, Decimal128Array, Float64Array, Int32Array,
-        Int64Array, ListArray, RecordBatch, RecordBatchReader, StringArray,
+        Array, ArrayRef, BinaryViewArray, Date32Array, Date64Array, Decimal128Array,
+        Decimal256Array, DurationNanosecondArray, DurationSecondArray, Float64Array, Int32Array,
+        Int64Array, IntervalDayTimeArray, IntervalMonthDayNanoArray, IntervalYearMonthArray,
+        ListArray, RecordBatch, RecordBatchReader, StringArray, Time32MillisecondArray,
+        Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
         TimestampMicrosecondArray, TimestampMillisecondArray,
     };
-    use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
+    use arrow_buffer::{IntervalDayTime, IntervalMonthDayNano, i256};
+    use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef, TimeUnit};
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
@@ -1250,26 +1430,210 @@ mod tests {
     }
 
     #[test]
-    fn date32_and_date64_same_day_are_unchanged() {
-        let left_schema = schema(vec![id_field(), Field::new("d", DataType::Date32, false)]);
-        let right_schema = schema(vec![id_field(), Field::new("d", DataType::Date64, false)]);
-        // day 3 == 3 * 86_400_000 ms.
+    fn date64_hashes_by_raw_value() {
+        // Date64 hashes its raw millisecond value: equal values are unchanged,
+        // and two distinct raw values (even within one calendar day, which
+        // Arrow's whole-day contract forbids but the hash still distinguishes)
+        // are a change.
+        let sch = schema(vec![id_field(), Field::new("d", DataType::Date64, false)]);
+        let with = |v: i64| {
+            reader(
+                &sch,
+                vec![
+                    Arc::new(Int64Array::from(vec![Some(1)])),
+                    Arc::new(Date64Array::from(vec![v])),
+                ],
+            )
+        };
+        assert_eq!(
+            diff_rows(&with(0), &with(0), &sch, &sch, &key())
+                .unwrap()
+                .counts
+                .rows_changed,
+            0
+        );
+        assert_eq!(
+            diff_rows(&with(0), &with(86_399_999), &sch, &sch, &key())
+                .unwrap()
+                .counts
+                .rows_changed,
+            1
+        );
+    }
+
+    /// Diffs two one-row tables whose single non-key column `v` differs, and
+    /// asserts the row is reported changed — proving the type is hashed, not
+    /// skipped.
+    fn assert_value_change_detected(value_type: DataType, left: ArrayRef, right: ArrayRef) {
+        let sch = schema(vec![id_field(), Field::new("v", value_type, false)]);
+        let left = reader(&sch, vec![Arc::new(Int64Array::from(vec![Some(1)])), left]);
+        let right = reader(&sch, vec![Arc::new(Int64Array::from(vec![Some(1)])), right]);
+        let diff = diff_rows(&left, &right, &sch, &sch, &key()).unwrap();
+        assert_eq!(diff.counts.rows_changed, 1);
+    }
+
+    #[test]
+    fn time32_value_change_is_detected() {
+        assert_value_change_detected(
+            DataType::Time32(TimeUnit::Second),
+            Arc::new(Time32SecondArray::from(vec![1])),
+            Arc::new(Time32SecondArray::from(vec![2])),
+        );
+    }
+
+    #[test]
+    fn time64_value_change_is_detected() {
+        assert_value_change_detected(
+            DataType::Time64(TimeUnit::Microsecond),
+            Arc::new(Time64MicrosecondArray::from(vec![1])),
+            Arc::new(Time64MicrosecondArray::from(vec![2])),
+        );
+    }
+
+    #[test]
+    fn duration_value_change_is_detected() {
+        assert_value_change_detected(
+            DataType::Duration(TimeUnit::Second),
+            Arc::new(DurationSecondArray::from(vec![1])),
+            Arc::new(DurationSecondArray::from(vec![2])),
+        );
+    }
+
+    #[test]
+    fn interval_value_change_is_detected() {
+        assert_value_change_detected(
+            DataType::Interval(arrow_schema::IntervalUnit::YearMonth),
+            Arc::new(IntervalYearMonthArray::from(vec![1])),
+            Arc::new(IntervalYearMonthArray::from(vec![2])),
+        );
+    }
+
+    #[test]
+    fn decimal256_value_change_is_detected() {
+        let d = |v: i128| {
+            Decimal256Array::from(vec![i256::from_i128(v)])
+                .with_precision_and_scale(40, 2)
+                .unwrap()
+        };
+        assert_value_change_detected(
+            DataType::Decimal256(40, 2),
+            Arc::new(d(100)),
+            Arc::new(d(200)),
+        );
+    }
+
+    #[test]
+    fn decimal256_equal_value_across_scales_is_unchanged() {
+        let left_schema = schema(vec![
+            id_field(),
+            Field::new("v", DataType::Decimal256(40, 2), false),
+        ]);
+        let right_schema = schema(vec![
+            id_field(),
+            Field::new("v", DataType::Decimal256(40, 4), false),
+        ]);
         let left = reader(
             &left_schema,
             vec![
                 Arc::new(Int64Array::from(vec![Some(1)])),
-                Arc::new(Date32Array::from(vec![3])),
+                Arc::new(
+                    Decimal256Array::from(vec![i256::from_i128(100)])
+                        .with_precision_and_scale(40, 2)
+                        .unwrap(),
+                ),
             ],
         );
         let right = reader(
             &right_schema,
             vec![
                 Arc::new(Int64Array::from(vec![Some(1)])),
-                Arc::new(Date64Array::from(vec![3 * 86_400_000])),
+                Arc::new(
+                    Decimal256Array::from(vec![i256::from_i128(10_000)])
+                        .with_precision_and_scale(40, 4)
+                        .unwrap(),
+                ),
             ],
         );
+        // Value 1.00 == 1.0000; the column is not the key, so the scale change is
+        // a schema change but the row is unchanged.
         let diff = diff_rows(&left, &right, &left_schema, &right_schema, &key()).unwrap();
         assert_eq!(diff.counts.rows_changed, 0);
+    }
+
+    #[test]
+    fn run_end_encoded_non_key_column_is_refused() {
+        use arrow_array::RunArray;
+        let run_ends = Int32Array::from(vec![1]);
+        let values = Int64Array::from(vec![10]);
+        let run: RunArray<arrow_array::types::Int32Type> =
+            RunArray::try_new(&run_ends, &values).unwrap();
+        let sch = schema(vec![
+            id_field(),
+            Field::new("v", run.data_type().clone(), true),
+        ]);
+        let make = || {
+            reader(
+                &sch,
+                vec![
+                    Arc::new(Int64Array::from(vec![Some(1)])),
+                    Arc::new(run.clone()),
+                ],
+            )
+        };
+        let error = diff_rows(&make(), &make(), &sch, &sch, &key()).unwrap_err();
+        assert!(
+            matches!(error, TableDiffError::UnsupportedRowType { column, .. } if column == "v")
+        );
+    }
+
+    #[test]
+    fn adjacent_string_cells_are_not_confused_by_framing() {
+        // Two string columns: ("ab","c") vs ("a","bc"). Without the per-string
+        // length prefix these would hash identically; they must be a change.
+        let sch = schema(vec![
+            id_field(),
+            Field::new("p", DataType::Utf8, false),
+            Field::new("q", DataType::Utf8, false),
+        ]);
+        let left = reader(
+            &sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(StringArray::from(vec!["ab"])),
+                Arc::new(StringArray::from(vec!["c"])),
+            ],
+        );
+        let right = reader(
+            &sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(StringArray::from(vec!["a"])),
+                Arc::new(StringArray::from(vec!["bc"])),
+            ],
+        );
+        let diff = diff_rows(&left, &right, &sch, &sch, &key()).unwrap();
+        assert_eq!(diff.counts.rows_changed, 1);
+    }
+
+    #[test]
+    fn null_versus_empty_string_is_a_change() {
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Utf8, true)]);
+        let left = reader(
+            &sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+            ],
+        );
+        let right = reader(
+            &sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(StringArray::from(vec![Some("")])),
+            ],
+        );
+        let diff = diff_rows(&left, &right, &sch, &sch, &key()).unwrap();
+        assert_eq!(diff.counts.rows_changed, 1);
     }
 
     #[test]
@@ -1491,7 +1855,7 @@ mod tests {
 
     #[test]
     fn hash_distinguishes_and_equates_scalar_values() {
-        let hasher = super::RowHasher::new();
+        let hasher = super::RowHasher::new().unwrap();
 
         // Decimals: distinct values differ; the same value at different scales
         // (trailing zeros removed) is equal.
@@ -1513,18 +1877,27 @@ mod tests {
 
         // Timestamps: distinct instants differ; the same instant across units is
         // equal.
-        let us: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![2_000_000]));
-        let us2: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![3_000_000]));
-        let ms: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![2_000]));
-        assert_ne!(cell_hash(&hasher, us.clone()), cell_hash(&hasher, us2));
-        assert_eq!(cell_hash(&hasher, us), cell_hash(&hasher, ms));
+        let micros: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![2_000_000]));
+        let other_micros: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![3_000_000]));
+        let millis: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![2_000]));
+        assert_ne!(
+            cell_hash(&hasher, micros.clone()),
+            cell_hash(&hasher, other_micros)
+        );
+        assert_eq!(cell_hash(&hasher, micros), cell_hash(&hasher, millis));
 
-        // Dates: distinct days differ; the same day as Date32/Date64 is equal.
-        let d32: ArrayRef = Arc::new(Date32Array::from(vec![3]));
-        let d32b: ArrayRef = Arc::new(Date32Array::from(vec![4]));
-        let d64: ArrayRef = Arc::new(Date64Array::from(vec![3 * 86_400_000]));
-        assert_ne!(cell_hash(&hasher, d32.clone()), cell_hash(&hasher, d32b));
-        assert_eq!(cell_hash(&hasher, d32), cell_hash(&hasher, d64));
+        // Dates: distinct days differ; the same raw value is equal.
+        let day_three: ArrayRef = Arc::new(Date32Array::from(vec![3]));
+        let day_four: ArrayRef = Arc::new(Date32Array::from(vec![4]));
+        let day_three_again: ArrayRef = Arc::new(Date32Array::from(vec![3]));
+        assert_ne!(
+            cell_hash(&hasher, day_three.clone()),
+            cell_hash(&hasher, day_four)
+        );
+        assert_eq!(
+            cell_hash(&hasher, day_three),
+            cell_hash(&hasher, day_three_again)
+        );
 
         // Integers of different widths but the same value are equal; different
         // values differ.
@@ -1548,30 +1921,38 @@ mod tests {
         // Two distinct integral floats past 2^53 keep their bit patterns (they do
         // not fold to an integer): folding them would saturate both to the same
         // i128 and collide.
-        let hasher = super::RowHasher::new();
+        let hasher = super::RowHasher::new().unwrap();
         let f1: ArrayRef = Arc::new(Float64Array::from(vec![1e300]));
         let f2: ArrayRef = Arc::new(Float64Array::from(vec![2e300]));
         assert_ne!(cell_hash(&hasher, f1), cell_hash(&hasher, f2));
     }
 
     #[test]
-    fn hash_uses_the_full_128_bits() {
-        // The finish combines the two 64-bit hashers as `(low << 64) | high`, so
-        // the top 64 bits carry `low`; if it collapsed to `high` alone the hash
-        // would be only 64 bits wide. At least one of a few inputs has a non-zero
-        // top half (each hasher's output is effectively random).
-        let hasher = super::RowHasher::new();
-        let any_high_bits = (0..4).any(|v| {
-            let cell: ArrayRef = Arc::new(Int64Array::from(vec![v]));
-            cell_hash(&hasher, cell) >> 64 != 0
-        });
-        assert!(any_high_bits, "the hash must occupy its top 64 bits");
+    fn hash_uses_both_128_bit_halves() {
+        // SipHash-1-3's 128-bit output must populate both halves: across a run of
+        // inputs, at least one has a non-zero top half and at least one has the
+        // two halves unequal. A hash that collapsed to 64 bits (top half always
+        // zero, or the halves mirrored) would fail this.
+        let keyed = super::RowHasher::new().unwrap();
+        let outputs: Vec<u128> = (0..16)
+            .map(|v| cell_hash(&keyed, Arc::new(Int64Array::from(vec![v])) as ArrayRef))
+            .collect();
+        assert!(
+            outputs.iter().any(|h| h >> 64 != 0),
+            "the top 64 bits must be used"
+        );
+        assert!(
+            outputs
+                .iter()
+                .any(|h| (h >> 64) != (h & u128::from(u64::MAX))),
+            "the two 64-bit halves must differ"
+        );
     }
 
     #[test]
     fn key_and_row_domains_hash_differently() {
         // The domain tag separates a key hash from a row hash of the same cell.
-        let hasher = super::RowHasher::new();
+        let hasher = super::RowHasher::new().unwrap();
         let cell: ArrayRef = Arc::new(Int64Array::from(vec![5]));
         let as_key = super::hash_row(
             &hasher,
@@ -1658,6 +2039,46 @@ mod tests {
         );
         let diff = diff_rows(&left, &right, &sch, &sch, &key()).unwrap();
         assert_eq!(diff.counts.rows_changed, 1);
+    }
+
+    #[test]
+    fn remaining_temporal_and_view_variants_are_hashed() {
+        // Cover the time/duration/interval unit variants and the binary view arm
+        // not exercised by the tests above; each distinct value must be a change.
+        assert_value_change_detected(
+            DataType::Time32(TimeUnit::Millisecond),
+            Arc::new(Time32MillisecondArray::from(vec![1])),
+            Arc::new(Time32MillisecondArray::from(vec![2])),
+        );
+        assert_value_change_detected(
+            DataType::Time64(TimeUnit::Nanosecond),
+            Arc::new(Time64NanosecondArray::from(vec![1])),
+            Arc::new(Time64NanosecondArray::from(vec![2])),
+        );
+        assert_value_change_detected(
+            DataType::Duration(TimeUnit::Nanosecond),
+            Arc::new(DurationNanosecondArray::from(vec![1])),
+            Arc::new(DurationNanosecondArray::from(vec![2])),
+        );
+        assert_value_change_detected(
+            DataType::Interval(arrow_schema::IntervalUnit::DayTime),
+            Arc::new(IntervalDayTimeArray::from(vec![IntervalDayTime::new(1, 0)])),
+            Arc::new(IntervalDayTimeArray::from(vec![IntervalDayTime::new(2, 0)])),
+        );
+        assert_value_change_detected(
+            DataType::Interval(arrow_schema::IntervalUnit::MonthDayNano),
+            Arc::new(IntervalMonthDayNanoArray::from(vec![
+                IntervalMonthDayNano::new(1, 0, 0),
+            ])),
+            Arc::new(IntervalMonthDayNanoArray::from(vec![
+                IntervalMonthDayNano::new(2, 0, 0),
+            ])),
+        );
+        assert_value_change_detected(
+            DataType::BinaryView,
+            Arc::new(BinaryViewArray::from(vec![&b"a"[..]])),
+            Arc::new(BinaryViewArray::from(vec![&b"b"[..]])),
+        );
     }
 
     #[test]

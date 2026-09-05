@@ -1,37 +1,52 @@
-//! Measures the keyed row diff's peak memory and wall time at a given row
-//! count, to check the "peak RSS proportional to rows, not data" claim.
+//! Measures the keyed row diff's peak memory and wall time, to check the memory
+//! bounds the README states.
 //!
 //! Run under the OS's max-RSS reporter:
 //!
 //! ```sh
 //! cargo build -p onix-arrow --release --example row_diff_rss
+//! # linear shape (default): mostly-matching rows, 1% added/removed, ~2% changed
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000
 //! /usr/bin/time -l target/release/examples/row_diff_rss 10000000
+//! # duplicate-heavy shape: every key duplicated, wide string key
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 dup 16
+//! /usr/bin/time -l target/release/examples/row_diff_rss 200000 dup 1024
 //! ```
 //!
 //! Each side is generated on the fly, batch by batch, and nothing is retained
-//! between batches, so the process's peak RSS is the diff's own state (the
-//! per-row hash vectors and the classification sets), not the table data. The
-//! left is ids `0..n` and the right is ids `step..n + step` with `step = n /
-//! 100`, so 1% of rows are removed, 1% added, and about 2% of the shared rows
-//! changed — a realistic, materialization-exercising mix.
+//! between batches, so the process's peak RSS is the diff's own state, not the
+//! table data. The **linear** shape (`id`, `value` int64 columns) exercises the
+//! per-row hash vectors: the left is ids `0..n`, the right `step..n + step` with
+//! `step = n / 100`, so 1% removed, 1% added, ~2% changed. The **dup** shape
+//! (`key` Utf8 of the given width, `value` int64) makes every key appear twice
+//! on each side, so every distinct key is a duplicate and the whole
+//! `duplicate_keys` report is materialized — the term that scales with distinct
+//! duplicated keys times the key width.
 
 use std::sync::Arc;
 
-use arrow_array::{ArrayRef, Int64Array, RecordBatch, RecordBatchReader};
+use arrow_array::{ArrayRef, Int64Array, RecordBatch, RecordBatchReader, StringArray};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use onix_arrow::{TableDiffError, TableDiffOptions, TableInput, diff_tables};
 
 const BATCH: i64 = 65_536;
 
-/// A table of `(id, value)` rows generated on demand, retaining nothing.
+/// The generated table shape.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// `(id, value)` int64 columns; `id_offset` shifts the key range and
+    /// `change_every` perturbs a fraction of values.
+    Linear { id_offset: i64, change_every: i64 },
+    /// `(key, value)`; `key` is a `key_width`-byte string and each key value
+    /// appears twice, so every key is a duplicate.
+    Dup { key_width: usize },
+}
+
+/// A table generated on demand, retaining nothing between batches.
 struct Generated {
     schema: SchemaRef,
     rows: i64,
-    id_offset: i64,
-    /// Every `change_every`-th row gets a perturbed value, so a fraction of the
-    /// shared keys count as changed.
-    change_every: i64,
+    shape: Shape,
 }
 
 impl TableInput for Generated {
@@ -43,8 +58,7 @@ impl TableInput for Generated {
         Ok(Box::new(GenReader {
             schema: self.schema.clone(),
             rows: self.rows,
-            id_offset: self.id_offset,
-            change_every: self.change_every,
+            shape: self.shape,
             next: 0,
         }))
     }
@@ -53,8 +67,7 @@ impl TableInput for Generated {
 struct GenReader {
     schema: SchemaRef,
     rows: i64,
-    id_offset: i64,
-    change_every: i64,
+    shape: Shape,
     next: i64,
 }
 
@@ -66,23 +79,33 @@ impl Iterator for GenReader {
             return None;
         }
         let end = (self.next + BATCH).min(self.rows);
-        let ids: Int64Array = (self.next..end).map(|i| Some(i + self.id_offset)).collect();
-        // The value is a function of the id, so the same key holds the same
-        // value on both sides — except every `change_every`-th id, perturbed, so
-        // a fixed fraction of the shared keys count as changed.
-        let values: Int64Array = (self.next..end)
-            .map(|i| {
-                let id = i + self.id_offset;
-                Some(if id % self.change_every == 0 {
-                    id + 1
-                } else {
-                    id
-                })
-            })
-            .collect();
+        let columns: Vec<ArrayRef> = match self.shape {
+            Shape::Linear {
+                id_offset,
+                change_every,
+            } => {
+                let ids: Int64Array = (self.next..end).map(|i| Some(i + id_offset)).collect();
+                // The value is a function of the id, so a shared key holds the
+                // same value on both sides except every `change_every`-th id.
+                let values: Int64Array = (self.next..end)
+                    .map(|i| {
+                        let id = i + id_offset;
+                        Some(if id % change_every == 0 { id + 1 } else { id })
+                    })
+                    .collect();
+                vec![Arc::new(ids), Arc::new(values)]
+            }
+            Shape::Dup { key_width } => {
+                // Key value `i / 2`, so each distinct key appears twice.
+                let keys: StringArray = (self.next..end)
+                    .map(|i| Some(format!("{:0>width$}", i / 2, width = key_width)))
+                    .collect();
+                let values: Int64Array = (self.next..end).map(Some).collect();
+                vec![Arc::new(keys), Arc::new(values)]
+            }
+        };
         self.next = end;
 
-        let columns: Vec<ArrayRef> = vec![Arc::new(ids), Arc::new(values)];
         Some(RecordBatch::try_new(self.schema.clone(), columns))
     }
 }
@@ -94,43 +117,70 @@ impl RecordBatchReader for GenReader {
 }
 
 fn main() {
-    let rows: i64 = std::env::args()
-        .nth(1)
+    let args: Vec<String> = std::env::args().collect();
+    let rows: i64 = args
+        .get(1)
         .and_then(|a| a.parse().ok())
         .unwrap_or(1_000_000);
-    let step = (rows / 100).max(1);
+    let dup = args.get(2).is_some_and(|a| a == "dup");
+    let key_width: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(16);
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int64, false),
-        Field::new("value", DataType::Int64, false),
-    ]));
+    let (schema, left_shape, right_shape, key) = if dup {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+        (
+            schema,
+            Shape::Dup { key_width },
+            Shape::Dup { key_width },
+            "key",
+        )
+    } else {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+        let step = (rows / 100).max(1);
+        (
+            schema,
+            Shape::Linear {
+                id_offset: 0,
+                change_every: i64::MAX,
+            },
+            Shape::Linear {
+                id_offset: step,
+                change_every: 50,
+            },
+            "id",
+        )
+    };
 
-    // Left ids 0..rows unchanged; right ids step..rows+step with a perturbed
-    // value on ~2% of the shared rows.
     let left = Generated {
         schema: schema.clone(),
         rows,
-        id_offset: 0,
-        change_every: i64::MAX,
+        shape: left_shape,
     };
     let right = Generated {
         schema,
         rows,
-        id_offset: step,
-        change_every: 50,
+        shape: right_shape,
     };
 
     let start = std::time::Instant::now();
-    let diff = diff_tables(
-        &left,
-        &right,
-        &TableDiffOptions::new(vec!["id".to_string()]),
-    )
-    .expect("diff succeeds");
+    let diff = diff_tables(&left, &right, &TableDiffOptions::new(vec![key.to_string()]))
+        .expect("diff succeeds");
     let elapsed = start.elapsed();
     let summary = diff.summary();
 
-    println!("rows per side: {rows}");
+    println!(
+        "rows per side: {rows}{}",
+        if dup {
+            format!(" (dup, key_width={key_width})")
+        } else {
+            String::new()
+        }
+    );
     println!("wall: {:.2}s", elapsed.as_secs_f64());
     println!(
         "rows_added={} rows_removed={} rows_changed={} duplicate_keys={}",
