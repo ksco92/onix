@@ -47,6 +47,13 @@ dependence on the process's set iteration order (see
   reachable through any batch's values once a set/frozenset can pair against
   a list/tuple under `ignore_order`, not only the set batch's own.
 
+Seeds 120000347 and 120000708, well past `COMBINED_SEED_BASE`'s own window,
+exercise the frozenset shared-cache rule (`tests/golden/README.md`'s "Which
+member of an equality class wins") with an `int`/`float` and a `bool`/`float`
+member respectively, pinned by `test_a_frozenset_never_inherits_another_ones_digest`
+and `test_a_frozenset_bool_vs_float_member_hits_the_same_shared_cache_rule` in
+`test_sets.py`. Neither seed falls inside `COMBINED_SEED_COUNT`'s current window.
+
 Every generator function that walks an *existing* `set`/`frozenset`'s members
 (as opposed to building a fresh one) does so through `_deterministic_members`,
 never Python's own `for item in a_set`: the live set's iteration order is

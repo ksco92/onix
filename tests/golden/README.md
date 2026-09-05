@@ -382,6 +382,11 @@ DeepDiff([frozenset({1})], [frozenset({1.0})], ignore_order=True)   -> {}
 onix -> values_changed at root[0]: the two frozensets are different items
 ```
 
+The same collision closes on any Python-equal pair regardless of numeric
+subtype — `DeepDiff([frozenset({False})], [frozenset({0.0})], ignore_order=True)`
+is also `{}` (`False == 0.0`) — even though a bare `bool` member never
+collides with a bare `float` member.
+
 A `frozenset` is hashable, so `DeepDiff` caches it like a tuple; `onix` keys it
 by its own membership under `ignore_order` too. A `set` is unhashable, so
 neither tool ever caches one.

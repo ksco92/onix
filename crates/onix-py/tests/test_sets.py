@@ -390,6 +390,22 @@ def test_a_frozenset_never_inherits_another_ones_digest() -> None:
     ).to_dict()
 
 
+def test_a_frozenset_bool_vs_float_member_hits_the_same_shared_cache_rule() -> None:
+    """A frozenset list element whose member is Python-equal but differently typed matches
+    in DeepDiff through its shared digest cache (``False == 0.0`` closes the equality
+    class the same way ``1 == 1.0`` does); onix keys a frozenset by its own membership
+    always, so the two stay distinct items here.
+    """
+    assert DeepDiff([frozenset({False})], [frozenset({0.0})], ignore_order=True).to_dict() == {
+        "values_changed": {
+            "root[0]": {"old_value": frozenset({False}), "new_value": frozenset({0.0})}
+        }
+    }
+    assert RealDeepDiff(
+        [frozenset({False})], [frozenset({0.0})], ignore_order=True, verbose_level=2
+    ).to_dict() == {}
+
+
 def test_a_set_versus_a_list_is_a_type_change_whatever_the_order() -> None:
     """Set iteration order, "`list(a_set) == some_list`": answered by membership in onix.
 
