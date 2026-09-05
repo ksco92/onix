@@ -279,9 +279,9 @@ cargo install cargo-mutants --locked
 make mutants
 ```
 
-**Standing result.** `make mutants` enumerates a deterministic **1211** mutants
-(20 in `onix-cli`, 980 in `onix-core`, 211 in `onix-arrow`). In `onix-arrow`,
-a standalone `cargo mutants -p onix-arrow` on a quiet machine reports 162
+**Standing result.** `make mutants` enumerates a deterministic **1210** mutants
+(20 in `onix-cli`, 980 in `onix-core`, 210 in `onix-arrow`). In `onix-arrow`,
+a standalone `cargo mutants -p onix-arrow` on a quiet machine reports 161
 caught, 39 non-compiling (`Default`-substitution on types without a usable
 `Default`), 9 timeouts, and 1 missed. The 9 timeouts are mutant-induced
 infinite loops the tests reach (the decimal trailing-zero reduction in
