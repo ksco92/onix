@@ -18,10 +18,14 @@ SEED = 67890
 
 
 # Parity against the fixture sidecar
-def test_oracle_counts_match_sidecar_at_1k(tmp_path: Path) -> None:
-    """Every oracle count equals the sidecar's corresponding count at 1k rows."""
+@pytest.mark.parametrize(
+    "n_rows",
+    [1_000, pytest.param(100_000, marks=pytest.mark.slow), pytest.param(1_000_000, marks=pytest.mark.slow)],
+)
+def test_oracle_counts_match_sidecar(n_rows: int, tmp_path: Path) -> None:
+    """Every oracle count equals the sidecar's corresponding count, at every tested fixture size."""
     fixture_dir = tmp_path / "fixture"
-    manifest = generate(1000, SEED, fixture_dir)
+    manifest = generate(n_rows, SEED, fixture_dir)
 
     summary = run(fixture_dir / "a.parquet", fixture_dir / "b.parquet", ["id"], tmp_path / "oracle")
 
@@ -32,34 +36,6 @@ def test_oracle_counts_match_sidecar_at_1k(tmp_path: Path) -> None:
     # `category`'s dictionary retype is invisible to a SQL-only oracle (see the
     # module docstring); only `ts` and `note` show up in `schema_changes`.
     assert summary["schema_changes"] == len(manifest["schema_changes"]) - 1
-
-
-@pytest.mark.slow
-def test_oracle_counts_match_sidecar_at_100k(tmp_path: Path) -> None:
-    """The same parity check holds at 100k rows, not just 1k."""
-    fixture_dir = tmp_path / "fixture"
-    manifest = generate(100_000, SEED, fixture_dir)
-
-    summary = run(fixture_dir / "a.parquet", fixture_dir / "b.parquet", ["id"], tmp_path / "oracle")
-
-    assert summary["rows_added"] == manifest["rows_added"]
-    assert summary["rows_removed"] == manifest["rows_deleted"]
-    assert summary["duplicate_keys"] == manifest["duplicate_keys"]
-    assert summary["cells_changed"] == manifest["rows_modified_amount"] + manifest["rows_modified_payload"]
-
-
-@pytest.mark.slow
-def test_oracle_counts_match_sidecar_at_1m(tmp_path: Path) -> None:
-    """The same parity check holds at 1M rows, backing the README's stated size claim."""
-    fixture_dir = tmp_path / "fixture"
-    manifest = generate(1_000_000, SEED, fixture_dir)
-
-    summary = run(fixture_dir / "a.parquet", fixture_dir / "b.parquet", ["id"], tmp_path / "oracle")
-
-    assert summary["rows_added"] == manifest["rows_added"]
-    assert summary["rows_removed"] == manifest["rows_deleted"]
-    assert summary["duplicate_keys"] == manifest["duplicate_keys"]
-    assert summary["cells_changed"] == manifest["rows_modified_amount"] + manifest["rows_modified_payload"]
 
 
 def test_oracle_output_files_have_expected_columns(tmp_path: Path) -> None:

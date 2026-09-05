@@ -101,5 +101,5 @@ lives.
 ```sh
 cd perf/arrow
 uv run --group perf pytest tests -q             # fast: 1k-row fixtures + synthetic tables
-uv run --group perf pytest tests -q -m slow      # also regenerates and checks the 100k pair
+uv run --group perf pytest tests -q -m slow      # also regenerates and checks the 100k and 1M pairs
 ```

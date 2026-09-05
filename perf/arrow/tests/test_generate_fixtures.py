@@ -12,22 +12,12 @@ SEED = 12345
 
 
 # Determinism tests
-def test_regeneration_is_byte_identical_at_1k(tmp_path: Path) -> None:
-    """Two runs of `generate` with the same rows/seed produce identical bytes."""
+@pytest.mark.parametrize("n_rows", [1_000, pytest.param(100_000, marks=pytest.mark.slow)])
+def test_regeneration_is_byte_identical(n_rows: int, tmp_path: Path) -> None:
+    """Two runs of `generate` with the same rows/seed produce identical bytes, at every tested size."""
     out1, out2 = tmp_path / "run1", tmp_path / "run2"
-    generate(1000, SEED, out1)
-    generate(1000, SEED, out2)
-
-    for name in ("a.parquet", "b.parquet", "manifest.json"):
-        assert (out1 / name).read_bytes() == (out2 / name).read_bytes()
-
-
-@pytest.mark.slow
-def test_regeneration_is_byte_identical_at_100k(tmp_path: Path) -> None:
-    """The determinism guarantee also holds at 100k rows, not just 1k."""
-    out1, out2 = tmp_path / "run1", tmp_path / "run2"
-    generate(100_000, SEED, out1)
-    generate(100_000, SEED, out2)
+    generate(n_rows, SEED, out1)
+    generate(n_rows, SEED, out2)
 
     for name in ("a.parquet", "b.parquet", "manifest.json"):
         assert (out1 / name).read_bytes() == (out2 / name).read_bytes()
