@@ -11,6 +11,11 @@ system). Medians are taken over 11 runs at the 1M size and 5 runs at the full
 size (a single full-size run already takes tens of seconds; more runs would
 not fit a foreground session). Every run's raw metrics, plus the pair's
 SHA-256 checksums, are written to `bench_raw/<size>/<tool>_<run>.json`.
+This script's `Measurement`/`_normalize_maxrss`/`_fmt_mb` duplicate rather
+than import their `bench_bindings.py` counterparts: it runs from `perf/arrow`
+with only that directory on `sys.path`, the same cross-directory-import
+constraint `perf/_common.py`'s own docstring documents for this repo's other
+single-file perf scripts.
 
 # Correctness before timing
 
