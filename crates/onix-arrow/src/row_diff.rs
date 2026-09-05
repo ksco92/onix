@@ -1070,7 +1070,7 @@ mod tests {
     use arrow_array::cast::AsArray;
     use arrow_array::types::Int64Type;
     use arrow_array::{
-        Array, ArrayRef, BinaryViewArray, Date32Array, Date64Array, Decimal128Array,
+        Array, ArrayRef, BinaryArray, BinaryViewArray, Date32Array, Date64Array, Decimal128Array,
         Decimal256Array, DurationNanosecondArray, DurationSecondArray, Float64Array, Int32Array,
         Int64Array, IntervalDayTimeArray, IntervalMonthDayNanoArray, IntervalYearMonthArray,
         ListArray, RecordBatch, RecordBatchReader, StringArray, Time32MillisecondArray,
@@ -2038,6 +2038,46 @@ mod tests {
             vec![Arc::new(Int64Array::from(vec![Some(1)])), Arc::new(right_s)],
         );
         let diff = diff_rows(&left, &right, &sch, &sch, &key()).unwrap();
+        assert_eq!(diff.counts.rows_changed, 1);
+    }
+
+    #[test]
+    fn string_and_binary_of_the_same_bytes_hash_differently() {
+        // The per-cell type tag disambiguates kinds: a Utf8 "x" and a Binary
+        // b"x" carry the same length and bytes, so only the tag separates them.
+        let hasher = super::RowHasher::new().unwrap();
+        let as_str: ArrayRef = Arc::new(StringArray::from(vec!["x"]));
+        let as_bin: ArrayRef = Arc::new(BinaryArray::from(vec![&b"x"[..]]));
+        assert_ne!(cell_hash(&hasher, as_str), cell_hash(&hasher, as_bin));
+    }
+
+    #[test]
+    fn time_unit_change_is_detected() {
+        // 1 second and 1 millisecond are different times; the unit discriminant
+        // keeps them from colliding.
+        let left_schema = schema(vec![
+            id_field(),
+            Field::new("t", DataType::Time32(TimeUnit::Second), false),
+        ]);
+        let right_schema = schema(vec![
+            id_field(),
+            Field::new("t", DataType::Time32(TimeUnit::Millisecond), false),
+        ]);
+        let left = reader(
+            &left_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(Time32SecondArray::from(vec![1])),
+            ],
+        );
+        let right = reader(
+            &right_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(Time32MillisecondArray::from(vec![1])),
+            ],
+        );
+        let diff = diff_rows(&left, &right, &left_schema, &right_schema, &key()).unwrap();
         assert_eq!(diff.counts.rows_changed, 1);
     }
 

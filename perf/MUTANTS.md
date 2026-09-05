@@ -18,9 +18,22 @@ make mutants        # cargo mutants --package onix-core --package onix-cli --pac
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **1063** mutants (20 in `onix-cli`,
-980 in `onix-core`, 63 in `onix-arrow` — of which 42 are viable and all
-caught, 21 do not compile). Its classification of each mutant into
+`make mutants` enumerates a deterministic **1189** mutants (20 in `onix-cli`,
+980 in `onix-core`, 189 in `onix-arrow`). A standalone `cargo mutants -p
+onix-arrow` on a quiet machine reports, for the 189 `onix-arrow` mutants
+(122 in `row_diff.rs`, 38 in `schema.rs`, 17 in `table_diff.rs`, 5 in `lib.rs`,
+4 in `error.rs`, 3 in `options.rs`): **141 caught, 38 unviable, 9 timeout, 1
+missed**. The 38 unviable are `Default`-substitution mutants on types without a
+usable `Default`. The 9 timeouts are mutant-induced infinite loops the tests
+reach — the trailing-zero reduction loop in `hash_decimal` (`==`/`/=` mutants)
+and the two cursor-advance loops in `classify` (the `<`/`==`/`+=` mutants) —
+detected as hangs, not silent survivors. The 1 missed is a genuine equivalent
+mutant: `row_diff.rs`'s `materialize_side` guards `if selected.num_rows() > 0`
+before pushing a batch to `concat_batches`, and `> 0 -> >= 0` only adds empty
+batches, which `concat_batches` ignores, so the output is identical (the
+keyed-hash `finish` combine that was an equivalent in an earlier revision is
+gone — the 128-bit hash is now a single `siphasher` `SipHasher13`, not two
+combined 64-bit hashers). Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
 depends on wall-clock time (a slow mutant is a "timeout" on one machine and
 "missed"/"caught" on another) and, in this workspace, on build caching (a
@@ -141,7 +154,7 @@ timeout.
 
 The `onix-core` + `onix-cli` portion of the enumeration is deterministic at
 **1000** mutants (`cargo mutants --list`; hash.rs 37, memo.rs 14, lcs.rs 111 of
-them); with `onix-arrow`'s 63 the top-line total is 1063, as recorded above. The last full
+them); with `onix-arrow`'s 189 the top-line total is 1189, as recorded above. The last full
 representative run classified the previous 986-mutant enumeration as **890
 caught, 75 unviable, 15 missed, 6 timeout** — the survivors confined to the
 documented equivalent/uncompilable kinds: the `lcs.rs` LCS spots (missed plus

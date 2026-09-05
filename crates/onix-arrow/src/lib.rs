@@ -295,6 +295,17 @@ mod tests {
     }
 
     #[test]
+    fn dictionary_key_column_is_accepted() {
+        // A dictionary key is a scalar encoding, so it passes the up-front
+        // hashable-key check (covering the dictionary arm of `is_hashable`).
+        let dict = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+        let left = reader(vec![Field::new("id", dict.clone(), false)]);
+        let right = reader(vec![Field::new("id", dict, false)]);
+        let options = TableDiffOptions::new(vec!["id".to_string()]);
+        assert!(diff_tables(&left, &right, &options).is_ok());
+    }
+
+    #[test]
     fn nested_key_column_is_rejected_up_front() {
         // An empty table with a list key errors before any row is read, rather
         // than diffing to an empty result.
