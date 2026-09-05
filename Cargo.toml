@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/onix-core", "crates/onix-cli", "crates/onix-py", "crates/onix-arrow"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 license = "MIT"
 
