@@ -807,8 +807,8 @@ def _generate_time_timedelta_ignore_order_fuzz_cases() -> (
     cases: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {}
 
     for i in range(_TIME_FUZZ_CASE_COUNT):
-        # Never 0: an empty `a`/`b` pair carries no time or timedelta at all,
-        # defeating the batch's own point (issue #61 fix-round finding).
+        # Draw at least one element so every seeded case exercises a time
+        # or timedelta.
         size = rng.randint(1, 8)
         a = [rng.choice(_TIME_FUZZ_ALPHABET) for _ in range(size)]
         b = list(a)
