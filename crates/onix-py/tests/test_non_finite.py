@@ -44,10 +44,12 @@ order-/repetition-insensitive set-member-hashing divergence
 import json
 import math
 import random
+import time
 from typing import Final
 
 from deepdiff import DeepDiff as RealDeepDiff
 
+from deepdiff_rs import MAX_DEPTH_CEILING
 from deepdiff_rs import DeepDiff as OnixDeepDiff
 
 from test_differential_fuzz import JsonValue, _gen_value
@@ -249,6 +251,25 @@ def test_two_distinct_bit_identical_nans_in_a_carried_set_dedup_in_onix_not_deep
     onix = OnixDeepDiff({"a": 1}, {"a": 1, "b": nans})
     added = onix.to_dict()["dictionary_item_added"]["root['b']"]
     assert len(added) == 1
+
+
+# --- regression: JSON rendering of a buried non-finite leaf stays linear ---
+
+
+def test_deep_report_with_a_buried_non_finite_leaf_renders_to_json_quickly() -> None:
+    """A report carrying a deeply nested `NaN` renders to JSON well under the ceiling's timeout."""
+    depth = MAX_DEPTH_CEILING - 5_000
+    deep = float("nan")
+    for _ in range(depth):
+        deep = {"k": deep}
+
+    diff = OnixDeepDiff({}, {"x": deep}, max_depth=MAX_DEPTH_CEILING)
+    start = time.perf_counter()
+    text = diff.to_json()
+    elapsed = time.perf_counter() - start
+
+    assert "NaN" in text
+    assert elapsed < 2.0, elapsed
 
 
 # --- biased differential fuzz -----------------------------------------------

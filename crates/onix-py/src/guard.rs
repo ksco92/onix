@@ -193,32 +193,11 @@ pub(crate) fn serialize_value(py: Python<'_>, value: &Value, deep: bool) -> PyRe
 }
 
 /// Renders one compact [`Value`] to JSON text, matching real `DeepDiff`'s own
-/// `to_json()`: a `NaN`, `Infinity` or `-Infinity` renders as the bare
-/// (non-standard-JSON) token Python's `json.dumps` writes for one by default
-/// (`allow_nan=True`) — which [`serde_json`] cannot produce at all, since
-/// `Value::to_serde_json` has nowhere to put one (a `serde_json::Value` has
-/// no non-finite `Number` at all; that method falls back to `null`, the
-/// right choice for its own callers but not for this one). Every natively
-/// recursive step this needs happens inside one call to this function or
-/// `Value::to_serde_json`, so routing this function to the sized worker is
-/// enough to keep a deep report off the calling thread's stack entirely.
-///
-/// The whole tree is checked for a non-finite float exactly **once**, here —
-/// [`write_json`] never re-derives this for any node it walks, only for the
-/// leaf it is currently rendering, from that leaf's own `is_finite()`
-/// (`O(1)`, no subtree scan). Re-checking containment at every nesting level
-/// on the way down (a node checks itself, then each of its children checks
-/// itself again before recursing further, and so on) would cost `O(depth²)`
-/// on a deeply nested single non-finite leaf — quadratic in `max_depth`,
-/// which a caller can raise up to `MAX_DEPTH_CEILING` — where the
-/// one-check-total design below is `O(nodes)` total, matching
-/// `Value::to_serde_json`'s own construction cost.
-///
-/// A subtree with no non-finite float anywhere in it takes the fast,
-/// pre-existing path (`Value::to_serde_json` + [`serde_json::to_string`]),
-/// byte-identical to what this function produced before non-finite floats
-/// were supported — the common case, since a non-finite float is rare, and
-/// still the *only* place this module scans for one.
+/// `to_json()`: a `NaN`, `Infinity` or `-Infinity` renders as the bare,
+/// non-standard token Python's `json.dumps` writes for one by default, which
+/// [`serde_json`] cannot represent on its own. The whole tree is checked for
+/// a non-finite float once, here; [`write_json`] then renders each leaf's
+/// token from that leaf's own `is_finite()`, never rescanning a subtree.
 fn to_json_string(value: &Value) -> Result<String, serde_json::Error> {
     if !has_non_finite_float(value) {
         return serde_json::to_string(&value.to_serde_json());
@@ -229,16 +208,20 @@ fn to_json_string(value: &Value) -> Result<String, serde_json::Error> {
 }
 
 /// Returns `true` if `value` is, or contains anywhere within it, a
-/// non-finite float. Called exactly once per [`to_json_string`] call, on the
-/// root — see that function's doc for why [`write_json`] never calls this
-/// again on any node it descends into.
+/// non-finite float.
 fn has_non_finite_float(value: &Value) -> bool {
     match value {
         Value::Number(n) => n.as_f64().is_some_and(|f| !f.is_finite()),
         Value::Array(items) | Value::Tuple(items) => items.iter().any(has_non_finite_float),
         Value::Set(items) | Value::FrozenSet(items) => items.iter().any(has_non_finite_float),
         Value::Object(obj) => obj.values().any(has_non_finite_float),
-        Value::Null | Value::Bool(_) | Value::Str(_) | Value::DateTime(_) | Value::Date(_) => false,
+        Value::Null
+        | Value::Bool(_)
+        | Value::Str(_)
+        | Value::DateTime(_)
+        | Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeDelta(_) => false,
     }
 }
 
@@ -286,7 +269,13 @@ fn write_json(value: &Value, out: &mut String) -> Result<(), serde_json::Error> 
         // An ordinary leaf below a non-finite one somewhere else in the
         // tree (not unreachable: this function no longer pre-filters by
         // containment, see this function's own doc).
-        Value::Null | Value::Bool(_) | Value::Str(_) | Value::DateTime(_) | Value::Date(_) => {
+        Value::Null
+        | Value::Bool(_)
+        | Value::Str(_)
+        | Value::DateTime(_)
+        | Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeDelta(_) => {
             out.push_str(&serde_json::to_string(&value.to_serde_json())?);
         }
     }
