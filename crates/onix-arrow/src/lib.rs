@@ -180,18 +180,18 @@ pub fn diff_tables(
     let changes = diff_schemas(&left_schema, &right_schema)?;
 
     for key in options.key() {
-        let Ok(_left_field) = left_schema.field_with_name(key) else {
+        if left_schema.field_with_name(key).is_err() {
             return Err(TableDiffError::KeyColumnMissing {
                 column: key.clone(),
                 side: Side::Left,
             });
-        };
-        let Ok(_right_field) = right_schema.field_with_name(key) else {
+        }
+        if right_schema.field_with_name(key).is_err() {
             return Err(TableDiffError::KeyColumnMissing {
                 column: key.clone(),
                 side: Side::Right,
             });
-        };
+        }
 
         // The key's own hashability (a nested or otherwise unhashable key) is
         // checked, along with every other column, by `row_diff::diff_rows`; only
