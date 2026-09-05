@@ -1333,11 +1333,9 @@ proptest! {
 }
 
 /// A memoized deep-nested `ignore_order` diff must recompute each level's
-/// pairing distance exactly once — the property a wall-clock bound used to
-/// guard here by timing, which failed once under parallel CI load even
-/// though the engine code was unchanged (noise-dominated the same way the
-/// K-vs-2K interning ratio was; see this module's other flaky-timing
-/// replacement). Measured directly instead, with no clock in the loop:
+/// pairing distance exactly once — replaces a wall-clock guard that was
+/// flaky under parallel CI (issue #33). Measured directly instead, with no
+/// clock in the loop:
 ///
 /// [`super::pairing::compute_pairs`] recomputes a container pair's distance
 /// only on an [`IgnoreOrderMemo`] cache miss (see [`IgnoreOrderMemo::put`]'s
@@ -1349,8 +1347,8 @@ proptest! {
 /// (the outermost wrapper is never itself paired against anything), so a
 /// working memo leaves `put_count() == depth - 1`; confirmed by temporarily
 /// forcing [`IgnoreOrderMemo::get`] to always return `None` and re-running
-/// this test, which then reported `2^depth - 1` puts (8,191 at depth 14
-/// alone, where the working memo leaves 13) instead of failing on a clock.
+/// this test, which then reported `2^(depth - 1) - 1` puts (8,191 at depth
+/// 14 alone, where the working memo leaves 13) instead of failing on a clock.
 #[test]
 fn deep_nested_ignore_order_memoizes_distance_computations_linearly() {
     let opts = DiffOptions {
@@ -2503,11 +2501,9 @@ fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
 }
 
 /// Interning `K` set/list members must never collapse onto one hash bucket —
-/// the property a wall-clock `K -> 2K` diff-time ratio used to guard here by
-/// timing, which is noise-dominated at these sizes on a shared CI runner (a
-/// bare-metal-quiet 10ms K sample can read `3x` slower than main on the same
-/// engine code; see this test's own history in the issue tracker). Measured
-/// directly instead, with no diff and no clock in the loop:
+/// replaces a wall-clock `K -> 2K` diff-time ratio that was flaky under
+/// parallel CI (issue #33). Measured directly instead, with no diff and no
+/// clock in the loop:
 ///
 /// [`super::hash::item_key`]'s `Float` arm hashes through
 /// [`crate::lcs::mix_float_bits`] before the bits ever reach one of this
@@ -2529,21 +2525,16 @@ fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
 /// fails on both the distinctness and the growth checks).
 #[test]
 fn float_hash_buckets_stay_distinct_and_grow_linearly_with_member_count() {
-    use crate::value::Number;
     use std::collections::HashSet;
     use std::hash::{Hash, Hasher};
 
-    let memo = IgnoreOrderMemo::new();
     let low_bucket = |n: usize, half: bool| -> u32 {
         #[allow(
             clippy::cast_precision_loss,
             reason = "n stays well under 2^53 here; exactness is not the point of the probe"
         )]
         let value = n as f64 + if half { 0.5 } else { 0.0 };
-        let key = super::hash::item_key(
-            &CValue::Number(Number::from_f64(value).expect("finite")),
-            &memo,
-        );
+        let key = item_key(&json!(value));
         let mut hasher = FxHasher::default();
         key.hash(&mut hasher);
         #[allow(
