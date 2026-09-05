@@ -47,7 +47,9 @@ mutants:
   `value_domain` arm is pinned by
   `each_value_domain_paired_with_a_string_is_type_changed`, which pairs each
   domain against a `Utf8` column and asserts the change is `type_changed`
-  (dropping any of those arms would mislabel it `value_changed`). Its classification of each mutant into
+  (dropping any of those arms would mislabel it `value_changed`).
+
+Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
 depends on wall-clock time (a slow mutant is a "timeout" on one machine and
 "missed"/"caught" on another) and, in this workspace, on build caching (a
