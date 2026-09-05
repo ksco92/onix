@@ -176,10 +176,10 @@ def _schema_diff(con: duckdb.DuckDBPyConnection, left: Path, right: Path) -> lis
         f"""
         WITH left_schema AS (
             SELECT name, CASE WHEN converted_type LIKE 'TIMESTAMP%' THEN converted_type ELSE duckdb_type END AS type_label
-            FROM parquet_schema('{left}') WHERE name != 'schema'
+            FROM parquet_schema({_quote_literal(str(left))}) WHERE name != 'schema'
         ), right_schema AS (
             SELECT name, CASE WHEN converted_type LIKE 'TIMESTAMP%' THEN converted_type ELSE duckdb_type END AS type_label
-            FROM parquet_schema('{right}') WHERE name != 'schema'
+            FROM parquet_schema({_quote_literal(str(right))}) WHERE name != 'schema'
         )
         SELECT COALESCE(a.name, b.name) AS "column", a.type_label AS left_type, b.type_label AS right_type
         FROM left_schema a
@@ -310,11 +310,11 @@ def _write_cells_changed(
             )
             {per_column_selects}
             ORDER BY {key_list}, "column"
-        ) TO '{out_path}' (FORMAT PARQUET)
+        ) TO {_quote_literal(str(out_path))} (FORMAT PARQUET)
         """,
     )
 
-    return con.sql(f"SELECT COUNT(*) FROM read_parquet('{out_path}')").fetchone()[0]
+    return con.sql(f"SELECT COUNT(*) FROM read_parquet({_quote_literal(str(out_path))})").fetchone()[0]
 
 
 ##############################################
@@ -341,8 +341,8 @@ def run(left: Path, right: Path, key_columns: list[str], out_dir: Path) -> dict[
     # timezone, not UTC -- pinned here so `cells_changed`'s old_value/new_value
     # strings are the same on every machine regardless of its local timezone.
     con.execute("SET TimeZone = 'UTC'")
-    con.execute(f"CREATE VIEW va AS SELECT * FROM read_parquet('{left}')")
-    con.execute(f"CREATE VIEW vb AS SELECT * FROM read_parquet('{right}')")
+    con.execute(f"CREATE VIEW va AS SELECT * FROM read_parquet({_quote_literal(str(left))})")
+    con.execute(f"CREATE VIEW vb AS SELECT * FROM read_parquet({_quote_literal(str(right))})")
 
     schema_rows = _schema_diff(con, left, right)
     con.execute(
@@ -350,7 +350,7 @@ def run(left: Path, right: Path, key_columns: list[str], out_dir: Path) -> dict[
     )
     if schema_rows:
         con.executemany("INSERT INTO schema_diff VALUES (?, ?, ?, ?)", schema_rows)
-    con.execute(f"COPY schema_diff TO '{out_dir / 'schema_diff.parquet'}' (FORMAT PARQUET)")
+    con.execute(f"COPY schema_diff TO {_quote_literal(str(out_dir / 'schema_diff.parquet'))} (FORMAT PARQUET)")
 
     _build_key_summary(con, key_columns)
     key_list = ", ".join(_quote_ident(c) for c in key_columns)
@@ -362,7 +362,7 @@ def run(left: Path, right: Path, key_columns: list[str], out_dir: Path) -> dict[
         COPY (
             SELECT b.* FROM vb b
             INNER JOIN (SELECT {key_list} FROM key_summary WHERE left_count = 0 AND right_count = 1) k ON {added_join}
-        ) TO '{out_dir / "rows_added.parquet"}' (FORMAT PARQUET)
+        ) TO {_quote_literal(str(out_dir / "rows_added.parquet"))} (FORMAT PARQUET)
         """,
     )
     con.execute(
@@ -370,7 +370,7 @@ def run(left: Path, right: Path, key_columns: list[str], out_dir: Path) -> dict[
         COPY (
             SELECT a.* FROM va a
             INNER JOIN (SELECT {key_list} FROM key_summary WHERE left_count = 1 AND right_count = 0) k ON {removed_join}
-        ) TO '{out_dir / "rows_removed.parquet"}' (FORMAT PARQUET)
+        ) TO {_quote_literal(str(out_dir / "rows_removed.parquet"))} (FORMAT PARQUET)
         """,
     )
     con.execute(
@@ -379,7 +379,7 @@ def run(left: Path, right: Path, key_columns: list[str], out_dir: Path) -> dict[
             SELECT {key_list}, left_count, right_count FROM key_summary
             WHERE left_count > 1 OR right_count > 1
             ORDER BY {key_list}
-        ) TO '{out_dir / "duplicate_keys.parquet"}' (FORMAT PARQUET)
+        ) TO {_quote_literal(str(out_dir / "duplicate_keys.parquet"))} (FORMAT PARQUET)
         """,
     )
 

@@ -48,6 +48,20 @@ def test_oracle_counts_match_sidecar_at_100k(tmp_path: Path) -> None:
     assert summary["cells_changed"] == manifest["rows_modified_amount"] + manifest["rows_modified_payload"]
 
 
+@pytest.mark.slow
+def test_oracle_counts_match_sidecar_at_1m(tmp_path: Path) -> None:
+    """The same parity check holds at 1M rows, backing the README's stated size claim."""
+    fixture_dir = tmp_path / "fixture"
+    manifest = generate(1_000_000, SEED, fixture_dir)
+
+    summary = run(fixture_dir / "a.parquet", fixture_dir / "b.parquet", ["id"], tmp_path / "oracle")
+
+    assert summary["rows_added"] == manifest["rows_added"]
+    assert summary["rows_removed"] == manifest["rows_deleted"]
+    assert summary["duplicate_keys"] == manifest["duplicate_keys"]
+    assert summary["cells_changed"] == manifest["rows_modified_amount"] + manifest["rows_modified_payload"]
+
+
 def test_oracle_output_files_have_expected_columns(tmp_path: Path) -> None:
     """Each written parquet file has the documented long-format columns."""
     fixture_dir = tmp_path / "fixture"
@@ -196,8 +210,12 @@ def test_same_instant_across_timestamp_units_is_not_a_changed_cell(tmp_path: Pat
     """A timestamp exactly representable at ms precision is not reported as changed."""
     instant = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     a_path, b_path = tmp_path / "ts_a.parquet", tmp_path / "ts_b.parquet"
-    pq.write_table(pa.table({"id": pa.array([1], type=pa.int64()), "ts": pa.array([instant], type=pa.timestamp("us", tz="UTC"))}), a_path)
-    pq.write_table(pa.table({"id": pa.array([1], type=pa.int64()), "ts": pa.array([instant], type=pa.timestamp("ms", tz="UTC"))}), b_path)
+    pq.write_table(
+        pa.table({"id": pa.array([1], type=pa.int64()), "ts": pa.array([instant], type=pa.timestamp("us", tz="UTC"))}), a_path,
+    )
+    pq.write_table(
+        pa.table({"id": pa.array([1], type=pa.int64()), "ts": pa.array([instant], type=pa.timestamp("ms", tz="UTC"))}), b_path,
+    )
 
     summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
     assert summary["cells_changed"] == 0
@@ -240,6 +258,25 @@ def test_unusual_column_names_on_key_and_non_key_columns(tmp_path: Path) -> None
     assert summary["rows_removed"] == 0
     assert summary["cells_changed"] == 1
     assert changed == [{key_col: 2, "column": value_col, "old_value": "y", "new_value": "changed"}]
+
+
+# Path quoting: file/directory names that could break an unquoted SQL literal
+def test_path_with_single_quote_and_space_does_not_break_the_query(tmp_path: Path) -> None:
+    """A directory name containing a single quote and a space doesn't break the SQL."""
+    weird_dir = tmp_path / "o'brien's data 2024"
+    weird_dir.mkdir()
+    a_rows = [{"id": 1, "value": "x"}, {"id": 2, "value": "y"}]
+    b_rows = [{"id": 1, "value": "x"}, {"id": 2, "value": "changed"}]
+    a_path, b_path = weird_dir / "a.parquet", weird_dir / "b.parquet"
+    pq.write_table(pa.Table.from_pylist(a_rows), a_path)
+    pq.write_table(pa.Table.from_pylist(b_rows), b_path)
+    out_dir = weird_dir / "oracle's output"
+
+    summary = run(a_path, b_path, ["id"], out_dir)
+    changed = pq.read_table(out_dir / "cells_changed.parquet").to_pylist()
+
+    assert summary["cells_changed"] == 1
+    assert changed == [{"id": 2, "column": "value", "old_value": "y", "new_value": "changed"}]
 
 
 def test_schema_diff_reports_removed_column(tmp_path: Path) -> None:

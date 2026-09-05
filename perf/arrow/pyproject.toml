@@ -18,4 +18,4 @@ testpaths = ["tests"]
 # So `tests/*.py` can `from generate_fixtures import ...`/`from oracle_duckdb import ...`
 # with no sys.path hack, the same convention as crates/onix-py/pyproject.toml.
 pythonpath = ["."]
-markers = ["slow: exercises the 100k fixture pair; skipped by default (-m 'not slow')"]
+markers = ["slow: exercises the 100k or 1M fixture pair; skipped by default (-m 'not slow')"]
