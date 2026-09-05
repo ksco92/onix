@@ -1,10 +1,11 @@
 //! Table diffing for onix, over Apache Arrow.
 //!
 //! [`diff_tables`] compares two tables presented as [`TableInput`]s and returns
-//! a [`TableDiff`] carrying both the **schema** diff — which columns were added,
-//! removed, or changed type — and the keyed **row** diff — which rows were
-//! added, removed, or changed, and which keys are duplicated. The per-cell diff
-//! (`cells_changed`) arrives in a later version.
+//! a [`TableDiff`] carrying the **schema** diff — which columns were added,
+//! removed, or changed type — the keyed **row** diff — which rows were added,
+//! removed, or changed, and which keys are duplicated — and the per-cell diff
+//! (`cells_changed`), reporting which columns changed in each changed row and
+//! how.
 //!
 //! The two tables are matched on a required, non-empty set of key columns (the
 //! table's primary key), carried in [`TableDiffOptions`]. Every key column must
@@ -14,9 +15,10 @@
 //!
 //! # Inputs
 //!
-//! The row diff reads each side twice (once to hash every row, once to
-//! materialize only the differing rows), so [`diff_tables`] takes a
-//! re-openable [`TableInput`] rather than a single-use `RecordBatchReader`.
+//! The row diff reads each side more than once (to hash every row, to
+//! materialize the added/removed rows, and to materialize the changed rows for
+//! the per-cell diff), so [`diff_tables`] takes a re-openable [`TableInput`]
+//! rather than a single-use `RecordBatchReader`.
 //! In-memory tables use [`MemoryInput`]; a caller whose data is a one-shot
 //! stream spools it to a temporary Arrow IPC file first and implements
 //! [`TableInput`] over that file (as the Python bindings do).
@@ -162,6 +164,15 @@ pub const MAX_NESTING_DEPTH: usize = 128;
 ///   nested key, a run-end-encoded column, or a type combination Arrow cannot
 ///   build.
 /// - [`TableDiffError::Read`] if a batch cannot be read from either input.
+/// - [`TableDiffError::Render`] if a changed cell's value cannot be rendered to
+///   its canonical string — for example an out-of-range temporal value the
+///   formatter cannot format.
+/// - [`TableDiffError::TooManyChangedRows`] if one side has more than
+///   `u32::MAX` changed rows, which the per-cell diff's row-index arrays cannot
+///   address.
+/// - [`TableDiffError::EqualRenderings`] never fires for real input: it guards
+///   the internal invariant that a `value_changed` cell always renders two
+///   different strings.
 pub fn diff_tables(
     left: &impl TableInput,
     right: &impl TableInput,

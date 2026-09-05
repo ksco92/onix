@@ -18,22 +18,29 @@ make mutants        # cargo mutants --package onix-core --package onix-cli --pac
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **1210** mutants (20 in `onix-cli`,
-980 in `onix-core`, 210 in `onix-arrow`). A standalone `cargo mutants -p
-onix-arrow` on a quiet machine reports, for the 210 `onix-arrow` mutants
-(144 in `row_diff.rs`, 38 in `schema.rs`, 17 in `table_diff.rs`, 4 in `lib.rs`,
-4 in `error.rs`, 3 in `options.rs`): **161 caught, 39 unviable, 9 timeout, 1
-missed**. The 39 unviable are `Default`-substitution mutants on types without a
+`make mutants` enumerates a deterministic **1274** mutants (20 in `onix-cli`,
+980 in `onix-core`, 274 in `onix-arrow`). A standalone `cargo mutants -p
+onix-arrow` on a quiet machine reports, for the 274 `onix-arrow` mutants
+(208 in `row_diff.rs`, 38 in `schema.rs`, 17 in `table_diff.rs`, 4 in `lib.rs`,
+4 in `error.rs`, 3 in `options.rs`): **212 caught, 52 unviable, 9 timeout, 1
+missed**. The 52 unviable are `Default`-substitution mutants on types without a
 usable `Default`. The 9 timeouts are mutant-induced infinite loops the tests
 reach — the trailing-zero reduction loop in `hash_decimal` (`==`/`/=` mutants)
 and the two cursor-advance loops in `classify` (the `<`/`==`/`+=` mutants) —
 detected as hangs, not silent survivors. The 1 missed is a genuine equivalent
-mutant: `row_diff.rs`'s `materialize_side` guards `if selected.num_rows() > 0`
-before pushing a batch to `concat_batches`, and `> 0 -> >= 0` only adds empty
-batches, which `concat_batches` ignores, so the output is identical (the
-keyed-hash `finish` combine that was an equivalent in an earlier revision is
-gone — the 128-bit hash is now a single `siphasher` `SipHasher13`, not two
-combined 64-bit hashers). Its classification of each mutant into
+mutant: `row_diff.rs`'s `push_filtered` (the shared filter-and-push helper of
+both the added/removed and the per-cell materialize passes) guards
+`if selected.num_rows() > 0` before pushing a batch to `concat_batches`, and
+`> 0 -> >= 0` only adds empty batches, which `concat_batches` ignores, so the
+output is identical.
+
+`value_domain`'s arms are each pinned: `each_value_domain_paired_with_a_string_is_type_changed`
+pairs every domain against a `Utf8` column and asserts `type_changed` (dropping
+an arm would mislabel it `value_changed`), and the `Null` arm is caught because
+its catch-all is `unreachable!` — dropping it panics on the `Null`-typed column
+`only_the_differing_cells_of_a_changed_row_are_reported` diffs.
+
+Its classification of each mutant into
 caught / missed / timeout / unviable is **not** reproducible run to run: it
 depends on wall-clock time (a slow mutant is a "timeout" on one machine and
 "missed"/"caught" on another) and, in this workspace, on build caching (a
@@ -154,7 +161,7 @@ timeout.
 
 The `onix-core` + `onix-cli` portion of the enumeration is deterministic at
 **1000** mutants (`cargo mutants --list`; hash.rs 37, memo.rs 14, lcs.rs 111 of
-them); with `onix-arrow`'s 210 the top-line total is 1210, as recorded above. The last full
+them); with `onix-arrow`'s 274 the top-line total is 1274, as recorded above. The last full
 representative run classified the previous 986-mutant enumeration as **890
 caught, 75 unviable, 15 missed, 6 timeout** — the survivors confined to the
 documented equivalent/uncompilable kinds: the `lcs.rs` LCS spots (missed plus

@@ -3,7 +3,7 @@
 Computes, using DuckDB SQL only (joins, `GROUP BY`, and set membership --
 no row-by-row Python), what a correct table diff of `a.parquet`/`b.parquet`
 must report: schema differences, rows added, rows removed, changed rows
-(long format: key, column, old_value, new_value), and duplicate keys. This
+(long format: key, column, old_value, new_value, change), and duplicate keys. This
 serves two purposes later in the project: a correctness reference the Rust
 `onix-arrow` crate's own results are checked against (#39, #40), and one of
 two speed baselines a data engineer would otherwise reach for (#43).
@@ -290,10 +290,19 @@ def _write_cells_changed(
     key_select = ", ".join(f"a.{_quote_ident(c)}" for c in key_columns)
     matched_join = _null_safe_join("a", "k", key_columns)
     cell_join = _null_safe_join("a", "b", key_columns)
+    # `change` mirrors onix's per-cell label; the null branches follow the
+    # module docstring's Nulls bullet. `type_changed` is onix-specific (a
+    # value-domain mismatch) that a SQL cast diff cannot detect, so it is out of
+    # this oracle's scope.
     per_column_selects = " UNION ALL ".join(
         f"""
         SELECT {key_select}, {_quote_literal(column)} AS "column",
-               CAST(a.{_quote_ident(column)} AS VARCHAR) AS old_value, CAST(b.{_quote_ident(column)} AS VARCHAR) AS new_value
+               CAST(a.{_quote_ident(column)} AS VARCHAR) AS old_value, CAST(b.{_quote_ident(column)} AS VARCHAR) AS new_value,
+               CASE
+                   WHEN a.{_quote_ident(column)} IS NULL AND b.{_quote_ident(column)} IS NOT NULL THEN 'became_non_null'
+                   WHEN a.{_quote_ident(column)} IS NOT NULL AND b.{_quote_ident(column)} IS NULL THEN 'became_null'
+                   ELSE 'value_changed'
+               END AS change
         FROM matched a
         JOIN vb b ON {cell_join}
         WHERE a.{_quote_ident(column)} IS DISTINCT FROM b.{_quote_ident(column)}

@@ -116,6 +116,7 @@ def test_identical_results_across_input_libraries(left_lib: str, right_lib: str)
         "rows_changed": 0,
         "duplicate_keys": 0,
         "null_keys": 0,
+        "cells_changed": 0,
     }
 
 
@@ -285,6 +286,7 @@ def test_identical_schemas_have_no_schema_changes_but_report_row_changes() -> No
         "rows_changed": 1,
         "duplicate_keys": 0,
         "null_keys": 0,
+        "cells_changed": 1,
     }
 
 
@@ -502,15 +504,12 @@ def test_duplicate_column_on_left_is_rejected() -> None:
         diff_tables(left, right, key=["id"])
 
 
-def test_cells_changed_not_implemented() -> None:
-    """cells_changed raises NotImplementedError in this version; the other row members return tables."""
+def test_every_row_member_returns_an_arrow_table() -> None:
+    """cells_changed and the other row members all return Arrow tables (the int pair has no differing rows)."""
     left, right = _int_tables()
     diff = diff_tables(left, right, key=["id"])
 
-    with pytest.raises(NotImplementedError):
-        diff.cells_changed()
-
-    for member in ("rows_added", "rows_removed", "duplicate_keys"):
+    for member in ("rows_added", "rows_removed", "duplicate_keys", "cells_changed"):
         assert len(getattr(diff, member)()) == 0
 
 

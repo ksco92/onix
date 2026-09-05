@@ -81,7 +81,7 @@ uv run --group perf oracle_duckdb.py --left fixtures/100k/a.parquet --right fixt
 ```
 
 `oracle_duckdb.py` computes schema differences, rows added, rows removed,
-changed cells (long format: key, column, old_value, new_value), and
+changed cells (long format: key, column, old_value, new_value, change), and
 duplicate keys, using DuckDB SQL (joins and `GROUP BY`, no row-by-row
 Python), and writes each as a parquet file under `--out`. Its counts match
 `generate_fixtures.py`'s sidecar exactly at 1k, 100k, and 1M rows (see

@@ -31,9 +31,8 @@ impl fmt::Display for Side {
 
 /// Errors that can occur while diffing two tables.
 ///
-/// Marked `#[non_exhaustive]` because the later row-diff slices add their own
-/// variants (streaming/read failures and the like); matching on it must keep
-/// a wildcard arm.
+/// Marked `#[non_exhaustive]` so future work can add variants without a
+/// breaking change; matching on it must keep a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TableDiffError {
@@ -95,13 +94,32 @@ pub enum TableDiffError {
         /// The underlying error's message.
         message: String,
     },
-    /// A member of [`crate::TableDiff`] that a later version fills in was
-    /// asked for before that version exists. The per-cell changes
-    /// (`cells_changed`) arrive with a later version; `rows_added`,
-    /// `rows_removed`, and `duplicate_keys` are available.
-    NotImplemented {
-        /// The name of the member that is not implemented yet.
-        feature: &'static str,
+    /// A cell value could not be rendered to its canonical string for the
+    /// per-cell diff — for example a temporal value outside the range the
+    /// formatter can format. Reported as a typed error rather than written into
+    /// the output as error prose (which a real string cell could not be told
+    /// apart from).
+    Render {
+        /// The column whose cell could not be rendered.
+        column: String,
+        /// The underlying formatting error's message.
+        message: String,
+    },
+    /// The per-cell diff would need more than `u32::MAX` changed rows on one
+    /// side, which its row-index arrays cannot address. Bound the changed-row
+    /// count of untrusted input.
+    TooManyChangedRows {
+        /// The number of changed rows that overflowed.
+        rows: usize,
+    },
+    /// A `value_changed` cell rendered identically on both sides — a broken
+    /// invariant, not a caller error. The per-cell diff renders each side in a
+    /// common comparison form so a value change always shows two different
+    /// strings; this variant guards that guarantee and cannot fire for any real
+    /// input.
+    EqualRenderings {
+        /// The column whose two renderings were equal.
+        column: String,
     },
 }
 
@@ -137,10 +155,20 @@ impl fmt::Display for TableDiffError {
                  needs the key to be the same type on both sides"
             ),
             TableDiffError::Read { message } => write!(f, "failed to read table data: {message}"),
-            TableDiffError::NotImplemented { feature } => write!(
+            TableDiffError::Render { column, message } => write!(
                 f,
-                "{feature} is not implemented in this version; \
-                 the per-cell changes arrive in a later version"
+                "could not render a value of column {column:?} to its canonical string: {message}"
+            ),
+            TableDiffError::TooManyChangedRows { rows } => write!(
+                f,
+                "the per-cell diff has {rows} changed rows on one side, more than the \
+                 {} its row-index arrays can address; bound the changed-row count",
+                u32::MAX
+            ),
+            TableDiffError::EqualRenderings { column } => write!(
+                f,
+                "internal invariant: a value change in column {column:?} rendered identically \
+                 on both sides, which the common-form rendering is designed to prevent"
             ),
         }
     }
@@ -220,13 +248,34 @@ mod tests {
     }
 
     #[test]
-    fn not_implemented_message_names_the_feature() {
-        let error = TableDiffError::NotImplemented {
-            feature: "rows_added",
+    fn render_message_names_the_column() {
+        let error = TableDiffError::Render {
+            column: "ts".to_string(),
+            message: "Cast error".to_string(),
         };
         let message = error.to_string();
-        assert!(message.contains("rows_added"));
-        assert!(message.contains("not implemented"));
+        assert!(message.contains("\"ts\""));
+        assert!(message.contains("Cast error"));
+    }
+
+    #[test]
+    fn equal_renderings_message_reads_as_an_invariant() {
+        let error = TableDiffError::EqualRenderings {
+            column: "d".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("\"d\""));
+        assert!(message.contains("invariant"));
+    }
+
+    #[test]
+    fn too_many_changed_rows_message_names_the_count() {
+        let error = TableDiffError::TooManyChangedRows {
+            rows: 5_000_000_000,
+        };
+        let message = error.to_string();
+        assert!(message.contains("5000000000"));
+        assert!(message.contains("changed-row count"));
     }
 
     #[test]
