@@ -2946,7 +2946,7 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
             prop::collection::vec(inner.clone(), 0..4)
                 .prop_map(|v| CValue::FrozenSet(SetItems::new(v))),
             prop::collection::vec(("[a-c]", inner), 0..3)
-                .prop_map(|entries| { crate::value::Builder::new().object(entries) }),
+                .prop_map(|entries| crate::value::Builder::new().object(entries)),
         ]
     })
 }
