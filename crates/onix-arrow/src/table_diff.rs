@@ -155,8 +155,8 @@ impl TableDiff {
     ///
     /// # Errors
     ///
-    /// Never fails in this version; the [`Result`] keeps the signature stable
-    /// with the members not yet built.
+    /// Never fails; the [`Result`] keeps the signature uniform with the other
+    /// row-level members.
     pub fn rows_added(&self) -> Result<RecordBatch, TableDiffError> {
         Ok(self.rows.rows_added.clone())
     }
@@ -166,8 +166,8 @@ impl TableDiff {
     ///
     /// # Errors
     ///
-    /// Never fails in this version; the [`Result`] keeps the signature stable
-    /// with the members not yet built.
+    /// Never fails; the [`Result`] keeps the signature uniform with the other
+    /// row-level members.
     pub fn rows_removed(&self) -> Result<RecordBatch, TableDiffError> {
         Ok(self.rows.rows_removed.clone())
     }
@@ -179,8 +179,8 @@ impl TableDiff {
     ///
     /// # Errors
     ///
-    /// Never fails in this version; the [`Result`] keeps the signature uniform
-    /// with the other row-level members.
+    /// Never fails; the [`Result`] keeps the signature uniform with the other
+    /// row-level members.
     pub fn cells_changed(&self) -> Result<RecordBatch, TableDiffError> {
         Ok(self.rows.cells_changed.clone())
     }
@@ -190,8 +190,8 @@ impl TableDiff {
     ///
     /// # Errors
     ///
-    /// Never fails in this version; the [`Result`] keeps the signature stable
-    /// with the members not yet built.
+    /// Never fails; the [`Result`] keeps the signature uniform with the other
+    /// row-level members.
     pub fn duplicate_keys(&self) -> Result<RecordBatch, TableDiffError> {
         Ok(self.rows.duplicate_keys.clone())
     }
@@ -233,7 +233,6 @@ mod tests {
             rows_removed: empty_batch(),
             duplicate_keys: empty_batch(),
             cells_changed: empty_batch(),
-            changed_keys: Vec::new(),
             counts,
         }
     }

@@ -94,6 +94,24 @@ pub enum TableDiffError {
         /// The underlying error's message.
         message: String,
     },
+    /// A cell value could not be rendered to its canonical string for the
+    /// per-cell diff — for example a temporal value outside the range the
+    /// formatter can format. Reported as a typed error rather than written into
+    /// the output as error prose (which a real string cell could not be told
+    /// apart from).
+    Render {
+        /// The column whose cell could not be rendered.
+        column: String,
+        /// The underlying formatting error's message.
+        message: String,
+    },
+    /// The per-cell diff would need more than `u32::MAX` changed rows on one
+    /// side, which its row-index arrays cannot address. Bound the changed-row
+    /// count of untrusted input.
+    TooManyChangedRows {
+        /// The number of changed rows that overflowed.
+        rows: usize,
+    },
 }
 
 impl fmt::Display for TableDiffError {
@@ -128,6 +146,16 @@ impl fmt::Display for TableDiffError {
                  needs the key to be the same type on both sides"
             ),
             TableDiffError::Read { message } => write!(f, "failed to read table data: {message}"),
+            TableDiffError::Render { column, message } => write!(
+                f,
+                "could not render a value of column {column:?} to its canonical string: {message}"
+            ),
+            TableDiffError::TooManyChangedRows { rows } => write!(
+                f,
+                "the per-cell diff has {rows} changed rows on one side, more than the \
+                 {} its row-index arrays can address; bound the changed-row count",
+                u32::MAX
+            ),
         }
     }
 }
@@ -203,6 +231,27 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("\"id\""));
         assert!(message.contains("same type on both sides"));
+    }
+
+    #[test]
+    fn render_message_names_the_column() {
+        let error = TableDiffError::Render {
+            column: "ts".to_string(),
+            message: "Cast error".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("\"ts\""));
+        assert!(message.contains("Cast error"));
+    }
+
+    #[test]
+    fn too_many_changed_rows_message_names_the_count() {
+        let error = TableDiffError::TooManyChangedRows {
+            rows: 5_000_000_000,
+        };
+        let message = error.to_string();
+        assert!(message.contains("5000000000"));
+        assert!(message.contains("changed-row count"));
     }
 
     #[test]

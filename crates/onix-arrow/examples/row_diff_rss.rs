@@ -11,6 +11,11 @@
 //! # same shape with no changed rows: the cell pass materializes nothing, the
 //! # pass-one baseline the ~2%-changed run is measured against
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 nochange
+//! # every row changed (narrow int cells): the cell pass at full width
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 allchange
+//! # every row changed with a wide (1 KB) string cell: the rendering worst case
+//! /usr/bin/time -l target/release/examples/row_diff_rss 100000 wide 1024
+//! /usr/bin/time -l target/release/examples/row_diff_rss 200000 wide 1024
 //! # duplicate-heavy shape: every key duplicated, wide string key
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 dup 16
 //! /usr/bin/time -l target/release/examples/row_diff_rss 200000 dup 1024
@@ -24,8 +29,14 @@
 //! materializes those ~2% changed rows on both sides. The **nochange** variant
 //! keeps the 1% added/removed but makes every shared row equal, so the cell pass
 //! materializes nothing: the difference in peak RSS between it and the default
-//! run is the cell pass's cost. The **dup** shape (`key` Utf8 of the given width,
-//! `value` int64) makes every key appear twice on each side, so every distinct
+//! run is the cell pass's cost. The **allchange** variant drops the offset and
+//! changes every shared row (no added/removed), so the cell pass materializes
+//! and renders every row. The **wide** shape (`id` int64, `value` a
+//! `value_width`-byte Utf8 that differs between the sides) changes every row too
+//! and renders `value_width` bytes per changed cell — the rendering worst case,
+//! whose peak RSS scales with changed cells times cell width. The **dup** shape
+//! (`key` Utf8 of the given width, `value` int64) makes every key appear twice
+//! on each side, so every distinct
 //! key is a duplicate and the whole `duplicate_keys` report is materialized —
 //! the term that scales with distinct duplicated keys times the key width.
 
@@ -46,6 +57,11 @@ enum Shape {
     /// `(key, value)`; `key` is a `key_width`-byte string and each key value
     /// appears twice, so every key is a duplicate.
     Dup { key_width: usize },
+    /// `(id, value)` where `value` is a `value_width`-byte string filled with
+    /// `fill`; the two sides share every id but differ in `fill`, so every row
+    /// is changed and every changed cell renders `value_width` bytes — the
+    /// wide-cell worst case for the per-cell diff's rendering memory.
+    Wide { value_width: usize, fill: u8 },
 }
 
 /// A table generated on demand, retaining nothing between batches.
@@ -109,6 +125,12 @@ impl Iterator for GenReader {
                 let values: Int64Array = (self.next..end).map(Some).collect();
                 vec![Arc::new(keys), Arc::new(values)]
             }
+            Shape::Wide { value_width, fill } => {
+                let ids: Int64Array = (self.next..end).map(Some).collect();
+                let cell = String::from_utf8(vec![fill; value_width]).unwrap();
+                let values: StringArray = (self.next..end).map(|_| Some(cell.as_str())).collect();
+                vec![Arc::new(ids), Arc::new(values)]
+            }
         };
         self.next = end;
 
@@ -128,42 +150,76 @@ fn main() {
         .get(1)
         .and_then(|a| a.parse().ok())
         .unwrap_or(1_000_000);
-    let dup = args.get(2).is_some_and(|a| a == "dup");
-    // `nochange`: same 1% added / 1% removed as the default linear shape but no
-    // changed rows, so the cell pass materializes nothing — its peak RSS is the
-    // pass-one baseline the cell pass is measured against.
-    let nochange = args.get(2).is_some_and(|a| a == "nochange");
-    let key_width: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(16);
+    // Mode selects the shape: "dup" (duplicate-heavy), "wide" (all rows changed,
+    // wide string value column), "nochange"/"allchange"/default (linear int).
+    let mode = args.get(2).map_or("", String::as_str);
+    let width: usize = args
+        .get(3)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(if mode == "wide" { 1024 } else { 16 });
 
-    let (schema, left_shape, right_shape, key) = if dup {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("key", DataType::Utf8, false),
-            Field::new("value", DataType::Int64, false),
-        ]));
-        (
-            schema,
-            Shape::Dup { key_width },
-            Shape::Dup { key_width },
-            "key",
-        )
-    } else {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-            Field::new("value", DataType::Int64, false),
-        ]));
-        let step = (rows / 100).max(1);
-        (
-            schema,
-            Shape::Linear {
-                id_offset: 0,
-                change_every: i64::MAX,
-            },
-            Shape::Linear {
-                id_offset: step,
-                change_every: if nochange { i64::MAX } else { 50 },
-            },
-            "id",
-        )
+    let (schema, left_shape, right_shape, key, label) = match mode {
+        "dup" => {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("value", DataType::Int64, false),
+            ]));
+            let shape = Shape::Dup { key_width: width };
+            (
+                schema,
+                shape,
+                shape,
+                "key",
+                format!(" (dup, key_width={width})"),
+            )
+        }
+        "wide" => {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("value", DataType::Utf8, false),
+            ]));
+            (
+                schema,
+                Shape::Wide {
+                    value_width: width,
+                    fill: b'a',
+                },
+                Shape::Wide {
+                    value_width: width,
+                    fill: b'b',
+                },
+                "id",
+                format!(" (wide, value_width={width}, all changed)"),
+            )
+        }
+        _ => {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("value", DataType::Int64, false),
+            ]));
+            let step = (rows / 100).max(1);
+            // `nochange`: 1% added/removed but no changed rows (the pass-one
+            // baseline). `allchange`: no added/removed, every row changed.
+            // Default: 1% added/removed, ~2% changed.
+            let (id_offset, change_every, label) = match mode {
+                "nochange" => (step, i64::MAX, " (nochange baseline)"),
+                "allchange" => (0, 1, " (all changed)"),
+                _ => (step, 50, ""),
+            };
+            (
+                schema,
+                Shape::Linear {
+                    id_offset: 0,
+                    change_every: i64::MAX,
+                },
+                Shape::Linear {
+                    id_offset,
+                    change_every,
+                },
+                "id",
+                label.to_string(),
+            )
+        }
     };
 
     let left = Generated {
@@ -183,14 +239,7 @@ fn main() {
     let elapsed = start.elapsed();
     let summary = diff.summary();
 
-    println!(
-        "rows per side: {rows}{}",
-        if dup {
-            format!(" (dup, key_width={key_width})")
-        } else {
-            String::new()
-        }
-    );
+    println!("rows per side: {rows}{label}");
     println!("wall: {:.2}s", elapsed.as_secs_f64());
     println!(
         "rows_added={} rows_removed={} rows_changed={} duplicate_keys={} cells_changed={}",
