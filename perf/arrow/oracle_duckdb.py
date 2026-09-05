@@ -290,12 +290,10 @@ def _write_cells_changed(
     key_select = ", ".join(f"a.{_quote_ident(c)}" for c in key_columns)
     matched_join = _null_safe_join("a", "k", key_columns)
     cell_join = _null_safe_join("a", "b", key_columns)
-    # `change` mirrors onix's per-cell label. The fixture has no null non-key
-    # cells and no type-changed common column (per the module docstring), so in
-    # practice every row here is `value_changed`; the null-driven branches are
-    # written out so the oracle stays correct if a future fixture adds nullable
-    # cells. `type_changed` is onix-specific (a value-domain mismatch) and not
-    # something a SQL cast diff can detect, so it is out of this oracle's scope.
+    # `change` mirrors onix's per-cell label; the null branches follow the
+    # module docstring's Nulls bullet. `type_changed` is onix-specific (a
+    # value-domain mismatch) that a SQL cast diff cannot detect, so it is out of
+    # this oracle's scope.
     per_column_selects = " UNION ALL ".join(
         f"""
         SELECT {key_select}, {_quote_literal(column)} AS "column",
