@@ -2,6 +2,7 @@
 perf/fixtures/
 perf/bench_raw/
 perf/arrow/fixtures/
+perf/arrow/bench_raw/
 perf/arrow/.venv/
 __pycache__/
 *.profraw
