@@ -3,6 +3,7 @@
 import decimal
 import random
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 import polars as pl
@@ -25,6 +26,12 @@ def _table(diff_member: object) -> pa.Table:
 def _ids(table: pa.Table) -> set:
     """The set of ``id`` values in a result table."""
     return set(table.column("id").to_pylist())
+
+
+def _cells(table: pa.Table, key: tuple[str, ...] = ("id",)) -> set:
+    """A ``cells_changed`` table as a set of ``(*key, column, old, new, change)`` tuples."""
+    rows = table.to_pylist()
+    return {(*(r[k] for k in key), r["column"], r["old_value"], r["new_value"], r["change"]) for r in rows}
 
 
 # Basic row-diff tests
@@ -199,12 +206,115 @@ def test_changed_value_in_each_scalar_type_is_reported(
     left_value: object,
     right_value: object,
 ) -> None:
-    """A differing non-key cell of each supported scalar type is a row change, never silently skipped."""
+    """A differing non-key cell of each supported scalar type is a row change and one reported cell, never silently skipped."""
     left = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([left_value], column_type)})
     right = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([right_value], column_type)})
     diff = diff_tables(left, right, key=["id"])
 
     assert diff.summary()["rows_changed"] == 1
+    assert diff.summary()["cells_changed"] == 1
+    cell = _table(diff.cells_changed()).to_pylist()[0]
+    assert (cell["id"], cell["column"], cell["change"]) == (1, "v", "value_changed")
+    assert cell["old_value"] is not None
+    assert cell["new_value"] is not None
+
+
+# Per-cell diff: labels, rendering, and ordering
+
+
+def test_changed_cell_reports_key_column_old_new_and_label() -> None:
+    """A value change lists the key, the column, both rendered values, and value_changed."""
+    left = pa.table({"id": pa.array([1, 2], pa.int64()), "v": pa.array([10, 20], pa.int64())})
+    right = pa.table({"id": pa.array([1, 2], pa.int64()), "v": pa.array([10, 25], pa.int64())})
+    cells = _table(diff_tables(left, right, key=["id"]).cells_changed()).to_pylist()
+
+    assert cells == [{"id": 2, "column": "v", "old_value": "20", "new_value": "25", "change": "value_changed"}]
+
+
+def test_became_null_and_became_non_null_labels() -> None:
+    """A cell going to/from null is labelled and renders the present side only."""
+    left = pa.table({"id": pa.array([1, 2], pa.int64()), "v": pa.array([10, None], pa.int64())})
+    right = pa.table({"id": pa.array([1, 2], pa.int64()), "v": pa.array([None, 20], pa.int64())})
+    cells = _cells(_table(diff_tables(left, right, key=["id"]).cells_changed()))
+
+    assert cells == {
+        (1, "v", "10", None, "became_null"),
+        (2, "v", None, "20", "became_non_null"),
+    }
+
+
+def test_value_domain_mismatch_is_type_changed() -> None:
+    """A column that is a string on one side and an int on the other is reported type_changed, not value_changed."""
+    left = pa.table({"id": pa.array([1], pa.int64()), "c": pa.array(["5"], pa.string())})
+    right = pa.table({"id": pa.array([1], pa.int64()), "c": pa.array([5], pa.int64())})
+    cells = _table(diff_tables(left, right, key=["id"]).cells_changed()).to_pylist()
+
+    assert cells == [{"id": 1, "column": "c", "old_value": "5", "new_value": "5", "change": "type_changed"}]
+
+
+def test_lossless_type_change_at_equal_value_reports_no_cell() -> None:
+    """An int32->int64 column with equal values is a schema change but no cell change."""
+    left = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([7], pa.int32())})
+    right = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([7], pa.int64())})
+    diff = diff_tables(left, right, key=["id"])
+
+    assert any(c["column"] == "v" and c["change"] == "type_changed" for c in diff.schema)
+    assert diff.summary()["rows_changed"] == 0
+    assert diff.summary()["cells_changed"] == 0
+
+
+def test_decimal_cell_renders_at_native_scale() -> None:
+    """A changed decimal cell renders old/new at the column's scale, matching a fixed-point form."""
+    dtype = pa.decimal128(18, 4)
+    left = pa.table({"id": pa.array([1], pa.int64()), "amount": pa.array([decimal.Decimal("20.0000")], dtype)})
+    right = pa.table({"id": pa.array([1], pa.int64()), "amount": pa.array([decimal.Decimal("20.5000")], dtype)})
+    cell = _table(diff_tables(left, right, key=["id"]).cells_changed()).to_pylist()[0]
+
+    assert (cell["old_value"], cell["new_value"]) == ("20.0000", "20.5000")
+
+
+def test_cells_ordered_by_rendered_key_then_left_schema_column() -> None:
+    """Output rows sort by the canonical key rendering, then left-schema column order."""
+    left = pa.table(
+        {
+            "id": pa.array([2, 10], pa.int64()),
+            "b": pa.array([1, 3], pa.int64()),
+            "a": pa.array([1, 3], pa.int64()),
+        },
+    )
+    right = pa.table(
+        {
+            "id": pa.array([2, 10], pa.int64()),
+            "b": pa.array([9, 8], pa.int64()),
+            "a": pa.array([9, 8], pa.int64()),
+        },
+    )
+    cells = _table(diff_tables(left, right, key=["id"]).cells_changed()).to_pylist()
+    order = [(c["id"], c["column"]) for c in cells]
+
+    # id renders "10" < "2" as strings; within a key, b (index 1) before a (index 2).
+    assert order == [(10, "b"), (10, "a"), (2, "b"), (2, "a")]
+
+
+def test_composite_key_cells_changed_carries_every_key_column() -> None:
+    """cells_changed carries all key columns for a composite key."""
+    left = pa.table(
+        {
+            "region": pa.array(["us", "eu"], pa.string()),
+            "id": pa.array([1, 1], pa.int64()),
+            "v": pa.array([10, 20], pa.int64()),
+        },
+    )
+    right = pa.table(
+        {
+            "region": pa.array(["us", "eu"], pa.string()),
+            "id": pa.array([1, 1], pa.int64()),
+            "v": pa.array([11, 20], pa.int64()),
+        },
+    )
+    cells = _cells(_table(diff_tables(left, right, key=["region", "id"]).cells_changed()), key=("region", "id"))
+
+    assert cells == {("us", 1, "v", "10", "11", "value_changed")}
 
 
 def test_pyarrow_all_none_column_compares_as_all_null() -> None:
@@ -270,6 +380,14 @@ def test_oracle_parity_on_the_fixture_pair(n_rows: int, tmp_path: Path) -> None:
     assert _ids(_table(diff.rows_added())) == oracle_added
     assert _ids(_table(diff.rows_removed())) == oracle_removed
 
+    # Every changed cell (key, column, rendered old/new, change label) matches
+    # the oracle's, so the per-cell diff agrees on the decimal and string
+    # renderings on real data.
+    assert summary["cells_changed"] == oracle["cells_changed"]
+    onix_cells = _cells(_table(diff.cells_changed()))
+    oracle_cells = _cells(pq.read_table(tmp_path / "oracle" / "cells_changed.parquet"))
+    assert onix_cells == oracle_cells
+
 
 def test_oracle_parity_with_duplicates_and_null_keys(tmp_path: Path) -> None:
     """onix matches the oracle on a synthetic table with duplicate and null keys (which the fixture never has)."""
@@ -299,6 +417,10 @@ def test_oracle_parity_with_duplicates_and_null_keys(tmp_path: Path) -> None:
     oracle_dup = pq.read_table(tmp_path / "oracle" / "duplicate_keys.parquet")
     assert _ids(dup) == _ids(oracle_dup)
 
+    onix_cells = _cells(_table(diff.cells_changed()))
+    oracle_cells = _cells(pq.read_table(tmp_path / "oracle" / "cells_changed.parquet"))
+    assert onix_cells == oracle_cells
+
 
 # Property test against a naive in-memory reference
 
@@ -313,6 +435,7 @@ def _naive(left_rows: list, right_rows: list) -> dict:
         right_groups[key].append(value)
 
     added = removed = changed = dup = null = 0
+    cells = set()
     for key in set(left_groups) | set(right_groups):
         if key is None:
             null += 1
@@ -328,8 +451,19 @@ def _naive(left_rows: list, right_rows: list) -> dict:
             added += 1
         elif left_groups[key][0] != right_groups[key][0]:
             changed += 1
+            # `v` is a non-null int64 on both sides, so a change is value_changed
+            # rendered in base 10; the id key column stays typed (int64), null for
+            # a null key.
+            cells.add((key, "v", str(left_groups[key][0]), str(right_groups[key][0]), "value_changed"))
 
-    return {"rows_added": added, "rows_removed": removed, "rows_changed": changed, "duplicate_keys": dup, "null_keys": null}
+    return {
+        "rows_added": added,
+        "rows_removed": removed,
+        "rows_changed": changed,
+        "duplicate_keys": dup,
+        "null_keys": null,
+        "cells": cells,
+    }
 
 
 def _random_rows(rng: random.Random) -> list:
@@ -362,7 +496,86 @@ def test_matches_naive_reference_over_random_tables() -> None:
                 "v": pa.array([value for _, value in right_rows], pa.int64()),
             },
         )
-        summary = diff_tables(left, right, key=["id"]).summary()
+        diff = diff_tables(left, right, key=["id"])
+        summary = diff.summary()
         expected = _naive(left_rows, right_rows)
 
-        assert {k: summary[k] for k in expected} == expected, (left_rows, right_rows)
+        counts = {k: v for k, v in expected.items() if k != "cells"}
+        assert {k: summary[k] for k in counts} == counts, (left_rows, right_rows)
+        assert summary["cells_changed"] == len(expected["cells"]), (left_rows, right_rows)
+        assert _cells(_table(diff.cells_changed())) == expected["cells"], (left_rows, right_rows)
+
+
+# Per-cell change detection and labels across every hashed value domain
+
+
+def _naive_cell_labels(left_rows: list, right_rows: list) -> set:
+    """The expected ``(id, "v", change)`` set for a single-typed nullable value column.
+
+    Because both sides share one column type, a change is a plain value
+    difference (nulls handled explicitly), so this reference needs no
+    type-specific comparison beyond Python equality.
+    """
+    left_groups: dict = defaultdict(list)
+    right_groups: dict = defaultdict(list)
+    for key, value in left_rows:
+        left_groups[key].append(value)
+    for key, value in right_rows:
+        right_groups[key].append(value)
+
+    labels = set()
+    for key in set(left_groups) | set(right_groups):
+        if len(left_groups.get(key, [])) != 1 or len(right_groups.get(key, [])) != 1:
+            continue
+        old, new = left_groups[key][0], right_groups[key][0]
+        if old is None and new is None:
+            continue
+        if old is None:
+            labels.add((key, "v", "became_non_null"))
+        elif new is None:
+            labels.add((key, "v", "became_null"))
+        elif old != new:
+            labels.add((key, "v", "value_changed"))
+
+    return labels
+
+
+def test_cell_labels_match_a_naive_reference_across_every_hashed_type() -> None:
+    """For every hashed value domain, onix's changed cells and their labels equal a naive reference."""
+    ts0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    ts1 = datetime(2024, 6, 1, 12, 30, tzinfo=timezone.utc)
+    pools = {
+        pa.int64(): [None, 0, 1, 2],
+        pa.int32(): [None, -1, 0, 7],
+        pa.uint16(): [None, 0, 3, 9],
+        pa.float64(): [None, 0.0, -0.0, 1.5, 2.0],
+        pa.bool_(): [None, True, False],
+        pa.decimal128(12, 3): [None, decimal.Decimal("1.000"), decimal.Decimal("1.500"), decimal.Decimal("2.250")],
+        pa.string(): [None, "a", "b", "café"],
+        pa.large_string(): [None, "x", "y"],
+        pa.binary(): [None, b"x", b"yy"],
+        pa.timestamp("us", tz="UTC"): [None, ts0, ts1],
+        pa.date32(): [None, ts0.date(), ts1.date()],
+    }
+    rng = random.Random(20260906)
+
+    for column_type, pool in pools.items():
+        for _ in range(40):
+            left_rows = [(rng.randint(0, 3), rng.choice(pool)) for _ in range(rng.randint(0, 8))]
+            right_rows = [(rng.randint(0, 3), rng.choice(pool)) for _ in range(rng.randint(0, 8))]
+            left = pa.table(
+                {
+                    "id": pa.array([k for k, _ in left_rows], pa.int64()),
+                    "v": pa.array([v for _, v in left_rows], column_type),
+                },
+            )
+            right = pa.table(
+                {
+                    "id": pa.array([k for k, _ in right_rows], pa.int64()),
+                    "v": pa.array([v for _, v in right_rows], column_type),
+                },
+            )
+            cells = _table(diff_tables(left, right, key=["id"]).cells_changed()).to_pylist()
+            got = {(c["id"], c["column"], c["change"]) for c in cells}
+            expected = _naive_cell_labels(left_rows, right_rows)
+            assert got == expected, (column_type, left_rows, right_rows)
