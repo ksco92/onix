@@ -14,28 +14,10 @@ Two things this file pins that the golden corpus cannot:
 import datetime
 
 import pytest
+from conftest import _normalize_types
 from deepdiff import DeepDiff as RealDeepDiff
 
 from deepdiff_rs import DeepDiff as OnixDeepDiff
-
-
-def _normalize_types(value: object) -> object:
-    """
-    Replace any Python type object in a report with its name.
-
-    :param value: A report, or any part of one.
-    :return: The same value with type objects replaced by their names.
-    """
-    if isinstance(value, dict):
-        return {key: _normalize_types(item) for key, item in value.items()}
-
-    if isinstance(value, list):
-        return [_normalize_types(item) for item in value]
-
-    if isinstance(value, type):
-        return value.__name__
-
-    return value
 
 
 @pytest.mark.parametrize(

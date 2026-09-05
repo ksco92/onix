@@ -1,19 +1,10 @@
 [
   {
-    "$time": "12:00:00+02:00"
-  },
-  {
     "$timedelta": {
-      "days": -1,
-      "microseconds": 0,
-      "seconds": 3600
+      "days": 0,
+      "microseconds": 1,
+      "seconds": 0
     }
-  },
-  {
-    "$time": "12:00:00+02:00"
-  },
-  {
-    "$time": "12:00:00+02:00"
   },
   {
     "$timedelta": {
@@ -22,8 +13,26 @@
       "seconds": 0
     }
   },
-  "anchor",
   {
-    "$time": "00:00:00"
-  }
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 0,
+      "seconds": 1
+    }
+  },
+  {
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 1,
+      "seconds": 0
+    }
+  },
+  {
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 0,
+      "seconds": 0
+    }
+  },
+  "anchor"
 ]

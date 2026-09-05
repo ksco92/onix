@@ -807,12 +807,14 @@ def _generate_time_timedelta_ignore_order_fuzz_cases() -> (
     cases: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {}
 
     for i in range(_TIME_FUZZ_CASE_COUNT):
-        size = rng.randint(0, 8)
+        # Never 0: an empty `a`/`b` pair carries no time or timedelta at all,
+        # defeating the batch's own point (issue #61 fix-round finding).
+        size = rng.randint(1, 8)
         a = [rng.choice(_TIME_FUZZ_ALPHABET) for _ in range(size)]
         b = list(a)
         rng.shuffle(b)
         change_n = rng.randint(0, size)
-        for index in rng.sample(range(size), change_n) if size else []:
+        for index in rng.sample(range(size), change_n):
             b[index] = rng.choice(_TIME_FUZZ_ALPHABET)
         cases[f"ignore_order_time_timedelta_fuzz_seed_{i:02d}"] = (a, b, {"ignore_order": True})
 

@@ -1,11 +1,1 @@
-{
-  "iterable_item_removed": {
-    "root[0]": "anchor"
-  },
-  "values_changed": {
-    "root[3]": {
-      "new_value": "-1 day, 1:00:00",
-      "old_value": "00:00:00"
-    }
-  }
-}
+{}

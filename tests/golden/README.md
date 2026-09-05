@@ -695,7 +695,8 @@ Every other divergence found while building the corpus was fixed in `onix-core` 
 `DeepDiff` exactly. The path-rendering collision exception, the multi-member
 nested-`frozenset`-rendering exception (both above), the three
 set-iteration-order differences, the list-LCS `2^53` limitation, the
-naive-datetime pairing timezone above, the lone-surrogate `ValueError` just
+naive-datetime pairing timezone above, the `time` seconds-of-day hashing
+quirk under `ignore_order` above, the lone-surrogate `ValueError` just
 described, and the Unicode-version `str`-repr divergence documented under
 "Pinned versions" above are the only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across

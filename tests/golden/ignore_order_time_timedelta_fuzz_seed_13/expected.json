@@ -1,15 +1,5 @@
 {
-  "iterable_item_added": {
-    "root[1]": "anchor"
-  },
-  "values_changed": {
-    "root[0]": {
-      "new_value": "0:00:01",
-      "old_value": "10:30:00"
-    },
-    "root[2]": {
-      "new_value": "1 day, 0:00:00",
-      "old_value": "00:00:00"
-    }
+  "iterable_item_removed": {
+    "root[1]": "1 day, 0:00:00"
   }
 }

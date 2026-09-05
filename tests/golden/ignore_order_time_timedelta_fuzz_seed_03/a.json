@@ -1,5 +1,8 @@
 [
   {
+    "$time": "23:59:59.999999"
+  },
+  {
     "$timedelta": {
       "days": 1,
       "microseconds": 0,
@@ -7,13 +10,10 @@
     }
   },
   {
-    "$time": "23:59:59.999999"
-  },
-  {
     "$timedelta": {
-      "days": -1,
+      "days": 0,
       "microseconds": 0,
-      "seconds": 3600
+      "seconds": 0
     }
   },
   {

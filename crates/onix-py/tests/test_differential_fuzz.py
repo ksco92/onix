@@ -70,6 +70,7 @@ from collections.abc import Iterator
 from typing import Final
 
 import pytest
+from conftest import _normalize_types
 from deepdiff import DeepDiff as RealDeepDiff
 from golden_tags import JSON_DEFAULT_MAPPING, canonical_set_order
 
@@ -158,9 +159,8 @@ DATE_PROBABILITY: Final[float] = 0.25
 NAIVE_PROBABILITY: Final[float] = 0.4
 CALENDAR_LEAF_PROBABILITY: Final[float] = 0.6
 
-# How often a calendar leaf is a `time` or a `timedelta` (issue #61) instead
-# of a `date`/`datetime` -- checked before the date/datetime branch below, so
-# each draws its own `rng` call the same cascading way DATE_PROBABILITY does.
+# How often a calendar leaf is a `time` or `timedelta` instead of a
+# `date`/`datetime`, each its own cascading `rng` draw like DATE_PROBABILITY.
 TIME_PROBABILITY: Final[float] = 0.15
 TIMEDELTA_PROBABILITY: Final[float] = 0.15
 
@@ -478,34 +478,6 @@ def _tuple_edge_mutations(rng: random.Random, value: JsonValue, in_tuple: bool =
 
     if in_tuple and isinstance(value, (bool, int, float)) and rng.random() < RETYPE_PROBABILITY:
         return _retype_number(rng, value)
-
-    return value
-
-
-def _normalize_types(value: JsonValue | type) -> JsonValue:
-    """
-    Replace any Python type object in a report with its name.
-
-    Real DeepDiff's `to_dict()` reports a `type_changes` entry's `old_type`/
-    `new_type` as the type objects themselves, where `deepdiff_rs` reports the
-    names its `to_json()` uses (`"tuple"`, `"list"`, ...). That one difference
-    is a documented gap of this MVP, so it is normalized away here rather than
-    swamping every other comparison this test exists to make.
-
-    :param value: A report, or any part of one.
-    :return: The same value with type objects replaced by their names.
-    """
-    if isinstance(value, dict):
-        return {key: _normalize_types(item) for key, item in value.items()}
-
-    if isinstance(value, list):
-        return [_normalize_types(item) for item in value]
-
-    if isinstance(value, tuple):
-        return tuple(_normalize_types(item) for item in value)
-
-    if isinstance(value, type):
-        return value.__name__
 
     return value
 
