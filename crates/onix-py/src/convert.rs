@@ -656,7 +656,7 @@ fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyR
     }
 
     if let Ok(f) = obj.cast::<PyFloat>() {
-        return float_to_value(f.value());
+        return Ok(float_to_value(f.value()));
     }
 
     if let Ok(s) = obj.cast::<PyString>() {

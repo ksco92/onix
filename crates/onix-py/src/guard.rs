@@ -232,10 +232,10 @@ fn has_non_finite_float(value: &Value) -> bool {
 /// finiteness (the literal token, or `Value::to_serde_json` for a finite
 /// one), and every container writes its children the same way — so the walk
 /// touches each node exactly once, `O(nodes)` total, with no re-scanning of
-/// what an ancestor already covered. Object keys reuse `serde_json`'s own
-/// string escaping (`Value`'s keys are always plain strings), so the only
-/// text this function writes by hand is JSON punctuation and the three
-/// non-finite tokens.
+/// what an ancestor already covered. An object key renders through
+/// [`onix_core::value::object_key_json_string`], the same non-`str`-key
+/// rendering [`Value::to_serde_json`] uses, so the two rendering paths agree
+/// on a key regardless of which one a given report takes.
 fn write_json(value: &Value, out: &mut String) -> Result<(), serde_json::Error> {
     match value {
         Value::Number(n) => {
@@ -260,7 +260,9 @@ fn write_json(value: &Value, out: &mut String) -> Result<(), serde_json::Error> 
                 if index > 0 {
                     out.push(',');
                 }
-                out.push_str(&serde_json::to_string(key)?);
+                out.push_str(&serde_json::to_string(
+                    &onix_core::value::object_key_json_string(key),
+                )?);
                 out.push(':');
                 write_json(child, out)?;
             }

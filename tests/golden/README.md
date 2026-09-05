@@ -831,6 +831,19 @@ that generates `tuple` dict keys (issue #62) excludes the empty tuple for
 this reason; see `crates/onix-py/tests/test_differential_fuzz.py`'s
 `_gen_non_str_dict_key`.
 
+**A non-finite `float` (`nan`/`inf`) dict key is also a real, narrow
+`DeepDiff` bug, not reproduced.** `stringify_param`'s `repr()`-then-
+`ast.literal_eval` round trip fails on `"nan"`/`"inf"` (neither parses as a
+Python literal) and silently collapses the key to `None`, the same way the
+empty-tuple case above does — confirmed live: `DeepDiff({}, {float('nan'):
+1}).to_json()` is `{"dictionary_item_added": {"null": 1}}`, with a warning
+printed. `onix` instead renders the key deterministically — `root[nan]` as
+a path segment, and the bare `NaN`/`Infinity`/`-Infinity` token text (the
+same a *value* of the same bits gets) wherever the key is embedded in a
+carried JSON object — per the same compatibility-policy choice. See
+`crates/onix-py/tests/test_non_finite.py`'s
+`test_non_finite_dict_key_renders_without_crashing`.
+
 Every other divergence found while building the corpus was fixed in `onix-core` to match
 `DeepDiff` exactly. The path-rendering collision exception, the multi-member
 nested-`frozenset`-rendering exception (both above), the three
@@ -838,9 +851,9 @@ set-iteration-order differences, the list-LCS `2^53` limitation, the
 naive-datetime pairing timezone above, the `time` seconds-of-day hashing
 quirk under `ignore_order` above, the non-finite-float object-identity
 divergence documented under "Non-finite floats" above, the lone-surrogate
-`ValueError`, the empty-tuple-key bug just described, and the
-Unicode-version `str`-repr divergence documented under "Pinned versions"
-above are the only accepted, documented exceptions —
+`ValueError`, the empty-tuple-key and non-finite-float-key bugs just
+described, and the Unicode-version `str`-repr divergence documented under
+"Pinned versions" above are the only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
 `scripts/differential_fuzz.py`) found zero *other* unexplained

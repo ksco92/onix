@@ -601,6 +601,17 @@ fn escape_non_printable(out: &mut String, c: char) {
 /// is involved. Verified against real Python `repr()` over a million random
 /// bit patterns in the bindings suite.
 pub(crate) fn python_float_repr(value: f64) -> String {
+    if !value.is_finite() {
+        // `{:e}` has no exponent form for these, so the digit-count logic
+        // below (which expects an `e` separator) never applies to them.
+        return if value.is_nan() {
+            "nan".to_string()
+        } else if value.is_sign_positive() {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        };
+    }
     let shortest = format!("{value:e}");
     let significant = shortest
         .split_once('e')
