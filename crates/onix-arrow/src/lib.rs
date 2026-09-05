@@ -102,12 +102,14 @@
 //! ```
 
 mod error;
+mod json_rows;
 mod options;
 mod row_diff;
 mod schema;
 mod table_diff;
 
 pub use error::{Side, TableDiffError};
+pub use json_rows::MAX_JSON_ROWS;
 pub use options::TableDiffOptions;
 pub use row_diff::{MemoryInput, TableInput};
 pub use schema::{ChangeKind, SchemaChange, diff_schemas};
