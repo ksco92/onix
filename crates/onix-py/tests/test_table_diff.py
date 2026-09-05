@@ -210,6 +210,15 @@ def test_list_of_key_value_struct_and_map_are_not_distinguished() -> None:
     assert diff.schema == []
 
 
+def test_list_view_normalizes_like_list() -> None:
+    """A list_view column equals the matching list, for scalar elements and for a key/value-struct (map) element."""
+    kv = pa.struct([pa.field("key", pa.string()), pa.field("value", pa.int32())])
+    for element in (pa.int64(), kv):
+        left = pa.schema([pa.field("id", pa.int64()), pa.field("v", pa.list_view(element))]).empty_table()
+        right = pa.schema([pa.field("id", pa.int64()), pa.field("v", pa.list_(element))]).empty_table()
+        assert diff_tables(left, right, key=["id"]).schema == []
+
+
 # Schema-comparison semantics tests
 
 

@@ -93,20 +93,20 @@ fn normalized_type(data_type: &DataType) -> DataType {
         DataType::Dictionary(_, value) => normalized_type(value),
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => DataType::Utf8,
         DataType::Binary | DataType::LargeBinary | DataType::BinaryView => DataType::Binary,
-        // A `List` or `LargeList` whose element carries the map signature (see
+        // Any list variant whose element carries the map signature (see
         // [`map_entries`]) is read as a map, on every library path: polars has
         // no map type and re-exports both a real Arrow map and an ordinary list
         // of key/value structs as the identical `LargeList<Struct<key, value>>`,
-        // while pyarrow uses `List` for such a list, so the two must normalize
-        // the same way to keep cross-library identity. `ListView`/
-        // `LargeListView` are never used for maps and stay lists.
-        DataType::List(field) | DataType::LargeList(field) => match map_entries(field) {
+        // while pyarrow uses `List` for such a list, so every list variant must
+        // normalize the same way to keep cross-library identity. Every list
+        // variant otherwise normalizes to `List`.
+        DataType::List(field)
+        | DataType::LargeList(field)
+        | DataType::ListView(field)
+        | DataType::LargeListView(field) => match map_entries(field) {
             Some((key, value)) => canonical_map(key, value),
             None => canonical_list(field.data_type()),
         },
-        DataType::ListView(field) | DataType::LargeListView(field) => {
-            canonical_list(field.data_type())
-        }
         DataType::FixedSizeList(field, size) => DataType::FixedSizeList(
             Arc::new(Field::new("item", normalized_type(field.data_type()), true)),
             *size,
@@ -171,8 +171,7 @@ fn canonical_map(key: &DataType, value: &DataType) -> DataType {
 /// different libraries reporting no spurious change, onix treats a list of
 /// structs named exactly `key`/`value` with a nullable key as a map on every
 /// path — so a migration between those two shapes (a real map ⇄ a list of
-/// key/value structs) is not reported as a type change. The README documents
-/// this.
+/// key/value structs) is not reported as a type change.
 fn map_entries(element: &FieldRef) -> Option<(&DataType, &DataType)> {
     if let DataType::Struct(fields) = element.data_type()
         && fields.len() == 2
@@ -549,6 +548,29 @@ mod tests {
         )]);
         let right = schema(vec![Field::new("nums", list_of(DataType::Int64), true)]);
         assert!(diff_schemas(&left, &right).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_view_of_key_value_struct_reads_as_a_map_like_list() {
+        // The map rule is exceptionless across list variants: a
+        // list_view<struct{key,value}> normalizes to the same canonical Map as
+        // a list<struct{key,value}>.
+        let kv = || {
+            DataType::Struct(
+                vec![
+                    Field::new("key", DataType::Utf8, true),
+                    Field::new("value", DataType::Int32, true),
+                ]
+                .into(),
+            )
+        };
+        let as_list_view = schema(vec![Field::new(
+            "m",
+            DataType::ListView(std::sync::Arc::new(Field::new("item", kv(), true))),
+            true,
+        )]);
+        let as_list = schema(vec![Field::new("m", list_of(kv()), true)]);
+        assert!(diff_schemas(&as_list_view, &as_list).unwrap().is_empty());
     }
 
     fn map_with(value: DataType) -> DataType {
