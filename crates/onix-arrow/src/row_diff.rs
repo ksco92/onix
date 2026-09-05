@@ -66,11 +66,14 @@
 //!
 //! # Per-cell changes
 //!
-//! [`diff_cells`] reports, for every changed row, which cells differ. A cell is
-//! reported changed **if and only if its [`hash_cell`] contribution differs**
-//! between the two matched rows — the same helper the row hash is built from, so
-//! the cell list and the row-changed decision can never drift. Each reported
-//! cell is labelled:
+//! [`diff_cells`] reports, for every changed row, which cells differ, as one
+//! output row per differing cell: the key columns, then `column`, `old_value`,
+//! `new_value`, and `change`. Output rows are ordered by the canonical string
+//! rendering of the key columns (lexicographic, nulls first), then by
+//! left-schema column order. A cell is reported changed **if and only if its
+//! [`hash_cell`] contribution differs** between the two matched rows — the
+//! same helper the row hash is built from, so the cell list and the
+//! row-changed decision can never drift. Each reported cell is labelled:
 //!
 //! - `became_null`/`became_non_null` when exactly one side is null;
 //! - `type_changed` when both are non-null and the two sides' types are not
@@ -1287,7 +1290,7 @@ fn value_domain(data_type: &DataType) -> ValueDomain {
 /// diff both use. A `Null`-typed column is all-null by definition and carries no
 /// validity buffer, so it is detected by type; every other column defers to its
 /// validity bitmap.
-fn cell_is_null(array: &ArrayRef, row: usize) -> bool {
+pub(crate) fn cell_is_null(array: &ArrayRef, row: usize) -> bool {
     matches!(array.data_type(), DataType::Null) || array.is_null(row)
 }
 
@@ -1351,13 +1354,16 @@ fn render_duration(raw: i64, unit: TimeUnit) -> String {
 /// One side's cell renderer: the Arrow formatter for most types, or a
 /// dependency-free [`render_duration`] for a `Duration` column (which the
 /// formatter can render as a `<invalid>` sentinel).
-enum SideRenderer<'a> {
+pub(crate) enum SideRenderer<'a> {
     Formatter(ArrayFormatter<'a>),
     Duration(&'a ArrayRef, TimeUnit),
 }
 
 impl<'a> SideRenderer<'a> {
-    fn new(array: &'a ArrayRef, opts: &'a FormatOptions<'a>) -> Result<Self, TableDiffError> {
+    pub(crate) fn new(
+        array: &'a ArrayRef,
+        opts: &'a FormatOptions<'a>,
+    ) -> Result<Self, TableDiffError> {
         if let DataType::Duration(unit) = array.data_type() {
             Ok(SideRenderer::Duration(array, *unit))
         } else {
@@ -1366,7 +1372,7 @@ impl<'a> SideRenderer<'a> {
         }
     }
 
-    fn render(&self, row: usize, column: &str) -> Result<String, TableDiffError> {
+    pub(crate) fn render(&self, row: usize, column: &str) -> Result<String, TableDiffError> {
         match self {
             SideRenderer::Formatter(formatter) => render_value(formatter, row, column),
             SideRenderer::Duration(array, unit) => {

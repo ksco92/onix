@@ -42,18 +42,24 @@ Repository = "https://github.com/ksco92/onix"
 # sync`'s universal (all-supported-versions) resolution satisfiable. The
 # test venv itself IS pinned, via this directory's `.python-version`:
 # Pinned to 3.14, Unicode 16.0.0; see tests/golden/README.md, Pinned versions.
-# polars and duckdb are here (test group) only, never as runtime deps: the
-# Arrow table-diff tests feed the same data through pyarrow, polars, and
-# DuckDB and assert identical results, which needs all three installed to run
-# but none of them installed to use diff_tables. pyarrow is both the `arrow`
-# extra and a test dependency (the tests exercise to_pyarrow() and pyarrow
-# inputs).
+# polars, duckdb, and pandas are here (test group) only, never as runtime
+# deps: the Arrow table-diff tests feed the same data through pyarrow,
+# polars, and DuckDB and assert identical results, which needs all three
+# installed to run but none of them installed to use diff_tables; pandas is
+# here to prove a TableDiff row member's __arrow_c_stream__ is consumable by
+# it (through pd.api.interchange.from_dataframe, which needs pyarrow
+# installed for its own reasons — see crates/onix-py/src/arrow.rs's module
+# doc). pyarrow is both the `arrow` extra and a test dependency (the tests
+# exercise to_pyarrow() and pyarrow inputs). mypy runs the stub-usability
+# check (see test_stub_mypy.py).
 test = [
     "pytest>=8",
     "deepdiff==9.1.0 ; python_version >= '3.10'",
     "pyarrow>=14",
     "polars>=1",
     "duckdb>=1",
+    "pandas>=2.2",
+    "mypy>=1.11",
 ]
 
 [tool.pytest.ini_options]

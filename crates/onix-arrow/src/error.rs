@@ -121,6 +121,25 @@ pub enum TableDiffError {
         /// The column whose two renderings were equal.
         column: String,
     },
+    /// [`crate::TableDiff::to_json`] would embed more row objects than
+    /// [`crate::MAX_JSON_ROWS`] allows (see its own doc for what that caps
+    /// and why). Use the Arrow-returning members instead, or export the
+    /// batches directly, for a diff this large.
+    TooManyJsonRows {
+        /// The number of row objects `to_json()` would have embedded.
+        rows: usize,
+        /// The cap that was exceeded.
+        max: usize,
+    },
+    /// [`crate::TableDiff::to_json`]'s `serde_json` serialization failed.
+    /// Its input is a fixed set of already-rendered strings, numbers, and
+    /// nested objects/arrays, so this does not happen in practice; it is a
+    /// typed error rather than a panic because a public API must return,
+    /// not abort, on an unexpected failure.
+    Json {
+        /// The underlying `serde_json` error's message.
+        message: String,
+    },
 }
 
 impl fmt::Display for TableDiffError {
@@ -170,6 +189,15 @@ impl fmt::Display for TableDiffError {
                 "internal invariant: a value change in column {column:?} rendered identically \
                  on both sides, which the common-form rendering is designed to prevent"
             ),
+            TableDiffError::TooManyJsonRows { rows, max } => write!(
+                f,
+                "to_json() would embed {rows} row objects, more than the {max}-row cap; use \
+                 the Arrow-returning members (rows_added(), rows_removed(), cells_changed(), \
+                 duplicate_keys()) or export the batches directly for a diff this large"
+            ),
+            TableDiffError::Json { message } => {
+                write!(f, "failed to serialize the table diff to JSON: {message}")
+            }
         }
     }
 }
@@ -276,6 +304,27 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("5000000000"));
         assert!(message.contains("changed-row count"));
+    }
+
+    #[test]
+    fn too_many_json_rows_message_names_count_and_cap() {
+        let error = TableDiffError::TooManyJsonRows {
+            rows: 20_000,
+            max: 10_000,
+        };
+        let message = error.to_string();
+        assert!(message.contains("20000"));
+        assert!(message.contains("10000-row cap"));
+        assert!(message.contains("rows_added()"));
+    }
+
+    #[test]
+    fn json_message_names_the_underlying_error() {
+        let error = TableDiffError::Json {
+            message: "unexpected end of input".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("unexpected end of input"));
     }
 
     #[test]
