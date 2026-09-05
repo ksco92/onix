@@ -20,6 +20,23 @@ two speed baselines a data engineer would otherwise reach for (#43).
   sides), so the rule is documented but not exercised by this pair; a
   future fixture that adds nullable cells should add a duplicate-run
   determinism check that also probes `IS DISTINCT FROM`'s branches.
+* **Null keys.** Per #39, "null in a key column counts as a distinct key
+  value that equals itself" -- a null-keyed row must still be matched
+  against its counterpart on the other side, not treated as a non-match.
+  Plain equality (`=`, and `USING (...)`'s implicit `=`) breaks this: `NULL
+  = NULL` is `UNKNOWN`, so a join on `=` silently excludes every null-keyed
+  row from a match, reporting it as both added and removed, and reports a
+  null key duplicated on both sides as two separate `duplicate_keys` rows
+  instead of one with combined counts. Every join on the key columns in
+  this module (`_build_key_summary`, `_write_cells_changed`, and `run`'s
+  added/removed queries) therefore uses `_null_safe_join`'s `IS NOT
+  DISTINCT FROM` predicate per key column, not `USING`/`=`. `GROUP BY`
+  needs no such fix: it already groups `NULL`s together per standard SQL
+  grouping semantics, so `key_summary`'s per-side row counts are correct
+  as soon as the join that reunites the two sides' counts is null-safe. A
+  composite key matches null-safely component-by-component, so one `NULL`
+  component doesn't prevent the other components from still requiring an
+  exact match.
 * **Decimals.** `amount` is `DECIMAL(18,4)` on both sides here, so DuckDB
   compares exact scaled integers with no floating-point rounding --
   `IS DISTINCT FROM` on two same-scale decimals is exact. A pair whose
@@ -32,13 +49,15 @@ two speed baselines a data engineer would otherwise reach for (#43).
   normalizes both to its own internal microsecond-precision `TIMESTAMP WITH
   TIME ZONE` at read time, so `a.ts IS DISTINCT FROM b.ts` already compares
   by instant with no explicit unit-normalization cast needed in the query
-  text. That same normalization, however, means the unit change is
-  invisible at the *schema* level through `DESCRIBE`/`pragma_table_info`
-  (both columns report the identical DuckDB type, confirmed empirically);
-  `_schema_diff` below reads `parquet_schema()`'s `converted_type` column
-  instead, which does still show `TIMESTAMP_MICROS` vs. `TIMESTAMP_MILLIS`,
-  because that reports the file's actual stored Parquet annotation rather
-  than DuckDB's own normalized SQL type.
+  text -- confirmed by `tests/test_oracle_duckdb.py`'s same-instant and
+  different-sub-millisecond-instant timestamp tests. That same
+  normalization, however, means the unit change is invisible at the
+  *schema* level through `DESCRIBE`/`pragma_table_info` (both columns
+  report the identical DuckDB type, confirmed empirically); `_schema_diff`
+  below reads `parquet_schema()`'s `converted_type` column instead, which
+  does still show `TIMESTAMP_MICROS` vs. `TIMESTAMP_MILLIS`, because that
+  reports the file's actual stored Parquet annotation rather than DuckDB's
+  own normalized SQL type.
 * **Floats.** This fixture has no `FLOAT`/`DOUBLE` column (`amount` is a
   fixed-point `DECIMAL`), so this oracle carries no opinion on float
   equality (significant digits, signed zero, NaN); a fixture that adds a
@@ -74,6 +93,58 @@ import json
 from pathlib import Path
 
 import duckdb
+
+##############################################
+##############################################
+##############################################
+##############################################
+# SQL-building helpers (identifier/literal quoting, null-safe key joins)
+
+
+def _quote_ident(name: str) -> str:
+    """
+    Quote `name` as a DuckDB identifier, escaping embedded double quotes.
+
+    Every column name interpolated into a query in this module goes
+    through this (never a bare f-string), so a parquet file with a column
+    named with a quote, a space, a semicolon, or a reserved word can't
+    break the generated SQL.
+
+    :param name: The raw column name.
+    :return: The double-quoted, escaped identifier.
+    """
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _quote_literal(value: str) -> str:
+    """
+    Quote `value` as a DuckDB string literal, escaping embedded single quotes.
+
+    :param value: The raw string value.
+    :return: The single-quoted, escaped literal.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _null_safe_join(alias_a: str, alias_b: str, key_columns: list[str]) -> str:
+    """
+    Build a null-safe `ON` predicate over every key column.
+
+    Plain equality (`=`, and `USING (...)`'s implicit `=`) treats `NULL =
+    NULL` as `UNKNOWN`, silently excluding every null-keyed row from a
+    join -- see the module docstring's "Null keys" rule. Every join on the
+    key columns in this module uses this predicate instead of `USING`.
+
+    :param alias_a: Left-side table alias.
+    :param alias_b: Right-side table alias.
+    :param key_columns: Key column names.
+    :return: The predicate text (no leading `ON`), e.g.
+        `a."id" IS NOT DISTINCT FROM b."id"`.
+    """
+    return " AND ".join(
+        f"{alias_a}.{_quote_ident(c)} IS NOT DISTINCT FROM {alias_b}.{_quote_ident(c)}" for c in key_columns
+    )
+
 
 ##############################################
 ##############################################
@@ -151,18 +222,22 @@ def _build_key_summary(con: duckdb.DuckDBPyConnection, key_columns: list[str]) -
     :param con: Connection with `va`/`vb` views already created.
     :param key_columns: The key column names (composite keys join on all of them).
     """
-    key_list = ", ".join(key_columns)
+    key_list = ", ".join(_quote_ident(c) for c in key_columns)
+    coalesce_list = ", ".join(
+        f"COALESCE(a.{_quote_ident(c)}, b.{_quote_ident(c)}) AS {_quote_ident(c)}" for c in key_columns
+    )
+    join_predicate = _null_safe_join("a", "b", key_columns)
     con.execute(
         f"""
         CREATE TEMP TABLE key_summary AS
         WITH a_counts AS (SELECT {key_list}, COUNT(*) AS left_count FROM va GROUP BY {key_list}),
              b_counts AS (SELECT {key_list}, COUNT(*) AS right_count FROM vb GROUP BY {key_list})
         SELECT
-            {", ".join(f"COALESCE(a.{c}, b.{c}) AS {c}" for c in key_columns)},
+            {coalesce_list},
             COALESCE(a.left_count, 0) AS left_count,
             COALESCE(b.right_count, 0) AS right_count
         FROM a_counts a
-        FULL OUTER JOIN b_counts b USING ({key_list})
+        FULL OUTER JOIN b_counts b ON {join_predicate}
         """,
     )
 
@@ -211,15 +286,17 @@ def _write_cells_changed(
     :param out_path: Parquet file to write.
     :return: Number of changed-cell rows written.
     """
-    key_list = ", ".join(key_columns)
-    key_select = ", ".join(f"a.{c}" for c in key_columns)
+    key_list = ", ".join(_quote_ident(c) for c in key_columns)
+    key_select = ", ".join(f"a.{_quote_ident(c)}" for c in key_columns)
+    matched_join = _null_safe_join("a", "k", key_columns)
+    cell_join = _null_safe_join("a", "b", key_columns)
     per_column_selects = " UNION ALL ".join(
         f"""
-        SELECT {key_select}, '{column}' AS "column",
-               CAST(a.{column} AS VARCHAR) AS old_value, CAST(b.{column} AS VARCHAR) AS new_value
+        SELECT {key_select}, {_quote_literal(column)} AS "column",
+               CAST(a.{_quote_ident(column)} AS VARCHAR) AS old_value, CAST(b.{_quote_ident(column)} AS VARCHAR) AS new_value
         FROM matched a
-        JOIN vb b USING ({key_list})
-        WHERE a.{column} IS DISTINCT FROM b.{column}
+        JOIN vb b ON {cell_join}
+        WHERE a.{_quote_ident(column)} IS DISTINCT FROM b.{_quote_ident(column)}
         """
         for column in compare_columns
     )
@@ -229,7 +306,7 @@ def _write_cells_changed(
             WITH matched AS (
                 SELECT a.* FROM va a
                 INNER JOIN (SELECT {key_list} FROM key_summary WHERE left_count = 1 AND right_count = 1) k
-                    USING ({key_list})
+                    ON {matched_join}
             )
             {per_column_selects}
             ORDER BY {key_list}, "column"
@@ -260,6 +337,10 @@ def run(left: Path, right: Path, key_columns: list[str], out_dir: Path) -> dict[
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
+    # DuckDB renders a TIMESTAMPTZ's CAST(... AS VARCHAR) in the session's
+    # timezone, not UTC -- pinned here so `cells_changed`'s old_value/new_value
+    # strings are the same on every machine regardless of its local timezone.
+    con.execute("SET TimeZone = 'UTC'")
     con.execute(f"CREATE VIEW va AS SELECT * FROM read_parquet('{left}')")
     con.execute(f"CREATE VIEW vb AS SELECT * FROM read_parquet('{right}')")
 
@@ -272,13 +353,15 @@ def run(left: Path, right: Path, key_columns: list[str], out_dir: Path) -> dict[
     con.execute(f"COPY schema_diff TO '{out_dir / 'schema_diff.parquet'}' (FORMAT PARQUET)")
 
     _build_key_summary(con, key_columns)
-    key_list = ", ".join(key_columns)
+    key_list = ", ".join(_quote_ident(c) for c in key_columns)
+    added_join = _null_safe_join("b", "k", key_columns)
+    removed_join = _null_safe_join("a", "k", key_columns)
 
     con.execute(
         f"""
         COPY (
             SELECT b.* FROM vb b
-            INNER JOIN (SELECT {key_list} FROM key_summary WHERE left_count = 0 AND right_count = 1) k USING ({key_list})
+            INNER JOIN (SELECT {key_list} FROM key_summary WHERE left_count = 0 AND right_count = 1) k ON {added_join}
         ) TO '{out_dir / "rows_added.parquet"}' (FORMAT PARQUET)
         """,
     )
@@ -286,7 +369,7 @@ def run(left: Path, right: Path, key_columns: list[str], out_dir: Path) -> dict[
         f"""
         COPY (
             SELECT a.* FROM va a
-            INNER JOIN (SELECT {key_list} FROM key_summary WHERE left_count = 1 AND right_count = 0) k USING ({key_list})
+            INNER JOIN (SELECT {key_list} FROM key_summary WHERE left_count = 1 AND right_count = 0) k ON {removed_join}
         ) TO '{out_dir / "rows_removed.parquet"}' (FORMAT PARQUET)
         """,
     )
@@ -303,7 +386,7 @@ def run(left: Path, right: Path, key_columns: list[str], out_dir: Path) -> dict[
     compare_columns = _common_non_key_columns(con, key_columns)
     cells_changed_count = _write_cells_changed(con, key_columns, compare_columns, out_dir / "cells_changed.parquet")
 
-    null_key_predicate = " OR ".join(f"{c} IS NULL" for c in key_columns)
+    null_key_predicate = " OR ".join(f"{_quote_ident(c)} IS NULL" for c in key_columns)
     counts = con.sql(
         f"""
         SELECT

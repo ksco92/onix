@@ -86,21 +86,14 @@ duplicate keys, using DuckDB SQL (joins and `GROUP BY`, no row-by-row
 Python), and writes each as a parquet file under `--out`. Its counts match
 `generate_fixtures.py`'s sidecar exactly at 1k, 100k, and 1M rows (see
 `tests/test_oracle_duckdb.py`), except for one documented, structural gap:
+the `category` dictionary retype has no footprint in Parquet's own schema,
+so it's invisible to a SQL-only schema diff (`oracle_duckdb.py`'s module
+docstring, "Dictionary encoding is invisible here").
 
-**The `category` dictionary retype is invisible to this oracle.** Parquet's
-own type system has no "dictionary-encoded string" logical type -- it's
-purely an Arrow-side annotation `pyarrow` reconstructs from a private
-`ARROW:schema` footer key that DuckDB's parquet reader doesn't decode. The
-oracle's schema diff (built on `parquet_schema()`, which does correctly see
-the `ts` unit change and the `note` column addition) reports 2 of the
-fixture's 3 schema changes; the third is verified directly against
-`pyarrow`'s own schema instead. This is an accepted difference between what
-a SQL engine and an Arrow-native library can see over the same file, not a
-bug in either.
-
-Its full value-comparison semantics -- how nulls, decimals, and cross-unit
-timestamps are compared, and why -- are documented in `oracle_duckdb.py`'s
-own module docstring, since that's also where the SQL implementing each rule
+Its full value-comparison semantics -- nulls (including null keys, per #39),
+decimals, cross-unit timestamps, and floats (none are exercised, since this
+fixture has no float column) -- are documented in `oracle_duckdb.py`'s own
+module docstring, since that's also where the SQL implementing each rule
 lives.
 
 ## Tests

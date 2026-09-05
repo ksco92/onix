@@ -4,6 +4,7 @@ duplicate keys, schema-diff classification) exercised on small synthetic
 tables the shared 5%-mutation fixture never produces on its own.
 """
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pyarrow as pa
@@ -130,6 +131,115 @@ def test_duplicate_key_on_both_sides_reports_both_counts(tmp_path: Path) -> None
 
     assert summary["duplicate_keys"] == 1
     assert duplicates == [{"id": 1, "left_count": 2, "right_count": 3}]
+
+
+# Null-key tests: NULL in a key column must equal itself across sides (#39)
+def test_null_keyed_row_is_matched_across_sides_when_value_is_equal(tmp_path: Path) -> None:
+    """A NULL key present on both sides is matched, not reported as added+removed."""
+    a_rows = [{"id": None, "value": "x"}, {"id": 2, "value": "y"}]
+    b_rows = [{"id": None, "value": "x"}, {"id": 2, "value": "y"}]
+    a_path, b_path = _write_pair(tmp_path, a_rows, b_rows)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+
+    assert summary["rows_added"] == 0
+    assert summary["rows_removed"] == 0
+    assert summary["cells_changed"] == 0
+    assert summary["null_keys"] == 1
+
+
+def test_null_keyed_row_with_a_different_value_yields_one_cell_change(tmp_path: Path) -> None:
+    """A NULL key matched across sides still detects a genuine cell change."""
+    a_rows = [{"id": None, "value": "x"}]
+    b_rows = [{"id": None, "value": "y"}]
+    a_path, b_path = _write_pair(tmp_path, a_rows, b_rows)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+    changed = pq.read_table(tmp_path / "oracle" / "cells_changed.parquet").to_pylist()
+
+    assert summary["rows_added"] == 0
+    assert summary["rows_removed"] == 0
+    assert summary["cells_changed"] == 1
+    assert changed == [{"id": None, "column": "value", "old_value": "x", "new_value": "y"}]
+
+
+def test_null_key_duplicated_on_both_sides_combines_counts(tmp_path: Path) -> None:
+    """A NULL key duplicated on both sides is one duplicate_keys row with combined counts."""
+    a_rows = [{"id": None, "value": "x"}, {"id": None, "value": "y"}]
+    b_rows = [{"id": None, "value": "x"}, {"id": None, "value": "y"}, {"id": None, "value": "z"}]
+    a_path, b_path = _write_pair(tmp_path, a_rows, b_rows)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+    duplicates = pq.read_table(tmp_path / "oracle" / "duplicate_keys.parquet").to_pylist()
+
+    assert summary["duplicate_keys"] == 1
+    assert duplicates == [{"id": None, "left_count": 2, "right_count": 3}]
+
+
+def test_composite_key_with_one_null_component_matches_component_wise(tmp_path: Path) -> None:
+    """A composite key null-matches only when every component (including NULLs) agrees."""
+    a_rows = [{"k1": 1, "k2": None, "value": "x"}, {"k1": 2, "k2": None, "value": "z"}]
+    b_rows = [{"k1": 1, "k2": None, "value": "x"}]
+    a_path, b_path = _write_pair(tmp_path, a_rows, b_rows)
+
+    summary = run(a_path, b_path, ["k1", "k2"], tmp_path / "oracle")
+    removed = pq.read_table(tmp_path / "oracle" / "rows_removed.parquet").to_pylist()
+
+    assert summary["rows_added"] == 0
+    assert summary["rows_removed"] == 1
+    assert summary["cells_changed"] == 0
+    assert removed == [{"k1": 2, "k2": None, "value": "z"}]
+
+
+# Cross-unit timestamp tests: a us-precision left side vs. an ms-precision right side
+def test_same_instant_across_timestamp_units_is_not_a_changed_cell(tmp_path: Path) -> None:
+    """A timestamp exactly representable at ms precision is not reported as changed."""
+    instant = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    a_path, b_path = tmp_path / "ts_a.parquet", tmp_path / "ts_b.parquet"
+    pq.write_table(pa.table({"id": pa.array([1], type=pa.int64()), "ts": pa.array([instant], type=pa.timestamp("us", tz="UTC"))}), a_path)
+    pq.write_table(pa.table({"id": pa.array([1], type=pa.int64()), "ts": pa.array([instant], type=pa.timestamp("ms", tz="UTC"))}), b_path)
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+    assert summary["cells_changed"] == 0
+
+
+def test_different_sub_millisecond_instant_is_a_changed_cell_rendered_correctly(tmp_path: Path) -> None:
+    """A genuine sub-millisecond difference is one changed cell, rendered in UTC."""
+    a_instant = datetime(2024, 1, 1, 12, 0, 0, 500, tzinfo=timezone.utc)  # .0005s
+    b_instant = datetime(2024, 1, 1, 12, 0, 0, 1000, tzinfo=timezone.utc)  # .001s
+    a_path, b_path = tmp_path / "ts_a.parquet", tmp_path / "ts_b.parquet"
+    pq.write_table(
+        pa.table({"id": pa.array([1], type=pa.int64()), "ts": pa.array([a_instant], type=pa.timestamp("us", tz="UTC"))}), a_path,
+    )
+    pq.write_table(
+        pa.table({"id": pa.array([1], type=pa.int64()), "ts": pa.array([b_instant], type=pa.timestamp("ms", tz="UTC"))}), b_path,
+    )
+
+    summary = run(a_path, b_path, ["id"], tmp_path / "oracle")
+    changed = pq.read_table(tmp_path / "oracle" / "cells_changed.parquet").to_pylist()
+
+    assert summary["cells_changed"] == 1
+    assert changed == [
+        {"id": 1, "column": "ts", "old_value": "2024-01-01 12:00:00.0005+00", "new_value": "2024-01-01 12:00:00.001+00"},
+    ]
+
+
+# Identifier quoting: column names that could break unquoted SQL text
+def test_unusual_column_names_on_key_and_non_key_columns(tmp_path: Path) -> None:
+    """A quote, a space, a semicolon, and a reserved word in column names don't break the query."""
+    key_col = 'weird "key"; col'
+    value_col = "select"  # a reserved word
+    a_rows = [{key_col: 1, value_col: "x"}, {key_col: 2, value_col: "y"}]
+    b_rows = [{key_col: 1, value_col: "x"}, {key_col: 2, value_col: "changed"}]
+    a_path, b_path = _write_pair(tmp_path, a_rows, b_rows)
+
+    summary = run(a_path, b_path, [key_col], tmp_path / "oracle")
+    changed = pq.read_table(tmp_path / "oracle" / "cells_changed.parquet").to_pylist()
+
+    assert summary["rows_added"] == 0
+    assert summary["rows_removed"] == 0
+    assert summary["cells_changed"] == 1
+    assert changed == [{key_col: 2, "column": value_col, "old_value": "y", "new_value": "changed"}]
 
 
 def test_schema_diff_reports_removed_column(tmp_path: Path) -> None:
