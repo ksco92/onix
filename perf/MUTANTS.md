@@ -18,12 +18,12 @@ make mutants        # cargo mutants --package onix-core --package onix-cli --pac
 
 ## What is deterministic, and what the tool classifies unreliably
 
-`make mutants` enumerates a deterministic **1189** mutants (20 in `onix-cli`,
-980 in `onix-core`, 189 in `onix-arrow`). A standalone `cargo mutants -p
-onix-arrow` on a quiet machine reports, for the 189 `onix-arrow` mutants
-(122 in `row_diff.rs`, 38 in `schema.rs`, 17 in `table_diff.rs`, 5 in `lib.rs`,
-4 in `error.rs`, 3 in `options.rs`): **141 caught, 38 unviable, 9 timeout, 1
-missed**. The 38 unviable are `Default`-substitution mutants on types without a
+`make mutants` enumerates a deterministic **1209** mutants (20 in `onix-cli`,
+980 in `onix-core`, 209 in `onix-arrow`). A standalone `cargo mutants -p
+onix-arrow` on a quiet machine reports, for the 209 `onix-arrow` mutants
+(142 in `row_diff.rs`, 38 in `schema.rs`, 17 in `table_diff.rs`, 5 in `lib.rs`,
+4 in `error.rs`, 3 in `options.rs`): **159 caught, 40 unviable, 9 timeout, 1
+missed**. The 40 unviable are `Default`-substitution mutants on types without a
 usable `Default`. The 9 timeouts are mutant-induced infinite loops the tests
 reach — the trailing-zero reduction loop in `hash_decimal` (`==`/`/=` mutants)
 and the two cursor-advance loops in `classify` (the `<`/`==`/`+=` mutants) —
@@ -154,7 +154,7 @@ timeout.
 
 The `onix-core` + `onix-cli` portion of the enumeration is deterministic at
 **1000** mutants (`cargo mutants --list`; hash.rs 37, memo.rs 14, lcs.rs 111 of
-them); with `onix-arrow`'s 189 the top-line total is 1189, as recorded above. The last full
+them); with `onix-arrow`'s 209 the top-line total is 1209, as recorded above. The last full
 representative run classified the previous 986-mutant enumeration as **890
 caught, 75 unviable, 15 missed, 6 timeout** — the survivors confined to the
 documented equivalent/uncompilable kinds: the `lcs.rs` LCS spots (missed plus
