@@ -834,13 +834,8 @@ fn set_items_dedup_signed_zero_like_a_real_python_set() {
     assert_eq!(items.len(), 1);
 }
 
-/// Two bit-identical `NaN`s dedup like a real Python `set` would (deemed
-/// deterministic and acceptable — see `tests/golden/README.md`'s "Non-finite
-/// floats" section for the narrow divergence from a real Python set holding
-/// two *distinct* `NaN` objects, which this crate's value model has no way
-/// to tell apart from one bit-identical `NaN` seen twice), while two
-/// differently-signed `NaN`s — never `Value`-equal, and never folded
-/// together by `canonical_cmp` — are kept as two distinct members.
+/// See `SetItems::new`'s own doc for why a bit-identical `NaN` pair dedups
+/// but a differently-signed pair does not.
 #[test]
 fn set_items_dedup_bit_identical_nan_but_keep_differently_signed_nan_apart() {
     let items = SetItems::new(vec![
