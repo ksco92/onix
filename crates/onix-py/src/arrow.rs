@@ -50,15 +50,14 @@ pub(crate) fn diff_tables(
     key: &Bound<'_, PyAny>,
 ) -> PyResult<TableDiff> {
     let key = extract_key(key)?;
-    // Importing the two objects builds their Arrow `DataType` trees through
-    // pyo3-arrow's recursive FFI, and dropping those trees is recursive too;
-    // both, plus onix-arrow's own recursive comparison, are native-stack sinks
-    // on adversarially deep nesting. Run the whole import/diff/drop on the
-    // stack-sized worker thread (re-acquiring the GIL there) so no nesting can
-    // overflow the calling thread — the same hardening the JSON path uses.
-    // onix-arrow additionally refuses nesting past `MAX_NESTING_DEPTH` with a
-    // `MaxDepthError`, so a clean error arrives well before even the worker's
-    // large stack is at risk.
+    // Import, diff, and drop all run on the stack-sized worker (re-acquiring the
+    // GIL there) because the recursive Arrow FFI import and the imported types'
+    // recursive drop are native-stack sinks on deep nesting, and — unlike the
+    // JSON path, which measures depth cheaply first and only spawns the worker
+    // past a threshold — depth here can only be measured after the import that
+    // is itself at risk, so the worker is unconditional. Its fixed per-call
+    // cost (tens of microseconds) is negligible for a whole-table diff.
+    // `onix_arrow::MAX_NESTING_DEPTH` then bounds the comparison; see its doc.
     let left = left.clone().unbind();
     let right = right.clone().unbind();
 

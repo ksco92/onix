@@ -17,17 +17,18 @@
 //!   traversal at all.
 //! - `arrow::diff_tables` — diffs two Arrow tables (from pyarrow, polars,
 //!   or `DuckDB`) through the Arrow C Data Interface, using the `onix_arrow`
-//!   crate. It is a separate value world from the two above: it never
-//!   builds an `onix_core::Value`, so it does not touch `convert`,
-//!   `errors::MaxDepthError`, or the `guard` machinery below — it compares
-//!   Arrow schemas directly. Its own module doc covers its error mapping.
+//!   crate. It builds no `onix_core::Value`, so it bypasses `convert`
+//!   entirely and compares Arrow schemas directly; but it reuses the shared
+//!   hardening — it raises `errors::MaxDepthError` for over-deep nesting and
+//!   runs its whole import/diff on `guard::run_on_worker`, the sized worker
+//!   thread. Its own module doc covers its error mapping.
 //!
 //! `errors` holds the Python-visible exception type (`errors::MaxDepthError`)
-//! the first two entry points raise instead of ever letting
+//! all three entry points raise instead of ever letting
 //! `onix_core::Error::MaxDepthExceeded` — or a native stack overflow on
 //! adversarially deep input — escape as anything else. `guard` holds the
 //! shared native-stack-overflow hardening (the `max_depth` ceiling and the
-//! sized diff worker thread) those two entry points route their diff through.
+//! sized worker thread) every entry point routes its recursive work through.
 mod arrow;
 mod convert;
 mod deepdiff;

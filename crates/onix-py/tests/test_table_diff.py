@@ -222,6 +222,33 @@ def test_string_columns_identical_across_libraries(left_lib: str, right_lib: str
     assert diff.schema == []
 
 
+@pytest.mark.parametrize(
+    ("left_lib", "right_lib"),
+    [
+        ("pyarrow", "pyarrow"),
+        ("polars", "polars"),
+        ("duckdb", "duckdb"),
+        ("polars", "pyarrow"),
+        ("duckdb", "polars"),
+    ],
+)
+def test_fixed_size_list_string_column_identical_across_libraries(left_lib: str, right_lib: str) -> None:
+    """
+    A fixed-size-list-of-string column is never a spurious type change across libraries.
+
+    polars stores it as Array(String) (Utf8View element) and DuckDB drops the element name; the
+    element type and name are normalized so the width alone distinguishes the type.
+
+    :param left_lib: The library providing the left table.
+    :param right_lib: The library providing the right table.
+    """
+    left_pa = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([["a", "b"]], pa.list_(pa.string(), 2))})
+    right_pa = pa.table({"id": pa.array([2], pa.int64()), "v": pa.array([["c", "d"]], pa.list_(pa.string(), 2))})
+    diff = diff_tables(_as(left_lib, left_pa), _as(right_lib, right_pa), key=["id"])
+
+    assert diff.schema == []
+
+
 # Schema-comparison semantics tests
 
 
@@ -721,11 +748,12 @@ def test_to_pyarrow_propagates_a_broken_pyarrow() -> None:
 # actually catches a native crash.
 
 
-def _run_isolated(program: str) -> subprocess.CompletedProcess:
+def _run_isolated(program: str, env: dict | None = None) -> subprocess.CompletedProcess:
     """
     Run a program in a subprocess so a native crash surfaces as a non-zero return code.
 
     :param program: Python source; it should print OK and exit 0 on success.
+    :param env: Extra environment variables to set on top of the current environment.
     :return: The completed subprocess.
     """
     return subprocess.run(
@@ -733,6 +761,7 @@ def _run_isolated(program: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, **env} if env else None,
     )
 
 
@@ -807,7 +836,7 @@ def test_duckdb_session_timezone_labelling_is_documented_and_workaround_works() 
     time zone: without the workaround the timestamp column reads as a type change against a UTC
     column, and with `SET TimeZone='UTC'` it does not.
     """
-    program = textwrap.dedent(
+    result = _run_isolated(
         """
         import pyarrow as pa
         import duckdb
@@ -828,13 +857,7 @@ def test_duckdb_session_timezone_labelling_is_documented_and_workaround_works() 
 
         print("OK")
         """,
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", program],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={**os.environ, "TZ": "America/New_York"},
+        env={"TZ": "America/New_York"},
     )
 
     assert result.returncode == 0, result.stderr
