@@ -285,7 +285,7 @@ def test_deep_report_with_a_buried_non_finite_leaf_renders_to_json_quickly() -> 
     elapsed = time.perf_counter() - start
 
     assert "NaN" in text
-    assert elapsed < 2.0, elapsed
+    assert elapsed < 0.1, elapsed
 
 
 # --- biased differential fuzz -----------------------------------------------
