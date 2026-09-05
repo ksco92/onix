@@ -1781,14 +1781,16 @@ fn render_key_rows(
     let mut rows = vec![Vec::with_capacity(key_count); batch.num_rows()];
     for (position, (decoded_column, render)) in columns.iter().enumerate() {
         let column_name = batch.schema().field(position).name().clone();
-        let formatter = ArrayFormatter::try_new(render, &opts).map_err(|e| read_error(&e))?;
+        // Use the same renderer as the value cells, so a `Duration` key renders
+        // through the sentinel-free ISO helper, not the Arrow formatter.
+        let renderer = SideRenderer::new(render, &opts)?;
         for (row, out) in rows.iter_mut().enumerate() {
-            let rendered = if cell_is_null(decoded_column, row) {
+            let text = if cell_is_null(decoded_column, row) {
                 None
             } else {
-                Some(render_value(&formatter, row, &column_name)?)
+                Some(renderer.render(row, &column_name)?)
             };
-            out.push(rendered);
+            out.push(text);
         }
     }
 
@@ -2475,6 +2477,27 @@ mod tests {
                 "{unit:?}: {old} {new}"
             );
         }
+    }
+
+    #[test]
+    fn duration_key_column_renders_iso_for_ordering() {
+        // The sort key of a Duration key column at an extreme value must be the
+        // ISO form, not the Arrow formatter's "<invalid>" sentinel. Exercised
+        // through render_key_rows directly (the sort key is not in the output).
+        let sch = schema(vec![
+            Field::new("k", DataType::Duration(TimeUnit::Second), false),
+            Field::new("v", DataType::Int64, true),
+        ]);
+        let batch = RecordBatch::try_new(
+            sch,
+            vec![
+                Arc::new(DurationSecondArray::from(vec![9_300_000_000_000_000_i64])),
+                Arc::new(Int64Array::from(vec![Some(1)])),
+            ],
+        )
+        .unwrap();
+        let rendered = super::render_key_rows(&batch, 1).unwrap();
+        assert_eq!(rendered[0][0].as_deref(), Some("PT9300000000000000S"));
     }
 
     #[test]

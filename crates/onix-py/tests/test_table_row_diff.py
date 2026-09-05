@@ -348,6 +348,23 @@ def test_extreme_duration_renders_without_a_sentinel() -> None:
     assert "invalid" not in cells[0]["new_value"]
 
 
+def test_duration_key_column_at_an_extreme_value_diffs_cleanly() -> None:
+    """A Duration key column at an extreme value diffs cleanly: its sort-key rendering is sentinel-free."""
+    # Built by casting int64: the value is past timedelta's range (as any value
+    # that triggers the formatter's sentinel must be), so it is never converted
+    # back to Python — the key column below is read only through Arrow.
+    key = pa.array([9_300_000_000_000_000], pa.int64()).cast(pa.duration("s"))
+    left = pa.table({"k": key, "v": pa.array([1], pa.int64())})
+    right = pa.table({"k": key, "v": pa.array([2], pa.int64())})
+    diff = diff_tables(left, right, key=["k"])
+    assert diff.summary()["cells_changed"] == 1
+    table = _table(diff.cells_changed())
+    assert table.column("column").to_pylist() == ["v"]
+    assert table.column("old_value").to_pylist() == ["1"]
+    assert table.column("new_value").to_pylist() == ["2"]
+    assert table.column("change").to_pylist() == ["value_changed"]
+
+
 def test_decimal_scale_change_is_no_record_when_equal_and_value_changed_when_not() -> None:
     """A decimal scale change at an equal value emits nothing; a differing value is value_changed."""
     assert _one_cell(pa.decimal128(10, 2), decimal.Decimal("1.00"), pa.decimal128(10, 4), decimal.Decimal("1.0000")) == []
