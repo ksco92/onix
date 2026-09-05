@@ -296,6 +296,12 @@ def _gen_non_str_dict_key(rng: random.Random) -> JsonValue:
     Pick a random non-`str` dict key: `int`, `bool`, `float`, `None`,
     `datetime`, `date`, or a `tuple` of scalars (issue #62).
 
+    `NON_STR_KEY_TUPLE_LEAVES` holds both `1` and `True`, so a generated
+    tuple key's own elements may land on a Python-equal-but-differently-typed
+    pair (e.g. `(1, True)`) -- deliberately in scope, exercising the same
+    element-wise `ScalarKey` matching a tuple *key* needs, not a generator
+    bug to avoid.
+
     :param rng: Seeded RNG.
     :return: A non-`str` dict key.
     """
@@ -1551,16 +1557,7 @@ def test_differential_fuzz_with_multiline_strings_matches_real_deepdiff() -> Non
 
 
 def test_differential_fuzz_with_non_str_dict_keys_matches_real_deepdiff() -> None:
-    """
-    Run a ninth SEED_COUNT-case batch whose dicts may carry non-`str` keys (issue #62).
-
-    Tuples and calendar values are enabled too, so a dict key may itself be a
-    `datetime`/`date` or a `tuple` of scalars, not only `int`/`bool`/`float`/
-    `None` — both as dict keys and as ordinary values, exercising the same
-    python-equality key matching (`1`/`1.0`/`True`) and `tuple`-key path
-    splitting the golden corpus pins, at fuzz scale and both ordered and
-    under `ignore_order`.
-    """
+    """Run a ninth SEED_COUNT-case batch whose dicts may carry non-`str` keys (issue #62)."""
     seeds = range(DICT_KEY_SEED_BASE, DICT_KEY_SEED_BASE + SEED_COUNT)
     mismatches = _run_batch(seeds, tuples=True, calendar=True, dict_keys=True)
 

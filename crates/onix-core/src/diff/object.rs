@@ -2,26 +2,14 @@
 //! keys become leaf findings, shared keys recurse through
 //! `super::dispatch`'s [`super::diff_at`] one level deeper.
 
-use crate::value::{Object, ObjectKey, Value};
+use crate::value::{Object, Value};
 
 use crate::error::Error;
 use crate::ignore_order::IgnoreOrderMemo;
-use crate::path::{PathSegment, dict_key_repr};
+use crate::path::{PathSegment, object_key_path_segment as key_segment};
 use crate::report::{Report, ValuesChangedEntry};
 
 use super::{DiffOptions, check_map_depth, check_value_depth, diff_at, scoped};
-
-/// The [`PathSegment`] one [`ObjectKey`] contributes: a `str` key renders
-/// through the existing dict-key quoting rule
-/// ([`PathSegment::Key`]/[`crate::path::quote_key`], unchanged), any other
-/// key through [`dict_key_repr`] ([`PathSegment::KeyRepr`]) — see that
-/// function's doc for the `tuple`-key splitting rule it implements.
-fn key_segment(key: &ObjectKey) -> PathSegment {
-    match key {
-        ObjectKey::Str(s) => PathSegment::Key(s.to_string()),
-        ObjectKey::Other(value) => PathSegment::KeyRepr(dict_key_repr(value)),
-    }
-}
 
 /// Diffs two dicts (JSON objects) at `path`, `depth` levels deep.
 ///
@@ -107,20 +95,10 @@ pub(crate) fn object_diff(
         return Ok(report);
     }
 
-    // A non-`str` key on either side needs python-equality matching
-    // (`object_diff_mixed`'s own doc has the full rule) rather than the
-    // walk below. Dispatched to a **separate function**, not merely a
-    // separate branch of this one: this function's own stack frame is on
-    // the hot recursive path a deeply nested, all-`str` dict walks through
-    // (`object_diff` -> `diff_at` -> `object_diff` -> ...), and in an
-    // unoptimized (debug/test) build every local a function declares —
-    // including ones live only in a branch never taken — is sized into its
-    // one frame; the python-equality match's own `Vec`s stayed out of this
-    // function's frame is what keeps that recursion's default depth budget
-    // from silently shrinking. (Found by
-    // `unequal_structure_deeper_than_default_max_depth_errors_via_diff`, a
-    // pre-existing regression test for exactly this class: it now catches a
-    // frame-size regression, not just a logic one.)
+    // A non-`str` key needs python-equality matching (`object_diff_mixed`'s
+    // own doc has the rule); dispatched to a separate function, kept off
+    // this function's own frame, to protect the default `max_depth`
+    // budget on the hot `object_diff` <-> `diff_at` recursion.
     if a.has_non_str_keys() || b.has_non_str_keys() {
         return object_diff_mixed(path, a, b, depth, opts, memo);
     }

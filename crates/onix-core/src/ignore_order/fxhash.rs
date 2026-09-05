@@ -42,8 +42,12 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// attacker-controlled member content *and* reached for every set/frozenset
 /// comparison, **including with the default `ignore_order=false`**, so an
 /// `FxHash` table there would be a crafted-collision `DoS` on the ordinary
-/// path; a `BTreeMap` has no hash to attack (`O(log n)` worst case, always). See
-/// that module's "Set-member digests" section. Every remaining `FxHash` table
+/// path; a `BTreeMap` has no hash to attack (`O(log n)` worst case, always,
+/// though each of those comparisons is a full walk of the probed key —
+/// `member_content`'s `MemberContent::UnhashableDict` key is itself keyed by
+/// each dict key's own `ItemKey` tree, not a flat string, since a dict key
+/// may be a `tuple`). See that module's "Set-member digests" section. Every
+/// remaining `FxHash` table
 /// in this module — `HashedList`, `AddedCandidates`,
 /// the pairing/`used` sets, and the distance memo — is reached **only** under
 /// `ignore_order=true`, the pairing hot path already bounded by the `O(N²)`

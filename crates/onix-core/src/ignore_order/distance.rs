@@ -428,17 +428,10 @@ fn python_eq(a: &Value, b: &Value) -> bool {
         (Value::Set(x) | Value::FrozenSet(x), Value::Set(y) | Value::FrozenSet(y)) => {
             unordered_python_eq(x, y)
         }
-        // A plain positional `zip` only works while `Object`'s storage order
-        // (`ObjectKey`'s own `Ord`) agrees with Python-equality identity,
-        // true for a `str`-only pair (the common case, kept allocation-free)
-        // but not once either side has a non-`str` key — `1` and `1.0` sort
-        // into different `canonical_cmp` ranks, so `match_dict_keys`'s
-        // python-equality matching is needed there instead (see its doc).
-        // Dispatched to a separate function, not a branch of this one — see
-        // `crate::diff::object::object_diff`'s identical call site for why:
-        // `python_eq` recurses into itself the same way `object_diff`
-        // recurses through `diff_at`, so `match_dict_keys`'s `Vec`s must
-        // stay out of this function's own frame.
+        // A non-`str` key needs `match_dict_keys`'s python-equality
+        // matching (see its doc); dispatched to a separate function, kept
+        // off this frame for the reason `crate::diff::object::object_diff`'s
+        // own dispatch documents.
         (Value::Object(x), Value::Object(y)) => {
             if x.has_non_str_keys() || y.has_non_str_keys() {
                 dict_python_eq_mixed(x, y)
@@ -725,34 +718,19 @@ fn coerce_to_python_str(value: &Value) -> Option<String> {
 /// producing a completely different pairing decision).
 pub(crate) const THRESHOLD_TO_DIFF_DEEPER: f64 = 0.33;
 
-/// A dict key's Python-equality identity, for matching a key across two
-/// different [`Object`]s the way `DeepDiff`'s own dict diffing does: a
-/// Python `dict`'s `==`, and `_diff_dict`'s `SetOrdered` key intersection,
-/// both go through `==`/`hash()`, which collapse `1`, `1.0` and `True` into
-/// one key and compare a `tuple` key element-wise — not this crate's own
-/// structural [`ObjectKey`] equality, which keeps them apart (confirmed
-/// against real `deepdiff==9.1.0`: `{1: "a"}` vs `{1.0: "a"}` is `{}`, not a
-/// `dictionary_item_removed` + `dictionary_item_added` pair).
-///
-/// `None` for a key this crate cannot classify this way — unreachable from
-/// `onix-py`'s conversion, which restricts a dict key to `None`/`bool`/
-/// `int`/`float`/`str`/`datetime`/`date`/a `tuple` of those (every one of
-/// which [`crate::lcs::python_scalar_key`] or this function's own `Tuple`
-/// case covers). Such a key — reachable only by building an [`ObjectKey`]
-/// directly, bypassing that conversion — never participates in
-/// [`match_dict_keys`]'s python-equality matching; it is always reported as
-/// added/removed, the same deterministic (if narrower) answer this crate
-/// gives an unclassifiable value everywhere else.
+/// A dict key's Python-equality identity — see [`match_dict_keys`]'s doc
+/// for the matching rule this backs and what a `None` result means.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum DictKeyIdentity {
-    Str(String),
     Scalar(crate::lcs::ScalarKey),
     Tuple(Vec<crate::lcs::ScalarKey>),
 }
 
 fn dict_key_identity(key: &ObjectKey) -> Option<DictKeyIdentity> {
     match key {
-        ObjectKey::Str(s) => Some(DictKeyIdentity::Str(s.to_string())),
+        ObjectKey::Str(s) => Some(DictKeyIdentity::Scalar(crate::lcs::ScalarKey::Str(
+            s.to_string(),
+        ))),
         ObjectKey::Other(value) => match value.as_ref() {
             Value::Tuple(items) => items
                 .iter()
@@ -780,7 +758,14 @@ pub(crate) struct DictKeyMatch<'a> {
 /// Matches `a`'s and `b`'s keys by [`DictKeyIdentity`] rather than
 /// [`Object::get`]/[`Object::contains_key`]'s structural [`ObjectKey`]
 /// equality — the rule every dict-vs-dict comparison in this crate needs
-/// once either side has a non-`str` key (see [`DictKeyIdentity`]'s doc).
+/// once either side has a non-`str` key: `DeepDiff`'s own `dict`'s `==`
+/// (`_diff_dict`'s `SetOrdered` key intersection) collapses `1`, `1.0` and
+/// `True` into one key and compares a `tuple` key element-wise, confirmed
+/// against real `deepdiff==9.1.0`: `{1: "a"}` vs `{1.0: "a"}` is `{}`, not
+/// a removed+added pair. A key `dict_key_identity` cannot classify
+/// (unreachable from `onix-py`'s conversion, which restricts a dict key to
+/// `None`/`bool`/`int`/`float`/`str`/`datetime`/`date`/a `tuple` of those)
+/// is always reported as added/removed instead of matched.
 /// `crate::diff::object_diff`, [`count_object_diff_leaves`] and
 /// [`is_below_threshold_to_diff_deeper`] each call this once
 /// [`Object::has_non_str_keys`] says either side needs it, so an ordinary
@@ -894,11 +879,8 @@ pub(crate) fn count_object_diff_leaves(
         return item_length_of_map(b);
     }
 
-    // Dispatched to a separate function rather than inlined as a branch —
-    // see `crate::diff::object::object_diff`'s identical call site for why:
-    // this function recurses through `count_diff_leaves` the same way
-    // `object_diff` recurses through `diff_at`, so its own frame size is on
-    // that hot path too, and `match_dict_keys`'s `Vec`s must stay out of it.
+    // Dispatched to a separate function, kept off this frame for the
+    // reason `crate::diff::object::object_diff`'s own dispatch documents.
     if a.has_non_str_keys() || b.has_non_str_keys() {
         return count_object_diff_leaves_mixed(a, b, depth, opts, memo);
     }

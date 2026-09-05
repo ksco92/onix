@@ -157,7 +157,7 @@
 use onix_core::datetime::{
     Date as CDate, DateTime as CDateTime, Time as CTime, TimeDelta as CTimeDelta,
 };
-use onix_core::path::{PathSegment, dict_key_repr, render_path};
+use onix_core::path::{PathSegment, object_key_path_segment as key_path_segment, render_path};
 use onix_core::value::{Builder, Entries, ObjectKey, SetItems};
 use onix_core::{Number as CNumber, Value as CValue};
 use pyo3::conversion::IntoPyObjectExt;
@@ -677,17 +677,6 @@ fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyR
     }
 
     Err(bad_dict_key_error(obj, dict_path))
-}
-
-/// The [`PathSegment`] one [`ObjectKey`] contributes to a path — a `str` key
-/// through the existing dict-key quoting rule
-/// ([`PathSegment::Key`]/[`onix_core::path::quote_key`], unchanged), any
-/// other key through [`dict_key_repr`] ([`PathSegment::KeyRepr`]).
-fn key_path_segment(key: &ObjectKey) -> PathSegment {
-    match key {
-        ObjectKey::Str(s) => PathSegment::Key(s.to_string()),
-        ObjectKey::Other(value) => PathSegment::KeyRepr(dict_key_repr(value)),
-    }
 }
 
 /// The error for a dict key of a type this MVP does not accept — see the

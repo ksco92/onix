@@ -79,11 +79,7 @@ def test_int_dict_key_is_accepted_and_diffed() -> None:
 
 
 def test_bool_none_and_float_dict_keys_are_accepted() -> None:
-    """`bool`, `None`, and `float` dict keys all convert, each at its own repr'd path.
-
-    Both sides share enough keys ("z" plus every eventually-shared new one) to stay above
-    DeepDiff's own `threshold_to_diff_deeper` ratio, so this reports one entry per key
-    instead of collapsing to a single wholesale `values_changed` on the whole dict."""
+    """`bool`, `None`, and `float` dict keys all convert, each at its own repr'd path."""
     diff = DeepDiff(
         {"z": 0, True: 1, None: 2, 1.5: 3},
         {"z": 0, True: 10, None: 20, 1.5: 30},
@@ -98,9 +94,7 @@ def test_bool_none_and_float_dict_keys_are_accepted() -> None:
 
 
 def test_datetime_and_date_dict_keys_are_accepted() -> None:
-    """A `datetime`/`date` dict key converts, at a path rendered via Python's own `repr()`.
-
-    Above the `threshold_to_diff_deeper` ratio — see the bool/None/float test's own note."""
+    """A `datetime`/`date` dict key converts, at a path rendered via Python's own `repr()`."""
     dt = datetime.datetime(2024, 1, 1, 10, 30)
     d = datetime.date(2024, 1, 1)
     diff = DeepDiff({"z": 0, dt: "a", d: "b"}, {"z": 0, dt: "a2", d: "b2"})

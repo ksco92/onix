@@ -417,7 +417,10 @@ pub(crate) enum MemberContent {
     /// A `set`, likewise.
     UnhashableSet(Vec<RepId>),
     /// A `dict`, likewise, keyed by each key's own [`ItemKey`] rather than a
-    /// plain `String` — see [`ItemKey::Dict`]'s doc for why.
+    /// plain `String` (see [`ItemKey::Dict`]'s doc for why) — so comparing
+    /// two `UnhashableDict`s (e.g. an `IgnoreOrderMemo::member_content`
+    /// lookup landing on one) walks each key's own `ItemKey` tree, not a
+    /// cheap string ordering.
     UnhashableDict(BTreeMap<ItemKey, RepId>),
 }
 
@@ -789,6 +792,13 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
 /// `tuple` key the same way a `tuple` value already is. Shared by
 /// [`keyed`]'s dict case and [`set_member_digest`]'s, so `ItemKey::Dict` and
 /// `MemberContent::UnhashableDict` key a dict identically.
+///
+/// This is the reason `ObjectKey` itself carries no `#[derive(Hash)]`: like
+/// [`Value`](crate::value::Value), its equality is this crate's own
+/// structural rule, not a field-by-field derive, so a generic `HashMap`/
+/// `HashSet` cannot key by it directly — every place this crate needs a
+/// content hash of one goes through this function (or `hash_value`'s own
+/// inline match, for the unkeyed `DistKey` case) instead.
 fn object_key_item_key(key: &crate::value::ObjectKey, memo: &IgnoreOrderMemo) -> ItemKey {
     match key {
         crate::value::ObjectKey::Str(s) => ItemKey::Str(s.to_string()),

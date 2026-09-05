@@ -136,25 +136,11 @@ pub enum Value {
     Object(Object),
 }
 
-/// One [`Object`] key: the `str` fast path this crate has always had, or any
-/// other key `DeepDiff` also accepts.
-///
-/// `DeepDiff` diffs a `dict` keyed by anything hashable, not only `str`
-/// (`root[1]`, `root[True]`, `root[None]`, a `datetime`/`date`, or a tuple of
-/// those). This variant carries exactly that set — see `onix-py`'s
-/// conversion table for the precise list convert.rs accepts — kept as its
-/// own case *alongside* [`ObjectKey::Str`] rather than folding every key
-/// into one representation, so a `str`-only object (the overwhelming common
-/// case: every JSON object, and most Python dicts) pays nothing beyond the
-/// one extra discriminant check this enum already cost before the variant
-/// existed: no interning, no boxing, no python-equality bookkeeping.
-///
-/// [`ObjectKey`] does not itself implement `Hash`: like [`Value`], its
-/// equality is a crate-defined structural rule ([`PartialEq`] below), not
-/// `#[derive(Hash)]`'s field-by-field one, so nothing generic (`HashMap`,
-/// `HashSet`) can key by it directly — see `crate::ignore_order::hash`'s
-/// `hash_value` for the one place a *content* hash of an [`ObjectKey`] is
-/// needed, computed by that module's own hand-written, iterative walk.
+/// One [`Object`] key: the `str` fast path this crate has always had
+/// ([`ObjectKey::Str`]), or any other key `DeepDiff` also accepts
+/// ([`ObjectKey::Other`]) — see `onix-py`'s conversion table for the exact
+/// set. No `Hash` impl; see `crate::ignore_order::hash`'s
+/// `object_key_item_key` for how a content hash of one is computed instead.
 #[derive(Debug, Clone)]
 pub enum ObjectKey {
     /// A `str` key, interned the same way [`Object`] has always interned

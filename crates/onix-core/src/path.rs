@@ -237,6 +237,19 @@ pub fn dict_key_repr(key: &Value) -> String {
     }
 }
 
+/// The [`PathSegment`] one [`ObjectKey`] contributes: a `str` key through
+/// the existing dict-key quoting rule ([`PathSegment::Key`]/[`quote_key`],
+/// unchanged), any other key through [`dict_key_repr`]
+/// ([`PathSegment::KeyRepr`]). Shared by the diff engine and the Python
+/// bindings' own conversion-error path segments, so the two cannot drift.
+#[must_use]
+pub fn object_key_path_segment(key: &ObjectKey) -> PathSegment {
+    match key {
+        ObjectKey::Str(s) => PathSegment::Key(s.to_string()),
+        ObjectKey::Other(value) => PathSegment::KeyRepr(dict_key_repr(value)),
+    }
+}
+
 /// Renders `value` as Python's `repr()` would.
 ///
 /// `repr()` and `str()` agree on every type this model holds except

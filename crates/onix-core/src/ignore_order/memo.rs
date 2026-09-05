@@ -153,6 +153,8 @@ type DistanceKey = (DistKey, DistKey);
 /// threaded (by shared reference, interior mutability) through the whole
 /// recursive diff, and dropped when it returns. No eviction and no tuning
 /// knobs: each is bounded by the number of distinct queries one diff makes.
+/// `member_content`'s own key can itself carry a nested dict's keys (see its
+/// own field doc), so a lookup there is not always a flat comparison.
 ///
 /// [`rough_distance`]: super::distance::rough_distance
 pub(crate) struct IgnoreOrderMemo {
@@ -176,7 +178,11 @@ pub(crate) struct IgnoreOrderMemo {
     /// Set-member content interning: each distinct [`MemberContent`] gets one
     /// [`RepId`] (its `usize` index), so content-equal members — a naive and an
     /// aware datetime at one instant included — collapse to one id. A
-    /// [`BTreeMap`] for the same collision-immunity reason as `node_table`.
+    /// [`BTreeMap`] for the same collision-immunity reason as `node_table`;
+    /// per-lookup cost is `O(log n)` comparisons, each a full walk of the
+    /// probed `MemberContent` — a `MemberContent::UnhashableDict` key is
+    /// itself keyed by each of the dict's own keys' `ItemKey` trees (a
+    /// `tuple` dict key included), not a cheap string ordering.
     member_content: RefCell<BTreeMap<MemberContent, RepId>>,
     enabled: bool,
     /// Total number of times [`Self::put`] has actually run — every distance
