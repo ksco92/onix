@@ -21,12 +21,19 @@
 //!    re-openable) and filtered to the rows whose keys landed in the added /
 //!    removed sets, plus one row per duplicate key for the duplicate-key report.
 //!    Only the differing rows are ever built into an output batch.
+//! 3. **Cell pass.** Each side is opened once more and filtered to the rows
+//!    whose key is in the *changed* set (present on both sides, differing row
+//!    hash); the two sides' changed rows are paired by key hash and every common
+//!    non-key column is compared cell by cell, one output record per differing
+//!    cell — see [`diff_cells`]. Only the changed rows are materialized, so this
+//!    pass too is bounded by the changed-row count, not the table size.
 //!
 //! Memory beyond the per-row hash vectors: the duplicate-key report holds the
 //! actual key values of every *distinct duplicated* key, so a duplicate-heavy
 //! input adds a term proportional to the number of distinct duplicated keys
 //! times the key width (see the README's Known-limitations bullet for measured
-//! figures).
+//! figures); the cell pass holds the changed rows of both sides at once, a term
+//! proportional to the changed-row count.
 //!
 //! # Hashing
 //!
@@ -50,6 +57,27 @@
 //! instant in nanoseconds (so the same instant at microsecond and millisecond
 //! precision hashes equal), and a null is a distinct value that equals only
 //! another null — the `IS DISTINCT FROM` semantics the `DuckDB` oracle uses.
+//!
+//! # Per-cell changes
+//!
+//! [`diff_cells`] reports, for every changed row, which cells differ. A cell is
+//! reported changed **if and only if its [`hash_cell`] contribution differs**
+//! between the two matched rows — the same helper the row hash is built from, so
+//! the cell list and the row-changed decision can never drift. Each reported
+//! cell is labelled: `became_null`/`became_non_null` when exactly one side is
+//! null, `type_changed` when both are non-null but the column's [`value_domain`]
+//! differs across sides (a number becoming a string, a timestamp becoming a
+//! date — the values are not comparable, so a lossless comparison is not
+//! attempted), and `value_changed` otherwise (same domain, differing value —
+//! this covers a lossless type change such as `Int32`→`Int64` or a timestamp
+//! unit change, whose equal values hash equal and so are *not* reported). A
+//! column present on only one side is a schema change and never a cell change.
+//! `old_value`/`new_value` are a canonical string rendering
+//! ([`arrow_cast::display`]; a timestamp renders as its UTC instant), null for a
+//! null cell; a decimal renders at its native scale and a string verbatim, both
+//! matching the `DuckDB` oracle. There is no typed old/new column: a long-format
+//! table mixes every compared column's type in one column, so a single typed
+//! column cannot represent them and the string rendering is the uniform form.
 //!
 //! # Which column types are hashed, refused, or skipped
 //!
@@ -96,24 +124,29 @@ use arrow_array::types::{
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt8Type, UInt16Type,
     UInt32Type, UInt64Type,
 };
-use arrow_array::{Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, RecordBatchReader};
+use arrow_array::{
+    Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, RecordBatchReader, StringArray,
+    UInt32Array,
+};
 use arrow_buffer::i256;
+use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use arrow_schema::{ArrowError, DataType, Field, IntervalUnit, Schema, SchemaRef, TimeUnit};
 
 /// A re-openable source of one table's record batches.
 ///
-/// The row diff reads each side twice — once to hash every row, once to
-/// materialize only the differing rows — so it needs a source it can open more
-/// than once rather than a single-use [`RecordBatchReader`]. A caller whose
-/// input is a one-shot reader (a Python Arrow stream, say) spools it to an
-/// anonymous temporary Arrow IPC file first and re-reads that file through a
-/// fresh, rewound handle on each `open`; an in-memory table is re-openable
-/// directly (see [`MemoryInput`]).
+/// The row diff reads each side more than once — to hash every row, to
+/// materialize the added/removed rows, and to materialize the changed rows for
+/// the per-cell diff — so it needs a source it can open more than once rather
+/// than a single-use [`RecordBatchReader`]. A caller whose input is a one-shot
+/// reader (a Python Arrow stream, say) spools it to an anonymous temporary Arrow
+/// IPC file first and re-reads that file through a fresh, rewound handle on each
+/// `open`; an in-memory table is re-openable directly (see [`MemoryInput`]).
 pub trait TableInput {
     /// The table's schema, without opening a reader.
     fn schema(&self) -> SchemaRef;
 
-    /// A fresh reader over the whole table. Called up to twice per diff.
+    /// A fresh reader over the whole table. Called several times per diff (the
+    /// hash pass, the added/removed materialize pass, and the per-cell pass).
     ///
     /// # Errors
     ///
@@ -166,6 +199,24 @@ const MAX_EXACT_F64_INT: f64 = 9_007_199_254_740_992.0;
 const DOMAIN_KEY: u8 = 1;
 /// Domain-separation tag mixed into a non-key-column (row) hash.
 const DOMAIN_ROW: u8 = 2;
+/// Domain-separation tag mixed into a single-cell hash, used by the per-cell
+/// diff to decide whether one column's value differs between two matched rows.
+const DOMAIN_CELL: u8 = 3;
+
+/// The `change` label written for a cell whose value differs. A cell is
+/// reported changed if and only if its [`hash_cell`] contribution differs — the
+/// exact same helper the row hash uses — so `cells_changed` lists precisely the
+/// columns that put a row in the changed set.
+const CHANGE_VALUE: &str = "value_changed";
+/// The `change` label for a cell non-null on the left and null on the right.
+const CHANGE_BECAME_NULL: &str = "became_null";
+/// The `change` label for a cell null on the left and non-null on the right.
+const CHANGE_BECAME_NON_NULL: &str = "became_non_null";
+/// The `change` label for a cell whose column has a different value domain on
+/// each side (a string versus a number, a timestamp versus a date): the two
+/// values are not comparable, so the difference is reported as a type change
+/// rather than a value change. See [`value_domain`].
+const CHANGE_TYPE: &str = "type_changed";
 
 // Per-cell type tags, written before the value so two values of different kinds
 // (a string `"1"` and an integer `1`) never hash equal.
@@ -259,9 +310,13 @@ pub(crate) struct RowDiff {
     /// One row per key appearing more than once on either side: the key
     /// columns, then `left_count` and `right_count`.
     pub(crate) duplicate_keys: RecordBatch,
-    /// Key hashes of rows present on both sides with a differing non-key hash.
-    /// Not yet exposed to callers; the per-cell diff (a later version) consumes
-    /// it.
+    /// Long-format per-cell changes for the changed rows: the key columns, then
+    /// `column`, `old_value`, `new_value` (canonical string renderings), and
+    /// `change`. See [`diff_cells`].
+    pub(crate) cells_changed: RecordBatch,
+    /// Key hashes of rows present on both sides with a differing non-key hash,
+    /// in first-seen order on the left. Retained so a caller can size the
+    /// changed set; [`diff_cells`] consumes a copy to materialize those rows.
     pub(crate) changed_keys: Vec<u128>,
     /// Counts derived from the classification.
     pub(crate) counts: RowCounts,
@@ -275,6 +330,9 @@ pub(crate) struct RowCounts {
     pub(crate) rows_changed: usize,
     pub(crate) duplicate_keys: usize,
     pub(crate) null_keys: usize,
+    /// Total number of changed cell records across all changed rows (the row
+    /// count of `cells_changed`).
+    pub(crate) cells_changed: usize,
 }
 
 /// Turns an Arrow error from the streaming machinery into a
@@ -1081,6 +1139,401 @@ fn build_duplicate_keys(
     RecordBatch::try_new(dup_key_schema.clone(), columns).map_err(|e| read_error(&e))
 }
 
+/// The value domain a column's cells are compared within. Two columns compare
+/// as values only when their domains match; a mismatch (a string versus a
+/// number, a timestamp versus a date) is reported as a `type_changed` cell
+/// rather than a value change. The grouping mirrors [`hash_cell`] exactly — two
+/// cells whose hash contributions are equal always share a domain, because each
+/// domain owns a disjoint set of the tags [`hash_cell`] writes — so the domain
+/// test never contradicts the hash. `Number` groups booleans, every integer
+/// width, and every float width because [`hash_cell`] folds an integral float
+/// to the integer form, so an int and a float of equal value hash equal;
+/// `Decimal` is separate because a decimal carries its own tag and never hashes
+/// equal to an integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueDomain {
+    /// All-null column (`DataType::Null`).
+    Null,
+    /// Boolean, any integer width, or any float width.
+    Number,
+    /// Any decimal width.
+    Decimal,
+    /// Any UTF-8 string variant.
+    Str,
+    /// Any binary variant.
+    Binary,
+    /// Any timestamp.
+    Timestamp,
+    /// `Date32` or `Date64`.
+    Date,
+    /// `Time32` or `Time64`.
+    Time,
+    /// A duration.
+    Duration,
+    /// An interval.
+    Interval,
+}
+
+/// The value domain of a column type, decoding a dictionary to its value type
+/// first. Only ever called on the common non-key columns, which
+/// [`reject_unhashable_columns`] has already proven hashable, so every hashable
+/// scalar type maps to a domain and the final arm is unreachable in practice.
+fn value_domain(data_type: &DataType) -> ValueDomain {
+    match data_type {
+        DataType::Null => ValueDomain::Null,
+        DataType::Boolean
+        | DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64
+        | DataType::Float16
+        | DataType::Float32
+        | DataType::Float64 => ValueDomain::Number,
+        DataType::Decimal32(_, _)
+        | DataType::Decimal64(_, _)
+        | DataType::Decimal128(_, _)
+        | DataType::Decimal256(_, _) => ValueDomain::Decimal,
+        DataType::Binary
+        | DataType::LargeBinary
+        | DataType::BinaryView
+        | DataType::FixedSizeBinary(_) => ValueDomain::Binary,
+        DataType::Timestamp(_, _) => ValueDomain::Timestamp,
+        DataType::Date32 | DataType::Date64 => ValueDomain::Date,
+        DataType::Time32(_) | DataType::Time64(_) => ValueDomain::Time,
+        DataType::Duration(_) => ValueDomain::Duration,
+        DataType::Interval(_) => ValueDomain::Interval,
+        DataType::Dictionary(_, value) => value_domain(value),
+        // `Utf8`/`LargeUtf8`/`Utf8View` — and, as a fallback, any type that
+        // cannot reach here because a compared column is always a hashable
+        // scalar — map to the string domain.
+        _ => ValueDomain::Str,
+    }
+}
+
+/// Whether a cell is null. A `Null`-typed column is all-null by definition and
+/// carries no validity buffer, so it is detected by type, exactly as
+/// [`hash_cell`] does; every other column defers to its validity bitmap.
+fn cell_is_null(array: &ArrayRef, row: usize) -> bool {
+    matches!(array.data_type(), DataType::Null) || array.is_null(row)
+}
+
+/// The keyed 128-bit hash of a single non-null cell, under the cell domain.
+/// Runs the same [`hash_cell`] the row hash uses, so a cell's change decision
+/// and its contribution to the row hash can never drift: two cells produce the
+/// same hash here exactly when [`hash_cell`] writes the same bytes for them, and
+/// that is exactly when they contribute equally to the row hash.
+fn cell_hash(hasher: &RowHasher, array: &ArrayRef, row: usize) -> Result<u128, TableDiffError> {
+    let mut cell = hasher.start(DOMAIN_CELL);
+    hash_cell(&mut cell, array, "", row)?;
+    Ok(cell.finish())
+}
+
+/// The column for rendering: a timestamp's timezone is stripped so
+/// [`ArrayFormatter`] renders its UTC instant (the raw value is already the UTC
+/// instant, and this crate compares timestamps by instant) without needing a
+/// timezone database; every other column renders as-is.
+fn render_column(array: &ArrayRef) -> Result<ArrayRef, TableDiffError> {
+    match array.data_type() {
+        DataType::Timestamp(unit, Some(_)) => {
+            arrow_cast::cast(array, &DataType::Timestamp(*unit, None)).map_err(|e| read_error(&e))
+        }
+        _ => Ok(array.clone()),
+    }
+}
+
+/// The output schema of the per-cell diff: each key column (decoded to its
+/// value type, nullable) followed by `column`, `old_value`, `new_value`, and
+/// `change`. `old_value`/`new_value` are nullable strings (null for a null
+/// cell); a single typed value column cannot represent every compared column's
+/// type at once, so the canonical string rendering is the uniform form.
+fn cells_changed_schema(left: &Schema, key: &[String]) -> SchemaRef {
+    let mut fields = Vec::with_capacity(key.len() + 4);
+    for name in key {
+        let data_type = left
+            .index_of(name)
+            .ok()
+            .map_or(DataType::Null, |i| decoded_type(left.field(i).data_type()));
+        fields.push(Field::new(name, data_type, true));
+    }
+    fields.push(Field::new("column", DataType::Utf8, false));
+    fields.push(Field::new("old_value", DataType::Utf8, true));
+    fields.push(Field::new("new_value", DataType::Utf8, true));
+    fields.push(Field::new("change", DataType::Utf8, false));
+    SchemaRef::new(Schema::new(fields))
+}
+
+/// One side's changed rows, projected to the key and common value columns (in
+/// that order) and concatenated into one batch, with each row's key hash in row
+/// order so the two sides can be paired.
+struct ChangedRows {
+    batch: RecordBatch,
+    key_hashes: Vec<u128>,
+}
+
+/// Re-reads one side and materializes only the rows whose key hash is in
+/// `changed`, projected to the key columns then the common value columns. Memory
+/// is bounded by the number of changed rows, never by the table size.
+fn collect_changed(
+    source: &impl TableInput,
+    columns: &SideColumns,
+    key_names: &[&str],
+    hasher: &RowHasher,
+    changed: &HashSet<u128>,
+    projected_schema: &SchemaRef,
+) -> Result<ChangedRows, TableDiffError> {
+    let projection: Vec<usize> = columns
+        .key
+        .iter()
+        .chain(columns.value.iter())
+        .copied()
+        .collect();
+    let reader = source.open()?;
+
+    let mut batches = Vec::new();
+    let mut key_hashes = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| read_error(&e))?;
+        let key_arrays = prepared_columns(&batch, &columns.key)?;
+
+        let mut mask = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let key_hash = hash_row(hasher, DOMAIN_KEY, &key_arrays, key_names, row)?;
+            let keep = changed.contains(&key_hash);
+            mask.push(keep);
+            if keep {
+                key_hashes.push(key_hash);
+            }
+        }
+
+        let projected = batch.project(&projection).map_err(|e| read_error(&e))?;
+        let selected =
+            arrow_select::filter::filter_record_batch(&projected, &BooleanArray::from(mask))
+                .map_err(|e| read_error(&e))?;
+        if selected.num_rows() > 0 {
+            batches.push(selected);
+        }
+    }
+
+    let batch = concat_or_empty(projected_schema, &batches)?;
+    Ok(ChangedRows { batch, key_hashes })
+}
+
+/// One emitted cell-change record before the output batch is assembled.
+struct CellRecord {
+    /// The record's row index into the left changed batch, for `take`-ing the
+    /// key columns after the records are sorted.
+    left_row: u32,
+    /// The compared column's rank in left-schema order, the secondary sort key.
+    column_rank: usize,
+    /// The compared column's name.
+    column: String,
+    old_value: Option<String>,
+    new_value: Option<String>,
+    change: &'static str,
+}
+
+/// Produces the long-format per-cell diff for the changed rows.
+///
+/// Re-streams both inputs, materializes only the changed rows on each side
+/// (bounded by the changed-row count), pairs them by key hash, and emits one
+/// record per differing cell — one whose [`hash_cell`] contribution differs
+/// between the two matched rows. A cell is `became_null`/`became_non_null` when
+/// exactly one side is null, `type_changed` when both are non-null but the
+/// column's [`value_domain`] differs across sides, and `value_changed`
+/// otherwise. Output rows are ordered by the canonical string rendering of the
+/// key columns (lexicographic, nulls first), then by left-schema column order.
+#[allow(clippy::too_many_arguments)]
+fn diff_cells(
+    left: &impl TableInput,
+    right: &impl TableInput,
+    left_schema: &Schema,
+    right_schema: &Schema,
+    key: &[String],
+    left_columns: &SideColumns,
+    right_columns: &SideColumns,
+    common_values: &[String],
+    key_names: &[&str],
+    hasher: &RowHasher,
+    key_output_types: &[DataType],
+    changed: &HashSet<u128>,
+) -> Result<RecordBatch, TableDiffError> {
+    let out_schema = cells_changed_schema(left_schema, key);
+    if changed.is_empty() {
+        return Ok(RecordBatch::new_empty(out_schema));
+    }
+
+    let left_proj = projected_schema(left_schema, left_columns);
+    let right_proj = projected_schema(right_schema, right_columns);
+    let left_rows = collect_changed(left, left_columns, key_names, hasher, changed, &left_proj)?;
+    let right_rows = collect_changed(
+        right,
+        right_columns,
+        key_names,
+        hasher,
+        changed,
+        &right_proj,
+    )?;
+
+    let key_count = key.len();
+    let right_pos: HashMap<u128, usize> = right_rows
+        .key_hashes
+        .iter()
+        .enumerate()
+        .map(|(row, &hash)| (hash, row))
+        .collect();
+
+    // Render the key columns of every left changed row once, for the sort key
+    // and for `take`-ing the typed key columns into the output.
+    let key_renders = render_key_rows(&left_rows.batch, key_count)?;
+
+    // Compared columns in left-schema order (common_values is name-sorted).
+    let mut order: Vec<usize> = (0..common_values.len()).collect();
+    order.sort_by_key(|&j| {
+        left_schema
+            .index_of(&common_values[j])
+            .unwrap_or(usize::MAX)
+    });
+
+    let opts = FormatOptions::default();
+    let mut records: Vec<CellRecord> = Vec::new();
+    for (column_rank, &j) in order.iter().enumerate() {
+        let name = &common_values[j];
+        let left_dt = left_schema.field(left_columns.value[j]).data_type();
+        let right_dt = right_schema.field(right_columns.value[j]).data_type();
+        let same_domain = value_domain(left_dt) == value_domain(right_dt);
+
+        let left_dec = decoded(left_rows.batch.column(key_count + j))?;
+        let right_dec = decoded(right_rows.batch.column(key_count + j))?;
+        let left_render = render_column(&left_dec)?;
+        let right_render = render_column(&right_dec)?;
+        let left_fmt = ArrayFormatter::try_new(&left_render, &opts).map_err(|e| read_error(&e))?;
+        let right_fmt =
+            ArrayFormatter::try_new(&right_render, &opts).map_err(|e| read_error(&e))?;
+
+        for left_row in 0..left_rows.batch.num_rows() {
+            let Some(&right_row) = right_pos.get(&left_rows.key_hashes[left_row]) else {
+                // A changed key is present once on each side by construction, so
+                // the only way to miss here is a ~n²/2¹²⁸ hash collision; skip
+                // rather than panic.
+                continue;
+            };
+            let left_null = cell_is_null(&left_dec, left_row);
+            let right_null = cell_is_null(&right_dec, right_row);
+            let change = if left_null && right_null {
+                continue;
+            } else if left_null {
+                CHANGE_BECAME_NON_NULL
+            } else if right_null {
+                CHANGE_BECAME_NULL
+            } else {
+                let left_hash = cell_hash(hasher, &left_dec, left_row)?;
+                let right_hash = cell_hash(hasher, &right_dec, right_row)?;
+                if left_hash == right_hash {
+                    continue;
+                } else if same_domain {
+                    CHANGE_VALUE
+                } else {
+                    CHANGE_TYPE
+                }
+            };
+
+            let old_value = (!left_null).then(|| left_fmt.value(left_row).to_string());
+            let new_value = (!right_null).then(|| right_fmt.value(right_row).to_string());
+            records.push(CellRecord {
+                left_row: u32::try_from(left_row).unwrap_or(u32::MAX),
+                column_rank,
+                column: name.clone(),
+                old_value,
+                new_value,
+                change,
+            });
+        }
+    }
+
+    records.sort_by(|a, b| {
+        key_renders[a.left_row as usize]
+            .cmp(&key_renders[b.left_row as usize])
+            .then(a.column_rank.cmp(&b.column_rank))
+    });
+
+    build_cells_changed(&out_schema, &left_rows.batch, key_output_types, &records)
+}
+
+/// The projected schema of one side's changed rows: the key columns then the
+/// common value columns, in that order.
+fn projected_schema(schema: &Schema, columns: &SideColumns) -> SchemaRef {
+    let fields: Vec<_> = columns
+        .key
+        .iter()
+        .chain(columns.value.iter())
+        .map(|&i| schema.fields()[i].clone())
+        .collect();
+    SchemaRef::new(Schema::new(fields))
+}
+
+/// Renders each row's key columns (timezone-stripped for timestamps) to a
+/// nullable-string tuple, the primary sort key of the output.
+fn render_key_rows(
+    batch: &RecordBatch,
+    key_count: usize,
+) -> Result<Vec<Vec<Option<String>>>, TableDiffError> {
+    let opts = FormatOptions::default();
+    let mut columns = Vec::with_capacity(key_count);
+    for position in 0..key_count {
+        let decoded_column = decoded(batch.column(position))?;
+        let render = render_column(&decoded_column)?;
+        columns.push((decoded_column, render));
+    }
+
+    let mut rows = vec![Vec::with_capacity(key_count); batch.num_rows()];
+    for (decoded_column, render) in &columns {
+        let formatter = ArrayFormatter::try_new(render, &opts).map_err(|e| read_error(&e))?;
+        for (row, out) in rows.iter_mut().enumerate() {
+            out.push(
+                (!cell_is_null(decoded_column, row)).then(|| formatter.value(row).to_string()),
+            );
+        }
+    }
+
+    Ok(rows)
+}
+
+/// Assembles the per-cell diff output batch from the sorted records: the typed
+/// key columns (`take`n from the left changed batch), then `column`,
+/// `old_value`, `new_value`, `change`.
+fn build_cells_changed(
+    out_schema: &SchemaRef,
+    left_batch: &RecordBatch,
+    key_output_types: &[DataType],
+    records: &[CellRecord],
+) -> Result<RecordBatch, TableDiffError> {
+    let indices: UInt32Array = records.iter().map(|r| r.left_row).collect();
+
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(key_output_types.len() + 4);
+    for (position, output_type) in key_output_types.iter().enumerate() {
+        let decoded_column = decoded(left_batch.column(position))?;
+        let cast = arrow_cast::cast(&decoded_column, output_type).map_err(|e| read_error(&e))?;
+        let taken = arrow_select::take::take(&cast, &indices, None).map_err(|e| read_error(&e))?;
+        columns.push(taken);
+    }
+
+    let column = StringArray::from_iter_values(records.iter().map(|r| r.column.as_str()));
+    let old_value: StringArray = records.iter().map(|r| r.old_value.clone()).collect();
+    let new_value: StringArray = records.iter().map(|r| r.new_value.clone()).collect();
+    let change = StringArray::from_iter_values(records.iter().map(|r| r.change));
+
+    columns.push(std::sync::Arc::new(column));
+    columns.push(std::sync::Arc::new(old_value));
+    columns.push(std::sync::Arc::new(new_value));
+    columns.push(std::sync::Arc::new(change));
+
+    RecordBatch::try_new(out_schema.clone(), columns).map_err(|e| read_error(&e))
+}
+
 /// Diffs the rows of two tables matched by `key`. See the module docs for the
 /// algorithm and value semantics.
 pub(crate) fn diff_rows(
@@ -1155,18 +1608,36 @@ pub(crate) fn diff_rows(
         &classified.duplicates,
     )?;
 
+    let changed_set: HashSet<u128> = classified.changed.iter().copied().collect();
+    let cells_changed = diff_cells(
+        left,
+        right,
+        left_schema,
+        right_schema,
+        key,
+        &left_columns,
+        &right_columns,
+        &common_values,
+        &key_names,
+        &hasher,
+        &key_output_types,
+        &changed_set,
+    )?;
+
     let counts = RowCounts {
         rows_added: classified.added.len(),
         rows_removed: classified.removed.len(),
         rows_changed: classified.changed.len(),
         duplicate_keys: classified.duplicates.len(),
         null_keys: null_key_count,
+        cells_changed: cells_changed.num_rows(),
     };
 
     Ok(RowDiff {
         rows_added,
         rows_removed,
         duplicate_keys,
+        cells_changed,
         changed_keys: classified.changed,
         counts,
     })
@@ -1177,10 +1648,10 @@ mod tests {
     use super::{MemoryInput, RowDiff, TableInput, diff_rows};
     use crate::error::TableDiffError;
     use arrow_array::cast::AsArray;
-    use arrow_array::types::Int64Type;
+    use arrow_array::types::{Int32Type, Int64Type};
     use arrow_array::{
         Array, ArrayRef, BinaryArray, BinaryViewArray, Date32Array, Date64Array, Decimal32Array,
-        Decimal64Array, Decimal128Array, Decimal256Array, DurationNanosecondArray,
+        Decimal64Array, Decimal128Array, Decimal256Array, DictionaryArray, DurationNanosecondArray,
         DurationSecondArray, Float64Array, Int32Array, Int64Array, IntervalDayTimeArray,
         IntervalMonthDayNanoArray, IntervalYearMonthArray, ListArray, NullArray, RecordBatch,
         RecordBatchReader, StringArray, Time32MillisecondArray, Time32SecondArray,
@@ -1188,7 +1659,8 @@ mod tests {
         TimestampMillisecondArray,
     };
     use arrow_buffer::{IntervalDayTime, IntervalMonthDayNano, i256};
-    use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef, TimeUnit};
+    use arrow_cast::display::{ArrayFormatter, FormatOptions};
+    use arrow_schema::{ArrowError, DataType, Field, IntervalUnit, Schema, SchemaRef, TimeUnit};
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
@@ -1247,6 +1719,31 @@ mod tests {
         vec!["id".to_string()]
     }
 
+    /// One `cells_changed` row: `(rendered_id, column, old, new, change)`.
+    type CellRow = (String, String, Option<String>, Option<String>, String);
+
+    /// The `cells_changed` batch as [`CellRow`] tuples in output order.
+    fn cells(batch: &RecordBatch) -> Vec<CellRow> {
+        let string = |name: &str, row: usize| -> Option<String> {
+            let column = batch.column_by_name(name).unwrap();
+            (!column.is_null(row)).then(|| {
+                let f = ArrayFormatter::try_new(column, &FormatOptions::default()).unwrap();
+                f.value(row).to_string()
+            })
+        };
+        (0..batch.num_rows())
+            .map(|row| {
+                (
+                    string("id", row).unwrap_or_default(),
+                    string("column", row).unwrap(),
+                    string("old_value", row),
+                    string("new_value", row),
+                    string("change", row).unwrap(),
+                )
+            })
+            .collect()
+    }
+
     /// Runs a diff of two `(id, v)` int tables and returns the result.
     fn diff_int_tables(
         left_ids: Vec<Option<i64>>,
@@ -1289,6 +1786,359 @@ mod tests {
         assert_eq!(ids(&diff.rows_added), BTreeSet::from([Some(4)]));
         assert_eq!(ids(&diff.rows_removed), BTreeSet::from([Some(1)]));
         assert_eq!(diff.changed_keys.len(), 1);
+    }
+
+    #[test]
+    fn changed_cell_reports_old_new_and_value_changed() {
+        // id 3's v changes 30 -> 31; the only changed cell.
+        let diff = diff_int_tables(
+            vec![Some(1), Some(2), Some(3)],
+            vec![10, 20, 30],
+            vec![Some(2), Some(3), Some(4)],
+            vec![20, 31, 40],
+        );
+        assert_eq!(diff.counts.cells_changed, 1);
+        assert_eq!(
+            cells(&diff.cells_changed),
+            vec![(
+                "3".to_string(),
+                "v".to_string(),
+                Some("30".to_string()),
+                Some("31".to_string()),
+                "value_changed".to_string(),
+            )]
+        );
+    }
+
+    #[test]
+    fn no_changes_yield_an_empty_cells_batch_with_the_schema() {
+        let diff = diff_int_tables(vec![Some(1)], vec![10], vec![Some(1)], vec![10]);
+        assert_eq!(diff.counts.cells_changed, 0);
+        assert_eq!(diff.cells_changed.num_rows(), 0);
+        // key column, then column/old_value/new_value/change.
+        assert_eq!(diff.cells_changed.num_columns(), 5);
+        assert_eq!(diff.cells_changed.schema().field(0).name(), "id");
+        assert_eq!(diff.cells_changed.schema().field(1).name(), "column");
+        assert_eq!(diff.cells_changed.schema().field(4).name(), "change");
+    }
+
+    #[test]
+    fn became_null_and_became_non_null_are_labelled() {
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, true)]);
+        let left = reader(
+            &sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1), Some(2)])),
+                Arc::new(Int64Array::from(vec![Some(10), None])),
+            ],
+        );
+        let right = reader(
+            &sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1), Some(2)])),
+                Arc::new(Int64Array::from(vec![None, Some(20)])),
+            ],
+        );
+        let diff = diff_rows(&left, &right, &sch, &sch, &key()).unwrap();
+        assert_eq!(
+            cells(&diff.cells_changed),
+            vec![
+                (
+                    "1".to_string(),
+                    "v".to_string(),
+                    Some("10".to_string()),
+                    None,
+                    "became_null".to_string(),
+                ),
+                (
+                    "2".to_string(),
+                    "v".to_string(),
+                    None,
+                    Some("20".to_string()),
+                    "became_non_null".to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn cell_with_a_domain_change_is_type_changed() {
+        // Column `c` is Utf8 on the left and Int64 on the right: a value-domain
+        // mismatch, so the cell is reported as a type change, not a value change.
+        let left_sch = schema(vec![id_field(), Field::new("c", DataType::Utf8, true)]);
+        let right_sch = schema(vec![id_field(), Field::new("c", DataType::Int64, true)]);
+        let left = reader(
+            &left_sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(StringArray::from(vec![Some("5")])),
+            ],
+        );
+        let right = reader(
+            &right_sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(Int64Array::from(vec![Some(5)])),
+            ],
+        );
+        let diff = diff_rows(&left, &right, &left_sch, &right_sch, &key()).unwrap();
+        assert_eq!(
+            cells(&diff.cells_changed),
+            vec![(
+                "1".to_string(),
+                "c".to_string(),
+                Some("5".to_string()),
+                Some("5".to_string()),
+                "type_changed".to_string(),
+            )]
+        );
+    }
+
+    #[test]
+    fn output_is_ordered_by_rendered_key_then_left_schema_column() {
+        // Two changed columns (b before a in schema order) and two changed keys
+        // (ids 2 and 10, which sort 10 < 2 as rendered strings). Output order:
+        // key rendering first ("10" then "2"), then left-schema column order
+        // (b at index 1, a at index 2).
+        let sch = schema(vec![
+            id_field(),
+            Field::new("b", DataType::Int64, false),
+            Field::new("a", DataType::Int64, false),
+        ]);
+        let cols = |ids: Vec<i64>, b: Vec<i64>, a: Vec<i64>| -> MemoryInput {
+            reader(
+                &sch,
+                vec![
+                    Arc::new(Int64Array::from(ids)),
+                    Arc::new(Int64Array::from(b)),
+                    Arc::new(Int64Array::from(a)),
+                ],
+            )
+        };
+        let left = cols(vec![2, 10], vec![1, 3], vec![1, 3]);
+        let right = cols(vec![2, 10], vec![9, 8], vec![9, 8]);
+        let diff = diff_rows(&left, &right, &sch, &sch, &key()).unwrap();
+        let ordering: Vec<(String, String)> = cells(&diff.cells_changed)
+            .into_iter()
+            .map(|(id, col, ..)| (id, col))
+            .collect();
+        assert_eq!(
+            ordering,
+            vec![
+                ("10".to_string(), "b".to_string()),
+                ("10".to_string(), "a".to_string()),
+                ("2".to_string(), "b".to_string()),
+                ("2".to_string(), "a".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_value_domain_paired_with_a_string_is_type_changed() {
+        // A column of each non-string, non-null value domain on the left against
+        // a Utf8 column on the right is a type change (the domains differ). Pins
+        // value_domain arm by arm: dropping any one domain's arm would fold it
+        // into the string domain, mislabelling that domain's case as
+        // value_changed. A dictionary of Int64 is included so the recursive
+        // dictionary arm is pinned too (its value domain is Number, not string).
+        let dict_keys = Int32Array::from(vec![0]);
+        let dict_values = Arc::new(Int64Array::from(vec![5]));
+        let dict: DictionaryArray<Int32Type> =
+            DictionaryArray::new(dict_keys, dict_values as ArrayRef);
+        let cases: Vec<(DataType, ArrayRef)> = vec![
+            (DataType::Int64, Arc::new(Int64Array::from(vec![5]))),
+            (
+                DataType::Decimal128(10, 2),
+                Arc::new(
+                    Decimal128Array::from(vec![100])
+                        .with_precision_and_scale(10, 2)
+                        .unwrap(),
+                ),
+            ),
+            (
+                DataType::Binary,
+                Arc::new(BinaryArray::from(vec![&b"x"[..]])),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                Arc::new(TimestampMicrosecondArray::from(vec![1]).with_timezone("UTC")),
+            ),
+            (DataType::Date32, Arc::new(Date32Array::from(vec![1]))),
+            (
+                DataType::Time32(TimeUnit::Second),
+                Arc::new(Time32SecondArray::from(vec![1])),
+            ),
+            (
+                DataType::Duration(TimeUnit::Second),
+                Arc::new(DurationSecondArray::from(vec![1])),
+            ),
+            (
+                DataType::Interval(IntervalUnit::YearMonth),
+                Arc::new(IntervalYearMonthArray::from(vec![1])),
+            ),
+            (dict.data_type().clone(), Arc::new(dict)),
+        ];
+
+        for (data_type, array) in cases {
+            let left_sch = schema(vec![id_field(), Field::new("c", data_type.clone(), true)]);
+            let right_sch = schema(vec![id_field(), Field::new("c", DataType::Utf8, true)]);
+            let left = reader(
+                &left_sch,
+                vec![Arc::new(Int64Array::from(vec![Some(1)])), array],
+            );
+            let right = reader(
+                &right_sch,
+                vec![
+                    Arc::new(Int64Array::from(vec![Some(1)])),
+                    Arc::new(StringArray::from(vec![Some("x")])),
+                ],
+            );
+            let diff = diff_rows(&left, &right, &left_sch, &right_sch, &key()).unwrap();
+            let got = cells(&diff.cells_changed);
+            assert_eq!(got.len(), 1, "{data_type:?}");
+            assert_eq!(got[0].4, "type_changed", "{data_type:?}");
+        }
+    }
+
+    #[test]
+    fn lossless_type_change_at_equal_value_reports_no_cell() {
+        // `v` is Int32 on the left and Int64 on the right with equal values:
+        // same value domain, equal hash, so no cell change is reported even
+        // though the schema type changed.
+        let left_sch = schema(vec![id_field(), Field::new("v", DataType::Int32, false)]);
+        let right_sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
+        let left = reader(
+            &left_sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(Int32Array::from(vec![7])),
+            ],
+        );
+        let right = reader(
+            &right_sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(Int64Array::from(vec![7])),
+            ],
+        );
+        let diff = diff_rows(&left, &right, &left_sch, &right_sch, &key()).unwrap();
+        assert_eq!(diff.counts.rows_changed, 0);
+        assert_eq!(diff.counts.cells_changed, 0);
+    }
+
+    #[test]
+    fn decimal_cell_renders_at_native_scale() {
+        let sch = schema(vec![
+            id_field(),
+            Field::new("amount", DataType::Decimal128(18, 4), false),
+        ]);
+        let cell = |v: i128| -> MemoryInput {
+            reader(
+                &sch,
+                vec![
+                    Arc::new(Int64Array::from(vec![Some(1)])),
+                    Arc::new(
+                        Decimal128Array::from(vec![v])
+                            .with_precision_and_scale(18, 4)
+                            .unwrap(),
+                    ),
+                ],
+            )
+        };
+        // 20.0000 -> 20.5000.
+        let diff = diff_rows(&cell(200_000), &cell(205_000), &sch, &sch, &key()).unwrap();
+        assert_eq!(
+            cells(&diff.cells_changed),
+            vec![(
+                "1".to_string(),
+                "amount".to_string(),
+                Some("20.0000".to_string()),
+                Some("20.5000".to_string()),
+                "value_changed".to_string(),
+            )]
+        );
+    }
+
+    #[test]
+    fn only_the_differing_cells_of_a_changed_row_are_reported() {
+        // A row changed by column `a` alone: the unchanged timestamp cell (equal
+        // instant) and the both-null `n` cell are not reported, and only `a`
+        // appears. Exercises the timestamp and null value domains, the
+        // timezone-stripping render path, and the unchanged/both-null skips.
+        let sch = schema(vec![
+            id_field(),
+            Field::new("a", DataType::Int64, true),
+            Field::new("n", DataType::Null, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                true,
+            ),
+        ]);
+        let build = |a: i64| -> MemoryInput {
+            reader(
+                &sch,
+                vec![
+                    Arc::new(Int64Array::from(vec![Some(1)])),
+                    Arc::new(Int64Array::from(vec![Some(a)])),
+                    Arc::new(NullArray::new(1)),
+                    Arc::new(TimestampMicrosecondArray::from(vec![1_000_000]).with_timezone("UTC")),
+                ],
+            )
+        };
+        let diff = diff_rows(&build(5), &build(6), &sch, &sch, &key()).unwrap();
+        assert_eq!(
+            cells(&diff.cells_changed),
+            vec![(
+                "1".to_string(),
+                "a".to_string(),
+                Some("5".to_string()),
+                Some("6".to_string()),
+                "value_changed".to_string(),
+            )]
+        );
+    }
+
+    #[test]
+    fn changed_timestamp_cell_renders_the_utc_instant() {
+        // A tz-aware timestamp that changes renders both values as the UTC
+        // instant, tz stripped, without a timezone database.
+        let sch = schema(vec![
+            id_field(),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                true,
+            ),
+        ]);
+        let build = |micros: i64| -> MemoryInput {
+            reader(
+                &sch,
+                vec![
+                    Arc::new(Int64Array::from(vec![Some(1)])),
+                    Arc::new(TimestampMicrosecondArray::from(vec![micros]).with_timezone("UTC")),
+                ],
+            )
+        };
+        // 2024-01-01T00:00:00 -> +1s.
+        let diff = diff_rows(
+            &build(1_704_067_200_000_000),
+            &build(1_704_067_201_000_000),
+            &sch,
+            &sch,
+            &key(),
+        )
+        .unwrap();
+        assert_eq!(
+            cells(&diff.cells_changed),
+            vec![(
+                "1".to_string(),
+                "ts".to_string(),
+                Some("2024-01-01T00:00:00".to_string()),
+                Some("2024-01-01T00:00:01".to_string()),
+                "value_changed".to_string(),
+            )]
+        );
     }
 
     #[test]
@@ -2390,6 +3240,8 @@ mod tests {
         null: usize,
         added_ids: BTreeSet<Option<i64>>,
         removed_ids: BTreeSet<Option<i64>>,
+        /// The changed cells as [`CellRow`] tuples.
+        cells: BTreeSet<CellRow>,
     }
 
     // Property test: the counts and the added/removed key sets equal a naive
@@ -2412,6 +3264,7 @@ mod tests {
         let (mut added, mut removed, mut changed, mut dup, mut null) = (0, 0, 0, 0, 0);
         let mut added_ids = BTreeSet::new();
         let mut removed_ids = BTreeSet::new();
+        let mut cells = BTreeSet::new();
         for k in keys {
             if k.is_none() {
                 null += 1;
@@ -2428,6 +3281,15 @@ mod tests {
                 added_ids.insert(k);
             } else if lg[&k][0] != rg[&k][0] {
                 changed += 1;
+                // `v` is a non-null Int64 on both sides here, so every changed
+                // cell is a `value_changed` rendered as a base-10 integer.
+                cells.insert((
+                    k.map(|i| i.to_string()).unwrap_or_default(),
+                    "v".to_string(),
+                    Some(lg[&k][0].to_string()),
+                    Some(rg[&k][0].to_string()),
+                    "value_changed".to_string(),
+                ));
             }
         }
         Naive {
@@ -2438,6 +3300,7 @@ mod tests {
             null,
             added_ids,
             removed_ids,
+            cells,
         }
     }
 
@@ -2457,6 +3320,9 @@ mod tests {
         assert_eq!(diff.counts.null_keys, naive.null, "null-key count");
         assert_eq!(ids(&diff.rows_added), naive.added_ids, "added ids");
         assert_eq!(ids(&diff.rows_removed), naive.removed_ids, "removed ids");
+        let got: BTreeSet<_> = cells(&diff.cells_changed).into_iter().collect();
+        assert_eq!(got, naive.cells, "changed cells");
+        assert_eq!(diff.counts.cells_changed, naive.cells.len(), "cell count");
     }
 
     proptest::proptest! {

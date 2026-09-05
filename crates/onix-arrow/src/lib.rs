@@ -1,10 +1,11 @@
 //! Table diffing for onix, over Apache Arrow.
 //!
 //! [`diff_tables`] compares two tables presented as [`TableInput`]s and returns
-//! a [`TableDiff`] carrying both the **schema** diff — which columns were added,
-//! removed, or changed type — and the keyed **row** diff — which rows were
-//! added, removed, or changed, and which keys are duplicated. The per-cell diff
-//! (`cells_changed`) arrives in a later version.
+//! a [`TableDiff`] carrying the **schema** diff — which columns were added,
+//! removed, or changed type — the keyed **row** diff — which rows were added,
+//! removed, or changed, and which keys are duplicated — and the per-cell diff
+//! (`cells_changed`), reporting which columns changed in each changed row and
+//! how.
 //!
 //! The two tables are matched on a required, non-empty set of key columns (the
 //! table's primary key), carried in [`TableDiffOptions`]. Every key column must
@@ -14,9 +15,10 @@
 //!
 //! # Inputs
 //!
-//! The row diff reads each side twice (once to hash every row, once to
-//! materialize only the differing rows), so [`diff_tables`] takes a
-//! re-openable [`TableInput`] rather than a single-use `RecordBatchReader`.
+//! The row diff reads each side more than once (to hash every row, to
+//! materialize the added/removed rows, and to materialize the changed rows for
+//! the per-cell diff), so [`diff_tables`] takes a re-openable [`TableInput`]
+//! rather than a single-use `RecordBatchReader`.
 //! In-memory tables use [`MemoryInput`]; a caller whose data is a one-shot
 //! stream spools it to a temporary Arrow IPC file first and implements
 //! [`TableInput`] over that file (as the Python bindings do).

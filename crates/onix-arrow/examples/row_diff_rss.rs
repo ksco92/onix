@@ -8,6 +8,9 @@
 //! # linear shape (default): mostly-matching rows, 1% added/removed, ~2% changed
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000
 //! /usr/bin/time -l target/release/examples/row_diff_rss 10000000
+//! # same shape with no changed rows: the cell pass materializes nothing, the
+//! # pass-one baseline the ~2%-changed run is measured against
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 nochange
 //! # duplicate-heavy shape: every key duplicated, wide string key
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 dup 16
 //! /usr/bin/time -l target/release/examples/row_diff_rss 200000 dup 1024
@@ -17,11 +20,14 @@
 //! between batches, so the process's peak RSS is the diff's own state, not the
 //! table data. The **linear** shape (`id`, `value` int64 columns) exercises the
 //! per-row hash vectors: the left is ids `0..n`, the right `step..n + step` with
-//! `step = n / 100`, so 1% removed, 1% added, ~2% changed. The **dup** shape
-//! (`key` Utf8 of the given width, `value` int64) makes every key appear twice
-//! on each side, so every distinct key is a duplicate and the whole
-//! `duplicate_keys` report is materialized — the term that scales with distinct
-//! duplicated keys times the key width.
+//! `step = n / 100`, so 1% removed, 1% added, ~2% changed — and the cell pass
+//! materializes those ~2% changed rows on both sides. The **nochange** variant
+//! keeps the 1% added/removed but makes every shared row equal, so the cell pass
+//! materializes nothing: the difference in peak RSS between it and the default
+//! run is the cell pass's cost. The **dup** shape (`key` Utf8 of the given width,
+//! `value` int64) makes every key appear twice on each side, so every distinct
+//! key is a duplicate and the whole `duplicate_keys` report is materialized —
+//! the term that scales with distinct duplicated keys times the key width.
 
 use std::sync::Arc;
 
@@ -123,6 +129,10 @@ fn main() {
         .and_then(|a| a.parse().ok())
         .unwrap_or(1_000_000);
     let dup = args.get(2).is_some_and(|a| a == "dup");
+    // `nochange`: same 1% added / 1% removed as the default linear shape but no
+    // changed rows, so the cell pass materializes nothing — its peak RSS is the
+    // pass-one baseline the cell pass is measured against.
+    let nochange = args.get(2).is_some_and(|a| a == "nochange");
     let key_width: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(16);
 
     let (schema, left_shape, right_shape, key) = if dup {
@@ -150,7 +160,7 @@ fn main() {
             },
             Shape::Linear {
                 id_offset: step,
-                change_every: 50,
+                change_every: if nochange { i64::MAX } else { 50 },
             },
             "id",
         )
@@ -183,7 +193,11 @@ fn main() {
     );
     println!("wall: {:.2}s", elapsed.as_secs_f64());
     println!(
-        "rows_added={} rows_removed={} rows_changed={} duplicate_keys={}",
-        summary.rows_added, summary.rows_removed, summary.rows_changed, summary.duplicate_keys
+        "rows_added={} rows_removed={} rows_changed={} duplicate_keys={} cells_changed={}",
+        summary.rows_added,
+        summary.rows_removed,
+        summary.rows_changed,
+        summary.duplicate_keys,
+        summary.cells_changed
     );
 }

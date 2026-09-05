@@ -21,9 +21,7 @@ use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch, RecordBatchIterator, RecordBatchReader, StructArray};
 use arrow_schema::{Field, FieldRef, SchemaRef};
-use pyo3::exceptions::{
-    PyImportError, PyModuleNotFoundError, PyNotImplementedError, PyTypeError, PyValueError,
-};
+use pyo3::exceptions::{PyImportError, PyModuleNotFoundError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyDict, PyList, PyString};
 use pyo3_arrow::ffi::{ArrayIterator, ArrayReader, to_schema_pycapsule, to_stream_pycapsule};
@@ -38,7 +36,7 @@ use onix_arrow::{
 type ImportedReader = RecordBatchIterator<Box<dyn RecordBatchReader + Send>>;
 
 /// One diff input, spooled to an anonymous temporary Arrow IPC stream file so
-/// the core's two-pass row diff can re-read it. The temp file is created with
+/// the core's multi-pass row diff can re-read it. The temp file is created with
 /// [`tempfile::tempfile`] — unlinked the instant it is opened, mode 0600, and
 /// never given a predictable name — so no other user can read the plaintext
 /// copy or pre-plant a symlink at its path, and nothing is left on disk even if
@@ -195,14 +193,13 @@ fn import_reader(obj: &Bound<'_, PyAny>) -> PyResult<ImportedReader> {
 fn map_table_error(error: &TableDiffError) -> PyErr {
     let message = error.to_string();
     match error {
-        TableDiffError::NotImplemented { .. } => PyNotImplementedError::new_err(message),
         TableDiffError::MaxDepthExceeded { .. } => crate::errors::MaxDepthError::new_err(message),
         _ => PyValueError::new_err(message),
     }
 }
 
-/// The result of [`diff_tables`]: the schema diff, plus the still-unbuilt
-/// row-level members.
+/// The result of [`diff_tables`]: the schema diff and the row-level members
+/// (`rows_added`, `rows_removed`, `cells_changed`, `duplicate_keys`).
 #[pyclass(module = "deepdiff_rs", name = "TableDiff", frozen)]
 pub(crate) struct TableDiff {
     core: CoreTableDiff,
@@ -259,11 +256,12 @@ impl TableDiff {
     }
 
     /// Counts of each kind of change: the schema counts (`columns_added`,
-    /// `columns_removed`, `columns_type_changed`) and the row counts
+    /// `columns_removed`, `columns_type_changed`), the row counts
     /// (`rows_added`, `rows_removed`, `rows_changed`, `duplicate_keys`,
-    /// `null_keys`). Duplicate keys are reported separately and excluded from
-    /// the added/removed/changed row counts; `null_keys` is an informational
-    /// count of distinct keys with a null component.
+    /// `null_keys`), and `cells_changed` (the total number of changed cells).
+    /// Duplicate keys are reported separately and excluded from the
+    /// added/removed/changed row counts; `null_keys` is an informational count
+    /// of distinct keys with a null component.
     fn summary<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let summary = self.core.summary();
         let dict = PyDict::new(py);
@@ -275,6 +273,7 @@ impl TableDiff {
         dict.set_item("rows_changed", summary.rows_changed)?;
         dict.set_item("duplicate_keys", summary.duplicate_keys)?;
         dict.set_item("null_keys", summary.null_keys)?;
+        dict.set_item("cells_changed", summary.cells_changed)?;
 
         Ok(dict)
     }
@@ -302,8 +301,12 @@ impl TableDiff {
             .map_err(|e| map_table_error(&e))
     }
 
-    /// Per-cell changes for rows on both sides. Raises `NotImplementedError`
-    /// until a later version fills it in.
+    /// Per-cell changes for rows present on both sides with differing non-key
+    /// values: the key columns, then `column`, `old_value`, `new_value`
+    /// (canonical string renderings, null for a null cell), and `change`
+    /// (`value_changed`, `type_changed`, `became_null`, or `became_non_null`).
+    /// One row per changed cell, ordered by the canonical string rendering of
+    /// the key columns, then left-schema column order.
     fn cells_changed(&self) -> PyResult<ArrowTable> {
         self.core
             .cells_changed()

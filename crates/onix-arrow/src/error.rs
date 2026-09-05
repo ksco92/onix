@@ -31,9 +31,8 @@ impl fmt::Display for Side {
 
 /// Errors that can occur while diffing two tables.
 ///
-/// Marked `#[non_exhaustive]` because the later row-diff slices add their own
-/// variants (streaming/read failures and the like); matching on it must keep
-/// a wildcard arm.
+/// Marked `#[non_exhaustive]` so future work can add variants without a
+/// breaking change; matching on it must keep a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TableDiffError {
@@ -95,14 +94,6 @@ pub enum TableDiffError {
         /// The underlying error's message.
         message: String,
     },
-    /// A member of [`crate::TableDiff`] that a later version fills in was
-    /// asked for before that version exists. The per-cell changes
-    /// (`cells_changed`) arrive with a later version; `rows_added`,
-    /// `rows_removed`, and `duplicate_keys` are available.
-    NotImplemented {
-        /// The name of the member that is not implemented yet.
-        feature: &'static str,
-    },
 }
 
 impl fmt::Display for TableDiffError {
@@ -137,11 +128,6 @@ impl fmt::Display for TableDiffError {
                  needs the key to be the same type on both sides"
             ),
             TableDiffError::Read { message } => write!(f, "failed to read table data: {message}"),
-            TableDiffError::NotImplemented { feature } => write!(
-                f,
-                "{feature} is not implemented in this version; \
-                 the per-cell changes arrive in a later version"
-            ),
         }
     }
 }
@@ -217,16 +203,6 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("\"id\""));
         assert!(message.contains("same type on both sides"));
-    }
-
-    #[test]
-    fn not_implemented_message_names_the_feature() {
-        let error = TableDiffError::NotImplemented {
-            feature: "rows_added",
-        };
-        let message = error.to_string();
-        assert!(message.contains("rows_added"));
-        assert!(message.contains("not implemented"));
     }
 
     #[test]

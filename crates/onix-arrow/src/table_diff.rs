@@ -12,9 +12,6 @@ use crate::schema::SchemaChange;
 
 /// Counts of each kind of schema and row change, returned by
 /// [`TableDiff::summary`].
-///
-/// The per-cell change count (`cells_changed`) is not present yet; it arrives
-/// with the per-cell diff version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct TableDiffSummary {
     /// Columns present on the right but not the left.
@@ -37,16 +34,16 @@ pub struct TableDiffSummary {
     /// a null key still matches its counterpart, so this is an informational
     /// count, not an exclusion.
     pub null_keys: usize,
+    /// Total number of changed cells across all changed rows — the row count of
+    /// [`TableDiff::cells_changed`].
+    pub cells_changed: usize,
 }
 
 /// The result of [`crate::diff_tables`].
 ///
 /// Carries the schema diff and the keyed row diff. [`TableDiff::rows_added`],
-/// [`TableDiff::rows_removed`], and [`TableDiff::duplicate_keys`] return Arrow
-/// batches; [`TableDiff::cells_changed`] returns
-/// [`TableDiffError::NotImplemented`] until the per-cell diff version fills it
-/// in, and this version exposes the changed key set internally for that version
-/// through the crate-private `changed_keys`.
+/// [`TableDiff::rows_removed`], [`TableDiff::duplicate_keys`], and
+/// [`TableDiff::cells_changed`] each return an Arrow batch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableDiff {
     schema: Vec<SchemaChange>,
@@ -86,6 +83,7 @@ impl TableDiff {
             rows_changed: self.rows.counts.rows_changed,
             duplicate_keys: self.rows.counts.duplicate_keys,
             null_keys: self.rows.counts.null_keys,
+            cells_changed: self.rows.counts.cells_changed,
         };
 
         for change in &self.schema {
@@ -174,18 +172,17 @@ impl TableDiff {
         Ok(self.rows.rows_removed.clone())
     }
 
-    /// Per-cell changes for rows present on both sides. Not implemented in this
-    /// version.
+    /// Per-cell changes for rows present on both sides with differing non-key
+    /// values: the key columns, then `column`, `old_value`, `new_value`, and
+    /// `change`. One row per changed cell, ordered by the canonical string
+    /// rendering of the key columns, then left-schema column order.
     ///
     /// # Errors
     ///
-    /// Always returns [`TableDiffError::NotImplemented`] in this version; the
-    /// changed key set it needs is available internally via the crate-private
-    /// `changed_keys`.
+    /// Never fails in this version; the [`Result`] keeps the signature uniform
+    /// with the other row-level members.
     pub fn cells_changed(&self) -> Result<RecordBatch, TableDiffError> {
-        Err(TableDiffError::NotImplemented {
-            feature: "cells_changed",
-        })
+        Ok(self.rows.cells_changed.clone())
     }
 
     /// Keys appearing more than once on either side: the key columns, then
@@ -216,7 +213,6 @@ fn schema_batch_schema() -> SchemaRef {
 #[cfg(test)]
 mod tests {
     use super::TableDiff;
-    use crate::error::TableDiffError;
     use crate::row_diff::{RowCounts, RowDiff};
     use crate::schema::{ChangeKind, SchemaChange};
     use arrow_array::{Array, Int64Array, RecordBatch};
@@ -236,6 +232,7 @@ mod tests {
             rows_added: empty_batch(),
             rows_removed: empty_batch(),
             duplicate_keys: empty_batch(),
+            cells_changed: empty_batch(),
             changed_keys: Vec::new(),
             counts,
         }
@@ -248,6 +245,7 @@ mod tests {
             rows_changed: 0,
             duplicate_keys: 0,
             null_keys: 0,
+            cells_changed: 0,
         }
     }
 
@@ -299,6 +297,7 @@ mod tests {
             rows_changed: 4,
             duplicate_keys: 5,
             null_keys: 6,
+            cells_changed: 7,
         };
         let diff = TableDiff::new(Vec::new(), row_diff(counts));
         let summary = diff.summary();
@@ -307,6 +306,7 @@ mod tests {
         assert_eq!(summary.rows_changed, 4);
         assert_eq!(summary.duplicate_keys, 5);
         assert_eq!(summary.null_keys, 6);
+        assert_eq!(summary.cells_changed, 7);
     }
 
     #[test]
@@ -397,12 +397,16 @@ mod tests {
     }
 
     #[test]
-    fn cells_changed_is_still_not_implemented() {
-        assert!(matches!(
-            sample().cells_changed(),
-            Err(TableDiffError::NotImplemented {
-                feature: "cells_changed"
-            })
-        ));
+    fn cells_changed_returns_its_batch() {
+        let counts = no_rows();
+        let mut rows = row_diff(counts);
+        rows.cells_changed = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)])),
+            vec![Arc::new(Int64Array::from(vec![1, 2])) as _],
+        )
+        .unwrap();
+        let diff = TableDiff::new(Vec::new(), rows);
+
+        assert_eq!(diff.cells_changed().unwrap().num_rows(), 2);
     }
 }
