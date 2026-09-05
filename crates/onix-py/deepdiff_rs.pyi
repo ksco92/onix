@@ -9,6 +9,9 @@ built module's real ``inspect.signature()``.
 
 from typing import Any
 
+__version__: str
+"""The installed ``deepdiff-rs`` distribution version."""
+
 class MaxDepthError(ValueError):
     """Raised when diffing (or importing an Arrow schema) would need to
     recurse past the configured ``max_depth`` — a catchable Python

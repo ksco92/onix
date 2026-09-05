@@ -47,5 +47,6 @@ fn deepdiff_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fast_path::diff_json, m)?)?;
     m.add("MaxDepthError", py.get_type::<errors::MaxDepthError>())?;
     m.add("MAX_DEPTH_CEILING", guard::MAX_DEPTH_CEILING)?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
