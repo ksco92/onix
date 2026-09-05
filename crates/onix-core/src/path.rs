@@ -879,7 +879,7 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(
-                set_item_repr(&Value::Number(Number::from_f64(input).expect("finite"))),
+                set_item_repr(&Value::Number(Number::from_f64(input))),
                 expected,
                 "for {input:?}"
             );
@@ -1135,7 +1135,7 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(
-                set_item_repr(&Value::Number(Number::from_f64(input).expect("finite"))),
+                set_item_repr(&Value::Number(Number::from_f64(input))),
                 expected,
                 "for {input:?}"
             );

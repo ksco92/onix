@@ -36,7 +36,7 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 ///   value model exactly once, up front — see `crate::convert`'s module doc
 ///   for the full conversion table and every unsupported-type error this can
 ///   raise (`TypeError` for an unsupported type, `ValueError` for an
-///   out-of-range int, a non-finite float, or a sub-second UTC offset).
+///   out-of-range int or a sub-second UTC offset).
 /// - `ignore_order`: mirrors `DeepDiff(..., ignore_order=True)`.
 /// - `max_depth`: caller-chosen recursion-depth bound; defaults to
 ///   `onix_core::DEFAULT_MAX_DEPTH` (512) when omitted. Exceeding it —

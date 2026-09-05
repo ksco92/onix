@@ -92,6 +92,15 @@ pub(crate) enum ScalarKey {
     /// Bit pattern of a non-integral (or too-large-to-be-exact) float —
     /// hashed through [`mix_float_bits`]; see this type's hand-written `Hash`.
     Float(u64),
+    /// A `NaN`, keyed by the address of the [`Value`] node it was read from
+    /// rather than by its bits — see [`python_scalar_key`]'s `NaN` case for
+    /// why: unlike every other [`ScalarKey`] variant, no bit pattern (or any
+    /// other structural fact) can make this key agree with Python's own
+    /// `==`, because `NaN != NaN` holds for every pair of `NaN`s in Python,
+    /// even two reads of the same bits. Never equal to another `Nan`, and
+    /// (`usize`s being what they are) never equal to any other variant's
+    /// discriminant-tagged value either.
+    Nan(usize),
     /// A `datetime`, keyed by whether it is aware and by its instant —
     /// Python's own `datetime.__eq__`/`__hash__` pair, which compares two
     /// aware values by instant (so `10:00+00:00 == 12:00+02:00`) but never
@@ -150,6 +159,13 @@ impl std::hash::Hash for ScalarKey {
             Self::Str(s) => s.hash(state),
             Self::Int(i) => i.hash(state),
             Self::Float(bits) => mix_float_bits(*bits).hash(state),
+            // A `Value` node's address is 8/16-byte-aligned like any other
+            // pointer, so its low bits carry no entropy; avalanche it the
+            // same way as a trailing-zero-heavy float bit pattern (see
+            // `mix_float_bits`'s own doc) rather than trust the raw address.
+            // `usize as u64` never truncates: `u64` is at least as wide as
+            // `usize` on every target this crate builds for.
+            Self::Nan(id) => mix_float_bits(*id as u64).hash(state),
             Self::DateTime { aware, instant } | Self::Time { aware, instant } => {
                 aware.hash(state);
                 instant.hash(state);
@@ -219,6 +235,26 @@ fn scalar_key(value: &Value) -> ScalarKey {
 /// `==`; `crate::ignore_order` needs the same rule twice more, for
 /// `DeepHash`'s cache identity and for the `list(t1) == t2` coercion test,
 /// and shares this one rather than restating it.
+///
+/// A `NaN` gets [`ScalarKey::Nan`], keyed by `value`'s own address, because
+/// no bit-pattern-based key could be right here: `NaN != NaN` in Python
+/// regardless of bits, confirmed against `deepdiff==9.1.0` — two distinct
+/// `NaN` objects with the *same* bits still fail `difflib`'s `==`-based
+/// match (`[1, nan_a, 2]` vs `[1, 2, nan_b]` reports a `type_changes` at the
+/// `nan`/`2` positions rather than treating the insertion as a clean shift,
+/// which a bit-based key that let `nan_a` match `nan_b` would get wrong).
+/// Each call therefore has to hand back a key that cannot equal *any* other
+/// call's — including another `NaN` read from the exact same bits — and an
+/// address is the only per-call-distinct, already-available `usize` this
+/// function has: `value` is borrowed from a [`Value`] tree that outlives the
+/// whole comparison this key feeds, so the address is stable for exactly as
+/// long as the key needs to be looked up, and (being a fresh allocation per
+/// converted Python object) two different `NaN` occurrences can never share
+/// one. See `tests/golden/README.md`'s "Non-finite floats" section for the
+/// one case this cannot reproduce (the *same* Python `NaN` object compared
+/// or hashed against itself, which real `DeepDiff`/`CPython` sometimes treat
+/// as matching via object identity — a concept this crate's value model
+/// does not carry).
 pub(crate) fn python_scalar_key(value: &Value) -> Option<ScalarKey> {
     Some(match value {
         Value::Null => ScalarKey::Null,
@@ -233,6 +269,9 @@ pub(crate) fn python_scalar_key(value: &Value) -> Option<ScalarKey> {
                 return Some(ScalarKey::Int(i));
             }
             let f = n.as_f64().expect("a serde_json Number is i64, u64, or f64");
+            if f.is_nan() {
+                return Some(ScalarKey::Nan(std::ptr::from_ref(value) as usize));
+            }
             if f.fract() == 0.0 && f.abs() <= MAX_EXACT_F64_INT {
                 #[allow(
                     clippy::cast_possible_truncation,

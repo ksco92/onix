@@ -42,25 +42,27 @@ def test_int_below_i64_min_raises_value_error() -> None:
         DeepDiff(-(2**63) - 1, 0)
 
 
-# float finiteness
+# float finiteness — non-finite floats convert (see test_non_finite.py for
+# the comparison/hashing/JSON-rendering behavior this MVP scope note used to
+# gate on rejecting them).
 
 
-def test_nan_float_raises_value_error() -> None:
-    """A NaN float raises ValueError (JSON has no representation for it)."""
-    with pytest.raises(ValueError, match="NaN and infinite"):
-        DeepDiff(math.nan, 0.0)
+def test_nan_float_is_accepted() -> None:
+    """A NaN float converts without error (see test_non_finite.py)."""
+    diff = DeepDiff(math.nan, 0.0)
+    assert math.isnan(diff.to_dict()["values_changed"]["root"]["old_value"])
 
 
-def test_positive_infinity_raises_value_error() -> None:
-    """A positive-infinity float raises ValueError."""
-    with pytest.raises(ValueError, match="NaN and infinite"):
-        DeepDiff(math.inf, 0.0)
+def test_positive_infinity_is_accepted() -> None:
+    """A positive-infinity float converts without error."""
+    diff = DeepDiff(math.inf, 0.0)
+    assert diff.to_dict()["values_changed"]["root"]["old_value"] == math.inf
 
 
-def test_negative_infinity_raises_value_error() -> None:
-    """A negative-infinity float raises ValueError."""
-    with pytest.raises(ValueError, match="NaN and infinite"):
-        DeepDiff(-math.inf, 0.0)
+def test_negative_infinity_is_accepted() -> None:
+    """A negative-infinity float converts without error."""
+    diff = DeepDiff(-math.inf, 0.0)
+    assert diff.to_dict()["values_changed"]["root"]["old_value"] == -math.inf
 
 
 def test_finite_float_is_accepted() -> None:

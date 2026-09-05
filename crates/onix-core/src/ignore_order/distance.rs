@@ -519,7 +519,7 @@ fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value>
     match new_value {
         Value::Bool(_) => Some(Value::Bool(is_truthy(old_value))),
         Value::Number(n) if n.is_f64() => {
-            coerce_to_f64(old_value).and_then(|f| Number::from_f64(f).map(Value::Number))
+            coerce_to_f64(old_value).map(|f| Value::Number(Number::from_f64(f)))
         }
         Value::Number(_) => coerce_to_i64(old_value).map(|i| Value::Number(Number::from_i64(i))),
         Value::Str(_) => coerce_to_python_str(old_value).map(|s| Value::Str(s.into_boxed_str())),
