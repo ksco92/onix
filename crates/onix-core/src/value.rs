@@ -715,23 +715,25 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     Ordering::Equal
 }
 
-/// [`canonical_cmp`]'s number case, for two numbers of the same kind (an
-/// int and a float are already ranked apart).
+/// Maps `-0.0` to `+0.0` and leaves every other float unchanged.
 ///
-/// Folds `-0.0` into `+0.0` before ordering two floats, the same idiom
-/// `crate::ignore_order::hash::number_key` normalizes signed zero with: a
-/// bare `total_cmp` ranks `-0.0` strictly below `+0.0`, which is finer than
-/// [`Number`]'s own [`PartialEq`] (IEEE `==`, where the two are equal) and
-/// than `DeepDiff`'s (a Python `set` can never hold both, since they hash
-/// and compare equal there too — confirmed against `deepdiff==9.1.0`).
-/// [`SetItems::new`] dedups by this comparison reporting `Equal`, so the
-/// mismatch let a set built directly from both zeros keep two members a
-/// real Python `set` could never produce, while [`Value`]'s equality already
-/// said they were the same member.
+/// `-0.0` and `+0.0` are one value: Python's `==` and `hash` agree on it (a
+/// `set` can hold only one), and so does [`Number`]'s own [`PartialEq`]
+/// (IEEE `==`). Every place this crate orders or hashes a float folds the
+/// sign away first with this function, so all of them agree with each other
+/// and with that equality — `canonical_cmp`'s [`number_cmp`], and
+/// `crate::ignore_order::hash`'s `number_key` and `keyed`.
+pub(crate) fn fold_signed_zero(f: f64) -> f64 {
+    f + 0.0
+}
+
+/// [`canonical_cmp`]'s number case, for two numbers of the same kind (an
+/// int and a float are already ranked apart). Orders by [`fold_signed_zero`]
+/// of each float, so this agrees with [`Number`]'s own [`PartialEq`].
 fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
     if a.is_f64() {
-        let af = a.as_f64().unwrap_or_default() + 0.0;
-        let bf = b.as_f64().unwrap_or_default() + 0.0;
+        let af = fold_signed_zero(a.as_f64().unwrap_or_default());
+        let bf = fold_signed_zero(b.as_f64().unwrap_or_default());
         return af.total_cmp(&bf);
     }
 

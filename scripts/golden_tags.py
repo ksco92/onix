@@ -311,8 +311,8 @@ def canonical_set_order(members: object) -> list[SetMember]:
     This is the Python twin of ``onix_core::value::SetItems``'s own ordering, whose doc
     is the definition of the rule. Two points it is easy to get wrong here: ``bool`` is
     ranked before ``int`` even though every Python bool *is* an int, and ``float``
-    comparison is a **total** one, so ``-0.0`` sorts before ``0.0`` where Python's ``<``
-    calls them equal.
+    comparison folds ``-0.0`` into ``0.0`` before ordering, matching Python's own
+    equality -- see ``number_cmp`` in ``crates/onix-core/src/value.rs``.
 
     :param members: Any iterable of set members.
     :return: The members in canonical order.
@@ -339,13 +339,8 @@ def _order_key(value: object) -> tuple[object, ...]:
         return (2, value)
 
     if isinstance(value, float):
-        # Folds -0.0 into +0.0 before ordering, mirroring
-        # `onix_core::value::number_cmp`: the two compare and hash equal
-        # (Python's own `<` already calls them equal), so a set holding both
-        # -- directly built, since a real Python `set` can never contain the
-        # pair -- must dedup them the same way `SetItems::new` does, and a
-        # container holding one of each (`(-0.0, -1)` vs `(0.0,)`) must rank
-        # by nothing else once their zeros compare equal.
+        # Folds -0.0 into +0.0 before ordering -- see `number_cmp` in
+        # crates/onix-core/src/value.rs.
         return (3, value + 0.0)
 
     if isinstance(value, str):

@@ -4,9 +4,15 @@ Directed regression cases plus two signed-zero-biased differential batches,
 both reusing ``test_differential_fuzz``'s generators and both-engines
 comparators with a biased scalar alphabet: one over plain lists (the
 pre-existing ``ignore_order`` hashing fix), one building sets and frozensets
-directly (issue #46 -- a real Python `set`/`frozenset` can never hold both
-`-0.0` and `0.0`, so this batch is what actually exercises the dedup a bare
-list never reaches). See ``ignore_order::hash::item_key``'s float branch and
+directly (issue #46). A real Python `set`/`frozenset` can never hold both
+`-0.0` and `0.0` -- `set(...)`/`frozenset(...)` collapse the pair to one
+member before the value ever reaches onix -- so this batch, run through the
+bindings, pins that a genuine single-representative signed-zero set matches
+real DeepDiff at fuzz scale; it cannot exercise `SetItems::new`'s own dedup
+of a *two-zero* set, which only a directly-built value can produce and which
+is guarded instead by `value_tests::set_items_dedup_signed_zero_like_a_real_python_set`
+and `ignore_order::tests::dist_key_hash_agrees_with_equality_on_tricky_equal_values`
+(crates/onix-core). See ``ignore_order::hash::item_key``'s float branch and
 ``onix_core::value::number_cmp`` (crates/onix-core) for why signed zeros are
 normalized.
 """
@@ -105,6 +111,9 @@ def _mutate_biased_set(
     """
     Build a related-but-different copy of a biased set, keeping its kind.
 
+    Mirrors `_mutate_set_value`'s set/frozenset branch, drawing replacement
+    members from `_BIASED_SCALARS` instead of the general-purpose alphabet.
+
     :param rng: Seeded RNG.
     :param value: The set or frozenset to derive a mutated copy from.
     :return: A structurally related, partially mutated copy of the same kind.
@@ -122,12 +131,14 @@ def test_signed_zero_biased_set_differential_matches_real_deepdiff() -> None:
     # Builds sets/frozensets directly from the signed-zero-heavy alphabet
     # (`_diverges_with_sets` tolerates DeepDiff's own hash-order instability
     # and the documented `list(a_set) == some_list` coercion class -- see
-    # `test_differential_fuzz`'s module doc). A real Python `set`/`frozenset`
-    # dedups `-0.0`/`0.0` before either engine ever sees it, so both sides of
-    # every comparison here are already the single-member set a real Python
-    # program would build; the point is that onix must build the identical
-    # set (`SetItems::new`'s own dedup) and compare it the same way DeepDiff
-    # does, at fuzz scale rather than only the hand-picked cases above.
+    # `test_differential_fuzz`'s module doc). `set(...)`/`frozenset(...)`
+    # already collapse `-0.0`/`0.0` to one member before either engine sees
+    # the value, so every set built here is the single-representative kind a
+    # real Python program produces; this pins that onix converts and
+    # compares that genuine set the same way DeepDiff does, at fuzz scale.
+    # It cannot exercise `SetItems::new`'s own dedup of a directly-built
+    # *two*-zero set -- see this module's own doc for the two Rust tests
+    # that guard that instead.
     rng = random.Random(20260904)
     cases = 1000
     mismatches: list[str] = []
