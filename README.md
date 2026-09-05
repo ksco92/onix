@@ -100,33 +100,35 @@ Pass `--ignore-order` to compare every list by value instead of by position, mir
 
 `diff_tables` compares two tables the way `DeepDiff` compares two objects. It takes any object implementing the [Arrow PyCapsule interface](https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html) — a pyarrow `Table` or `RecordBatch`, a polars `DataFrame`, a DuckDB relation — and imports it with no Python round trip. The two tables are matched on a required, non-empty set of key columns (the table's primary key).
 
-This version reports the **schema** diff: which columns were added, removed, or changed type. Row-level results (which rows were added or removed and which cells changed) arrive in a later version; the `rows_added`, `rows_removed`, `cells_changed`, and `duplicate_keys` members exist now but raise `NotImplementedError`.
+It reports the **schema** diff (which columns were added, removed, or changed type) and the keyed **row** diff (which rows were added, removed, or changed, and which keys are duplicated). Rows are matched by the key columns; `rows_added`, `rows_removed`, and `duplicate_keys` return Arrow tables, and `summary()` counts each outcome. The per-cell diff (`cells_changed`) arrives in a later version and raises `NotImplementedError` until then.
 
 ```python
 import pyarrow as pa
 from deepdiff_rs import diff_tables
 
 left = pa.table({
-    "id": pa.array([1, 2], pa.int64()),
-    "amount": pa.array([1, 2], pa.int32()),
+    "id": pa.array([1, 2, 3], pa.int64()),
+    "amount": pa.array([10, 20, 30], pa.int32()),
 })
 right = pa.table({
-    "id": pa.array([1, 2], pa.int64()),
-    "amount": pa.array([1, 2], pa.int64()),
-    "note": pa.array(["a", "b"], pa.string()),
+    "id": pa.array([2, 3, 4], pa.int64()),
+    "amount": pa.array([20, 31, 40], pa.int64()),
+    "note": pa.array(["a", "b", "c"], pa.string()),
 })
 
 diff = diff_tables(left, right, key=["id"])
 print(diff.summary())
-for change in diff.schema:
-    print(change["column"], change["change"], change["left_type"], change["right_type"])
+print("added ids:", pa.table(diff.rows_added()).column("id").to_pylist())
+print("removed ids:", pa.table(diff.rows_removed()).column("id").to_pylist())
 ```
 
 ```
-{'columns_added': 1, 'columns_removed': 0, 'columns_type_changed': 1}
-amount type_changed Int32 Int64
-note added None Utf8
+{'columns_added': 1, 'columns_removed': 0, 'columns_type_changed': 1, 'rows_added': 1, 'rows_removed': 1, 'rows_changed': 1, 'duplicate_keys': 0, 'null_keys': 0}
+added ids: [4]
+removed ids: [1]
 ```
+
+A key appearing more than once on either side is reported in `duplicate_keys` (with `left_count` and `right_count`) and excluded from the added/removed/changed sets; a null key matches its counterpart and is counted in `null_keys`. Rows are compared by the non-key columns present on *both* sides, with onix's value semantics (integers and integral floats fold together, `1.00` equals `1.0000`, a timestamp compares by its instant across units, dictionary-encoded values equal their plain form, and null equals null); a nested non-key column is out of scope and is skipped rather than compared. The exact value-comparison rules are documented on the hashing functions in [`crates/onix-arrow/src/row_diff.rs`](crates/onix-arrow/src/row_diff.rs).
 
 Type comparison uses the full logical Arrow type (timestamp unit and timezone, decimal precision and scale, and so on), but physical encodings that carry the same logical type compare equal — a dictionary-encoded string equals a plain string, polars' `Utf8View` equals pyarrow's `Utf8`, the list variants normalize together, and a map compares equal however a library spells it — so the same table read through pyarrow, polars, or DuckDB reports no spurious type changes. The full normalization rules are documented on `normalized_type` (and `map_entries`) in [`crates/onix-arrow/src/schema.rs`](crates/onix-arrow/src/schema.rs); nullability is ignored but reported in each record. Column names must be unique on each side; a repeated name raises `ValueError`. `diff.schema_arrow` is the same result as an Arrow table: it implements `__arrow_c_stream__`, so `polars.DataFrame(diff.schema_arrow)` and `pandas` consume it directly, and `diff.schema_arrow.to_pyarrow()` returns a `pyarrow.Table`.
 
@@ -145,10 +147,11 @@ Type comparison uses the full logical Arrow type (timestamp unit and timezone, d
 - `ignore_order` pairing is `O(N^2)` in unpaired elements per side and carries a polynomial cost in both time and memory with input depth; it has no `max_passes`/`max_diffs` cutoff, so bound the size and depth of untrusted input yourself. See [`crates/onix-core/src/ignore_order/mod.rs`](crates/onix-core/src/ignore_order/mod.rs).
 - A `values_changed` between two multi-line strings runs a `difflib`-style `O(N*M)` line diff on the default path with no opt-out, worst when changes are spread evenly through the text (about 35 s for a heavily edited 1 MB string and growing quadratically, so a few megabytes is minutes), so bound the size of untrusted strings yourself. See [`crates/onix-core/src/unified_diff.rs`](crates/onix-core/src/unified_diff.rs).
 - Ordered sequences (`list` or `tuple`) of scalars (null, bool, number, string, datetime, date) run a `difflib`-style `O(N*M)` matcher on the default path with its popular-element (autojunk) purge disabled for `DeepDiff` parity, worst for sequences of a few repeated values with dense edits (about 620 s for two 8,000-element lists of two repeated values with every other element changed, growing faster than quadratically), so bound the size of untrusted sequences yourself. See [`crates/onix-core/src/lcs.rs`](crates/onix-core/src/lcs.rs).
-- In `diff_tables`, a column name containing an embedded NUL byte (`\0`) arrives truncated at the NUL through the Arrow C Data Interface, and the report shows the truncated name; such names are rare in practice.
-- In `diff_tables`, a list of structs named exactly `key`/`value` with a nullable key and a real map are not distinguished, so a migration between the two is not reported as a type change (polars exports both as the same Arrow type); see `map_entries` in [`crates/onix-arrow/src/schema.rs`](crates/onix-arrow/src/schema.rs).
+- `diff_tables` inherits some Arrow-interchange quirks: a column name with an embedded NUL byte (`\0`) arrives truncated at the NUL through the C Data Interface (the report shows the truncated name; rare in practice); a list of structs named exactly `key`/`value` with a nullable key is not distinguished from a real map, so a migration between the two is not reported as a type change (polars exports both as the same Arrow type — see `map_entries` in [`crates/onix-arrow/src/schema.rs`](crates/onix-arrow/src/schema.rs)); and a polars all-null (`Null`-typed) column fails at Arrow C import with a `ValueError` (`the datatype "Null" doesn't expect buffer at index 0`), so give such a column a concrete type first (a pyarrow all-`None` column, inferred as `null`, works and compares as all-null).
 - In `diff_tables`, DuckDB labels a `TIMESTAMP WITH TIME ZONE` column with the connection's *session* time zone when it exports to Arrow (a UTC session as `Timestamp(µs, "UTC")`, an `America/New_York` session as `Timestamp(µs, "America/New_York")`), so on a non-UTC machine such a column can be reported as a type change against a UTC column from another library. Run `SET TimeZone='UTC'` on the DuckDB connection first for a deterministic, machine-independent result.
 - `diff_tables` refuses a column whose Arrow type is nested deeper than `MAX_NESTING_DEPTH` (128) with a `MaxDepthError`, because comparing arbitrarily deep nesting would overflow the native stack; 128 is far beyond any real schema. Importing a schema nested many thousands of levels deep is also slow regardless, a cost of the Arrow C Data Interface itself.
+- `diff_tables`'s row diff costs, per call: RAM for a 32-byte hash per row per side (sorted), so peak memory is linear in row count (about 75 MB at 1M rows/side, 660 MB at 10M) and time is `N·log N` (about 2 s for a 10M-row pair), plus a second term for the duplicate-key report, which holds the key values of every *distinct duplicated* key — an all-duplicate 200k-rows/side table (100k distinct duplicated keys) peaks at about 37 MB with 16-byte keys and 1.05 GB with 1 KB keys, 1M rows/side (500k distinct) at about 165 MB with 16-byte keys; and temp disk, because each input is read twice and so is spooled to an anonymous file (`tempfile`: unlinked at once, mode 0600, no predictable name — nothing is left on disk even on abnormal exit), both spools resident at once, peaking at the decoded size of both inputs (about 315 MB — 161 + 154 MB uncompressed Arrow IPC — for the 1M-row fixture pair; on the order of 10 GB for the full 5 GB-per-side fixture pair, which on Linux may be a RAM-backed `tmpfs`), a full temp filesystem raising `ValueError` naming `TMPDIR`. None of these has a built-in cap: bound the row count and, for duplicate-heavy data, the key width of untrusted input. Figures are the peak resident set of `cargo run -p onix-arrow --release --example row_diff_rss`, single run, macOS on an Apple M-series laptop, 2026-09-05, same method as [Performance](#performance). See [`crates/onix-arrow/src/row_diff.rs`](crates/onix-arrow/src/row_diff.rs).
+- `diff_tables` compares scalar columns by value (hashed: null, booleans, every integer, float and decimal width, strings and binary in every encoding, timestamps, dates, times, durations, intervals, and dictionaries of these; refused with `ValueError`: run-end encoded columns and any type-and-unit combination Arrow itself cannot build; nested non-key columns skipped, nested key columns refused), with the exact enumeration in the module doc of [`crates/onix-arrow/src/row_diff.rs`](crates/onix-arrow/src/row_diff.rs). It also refuses a key column whose type differs across the two inputs after encoding normalization (the conservative choice: a primary key that changed type is refused rather than guessed, not coerced).
 - Output is byte-identical to DeepDiff except for the cases listed above and two path-rendering quirks; [`tests/golden/README.md`](tests/golden/README.md) enumerates every accepted exception, including integers past `2^53` (the limit of exact `f64` representation) inside ordered scalar lists and `ignore_order` pairing among naive datetimes, which DeepDiff ranks using the *process's local timezone* while onix reads a naive value as UTC everywhere.
 
 ## Performance
@@ -200,12 +203,12 @@ Both reports carry their full methodology, fairness rules, and the reproduce com
 
 ## Reference
 
-**Python API.** The public surface is `DeepDiff`, `diff_json`, `MaxDepthError`, and `MAX_DEPTH_CEILING`.
+**Python API.** The public surface is `DeepDiff`, `diff_json`, `diff_tables` (returning a `TableDiff`), `MaxDepthError`, and `MAX_DEPTH_CEILING`.
 
 - `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`: diffs two live Python objects of supported value types — `None`, `bool`, `int`, `float`, `str`, `dict` (with `str` keys), `list`, `tuple`, `set`, `frozenset`, `datetime.datetime`, and `datetime.date` (see [Known limitations](#known-limitations) for the exact restrictions and exclusions); `.to_json()` returns the DeepDiff-compatible JSON string, `.to_dict()` the same report as a dict — with Python types preserved, so a value the diff found in a `tuple`, `set` or `frozenset` comes back as one and a `datetime`/`date` comes back as a real `datetime`/`date` — and the instance is falsy when there is no difference. The `set_item_added`/`set_item_removed` categories are lists of path strings, each ending in the item itself (`root['a'][2]`, `root['x']`, `root[(1, 2)]`).
 - `diff_json(a, b, ignore_order=False, max_depth=None) -> str`: diffs two JSON strings entirely in Rust and returns the report as a JSON string.
 - `MaxDepthError` (a `ValueError` subclass) is raised when input exceeds `max_depth`; `MAX_DEPTH_CEILING` (20,000) is the hard upper bound on `max_depth`.
-- `diff_tables(left, right, key=[...]) -> TableDiff`: diffs two Arrow tables (see [Diffing tables](#diffing-tables)). `TableDiff.schema` is the list of changed columns, `.schema_arrow` the same as an Arrow table, `.summary()` the change counts, `.to_json()` both as JSON; `.rows_added()`, `.rows_removed()`, `.cells_changed()`, and `.duplicate_keys()` raise `NotImplementedError` until a later version.
+- `diff_tables(left, right, key=[...]) -> TableDiff`: diffs two Arrow tables (see [Diffing tables](#diffing-tables)). `TableDiff.schema` is the list of changed columns, `.schema_arrow` the same as an Arrow table, `.summary()` the schema and row change counts, `.to_json()` the schema diff as JSON; `.rows_added()`, `.rows_removed()`, and `.duplicate_keys()` return Arrow tables, and `.cells_changed()` raises `NotImplementedError` until a later version.
 
 **CLI.** `onix diff <a.json> <b.json> [--max-depth N] [--ignore-order] [--timing]` reads both files as JSON and prints a compact, single-line DeepDiff-compatible report to stdout (`{}` when there is no difference).
 
@@ -227,7 +230,7 @@ Exit codes:
 ```
 crates/onix-core   # the diff engine (library, no I/O)
 crates/onix-cli    # the `onix` binary (thin CLI over the core)
-crates/onix-arrow  # Arrow table diffing (schema diff; rows in a later version)
+crates/onix-arrow  # Arrow table diffing (schema diff and keyed row diff)
 crates/onix-py     # PyO3 bindings, published as `deepdiff-rs`
 scripts/           # gen_goldens.py: regenerates tests/golden/ from real DeepDiff
 tests/golden       # DeepDiff-generated expected outputs (the compatibility corpus)

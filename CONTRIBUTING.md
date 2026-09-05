@@ -279,9 +279,17 @@ cargo install cargo-mutants --locked
 make mutants
 ```
 
-**Standing result.** `make mutants` enumerates a deterministic **1063** mutants
-(20 in `onix-cli`, 980 in `onix-core`, 63 in `onix-arrow`). In `onix-arrow` all
-42 viable mutants are caught (21 do not compile). In `onix-core`/`onix-cli`
+**Standing result.** `make mutants` enumerates a deterministic **1210** mutants
+(20 in `onix-cli`, 980 in `onix-core`, 210 in `onix-arrow`). In `onix-arrow`,
+a standalone `cargo mutants -p onix-arrow` on a quiet machine reports 161
+caught, 39 non-compiling (`Default`-substitution on types without a usable
+`Default`), 9 timeouts, and 1 missed. The 9 timeouts are mutant-induced
+infinite loops the tests reach (the decimal trailing-zero reduction in
+`hash_decimal`, and the merge-join cursor advance in `classify`) — detected as
+hangs, not silent survivors. The 1 missed is an equivalent mutant: the
+`num_rows() > 0 -> >= 0` guard in `materialize_side` before pushing a batch to
+concatenate is output-neutral, because `concat_batches` ignores empty batches.
+In `onix-core`/`onix-cli`
 every viable mutant is caught except equivalent mutants confined to five
 documented spots (`onix-core/src/lcs.rs`;
 the `> 1` threshold in `onix-core/src/diff/array.rs`, provably output-neutral;
@@ -294,7 +302,8 @@ noisy run to run, but neither the five spots nor the `Default`-substitution
 kind changes; [`perf/MUTANTS.md`](perf/MUTANTS.md) carries the tool version,
 the reproduce command, and the full argument for why no reported survivor is
 a real test gap. Work that touches this logic should re-run `make mutants`
-and confirm no viable mutant survives outside those five spots.
+and confirm no viable mutant survives outside those five `onix-core` spots and
+the one `onix-arrow` spot above.
 
 ## Wheels and publishing
 

@@ -70,10 +70,35 @@ pub enum TableDiffError {
         /// The maximum nesting depth allowed.
         max_depth: usize,
     },
+    /// A column the row diff must hash has an Arrow type it cannot hash by
+    /// value: a key column of any such type, or a non-key *scalar* column the
+    /// crate does not handle (for example `RunEndEncoded`). A *nested* non-key
+    /// column (list, struct, map, union) is out of scope and skipped, not
+    /// refused; only a nested *key* column reaches this error.
+    UnsupportedRowType {
+        /// The column whose type is unsupported.
+        column: String,
+        /// The unsupported Arrow type, rendered.
+        data_type: String,
+    },
+    /// A key column has a different (normalized) Arrow type on each side. This
+    /// is the deliberate conservative choice: a primary key that changed type is
+    /// refused rather than guessed — the row diff will not coerce one side to
+    /// the other's type to decide row identity.
+    KeyTypeMismatch {
+        /// The key column whose type differs across the two inputs.
+        column: String,
+    },
+    /// A batch could not be read from an input reader, or a temporary spool
+    /// file could not be written or re-read, while diffing rows.
+    Read {
+        /// The underlying error's message.
+        message: String,
+    },
     /// A member of [`crate::TableDiff`] that a later version fills in was
-    /// asked for before that version exists. Schema diffing is complete in
-    /// this version; row-level results (`rows_added`, `rows_removed`,
-    /// `cells_changed`, `duplicate_keys`) are not.
+    /// asked for before that version exists. The per-cell changes
+    /// (`cells_changed`) arrive with a later version; `rows_added`,
+    /// `rows_removed`, and `duplicate_keys` are available.
     NotImplemented {
         /// The name of the member that is not implemented yet.
         feature: &'static str,
@@ -100,10 +125,22 @@ impl fmt::Display for TableDiffError {
                 "column {column:?} has an Arrow type nested deeper than the maximum of \
                  {max_depth}; diffing it could overflow the native stack, so it is refused"
             ),
+            TableDiffError::UnsupportedRowType { column, data_type } => write!(
+                f,
+                "column {column:?} has Arrow type {data_type}, which the row diff cannot \
+                 compare by value; a key column and a non-key scalar column must be a \
+                 supported scalar type (nested non-key columns are skipped instead)"
+            ),
+            TableDiffError::KeyTypeMismatch { column } => write!(
+                f,
+                "key column {column:?} has a different type on each side; a keyed row diff \
+                 needs the key to be the same type on both sides"
+            ),
+            TableDiffError::Read { message } => write!(f, "failed to read table data: {message}"),
             TableDiffError::NotImplemented { feature } => write!(
                 f,
                 "{feature} is not implemented in this version; \
-                 only the schema diff is available yet"
+                 the per-cell changes arrive in a later version"
             ),
         }
     }
@@ -159,6 +196,27 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("\"deep\""));
         assert!(message.contains("128"));
+    }
+
+    #[test]
+    fn unsupported_row_type_message_names_column_and_type() {
+        let error = TableDiffError::UnsupportedRowType {
+            column: "xs".to_string(),
+            data_type: "RunEndEncoded".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("\"xs\""));
+        assert!(message.contains("RunEndEncoded"));
+    }
+
+    #[test]
+    fn key_type_mismatch_message_names_the_column() {
+        let error = TableDiffError::KeyTypeMismatch {
+            column: "id".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("\"id\""));
+        assert!(message.contains("same type on both sides"));
     }
 
     #[test]

@@ -1,17 +1,38 @@
 //! Table diffing for onix, over Apache Arrow.
 //!
-//! [`diff_tables`] compares two tables presented as Arrow
-//! [`RecordBatchReader`]s and returns a [`TableDiff`]. This version computes
-//! the **schema** diff — which columns were added, removed, or changed type —
-//! in full; the row-level members of [`TableDiff`] exist but return
-//! [`TableDiffError::NotImplemented`] until a later version fills them in.
+//! [`diff_tables`] compares two tables presented as [`TableInput`]s and returns
+//! a [`TableDiff`] carrying both the **schema** diff — which columns were added,
+//! removed, or changed type — and the keyed **row** diff — which rows were
+//! added, removed, or changed, and which keys are duplicated. The per-cell diff
+//! (`cells_changed`) arrives in a later version.
 //!
-//! The two tables are matched on a required, non-empty set of key columns
-//! (the table's primary key), carried in [`TableDiffOptions`]. The key is not
-//! used by the schema diff itself, but every key column must exist on both
-//! sides — a missing one is a [`TableDiffError::KeyColumnMissing`] — so the
-//! later row diff has a valid key to match on. Column names must be unique on
-//! each side; a repeated name is a [`TableDiffError::DuplicateColumn`].
+//! The two tables are matched on a required, non-empty set of key columns (the
+//! table's primary key), carried in [`TableDiffOptions`]. Every key column must
+//! exist on both sides — a missing one is a [`TableDiffError::KeyColumnMissing`].
+//! Column names must be unique on each side; a repeated name is a
+//! [`TableDiffError::DuplicateColumn`].
+//!
+//! # Inputs
+//!
+//! The row diff reads each side twice (once to hash every row, once to
+//! materialize only the differing rows), so [`diff_tables`] takes a
+//! re-openable [`TableInput`] rather than a single-use `RecordBatchReader`.
+//! In-memory tables use [`MemoryInput`]; a caller whose data is a one-shot
+//! stream spools it to a temporary Arrow IPC file first and implements
+//! [`TableInput`] over that file (as the Python bindings do).
+//!
+//! # Row diff
+//!
+//! Rows are matched by a keyed 128-bit hash of the key columns; a row present
+//! only on one side is added or removed, a row on both sides whose non-key
+//! columns differ is changed, and a key appearing more than once on either side
+//! is a duplicate — reported with its per-side counts and excluded from the
+//! added/removed/changed sets. Only the non-key columns present on *both* sides
+//! take part in change detection (a column on one side only is a schema change,
+//! not a cell change), and only scalar columns are compared; a nested non-key
+//! column is skipped, while a nested key column is a
+//! [`TableDiffError::UnsupportedRowType`]. See `src/row_diff.rs` for the exact
+//! value semantics.
 //!
 //! # Type comparison
 //!
@@ -36,42 +57,57 @@
 //! ```
 //! use std::sync::Arc;
 //!
-//! use arrow_array::{RecordBatch, RecordBatchIterator};
-//! use arrow_schema::{ArrowError, DataType, Field, Schema};
-//! use onix_arrow::{diff_tables, TableDiffOptions};
+//! use arrow_array::{Int64Array, RecordBatch};
+//! use arrow_schema::{DataType, Field, Schema};
+//! use onix_arrow::{diff_tables, MemoryInput, TableDiffOptions};
 //!
 //! let left_schema = Arc::new(Schema::new(vec![
 //!     Field::new("id", DataType::Int64, false),
-//!     Field::new("amount", DataType::Decimal128(10, 2), true),
+//!     Field::new("amount", DataType::Int64, true),
 //! ]));
-//! let right_schema = Arc::new(Schema::new(vec![
-//!     Field::new("id", DataType::Int64, false),
-//!     Field::new("amount", DataType::Decimal128(10, 4), true),
-//! ]));
+//! let right_schema = left_schema.clone();
 //!
-//! // The schema diff reads only each reader's schema, so the readers can be
-//! // empty here.
-//! let no_batches: Vec<Result<RecordBatch, ArrowError>> = vec![];
-//! let left = RecordBatchIterator::new(no_batches.into_iter(), left_schema);
-//! let no_batches: Vec<Result<RecordBatch, ArrowError>> = vec![];
-//! let right = RecordBatchIterator::new(no_batches.into_iter(), right_schema);
+//! let left = MemoryInput::new(
+//!     left_schema.clone(),
+//!     vec![RecordBatch::try_new(
+//!         left_schema.clone(),
+//!         vec![
+//!             Arc::new(Int64Array::from(vec![1, 2])),
+//!             Arc::new(Int64Array::from(vec![10, 20])),
+//!         ],
+//!     )
+//!     .unwrap()],
+//! );
+//! let right = MemoryInput::new(
+//!     right_schema.clone(),
+//!     vec![RecordBatch::try_new(
+//!         right_schema,
+//!         vec![
+//!             Arc::new(Int64Array::from(vec![2, 3])),
+//!             Arc::new(Int64Array::from(vec![20, 30])),
+//!         ],
+//!     )
+//!     .unwrap()],
+//! );
 //!
 //! let options = TableDiffOptions::new(vec!["id".to_string()]);
-//! let diff = diff_tables(left, right, &options).unwrap();
+//! let diff = diff_tables(&left, &right, &options).unwrap();
 //!
-//! assert_eq!(diff.summary().columns_type_changed, 1);
-//! assert_eq!(diff.schema()[0].column, "amount");
+//! // id 1 is only on the left (removed), id 3 only on the right (added).
+//! assert_eq!(diff.summary().rows_removed, 1);
+//! assert_eq!(diff.summary().rows_added, 1);
+//! assert_eq!(diff.rows_added().unwrap().num_rows(), 1);
 //! ```
 
 mod error;
 mod options;
+mod row_diff;
 mod schema;
 mod table_diff;
 
-use arrow_array::RecordBatchReader;
-
 pub use error::{Side, TableDiffError};
 pub use options::TableDiffOptions;
+pub use row_diff::{MemoryInput, TableInput};
 pub use schema::{ChangeKind, SchemaChange, diff_schemas};
 pub use table_diff::{TableDiff, TableDiffSummary};
 
@@ -104,11 +140,10 @@ pub use table_diff::{TableDiff, TableDiffSummary};
 /// backstop.
 pub const MAX_NESTING_DEPTH: usize = 128;
 
-/// Diffs two tables presented as Arrow [`RecordBatchReader`]s.
+/// Diffs two tables presented as re-openable [`TableInput`]s.
 ///
-/// Only the readers' schemas are read in this version, so their batches are
-/// left untouched. See the [crate-level docs](crate) for the type-comparison
-/// rules and the key-column contract.
+/// See the [crate-level docs](crate) for the type-comparison rules, the
+/// key-column contract, and the row-diff semantics.
 ///
 /// # Errors
 ///
@@ -119,14 +154,17 @@ pub const MAX_NESTING_DEPTH: usize = 128;
 ///   the same name.
 /// - [`TableDiffError::KeyColumnMissing`] if a key column is absent from
 ///   either input's schema, naming the column and the side.
-// The readers are taken by value because the row-diff versions consume them
-// (they iterate every batch); this version reads only their schemas, so the
-// owned readers are dropped here, but the by-value signature is the stable
-// contract those versions build on.
-#[allow(clippy::needless_pass_by_value)]
+/// - [`TableDiffError::KeyTypeMismatch`] if a key column's normalized type
+///   differs across the two inputs (a primary key that changed type is refused,
+///   not coerced).
+/// - [`TableDiffError::UnsupportedRowType`] if a key column's type, or any
+///   non-nested column's type on either side, cannot be hashed by value — a
+///   nested key, a run-end-encoded column, or a type combination Arrow cannot
+///   build.
+/// - [`TableDiffError::Read`] if a batch cannot be read from either input.
 pub fn diff_tables(
-    left: impl RecordBatchReader,
-    right: impl RecordBatchReader,
+    left: &impl TableInput,
+    right: &impl TableInput,
     options: &TableDiffOptions,
 ) -> Result<TableDiff, TableDiffError> {
     if options.key().is_empty() {
@@ -136,8 +174,9 @@ pub fn diff_tables(
     let left_schema = left.schema();
     let right_schema = right.schema();
 
-    // Runs the schema diff first: it also rejects duplicate column names, after
-    // which the key lookups below are unambiguous.
+    // Runs the schema diff first: it rejects duplicate column names and
+    // over-deep nesting, after which the key lookups below are unambiguous and
+    // the row hash walks only bounded, scalar columns.
     let changes = diff_schemas(&left_schema, &right_schema)?;
 
     for key in options.key() {
@@ -153,24 +192,39 @@ pub fn diff_tables(
                 side: Side::Right,
             });
         }
+
+        // The key's own hashability (a nested or otherwise unhashable key) is
+        // checked, along with every other column, by `row_diff::diff_rows`; only
+        // key existence and the type-mismatch below live here.
+
+        // A key whose normalized type differs across sides is a schema type
+        // change; refuse it rather than guess row identity across a changed key
+        // type (the conservative choice). The schema diff above already computed
+        // this.
+        if changes
+            .iter()
+            .any(|change| &change.column == key && change.change == ChangeKind::TypeChanged)
+        {
+            return Err(TableDiffError::KeyTypeMismatch {
+                column: key.clone(),
+            });
+        }
     }
 
-    Ok(TableDiff::new(changes))
+    let rows = row_diff::diff_rows(left, right, &left_schema, &right_schema, options.key())?;
+
+    Ok(TableDiff::new(changes, rows))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Side, TableDiffError, TableDiffOptions, diff_tables};
-    use arrow_array::{RecordBatch, RecordBatchIterator};
-    use arrow_schema::{ArrowError, DataType, Field, Schema};
+    use super::{MemoryInput, Side, TableDiffError, TableDiffOptions, diff_tables};
+    use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
 
-    type EmptyReader = RecordBatchIterator<std::vec::IntoIter<Result<RecordBatch, ArrowError>>>;
-
-    fn reader(fields: Vec<Field>) -> EmptyReader {
+    fn reader(fields: Vec<Field>) -> MemoryInput {
         let schema = Arc::new(Schema::new(fields));
-        let batches: Vec<Result<RecordBatch, ArrowError>> = vec![];
-        RecordBatchIterator::new(batches.into_iter(), schema)
+        MemoryInput::new(schema, Vec::new())
     }
 
     #[test]
@@ -179,7 +233,7 @@ mod tests {
         let right = reader(vec![Field::new("id", DataType::Int64, false)]);
         let options = TableDiffOptions::new(Vec::new());
         assert_eq!(
-            diff_tables(left, right, &options),
+            diff_tables(&left, &right, &options),
             Err(TableDiffError::EmptyKey)
         );
     }
@@ -190,7 +244,7 @@ mod tests {
         let right = reader(vec![Field::new("id", DataType::Int64, false)]);
         let options = TableDiffOptions::new(vec!["id".to_string()]);
         assert_eq!(
-            diff_tables(left, right, &options),
+            diff_tables(&left, &right, &options),
             Err(TableDiffError::KeyColumnMissing {
                 column: "id".to_string(),
                 side: Side::Left,
@@ -204,10 +258,78 @@ mod tests {
         let right = reader(vec![Field::new("other", DataType::Int64, false)]);
         let options = TableDiffOptions::new(vec!["id".to_string()]);
         assert_eq!(
-            diff_tables(left, right, &options),
+            diff_tables(&left, &right, &options),
             Err(TableDiffError::KeyColumnMissing {
                 column: "id".to_string(),
                 side: Side::Right,
+            })
+        );
+    }
+
+    #[test]
+    fn key_type_mismatch_int_versus_float_is_rejected() {
+        let left = reader(vec![Field::new("id", DataType::Int64, false)]);
+        let right = reader(vec![Field::new("id", DataType::Float64, false)]);
+        let options = TableDiffOptions::new(vec!["id".to_string()]);
+        assert_eq!(
+            diff_tables(&left, &right, &options),
+            Err(TableDiffError::KeyTypeMismatch {
+                column: "id".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn key_type_mismatch_int_widths_is_rejected() {
+        let left = reader(vec![Field::new("id", DataType::Int32, false)]);
+        let right = reader(vec![Field::new("id", DataType::Int64, false)]);
+        let options = TableDiffOptions::new(vec!["id".to_string()]);
+        assert_eq!(
+            diff_tables(&left, &right, &options),
+            Err(TableDiffError::KeyTypeMismatch {
+                column: "id".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn dictionary_key_column_is_accepted() {
+        // A dictionary key is a scalar encoding, so it passes the up-front
+        // hashable-key check (covering the dictionary arm of `is_hashable`).
+        let dict = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+        let left = reader(vec![Field::new("id", dict.clone(), false)]);
+        let right = reader(vec![Field::new("id", dict, false)]);
+        let options = TableDiffOptions::new(vec!["id".to_string()]);
+        assert!(diff_tables(&left, &right, &options).is_ok());
+    }
+
+    #[test]
+    fn nested_key_column_is_rejected_up_front() {
+        // An empty table with a list key errors before any row is read, rather
+        // than diffing to an empty result.
+        let list = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
+        let left = reader(vec![Field::new("k", list.clone(), true)]);
+        let right = reader(vec![Field::new("k", list, true)]);
+        let options = TableDiffOptions::new(vec!["k".to_string()]);
+        assert!(matches!(
+            diff_tables(&left, &right, &options),
+            Err(TableDiffError::UnsupportedRowType { column, .. }) if column == "k"
+        ));
+    }
+
+    #[test]
+    fn unhashable_and_type_mismatched_key_reports_type_mismatch() {
+        // A key that is both unhashable (a nested list on the left) and
+        // type-changed across sides: the type-mismatch refusal is checked first,
+        // so it wins over the unhashable-column refusal. Pins that priority.
+        let list = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
+        let left = reader(vec![Field::new("id", list, true)]);
+        let right = reader(vec![Field::new("id", DataType::Int64, false)]);
+        let options = TableDiffOptions::new(vec!["id".to_string()]);
+        assert_eq!(
+            diff_tables(&left, &right, &options),
+            Err(TableDiffError::KeyTypeMismatch {
+                column: "id".to_string(),
             })
         );
     }
@@ -223,7 +345,7 @@ mod tests {
             Field::new("name", DataType::Int64, true),
         ]);
         let options = TableDiffOptions::new(vec!["id".to_string()]);
-        let diff = diff_tables(left, right, &options).unwrap();
+        let diff = diff_tables(&left, &right, &options).unwrap();
 
         assert_eq!(diff.schema().len(), 1);
         assert_eq!(diff.schema()[0].column, "name");
@@ -239,7 +361,7 @@ mod tests {
         let right = reader(vec![Field::new("id", DataType::Int64, false)]);
         let options = TableDiffOptions::new(vec!["id".to_string()]);
         assert_eq!(
-            diff_tables(left, right, &options),
+            diff_tables(&left, &right, &options),
             Err(TableDiffError::DuplicateColumn {
                 column: "x".to_string(),
                 side: Side::Left,
@@ -256,7 +378,7 @@ mod tests {
         let right = reader(vec![Field::new("a", DataType::Int64, false)]);
         let options = TableDiffOptions::new(vec!["a".to_string(), "b".to_string()]);
         assert_eq!(
-            diff_tables(left, right, &options),
+            diff_tables(&left, &right, &options),
             Err(TableDiffError::KeyColumnMissing {
                 column: "b".to_string(),
                 side: Side::Right,

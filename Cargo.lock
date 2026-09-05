@@ -93,6 +93,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-ipc"
+version = "59.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcc41681ea80f521df14c36725b74d4c60702c47f0793af2be469c04527e2599"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-schema",
+ "arrow-select",
+ "flatbuffers",
+]
+
+[[package]]
 name = "arrow-ord"
 version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -290,6 +304,16 @@ name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
+
+[[package]]
+name = "flatbuffers"
+version = "25.12.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
+dependencies = [
+ "bitflags",
+ "rustc_version",
+]
 
 [[package]]
 name = "fnv"
@@ -605,17 +629,24 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "onix-arrow"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
+ "arrow-cast",
  "arrow-schema",
+ "arrow-select",
+ "getrandom 0.3.4",
+ "half",
+ "proptest",
  "serde",
  "serde_json",
+ "siphasher",
 ]
 
 [[package]]
 name = "onix-cli"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "onix-core",
  "serde_json",
@@ -623,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "onix-core"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "proptest",
  "serde",
@@ -633,15 +664,17 @@ dependencies = [
 
 [[package]]
 name = "onix-py"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "arrow-array",
+ "arrow-ipc",
  "arrow-schema",
  "onix-arrow",
  "onix-core",
  "pyo3",
  "pyo3-arrow",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -885,6 +918,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
+name = "rustc_version"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+dependencies = [
+ "semver",
+]
+
+[[package]]
 name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -920,6 +962,12 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
