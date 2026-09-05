@@ -62,19 +62,6 @@ from typing import Final
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from _common import (
-    ADDED_COLUMN,
-    SIDECAR_DUPLICATE_KEYS,
-    SIDECAR_ROWS,
-    SIDECAR_ROWS_ADDED,
-    SIDECAR_ROWS_DELETED,
-    SIDECAR_ROWS_MODIFIED_AMOUNT,
-    SIDECAR_ROWS_MODIFIED_PAYLOAD,
-    SIDECAR_ROWS_UNCHANGED,
-    SIDECAR_SCHEMA_CHANGES,
-    SIDECAR_SEED,
-)
-
 ##############################################
 ##############################################
 ##############################################
@@ -87,6 +74,9 @@ from _common import (
 # and the row count this constant was set to after that measurement.
 DEFAULT_SEED: Final[int] = 20260904
 DEFAULT_ROWS: Final[int] = 37_000_000
+
+# `b.parquet`'s one new column, on top of `a.parquet`'s five.
+ADDED_COLUMN: Final[str] = "note"
 
 # Row-group size: bounds the number of rows held as in-memory Python/Arrow
 # objects at once, independent of `--rows`.
@@ -423,15 +413,15 @@ def generate(rows: int, seed: int, out_dir: Path) -> dict[str, object]:
         writer_b.close()
 
     manifest: dict[str, object] = {
-        SIDECAR_SEED: seed,
-        SIDECAR_ROWS: rows,
-        SIDECAR_ROWS_DELETED: counters.deleted,
-        SIDECAR_ROWS_ADDED: counters.added,
-        SIDECAR_ROWS_MODIFIED_AMOUNT: counters.modified_amount,
-        SIDECAR_ROWS_MODIFIED_PAYLOAD: counters.modified_payload,
-        SIDECAR_ROWS_UNCHANGED: counters.unchanged,
-        SIDECAR_DUPLICATE_KEYS: 0,
-        SIDECAR_SCHEMA_CHANGES: [
+        "seed": seed,
+        "rows": rows,
+        "rows_deleted": counters.deleted,
+        "rows_added": counters.added,
+        "rows_modified_amount": counters.modified_amount,
+        "rows_modified_payload": counters.modified_payload,
+        "rows_unchanged": counters.unchanged,
+        "duplicate_keys": 0,
+        "schema_changes": [
             {"column": "category", "change": "type_changed", "left_type": "string", "right_type": "dictionary<int32, string>"},
             {"column": "ts", "change": "type_changed", "left_type": "timestamp[us, UTC]", "right_type": "timestamp[ms, UTC]"},
             {"column": ADDED_COLUMN, "change": "added", "left_type": None, "right_type": "string"},
