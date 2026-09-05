@@ -124,10 +124,9 @@ Replacing `<impl std::hash::Hash for ItemKey>::hash` with `()` (a no-op
 hasher) used to only surface as a `cargo-mutants` timeout: a no-op `ItemKey`
 hash sends every `FxHash`-backed table (`HashedList`, tuple digests) to one
 bucket, i.e. `O(n^2)`, and the suite-wide slowdown it caused tripped the
-tool's per-mutant test timeout before the old wall-clock
-`set_and_list_member_interning_scales_near_linearly` test's own `K -> 2K`
-ratio bound could fail cleanly — detected, but only as a hang. That test was
-replaced (issue #33) with
+tool's per-mutant test timeout before the previous timing-based test
+(removed, issue #33) could fail on its own bound — detected, but only as a
+hang. That test was replaced with
 `float_hash_buckets_stay_distinct_and_grow_linearly_with_member_count`, which
 hashes real `ItemKey`s through the crate's actual `FxHasher` and asserts the
 low bits of the resulting hash spread across (near-)distinct buckets for a
