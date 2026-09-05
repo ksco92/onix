@@ -1332,15 +1332,27 @@ proptest! {
     }
 }
 
+/// A memoized deep-nested `ignore_order` diff must recompute each level's
+/// pairing distance exactly once — the property a wall-clock bound used to
+/// guard here by timing, which failed once under parallel CI load even
+/// though the engine code was unchanged (noise-dominated the same way the
+/// K-vs-2K interning ratio was; see this module's other flaky-timing
+/// replacement). Measured directly instead, with no clock in the loop:
+///
+/// [`super::pairing::compute_pairs`] recomputes a container pair's distance
+/// only on an [`IgnoreOrderMemo`] cache miss (see [`IgnoreOrderMemo::put`]'s
+/// field doc), so [`IgnoreOrderMemo::put_count`] — every recomputation, not
+/// just the distinct entries a repeated `put` leaves behind — is a direct,
+/// deterministic stand-in for the "re-diffs each level twice, compounding
+/// `~2x` per level" cost the timing bound used to catch. A single-element
+/// nested list of depth `d` has exactly `d - 1` container-pair candidates
+/// (the outermost wrapper is never itself paired against anything), so a
+/// working memo leaves `put_count() == depth - 1`; confirmed by temporarily
+/// forcing [`IgnoreOrderMemo::get`] to always return `None` and re-running
+/// this test, which then reported `2^depth - 1` puts (8,191 at depth 14
+/// alone, where the working memo leaves 13) instead of failing on a clock.
 #[test]
-fn deep_nested_ignore_order_completes_quickly_with_memoization() {
-    use std::time::Instant;
-
-    // A single-element nested list of depth `d` is `d` nodes — tiny, legal
-    // input. Unmemoized, `ignore_order` pairing re-diffs each level twice
-    // (once to score the pair's distance, once to record it), compounding to
-    // `~2x` cost per level: this used to take ~1-2s at depth 20 and hang for
-    // tens of seconds by depth 25. The distance memo collapses it to linear.
+fn deep_nested_ignore_order_memoizes_distance_computations_linearly() {
     let opts = DiffOptions {
         ignore_order: true,
         max_depth: 100_000,
@@ -1353,28 +1365,31 @@ fn deep_nested_ignore_order_completes_quickly_with_memoization() {
         crate::value::Value::from(value)
     };
 
-    let (a, b) = (build(20, 1), build(20, 2));
-    let started = Instant::now();
-    let report = crate::diff::diff_with_options(&a, &b, &opts).expect("depth 20 diffs");
-    let depth_20 = started.elapsed();
-    assert!(
-        !report.is_empty(),
-        "depth-20 unequal input must report a change"
-    );
-    assert!(
-        depth_20.as_millis() < 500,
-        "depth-20 nested ignore_order took {depth_20:?}, over the 500ms bound"
-    );
+    let recomputations_at = |depth: usize| -> usize {
+        let (a, b) = (build(depth, 1), build(depth, 2));
+        let memo = IgnoreOrderMemo::new();
+        let report = crate::diff::diff_with_options_memo(&a, &b, &opts, &memo)
+            .unwrap_or_else(|e| panic!("depth-{depth} diffs: {e}"));
+        assert!(
+            !report.is_empty(),
+            "depth-{depth} unequal input must report a change"
+        );
+        memo.put_count()
+    };
 
-    // Depth 25 previously hung (>30s); it must now complete at all.
-    let (a, b) = (build(25, 1), build(25, 2));
-    let started = Instant::now();
-    let _ = crate::diff::diff_with_options(&a, &b, &opts).expect("depth 25 diffs");
-    let depth_25 = started.elapsed();
-    assert!(
-        depth_25.as_secs() < 5,
-        "depth-25 nested ignore_order took {depth_25:?}, over the 5s bound"
-    );
+    // Depth 25 previously hung for tens of seconds unmemoized; both depths
+    // are kept so a regression shows up well before it would need to.
+    for depth in [20usize, 25] {
+        let puts = recomputations_at(depth);
+        assert_eq!(
+            puts,
+            depth - 1,
+            "depth-{depth} nested ignore_order recomputed {puts} distances, \
+             expected exactly {} (one per level) — the distance memo is not \
+             being hit",
+            depth - 1
+        );
+    }
 }
 
 // --- tuples under ignore_order -------------------------------------------
