@@ -239,7 +239,17 @@ impl Value {
         match self {
             Value::Null => serde_json::Value::Null,
             Value::Bool(b) => serde_json::Value::Bool(*b),
-            Value::Number(n) => serde_json::Value::Number(n.to_serde_number()),
+            // A non-finite float has no `serde_json::Number` form at all;
+            // `null` is what the streaming parse path already renders for
+            // one arriving that way (see `ValueVisitor::visit_f64`), and
+            // this is unreachable from the CLI (JSON text cannot carry a
+            // `NaN`/`Infinity` literal) or from the Python bindings' own
+            // `to_json()` (`crate::guard::to_json_string` in `onix-py`
+            // renders a report directly, without going through this method,
+            // precisely so it can emit `NaN`/`Infinity` instead).
+            Value::Number(n) => n
+                .to_serde_number()
+                .map_or(serde_json::Value::Null, serde_json::Value::Number),
             Value::Str(s) => serde_json::Value::String(s.as_ref().to_owned()),
             Value::DateTime(value) => serde_json::Value::String(value.isoformat()),
             Value::Date(value) => serde_json::Value::String(value.isoformat()),
@@ -484,8 +494,14 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
 
 /// A JSON number preserving [`serde_json`]'s exact three-way representation:
 /// a non-negative integer (`u64`), a negative integer (`i64`), or a float
-/// (`f64`). Floats are always finite: the constructors reject non-finite
-/// input, so every stored `f64` round-trips through [`serde_json::Number`].
+/// (`f64`). A float built from JSON (via `Number::from_serde` or the
+/// streaming [`Deserialize`]) is always finite — JSON itself has no
+/// `NaN`/`Infinity` literal — but [`Number::from_f64`] is not limited to
+/// that boundary: it also builds the [`Number`] a Python `float` converts
+/// to, and Python's `float` can be non-finite, so a stored float need not
+/// round-trip through [`serde_json::Number`] ([`Value::to_serde_json`]
+/// falls back to `null` for one that can't, the same collapse the streaming
+/// parse path already used for a non-finite value arriving some other way).
 ///
 /// See the [module documentation](self) for why this int/float distinction
 /// is load-bearing for byte-compatible output.
@@ -503,7 +519,8 @@ enum NumberRepr {
     PosInt(u64),
     /// A negative integer.
     NegInt(i64),
-    /// A finite float.
+    /// A float — finite, or (via [`Number::from_f64`] only; a
+    /// `serde_json::Number` is always finite) `NaN`/`Infinity`/`-Infinity`.
     Float(f64),
 }
 
@@ -530,14 +547,20 @@ impl Number {
         }
     }
 
-    /// Builds a number from an `f64`, returning `None` for non-finite input
-    /// (`NaN`/`Infinity`), which JSON cannot represent — mirroring
-    /// [`serde_json::Number::from_f64`].
+    /// Builds a number from an `f64`, finite or not.
+    ///
+    /// Unlike `Number::from_serde` (which mirrors
+    /// [`serde_json::Number::from_f64`] and only ever sees a finite value,
+    /// because a `serde_json::Number` is finite by construction), this
+    /// constructor is also the Python-`float` boundary
+    /// (`crate::convert::float_to_value` in `onix-py`), where a `NaN` or an
+    /// infinity is an ordinary, legal input — so it always succeeds and
+    /// stores exactly the bits it was given.
     #[must_use]
-    pub fn from_f64(value: f64) -> Option<Self> {
-        value.is_finite().then_some(Self {
+    pub fn from_f64(value: f64) -> Self {
+        Self {
             repr: NumberRepr::Float(value),
-        })
+        }
     }
 
     /// Returns `true` if this number was parsed/stored as a float.
@@ -605,13 +628,18 @@ impl Number {
         }
     }
 
-    /// Reconstructs the exact [`serde_json::Number`] this value came from.
-    fn to_serde_number(&self) -> serde_json::Number {
+    /// Reconstructs the exact [`serde_json::Number`] this value came from, or
+    /// `None` for a non-finite float — the one stored value JSON cannot
+    /// represent at all (not even as an "impossible" `serde_json::Number`;
+    /// [`serde_json::Number::from_f64`] itself rejects it). The caller
+    /// ([`Value::to_serde_json`]) falls back to `null`, matching how the
+    /// streaming parse path already collapses a non-finite value reaching it
+    /// some other way (see [`ValueVisitor::visit_f64`]).
+    fn to_serde_number(&self) -> Option<serde_json::Number> {
         match self.repr {
-            NumberRepr::PosInt(u) => serde_json::Number::from(u),
-            NumberRepr::NegInt(i) => serde_json::Number::from(i),
-            NumberRepr::Float(f) => serde_json::Number::from_f64(f)
-                .expect("stored floats are finite by construction, so from_f64 succeeds"),
+            NumberRepr::PosInt(u) => Some(serde_json::Number::from(u)),
+            NumberRepr::NegInt(i) => Some(serde_json::Number::from(i)),
+            NumberRepr::Float(f) => serde_json::Number::from_f64(f),
         }
     }
 }
@@ -706,6 +734,18 @@ impl SetItems {
     /// dedup here exactly as a real Python `set` would (they hash and
     /// compare equal there too), instead of surviving as two members the
     /// way `(1,)`/`(1.0,)` do.
+    ///
+    /// A `NaN` member dedups too, but only against a bit-identical `NaN` —
+    /// `canonical_cmp` never folds two differently-signed or -payloaded
+    /// `NaN`s together, so it stays no coarser there than `PartialEq` (which
+    /// never calls two `NaN`s equal at all). A real Python `set` can hold two
+    /// members that are both, individually, `float('nan')` — `nan != nan`
+    /// means they never dedup by value — so this is a real, if narrow,
+    /// divergence: this crate's value model has no notion of the *object
+    /// identity* Python's set falls back on, so a bit-identical pair of
+    /// `NaN`s collapses to one canonical member here where two independently
+    /// constructed Python `NaN` objects would not. See
+    /// `tests/golden/README.md`'s "Non-finite floats" section.
     ///
     /// Comparing structurally rather than by identity is also what keeps
     /// this cheap: a comparison stops at the first difference, where
@@ -881,7 +921,8 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     Ordering::Equal
 }
 
-/// Maps `-0.0` to `+0.0` and leaves every other float unchanged.
+/// Maps `-0.0` to `+0.0` and leaves every other float — including a `NaN` of
+/// any sign or payload — unchanged.
 ///
 /// `-0.0` and `+0.0` are one value: Python's `==` and `hash` agree on it (a
 /// `set` can hold only one), and so does [`Number`]'s own [`PartialEq`]
@@ -889,13 +930,35 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
 /// sign away first with this function, so all of them agree with each other
 /// and with that equality — `canonical_cmp`'s [`number_cmp`], and
 /// `crate::ignore_order::hash`'s `number_key` and `keyed`.
+///
+/// `NaN` is deliberately excluded from the `+ 0.0` fold rather than just
+/// happening to pass through it unchanged: IEEE-754 addition does not
+/// guarantee a NaN operand's own bits survive an arithmetic op — on this
+/// crate's tier-1 targets it quiets a signaling NaN (flips its top mantissa
+/// bit), which would make [`number_cmp`]'s [`f64::total_cmp`] (and
+/// `crate::ignore_order::hash`'s bit-based keys) silently key two distinct
+/// inputs on a value neither one actually is. Skipping the fold for any
+/// `NaN` keeps this function the identity on every bit pattern it does not
+/// explicitly normalize.
 pub(crate) fn fold_signed_zero(f: f64) -> f64 {
-    f + 0.0
+    if f.is_nan() { f } else { f + 0.0 }
 }
 
 /// [`canonical_cmp`]'s number case, for two numbers of the same kind (an
 /// int and a float are already ranked apart). Orders by [`fold_signed_zero`]
-/// of each float, so this agrees with [`Number`]'s own [`PartialEq`].
+/// of each float, so this agrees with [`Number`]'s own [`PartialEq`] on every
+/// non-`NaN` pair.
+///
+/// [`f64::total_cmp`] gives `NaN` a well-defined (if arbitrary) place in the
+/// order, by raw bits, so two floats that are `NaN` compare `Equal` here
+/// exactly when they share a bit pattern — coarser than [`Number`]'s
+/// [`PartialEq`], which (matching Python's `nan != nan`) never calls two
+/// `NaN`s equal. This is safe for [`SetItems::new`]'s dedup: it can only
+/// ever *drop* two bit-identical `NaN`s into one canonical member, a
+/// deterministic choice `tests/golden/README.md`'s "Non-finite floats"
+/// section documents as a divergence from a real Python `set` (which keeps
+/// two distinct-`NaN`-object members apart by identity, something this
+/// crate's value model has no notion of).
 fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
     if a.is_f64() {
         let af = fold_signed_zero(a.as_f64().unwrap_or_default());
@@ -1266,9 +1329,15 @@ impl<'de> Visitor<'de> for ValueVisitor<'_> {
     }
 
     fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+        if value.is_finite() {
+            return Ok(Value::Number(Number::from_f64(value)));
+        }
         // Non-finite floats have no JSON representation; collapse to Null,
-        // exactly as serde_json::Value's own visitor does.
-        Ok(Number::from_f64(value).map_or(Value::Null, Value::Number))
+        // exactly as serde_json::Value's own visitor does. Unreachable
+        // through serde_json's own parser (its grammar has no
+        // `NaN`/`Infinity` literal), so this only matters for another
+        // `Deserializer` implementation driving this same `Visitor`.
+        Ok(Value::Null)
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Value, E> {

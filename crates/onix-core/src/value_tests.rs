@@ -58,16 +58,24 @@ fn number_int_ranges_preserve_representation() {
 
 #[test]
 fn number_float_specials_and_conversions() {
-    let neg_zero = Number::from_f64(-0.0).expect("-0.0 is finite");
+    let neg_zero = Number::from_f64(-0.0);
     assert!(neg_zero.is_f64());
     assert_eq!(neg_zero.as_i64(), None);
     assert_eq!(neg_zero.as_u64(), None);
     assert_eq!(neg_zero.as_f64(), Some(-0.0));
 
-    // Non-finite floats have no JSON representation.
-    assert!(Number::from_f64(f64::NAN).is_none());
-    assert!(Number::from_f64(f64::INFINITY).is_none());
-    assert!(Number::from_f64(f64::NEG_INFINITY).is_none());
+    // Non-finite floats have no JSON representation, but `Number` itself
+    // stores one like any other float (see `Number::from_f64`'s own doc):
+    // this is the Python-`float` boundary, not the JSON one.
+    let nan = Number::from_f64(f64::NAN);
+    assert!(nan.is_f64());
+    assert!(nan.as_f64().is_some_and(f64::is_nan));
+
+    let inf = Number::from_f64(f64::INFINITY);
+    assert_eq!(inf.as_f64(), Some(f64::INFINITY));
+
+    let neg_inf = Number::from_f64(f64::NEG_INFINITY);
+    assert_eq!(neg_inf.as_f64(), Some(f64::NEG_INFINITY));
 
     // Integer -> f64 views.
     assert_eq!(Number::from_u64(9).as_f64(), Some(9.0));
@@ -724,7 +732,7 @@ fn canonical_order_ranks_by_kind_then_value() {
         Value::Number(Number::from_u64(10)),
         Value::Null,
         Value::Number(Number::from_u64(2)),
-        Value::Number(Number::from_f64(1.5).expect("finite")),
+        Value::Number(Number::from_f64(1.5)),
         Value::Bool(true),
         ctup(&[json!(1)]),
         cfrozen(&[json!(1)]),
@@ -782,9 +790,9 @@ fn set_items_drop_a_member_equal_to_an_earlier_one() {
 fn set_items_keep_members_that_only_look_alike() {
     let items = SetItems::new(vec![
         Value::Number(Number::from_u64(1)),
-        Value::Number(Number::from_f64(1.0).expect("finite")),
+        Value::Number(Number::from_f64(1.0)),
         Value::Bool(true),
-        Value::Number(Number::from_f64(2.0).expect("finite")),
+        Value::Number(Number::from_f64(2.0)),
         Value::Number(Number::from_u64(u64::MAX)),
         Value::Number(Number::from_i64(-1)),
     ]);
@@ -801,21 +809,18 @@ fn set_items_keep_members_that_only_look_alike() {
 #[test]
 fn set_items_dedup_signed_zero_like_a_real_python_set() {
     let items = SetItems::new(vec![
-        Value::Number(Number::from_f64(-0.0).expect("finite")),
-        Value::Number(Number::from_f64(0.0).expect("finite")),
+        Value::Number(Number::from_f64(-0.0)),
+        Value::Number(Number::from_f64(0.0)),
     ]);
     assert_eq!(items.len(), 1);
-    assert_eq!(
-        items[0],
-        Value::Number(Number::from_f64(0.0).expect("finite"))
-    );
+    assert_eq!(items[0], Value::Number(Number::from_f64(0.0)));
     assert_eq!(items[0].to_serde_json().to_string(), "-0.0");
 
     // Reversed input order keeps the other representative — first inserted
     // wins either way.
     let items = SetItems::new(vec![
-        Value::Number(Number::from_f64(0.0).expect("finite")),
-        Value::Number(Number::from_f64(-0.0).expect("finite")),
+        Value::Number(Number::from_f64(0.0)),
+        Value::Number(Number::from_f64(-0.0)),
     ]);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].to_serde_json().to_string(), "0.0");
@@ -827,6 +832,73 @@ fn set_items_dedup_signed_zero_like_a_real_python_set() {
     // Python `{(-0.0,), (0.0,)}` does.
     let items = SetItems::new(vec![ctup(&[json!(-0.0)]), ctup(&[json!(0.0)])]);
     assert_eq!(items.len(), 1);
+}
+
+/// Two bit-identical `NaN`s dedup like a real Python `set` would (deemed
+/// deterministic and acceptable — see `tests/golden/README.md`'s "Non-finite
+/// floats" section for the narrow divergence from a real Python set holding
+/// two *distinct* `NaN` objects, which this crate's value model has no way
+/// to tell apart from one bit-identical `NaN` seen twice), while two
+/// differently-signed `NaN`s — never `Value`-equal, and never folded
+/// together by `canonical_cmp` — are kept as two distinct members.
+#[test]
+fn set_items_dedup_bit_identical_nan_but_keep_differently_signed_nan_apart() {
+    let items = SetItems::new(vec![
+        Value::Number(Number::from_f64(f64::NAN)),
+        Value::Number(Number::from_f64(f64::NAN)),
+    ]);
+    assert_eq!(items.len(), 1);
+
+    let items = SetItems::new(vec![
+        Value::Number(Number::from_f64(f64::NAN)),
+        Value::Number(Number::from_f64(-f64::NAN)),
+    ]);
+    assert_eq!(items.len(), 2);
+}
+
+/// `Value::to_serde_json` cannot hold a non-finite float (`serde_json`'s own
+/// `Number::from_f64` rejects it, matching the JSON spec) — it falls back to
+/// `null`, the same collapse the streaming `Deserialize` path already uses
+/// for one arriving that way (see `non_finite_float_deserializes_to_null_like_serde_json`).
+#[test]
+fn to_serde_json_renders_a_non_finite_number_as_null() {
+    for f in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let value = Value::Number(Number::from_f64(f));
+        assert_eq!(value.to_serde_json(), serde_json::Value::Null, "for {f:?}");
+    }
+
+    // Nested inside a container, too — not just the bare top-level case.
+    let nested = Value::Array(vec![Value::Number(Number::from_f64(f64::NAN))].into_boxed_slice());
+    assert_eq!(nested.to_serde_json(), serde_json::json!([null]));
+}
+
+/// [`fold_signed_zero`] must leave a `NaN`'s bits alone (see that function's
+/// own doc): IEEE `+ 0.0` is not guaranteed to be the identity on a `NaN`
+/// (it quiets a signaling `NaN` on this crate's targets), which would
+/// otherwise make [`canonical_cmp`]/hashing silently key a `NaN` on a bit
+/// pattern it never actually had.
+#[test]
+fn fold_signed_zero_preserves_every_nan_bit_pattern() {
+    use super::fold_signed_zero;
+
+    for bits in [
+        0x7ff8_0000_0000_0000_u64, // canonical quiet NaN
+        0x7ff0_0000_0000_0001_u64, // a signaling NaN payload
+        0xfff8_0000_0000_0000_u64, // negative-signed quiet NaN
+        0xfff0_0000_0000_0001_u64, // negative-signed signaling NaN
+    ] {
+        let f = f64::from_bits(bits);
+        assert_eq!(
+            fold_signed_zero(f).to_bits(),
+            bits,
+            "fold_signed_zero must not change a NaN's bits"
+        );
+    }
+
+    // Still folds an ordinary signed zero, and leaves every other float
+    // untouched.
+    assert_eq!(fold_signed_zero(-0.0).to_bits(), 0.0_f64.to_bits());
+    assert_eq!(fold_signed_zero(1.5).to_bits(), 1.5_f64.to_bits());
 }
 
 /// Two members Python would call equal but that are structurally different

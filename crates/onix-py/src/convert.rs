@@ -12,7 +12,7 @@
 //! | `None` | `Null` | |
 //! | `bool` | `Bool` | checked before `int` — `bool` is a Python `int` subclass |
 //! | `int` | `Number` | must fit in `i64` or `u64`; see below |
-//! | `float` | `Number` | must be finite; see below |
+//! | `float` | `Number` | `NaN`/`Infinity`/`-Infinity` included |
 //! | `str` | `Str` | must be encodable as UTF-8; see below |
 //! | `dict` | `Object` | keys below; `str` keys interned across the whole walk |
 //! | `list` | `Array` | |
@@ -29,8 +29,6 @@
 //! - An `int` outside `i64::MIN..=u64::MAX` raises [`PyValueError`]:
 //!   arbitrary-precision integers are not supported in this MVP (real
 //!   `DeepDiff` supports them natively).
-//! - A `NaN` or infinite `float` raises [`PyValueError`] (JSON has no
-//!   representation for either).
 //! - A `str` containing a lone (unpaired) surrogate code point (e.g.
 //!   `"\udc80"`) raises [`PyValueError`] naming the exact path: it has no
 //!   UTF-8 encoding. See `tests/golden/README.md` for why this diverges from
@@ -307,7 +305,7 @@ fn classify<'py>(
     }
 
     if let Ok(f) = current.cast::<PyFloat>() {
-        return Ok(Step::Done(float_to_value(f.value())?));
+        return Ok(Step::Done(float_to_value(f.value())));
     }
 
     if let Ok(s) = current.cast::<PyString>() {
@@ -825,13 +823,11 @@ fn int_to_value(i: &Bound<'_, PyInt>) -> PyResult<CValue> {
     ))
 }
 
-fn float_to_value(f: f64) -> PyResult<CValue> {
-    CNumber::from_f64(f).map(CValue::Number).ok_or_else(|| {
-        PyValueError::new_err(
-            "NaN and infinite floats have no JSON representation and are not supported in this \
-             MVP",
-        )
-    })
+/// Every `float` converts, including `NaN`/`Infinity`/`-Infinity`: unlike
+/// JSON, a Python `float` has no finiteness restriction, and
+/// [`CNumber::from_f64`] stores whichever bits it is given.
+fn float_to_value(f: f64) -> CValue {
+    CValue::Number(CNumber::from_f64(f))
 }
 
 fn max_depth_error(max_depth: usize, path: &[PathSegment]) -> PyErr {
