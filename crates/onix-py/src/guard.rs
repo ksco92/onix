@@ -192,13 +192,114 @@ pub(crate) fn serialize_value(py: Python<'_>, value: &Value, deep: bool) -> PyRe
     serialized.map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
-/// Renders one compact [`Value`] to JSON text. Every natively recursive step
-/// this needs — building the transient `serde_json::Value`, serializing it,
-/// and dropping it again — happens inside this one call, so routing this
-/// function to the sized worker is enough to keep a deep report off the
-/// calling thread's stack entirely.
+/// Renders one compact [`Value`] to JSON text, matching real `DeepDiff`'s own
+/// `to_json()`: a `NaN`, `Infinity` or `-Infinity` renders as the bare,
+/// non-standard token Python's `json.dumps` writes for one by default, which
+/// [`serde_json`] cannot represent on its own. The whole tree is checked for
+/// a non-finite float once, here; [`write_json`] then renders each leaf's
+/// token from that leaf's own `is_finite()`, never rescanning a subtree.
 fn to_json_string(value: &Value) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&value.to_serde_json())
+    if !has_non_finite_float(value) {
+        return serde_json::to_string(&value.to_serde_json());
+    }
+    let mut out = String::new();
+    write_json(value, &mut out)?;
+    Ok(out)
+}
+
+/// Returns `true` if `value` is, or contains anywhere within it, a
+/// non-finite float.
+fn has_non_finite_float(value: &Value) -> bool {
+    match value {
+        Value::Number(n) => n.as_f64().is_some_and(|f| !f.is_finite()),
+        Value::Array(items) | Value::Tuple(items) => items.iter().any(has_non_finite_float),
+        Value::Set(items) | Value::FrozenSet(items) => items.iter().any(has_non_finite_float),
+        Value::Object(obj) => obj.values().any(has_non_finite_float),
+        Value::Null
+        | Value::Bool(_)
+        | Value::Str(_)
+        | Value::DateTime(_)
+        | Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeDelta(_) => false,
+    }
+}
+
+/// [`to_json_string`]'s slow path, reached only once [`has_non_finite_float`]
+/// has confirmed (once, for the whole tree, by the caller) that `value`
+/// contains a non-finite float somewhere in it. Writes every node's JSON
+/// text by hand — a `Number` decides its own rendering directly from its own
+/// finiteness (the literal token, or `Value::to_serde_json` for a finite
+/// one), and every container writes its children the same way — so the walk
+/// touches each node exactly once, `O(nodes)` total, with no re-scanning of
+/// what an ancestor already covered. An object key renders through
+/// [`onix_core::value::object_key_json_string`], the same non-`str`-key
+/// rendering [`Value::to_serde_json`] uses, so the two rendering paths agree
+/// on a key regardless of which one a given report takes.
+fn write_json(value: &Value, out: &mut String) -> Result<(), serde_json::Error> {
+    match value {
+        Value::Number(n) => {
+            let f = n
+                .as_f64()
+                .expect("a Number is always an i64, a u64, or an f64");
+            if f.is_finite() {
+                out.push_str(&serde_json::to_string(&value.to_serde_json())?);
+            } else if f.is_nan() {
+                out.push_str("NaN");
+            } else if f.is_sign_positive() {
+                out.push_str("Infinity");
+            } else {
+                out.push_str("-Infinity");
+            }
+        }
+        Value::Array(items) | Value::Tuple(items) => write_json_seq(items.iter(), out)?,
+        Value::Set(items) | Value::FrozenSet(items) => write_json_seq(items.iter(), out)?,
+        Value::Object(obj) => {
+            out.push('{');
+            for (index, (key, child)) in obj.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(
+                    &onix_core::value::object_key_json_string(key),
+                )?);
+                out.push(':');
+                write_json(child, out)?;
+            }
+            out.push('}');
+        }
+        // An ordinary leaf below a non-finite one somewhere else in the
+        // tree (not unreachable: this function no longer pre-filters by
+        // containment, see this function's own doc).
+        Value::Null
+        | Value::Bool(_)
+        | Value::Str(_)
+        | Value::DateTime(_)
+        | Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeDelta(_) => {
+            out.push_str(&serde_json::to_string(&value.to_serde_json())?);
+        }
+    }
+    Ok(())
+}
+
+/// [`write_json`]'s array/tuple/set/frozenset case: every one of `Value`'s
+/// sequence-shaped variants renders as a JSON array (matching real
+/// `DeepDiff`'s `to_json()`; see `Value::to_serde_json`'s own doc).
+fn write_json_seq<'a>(
+    items: impl Iterator<Item = &'a Value>,
+    out: &mut String,
+) -> Result<(), serde_json::Error> {
+    out.push('[');
+    for (index, item) in items.enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        write_json(item, out)?;
+    }
+    out.push(']');
+    Ok(())
 }
 
 /// Runs `f` on a dedicated worker thread whose stack is large enough for the

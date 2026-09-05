@@ -104,6 +104,67 @@ fn non_integral_floats_compare_by_value() {
     assert!(!python_scalar_eq(&json!(1.5), &json!(2.5)));
 }
 
+// `NaN` cannot arrive via `json!`/`cv` (`serde_json::Number` is finite by
+// construction), so these build the compact `Value` directly rather than
+// through the `serde_json`-literal wrapper the tests above share.
+#[test]
+fn two_distinct_nans_are_never_python_equal() {
+    use crate::value::{Number, Value};
+
+    let a = Value::Number(Number::from_f64(f64::NAN));
+    let b = Value::Number(Number::from_f64(f64::NAN));
+    assert_ne!(
+        super::python_scalar_key(&a),
+        super::python_scalar_key(&b),
+        "two independently-built NaN values must never share a ScalarKey"
+    );
+}
+
+#[test]
+fn the_same_nan_value_reference_yields_the_same_scalar_key() {
+    use crate::value::{Number, Value};
+
+    let a = Value::Number(Number::from_f64(f64::NAN));
+    assert_eq!(
+        super::python_scalar_key(&a),
+        super::python_scalar_key(&a),
+        "hashing/keying the same Value node twice must agree with itself"
+    );
+}
+
+#[test]
+fn nan_and_infinity_never_share_a_scalar_key() {
+    use crate::value::{Number, Value};
+
+    let nan = Value::Number(Number::from_f64(f64::NAN));
+    let inf = Value::Number(Number::from_f64(f64::INFINITY));
+    assert_ne!(
+        super::python_scalar_key(&nan),
+        super::python_scalar_key(&inf)
+    );
+}
+
+#[test]
+fn scalar_key_nan_hashes_and_is_usable_as_a_hashmap_key() {
+    use std::collections::HashMap;
+
+    use crate::value::{Number, Value};
+
+    let a = Value::Number(Number::from_f64(f64::NAN));
+    let b = Value::Number(Number::from_f64(f64::NAN));
+    let key_a = super::python_scalar_key(&a).expect("NaN is a scalar");
+    let key_b = super::python_scalar_key(&b).expect("NaN is a scalar");
+
+    let mut map: HashMap<super::ScalarKey, &str> = HashMap::new();
+    map.insert(key_a.clone(), "a");
+    map.insert(key_b.clone(), "b");
+    // Two distinct NaNs never collapse to one entry, matching Python's own
+    // `nan != nan` (see `super::ScalarKey::Nan`'s own doc).
+    assert_eq!(map.len(), 2);
+    assert_eq!(map.get(&key_a), Some(&"a"));
+    assert_eq!(map.get(&key_b), Some(&"b"));
+}
+
 // --- compute_opcodes -------------------------------------------------
 
 fn vals(items: &[i64]) -> Vec<serde_json::Value> {

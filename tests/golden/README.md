@@ -488,6 +488,75 @@ opaque path string — is why that batch caps a nested frozenset at one member.
 array. No golden case can exist for that shape — `expected.json` could not be
 generated — so it is pinned in `test_sets.py` instead.
 
+## Non-finite floats: where onix is deliberately different
+
+For a comparison, `NaN`/`Infinity`/`-Infinity` behave exactly like real
+`DeepDiff`, verified against `deepdiff==9.1.0`: `NaN != NaN`,
+`Infinity == Infinity`, and `to_json()` renders the same bare
+`NaN`/`Infinity`/`-Infinity` tokens Python's `json.dumps` writes by default
+(`allow_nan=True`) rather than quoting them or raising. Under `ignore_order`,
+matching agrees too: `DeepHash` digests any `NaN` by `str(obj)`
+(`deephash.py::_prep_number`), which is the same three characters for every
+`NaN` regardless of its sign or payload bits, so every `NaN` in a list, dict
+value, or set member matches every other one; `onix`'s `ItemKey::Float`
+reproduces that by collapsing every `NaN` onto one shared key (see
+`crate::ignore_order::hash::deephash_float_bits`'s own doc, in
+`crates/onix-core/src/ignore_order/hash.rs`), so this is not a golden gap —
+these cases could be goldens, except that `serde_json` (which the golden
+pipeline's `expected.json` round-trips through) cannot parse the bare `NaN`
+token back out of JSON text at all; they are pinned instead in
+`crates/onix-py/tests/test_non_finite.py`, comparing rendered JSON text
+directly (sidestepping `NaN != NaN` in the comparison itself).
+
+The one real divergence, in every case deterministic and traceable to the
+same cause: this crate's value model carries no Python object identity, and
+real `DeepDiff`/`CPython` occasionally use it as a shortcut that lets one
+`NaN` match itself where two independently-obtained `NaN`s would not:
+
+```text
+DeepDiff(nan, nan) where both sides are literally the same object (t1 is t2)
+  -> {} : DeepDiff's own diff() short-circuits on t1 is t2 before comparing
+DeepDiff(nan, nan) with two distinct NaN objects -> values_changed
+onix -> values_changed always: it has no notion of "the same object", so it
+  always takes the distinct-objects answer (the overwhelmingly common case)
+```
+
+```text
+{nan_a, nan_b}  (two distinct NaN objects, same bits) carried whole as an
+  added/removed *value* rather than diffed member by member, e.g.
+  DeepDiff({'a': 1}, {'a': 1, 'b': {nan_a, nan_b}})
+  -> dictionary_item_added: {"root['b']": {nan, nan}}, the real, untouched
+     2-member set (hash(nan) collides, but the identity-then-equality probe
+     finds neither `is` nor `==`, so a real Python set keeps both)
+onix -> SetItems::new (crate::value) canonicalizes at conversion time, before
+  the diff runs: two bit-identical NaNs fold into one canonical member, so
+  the carried set has one member, not two — deterministic (same bits always
+  dedup the same way, regardless of insertion order), but a real divergence
+  from this specific real-Python set. `_diff_set` itself (comparing two sets
+  against each other, member by member, with or without `ignore_order`)
+  already reduces to one entry per content digest on *both* tools' side —
+  see the "which member of an equality class wins" point above — so this
+  divergence is visible only when the set survives whole into the report,
+  never in the set_item_added/set_item_removed categories themselves.
+```
+
+```text
+A list holding the SAME NaN object twice, compared against a shifted copy
+  -> difflib's b2j index (a dict) matches that position to itself via the
+     identity-before-equality probe CPython dict/list internals use
+onix -> never matches: `ScalarKey::Nan` keys by the compact Value node's own
+  address (crate::lcs::python_scalar_key, crates/onix-core/src/lcs.rs), which
+  is fresh per occurrence by construction — the same posture DeepDiff takes
+  for two independently-obtained NaN objects, just applied uniformly
+```
+
+`crates/onix-core/src/value.rs`'s `SetItems::new` doc and
+`crates/onix-core/src/lcs.rs`'s `ScalarKey::Nan` doc have the full mechanism
+for the second and third points; `crates/onix-core/src/ignore_order/tests.rs`'s
+`dist_key_hash_collision_on_distinct_nans_never_becomes_equality` pins that a
+hash collision between two distinct `NaN`s (deliberate, matching `DeepHash`)
+never becomes a false equality in the distance memo.
+
 ## Known DeepDiff quirks
 
 - **Key quoting does not escape anything.** `DeepDiff`'s path rendering
@@ -762,15 +831,29 @@ that generates `tuple` dict keys (issue #62) excludes the empty tuple for
 this reason; see `crates/onix-py/tests/test_differential_fuzz.py`'s
 `_gen_non_str_dict_key`.
 
+**A non-finite `float` (`nan`/`inf`) dict key is also a real, narrow
+`DeepDiff` bug, not reproduced.** `stringify_param`'s `repr()`-then-
+`ast.literal_eval` round trip fails on `"nan"`/`"inf"` (neither parses as a
+Python literal) and silently collapses the key to `None`, the same way the
+empty-tuple case above does — confirmed live: `DeepDiff({}, {float('nan'):
+1}).to_json()` is `{"dictionary_item_added": {"null": 1}}`, with a warning
+printed. `onix` instead renders the key deterministically — `root[nan]` as
+a path segment, and the bare `NaN`/`Infinity`/`-Infinity` token text (the
+same a *value* of the same bits gets) wherever the key is embedded in a
+carried JSON object — per the same compatibility-policy choice. See
+`crates/onix-py/tests/test_non_finite.py`'s
+`test_non_finite_dict_key_renders_without_crashing`.
+
 Every other divergence found while building the corpus was fixed in `onix-core` to match
 `DeepDiff` exactly. The path-rendering collision exception, the multi-member
 nested-`frozenset`-rendering exception (both above), the three
 set-iteration-order differences, the list-LCS `2^53` limitation, the
 naive-datetime pairing timezone above, the `time` seconds-of-day hashing
-quirk under `ignore_order` above, the lone-surrogate `ValueError`, the
-empty-tuple-key bug just described, and the Unicode-version `str`-repr
-divergence documented under "Pinned versions" above are the only accepted,
-documented exceptions —
+quirk under `ignore_order` above, the non-finite-float object-identity
+divergence documented under "Non-finite floats" above, the lone-surrogate
+`ValueError`, the empty-tuple-key and non-finite-float-key bugs just
+described, and the Unicode-version `str`-repr divergence documented under
+"Pinned versions" above are the only accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
 `scripts/differential_fuzz.py`) found zero *other* unexplained

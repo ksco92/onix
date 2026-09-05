@@ -177,12 +177,14 @@ pub(crate) struct IgnoreOrderMemo {
     node_table: RefCell<BTreeMap<MemberHashKey, (NodeId, RepId)>>,
     /// Set-member content interning: each distinct [`MemberContent`] gets one
     /// [`RepId`] (its `usize` index), so content-equal members — a naive and an
-    /// aware datetime at one instant included — collapse to one id. A
-    /// [`BTreeMap`] for the same collision-immunity reason as `node_table`;
-    /// per-lookup cost is `O(log n)` comparisons, each a full walk of the
-    /// probed `MemberContent` — a `MemberContent::UnhashableDict` key is
-    /// itself keyed by each of the dict's own keys' `ItemKey` trees (a
-    /// `tuple` dict key included), not a cheap string ordering.
+    /// aware datetime at one instant, and (via the [`ItemKey::Float`] a
+    /// `MemberContent::Scalar` embeds) every `NaN` regardless of its own
+    /// bits — collapse to one id. A [`BTreeMap`] for the same
+    /// collision-immunity reason as `node_table`; per-lookup cost is
+    /// `O(log n)` comparisons, each a full walk of the probed
+    /// `MemberContent` — a `MemberContent::UnhashableDict` key is itself
+    /// keyed by each of the dict's own keys' `ItemKey` trees (a `tuple`
+    /// dict key included), not a cheap string ordering.
     member_content: RefCell<BTreeMap<MemberContent, RepId>>,
     enabled: bool,
     /// Total number of times [`Self::put`] has actually run — every distance

@@ -189,9 +189,11 @@ pub(crate) enum ItemKey {
     /// `serde_json::Number`'s non-float representation is always an `i64`
     /// or `u64`, both of which fit losslessly in `i128`.
     Int(i128),
-    /// A JSON value `serde_json` parsed as a float, keyed by its exact bit
-    /// pattern — kept as its own bucket even when whole-numbered (`5.0`
-    /// never collides with `Int(5)`; see this type's own doc).
+    /// A float, keyed by [`deephash_float_bits`] — its exact bit pattern for
+    /// any finite value (kept as its own bucket even when whole-numbered:
+    /// `5.0` never collides with `Int(5)`; see this type's own doc), but one
+    /// fixed representative for *every* `NaN` regardless of its bits, since
+    /// `DeepHash` digests any `NaN` the same way (see that function's doc).
     Float(u64),
     Str(String),
     /// A `datetime`, keyed by its instant with a naive value read as UTC —
@@ -678,15 +680,44 @@ fn scalar_content_key(value: &Value) -> ItemKey {
     }
 }
 
+/// The bit pattern [`ItemKey::Float`] keys a float by:
+/// [`crate::value::fold_signed_zero`] for every finite value (agreeing with
+/// [`crate::value::Number`]'s `PartialEq` and `canonical_cmp`'s
+/// `number_cmp`), and one fixed representative for *every* `NaN`,
+/// regardless of its own sign or payload bits.
+///
+/// This is deliberately **coarser** than [`crate::value::fold_signed_zero`]
+/// (which leaves a `NaN`'s bits alone) and coarser than
+/// [`crate::value::Number`]'s own `PartialEq` (under which no two `NaN`s are
+/// ever equal): `DeepHash._prep_number`
+/// builds its digest from `str(obj)` when `significant_digits` is unset (the
+/// only mode this crate reproduces), and `str()` of *any* `NaN` — whatever
+/// its bits — is the same three characters, `"nan"`. Collapsing every `NaN`
+/// onto one [`ItemKey`] is what makes `onix`'s `ignore_order` item/member
+/// matching agree with that: two list elements, dict values, or set members
+/// that are each independently a `NaN` hash-match here exactly as they do
+/// under real `DeepHash`, confirmed against `deepdiff==9.1.0` (`[nan_a]` vs
+/// `[nan_b]`, two *distinct* `NaN` objects, is `{}` under `ignore_order`).
+/// `Infinity`/`-Infinity` need no such collapse: `str(inf)` and `str(-inf)`
+/// already differ, matching their (already distinct) bit patterns.
+fn deephash_float_bits(f: f64) -> u64 {
+    if f.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        crate::value::fold_signed_zero(f).to_bits()
+    }
+}
+
 /// The type-distinct key for a bare number, mirroring [`ItemKey`]'s own
-/// number rule (see [`crate::value::fold_signed_zero`] for the signed-zero
-/// note).
+/// number rule (see [`deephash_float_bits`] for the float rule, including
+/// its `NaN` collapse, and [`crate::value::fold_signed_zero`] for the
+/// signed-zero note).
 fn number_key(n: &crate::value::Number) -> ItemKey {
     if n.is_f64() {
         let f = n
             .as_f64()
             .expect("Number::is_f64 guarantees as_f64 succeeds");
-        return ItemKey::Float(crate::value::fold_signed_zero(f).to_bits());
+        return ItemKey::Float(deephash_float_bits(f));
     }
     if let Some(i) = n.as_i64() {
         return ItemKey::Int(i128::from(i));
@@ -742,13 +773,14 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
                 let f = n
                     .as_f64()
                     .expect("Number::is_f64 guarantees as_f64 succeeds");
-                // See `crate::value::fold_signed_zero`: it is the identity on
-                // every float but `-0.0`, so an integral float like `2.0`
+                // See `deephash_float_bits`: it is the identity on every
+                // finite float but `-0.0`, so an integral float like `2.0`
                 // keeps a distinct `Float` key from the integer `2` (this
                 // deliberately does NOT take the ordered path's `ScalarKey`
                 // integral-to-`Int` canonicalization — the two paths have
-                // genuinely different number semantics).
-                ItemKey::Float(crate::value::fold_signed_zero(f).to_bits())
+                // genuinely different number semantics), and it collapses
+                // every `NaN` onto one shared key regardless of bits.
+                ItemKey::Float(deephash_float_bits(f))
             } else if let Some(i) = n.as_i64() {
                 ItemKey::Int(i128::from(i))
             } else {

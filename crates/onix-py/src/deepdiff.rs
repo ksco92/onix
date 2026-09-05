@@ -23,7 +23,8 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 ///
 /// `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`:
 ///
-/// - `t1`/`t2`: any of `None`, `bool`, `int`, `float`, `str`, `dict` (a key
+/// - `t1`/`t2`: any of `None`, `bool`, `int`, `float` (`NaN`/`Infinity`/
+///   `-Infinity` included), `str`, `dict` (a key
 ///   may be `str`, `None`, `bool`, `int`, `float`, `datetime.datetime`,
 ///   `datetime.date`, or a `tuple` of those, never nested), `list`, `tuple`,
 ///   `set`, `frozenset`, `datetime.datetime`, `datetime.date`,
@@ -38,7 +39,7 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 ///   value model exactly once, up front — see `crate::convert`'s module doc
 ///   for the full conversion table and every unsupported-type error this can
 ///   raise (`TypeError` for an unsupported type, `ValueError` for an
-///   out-of-range int, a non-finite float, or a sub-second UTC offset).
+///   out-of-range int or a sub-second UTC offset).
 /// - `ignore_order`: mirrors `DeepDiff(..., ignore_order=True)`.
 /// - `max_depth`: caller-chosen recursion-depth bound; defaults to
 ///   `onix_core::DEFAULT_MAX_DEPTH` (512) when omitted. Exceeding it —

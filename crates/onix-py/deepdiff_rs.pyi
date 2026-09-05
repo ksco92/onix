@@ -42,7 +42,8 @@ class DeepDiff:
     ) -> None:
         """
         :param t1: The left value to compare. Any of ``None``, ``bool``,
-            ``int``, ``float``, ``str``, ``dict`` (a key may be ``str``,
+            ``int``, ``float`` (``NaN``/``Infinity``/``-Infinity`` included),
+            ``str``, ``dict`` (a key may be ``str``,
             ``None``, ``bool``, ``int``, ``float``, ``datetime.datetime``,
             ``datetime.date``, or a ``tuple`` of those, never nested),
             ``list``, ``tuple``, ``set``, ``frozenset``,
