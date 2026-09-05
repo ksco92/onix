@@ -22,8 +22,9 @@
 //! always a simple index-aligned scan: when
 //! every element of *both* lists is a scalar (`DeepDiff`'s own
 //! `_all_values_basic_hashable` check — null/bool/number/string, plus
-//! datetime and date from `helper.basic_types`; a dict or list anywhere in
-//! either list disqualifies the whole comparison), it
+//! datetime, date, time and timedelta from `helper.basic_types`'s
+//! `datetimes` tuple; a dict or list anywhere in either list disqualifies
+//! the whole comparison), it
 //! additionally runs a `difflib.SequenceMatcher`-based "cheapest edit"
 //! match and, only when that produces more than one finding, compares its
 //! finding *count* against the plain index-aligned algorithm's, keeping
@@ -105,6 +106,23 @@ pub(crate) enum ScalarKey {
     /// A `date`, keyed by its ordinal. Its own bucket, because a `date` and
     /// a `datetime` are never Python-equal in either direction.
     Date(i64),
+    /// A `time`, keyed by whether it is aware and by
+    /// [`crate::datetime::Time::sort_instant`] — real `time.__eq__`'s exact
+    /// rule (see `crate::datetime`'s module doc): a naive value is never
+    /// equal to an aware one, and two aware values compare by an
+    /// offset-adjusted instant, at full microsecond precision (unlike the
+    /// truncated `ignore_order` hash rule — this key backs `difflib`
+    /// matching, which uses plain `==`, not `DeepHash`).
+    Time {
+        aware: bool,
+        instant: i64,
+    },
+    /// A `timedelta`, keyed by the value itself (already an exact,
+    /// `Eq`/`Hash`/`Ord` total-duration type — see
+    /// [`crate::datetime::TimeDelta`]'s own doc for why it is not a
+    /// flattened microsecond count) — always comparable, with no naive/aware
+    /// split.
+    TimeDelta(crate::datetime::TimeDelta),
 }
 
 /// Avalanche a raw `f64` bit pattern before it is hashed. A float carrying an
@@ -132,11 +150,12 @@ impl std::hash::Hash for ScalarKey {
             Self::Str(s) => s.hash(state),
             Self::Int(i) => i.hash(state),
             Self::Float(bits) => mix_float_bits(*bits).hash(state),
-            Self::DateTime { aware, instant } => {
+            Self::DateTime { aware, instant } | Self::Time { aware, instant } => {
                 aware.hash(state);
                 instant.hash(state);
             }
             Self::Date(ordinal) => ordinal.hash(state),
+            Self::TimeDelta(value) => value.hash(state),
         }
     }
 }
@@ -170,6 +189,8 @@ pub(crate) fn all_basic_scalars(items: &[Value]) -> bool {
                 | Value::Str(_)
                 | Value::DateTime(_)
                 | Value::Date(_)
+                | Value::Time(_)
+                | Value::TimeDelta(_)
         )
     })
 }
@@ -232,6 +253,11 @@ pub(crate) fn python_scalar_key(value: &Value) -> Option<ScalarKey> {
             instant: value.instant(),
         },
         Value::Date(value) => ScalarKey::Date(value.ordinal()),
+        Value::Time(value) => ScalarKey::Time {
+            aware: value.utc_offset_seconds().is_some(),
+            instant: value.sort_instant(),
+        },
+        Value::TimeDelta(value) => ScalarKey::TimeDelta(*value),
         Value::Array(_)
         | Value::Tuple(_)
         | Value::Set(_)

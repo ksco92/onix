@@ -1,0 +1,23 @@
+[
+  {
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 0,
+      "seconds": 2
+    }
+  },
+  {
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 0,
+      "seconds": 3
+    }
+  },
+  {
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 0,
+      "seconds": 4
+    }
+  }
+]

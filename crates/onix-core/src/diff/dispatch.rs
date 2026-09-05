@@ -60,6 +60,21 @@ pub(crate) fn diff_at(
         (Value::Date(old), Value::Date(new)) => {
             scalar_diff(path, old == new, a, b, depth, opts.max_depth)
         }
+        (Value::Time(old), Value::Time(new)) => {
+            // Plain `_diff_time` equality — no normalization step, unlike
+            // `datetime_diff` (see `crate::datetime`'s module doc).
+            scalar_diff(
+                path,
+                crate::datetime::times_equal(*old, *new),
+                a,
+                b,
+                depth,
+                opts.max_depth,
+            )
+        }
+        (Value::TimeDelta(old), Value::TimeDelta(new)) => {
+            scalar_diff(path, old == new, a, b, depth, opts.max_depth)
+        }
         (Value::Array(old), Value::Array(new)) | (Value::Tuple(old), Value::Tuple(new)) => {
             array_diff(path, old, new, depth, opts, memo)
         }
@@ -125,7 +140,9 @@ pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
             | Value::Number(_)
             | Value::Str(_)
             | Value::DateTime(_)
-            | Value::Date(_) => {}
+            | Value::Date(_)
+            | Value::Time(_)
+            | Value::TimeDelta(_) => {}
         }
     }
 

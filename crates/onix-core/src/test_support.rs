@@ -6,7 +6,7 @@
 //! same `From` bridge the CLI and bindings use) rather than re-declaring the
 //! identical helpers in every test module.
 
-use crate::datetime::{Date, DateTime};
+use crate::datetime::{Date, DateTime, Time, TimeDelta};
 use crate::value::{Number, Object, SetItems, Value};
 
 /// Compact value from a borrowed `serde_json` value.
@@ -62,6 +62,28 @@ pub(crate) fn cdt_at(
     Value::DateTime(
         DateTime::new(date, hour, minute, second, microsecond, offset)
             .expect("test datetime fields are in range"),
+    )
+}
+
+/// Compact `time` value, naive unless `offset` is given.
+pub(crate) fn ctime(
+    hour: u8,
+    minute: u8,
+    second: u8,
+    microsecond: u32,
+    offset: Option<i32>,
+) -> Value {
+    Value::Time(
+        Time::new(hour, minute, second, microsecond, offset)
+            .expect("test time fields are in range"),
+    )
+}
+
+/// Compact `timedelta` value from Python's own `(days, seconds,
+/// microseconds)` triple.
+pub(crate) fn ctimedelta(days: i64, seconds: i64, microseconds: i64) -> Value {
+    Value::TimeDelta(
+        TimeDelta::new(days, seconds, microseconds).expect("test timedelta fields are in range"),
     )
 }
 

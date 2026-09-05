@@ -1,0 +1,22 @@
+{
+  "iterable_item_removed": {
+    "root[3]": "1 day, 0:00:00",
+    "root[4]": "10:30:00+02:00",
+    "root[5]": "23:59:59.999999",
+    "root[6]": "10:30:00+00:00"
+  },
+  "type_changes": {
+    "root[0]": {
+      "new_type": "timedelta",
+      "new_value": "0:00:01",
+      "old_type": "time",
+      "old_value": "23:59:59.999999"
+    },
+    "root[1]": {
+      "new_type": "str",
+      "new_value": "anchor",
+      "old_type": "time",
+      "old_value": "12:00:00+02:00"
+    }
+  }
+}

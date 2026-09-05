@@ -1,0 +1,11 @@
+{
+  "iterable_item_added": {
+    "root[1]": "23:59:59.999999"
+  },
+  "values_changed": {
+    "root[0]": {
+      "new_value": "10:30:00+00:00",
+      "old_value": "00:00:00"
+    }
+  }
+}

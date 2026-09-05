@@ -1,0 +1,14 @@
+{
+  "set_item_added": [
+    "root['d'][4]"
+  ],
+  "set_item_removed": [
+    "root['d'][1]"
+  ],
+  "values_changed": {
+    "root['t']": {
+      "new_value": "12:00:00",
+      "old_value": "10:30:00"
+    }
+  }
+}

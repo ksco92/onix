@@ -24,8 +24,9 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 /// `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`:
 ///
 /// - `t1`/`t2`: any of `None`, `bool`, `int`, `float`, `str`, `dict` (`str`
-///   keys), `list`, `tuple`, `set`, `frozenset`, `datetime.datetime`, or
-///   `datetime.date`, arbitrarily nested. A *subclass* of any of these is
+///   keys), `list`, `tuple`, `set`, `frozenset`, `datetime.datetime`,
+///   `datetime.date`, `datetime.time`, or `datetime.timedelta`, arbitrarily
+///   nested. A *subclass* of any of these is
 ///   not supported (a `namedtuple`, a `set` subclass, a pandas
 ///   `Timestamp`), because `DeepDiff` reports every value under its own type
 ///   name. A `set`/`frozenset` member is restricted further, to whichever of
@@ -103,9 +104,10 @@ impl DeepDiff {
     /// renders as the JSON array `DeepDiff`'s own `to_json()` shows for one,
     /// a datetime as the `isoformat()` string it shows for one, and the
     /// `set_item_added`/`set_item_removed` categories as arrays of path
-    /// strings. Three documented differences, all in
-    /// `tests/golden/README.md`: `datetime.date` renders as `YYYY-MM-DD` and
-    /// a report holding a `frozenset` renders as an array, both where real
+    /// strings. Four documented differences, all in
+    /// `tests/golden/README.md`: `datetime.date`/`datetime.time` render as
+    /// `isoformat()`'s bytes and `datetime.timedelta` as `str()`'s, and a
+    /// report holding a `frozenset` renders as an array, all where real
     /// `DeepDiff`'s `to_json()` raises `TypeError`; and a set's members (and
     /// the two set categories' entries) come out in `onix`'s canonical order
     /// rather than the process's own unreproducible set iteration order (see

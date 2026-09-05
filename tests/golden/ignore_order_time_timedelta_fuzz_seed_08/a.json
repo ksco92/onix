@@ -1,0 +1,20 @@
+[
+  {
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 0,
+      "seconds": 0
+    }
+  },
+  {
+    "$time": "23:59:59.999999"
+  },
+  "anchor",
+  {
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 0,
+      "seconds": 1
+    }
+  }
+]

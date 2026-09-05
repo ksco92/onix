@@ -1,0 +1,16 @@
+{
+  "values_changed": {
+    "root['max']": {
+      "new_value": "11:00:00.999999",
+      "old_value": "10:00:00.999999"
+    },
+    "root['one']": {
+      "new_value": "11:00:00",
+      "old_value": "10:00:00.000001"
+    },
+    "root['zero']": {
+      "new_value": "11:00:00.000001",
+      "old_value": "10:00:00"
+    }
+  }
+}

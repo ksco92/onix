@@ -111,6 +111,14 @@ fn hash_value<H: Hasher>(root: &Value, state: &mut H) {
             Value::Str(s) => s.hash(state),
             Value::DateTime(dt) => dt.instant().hash(state),
             Value::Date(date) => date.ordinal().hash(state),
+            // Consistent with `Value`'s own `times_equal`-based `PartialEq`
+            // for `Time`: awareness first (never collapsed), then the same
+            // instant `times_equal` compares within one awareness bucket.
+            Value::Time(time) => {
+                time.utc_offset_seconds().is_some().hash(state);
+                time.sort_instant().hash(state);
+            }
+            Value::TimeDelta(value) => value.hash(state),
             Value::Array(items) | Value::Tuple(items) => {
                 items.len().hash(state);
                 stack.extend(items.iter());
@@ -189,6 +197,17 @@ pub(crate) enum ItemKey {
     /// which can never collide with `_prep_datetime`'s
     /// `YYYY-MM-DD HH:MM:SS+00:00`, so a date and a datetime never pair.
     Date(i64),
+    /// A `time`, keyed by [`crate::datetime::Time::hash_seconds_of_day`] —
+    /// `DeepHash._prep_datetime` reduces a `time` to `time_to_seconds`
+    /// before formatting, dropping the microsecond *and* any offset
+    /// entirely (a genuine, confirmed quirk — see `crate::datetime`'s
+    /// module doc), so two times equal only in whole seconds-of-day
+    /// hash-match here even when ordinary `==` would call them different.
+    Time(i64),
+    /// A `timedelta`, keyed by the value itself — `_prep_number` hashes a
+    /// `timedelta` exactly (no truncation), and the type's own `Eq`/`Hash`
+    /// already are that exact value.
+    TimeDelta(crate::datetime::TimeDelta),
     /// Order- and count-insensitive: see this type's own doc.
     List(BTreeSet<ItemKey>),
     /// A tuple, keyed exactly like [`ItemKey::List`] (order- and
@@ -247,6 +266,8 @@ impl std::hash::Hash for ItemKey {
             Self::Str(s) => s.hash(state),
             Self::DateTime(instant) => instant.hash(state),
             Self::Date(ordinal) => ordinal.hash(state),
+            Self::Time(seconds_of_day) => seconds_of_day.hash(state),
+            Self::TimeDelta(value) => value.hash(state),
             Self::List(items) | Self::Set(items) | Self::FrozenSet(items) => items.hash(state),
             Self::Tuple(items) => items.hash(state),
             Self::Dict(map) => map.hash(state),
@@ -503,7 +524,9 @@ pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> RepId {
             | Value::Number(_)
             | Value::Str(_)
             | Value::DateTime(_)
-            | Value::Date(_) => {}
+            | Value::Date(_)
+            | Value::Time(_)
+            | Value::TimeDelta(_) => {}
         }
     }
 
@@ -518,7 +541,9 @@ pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> RepId {
             | Value::Number(_)
             | Value::Str(_)
             | Value::DateTime(_)
-            | Value::Date(_) => {
+            | Value::Date(_)
+            | Value::Time(_)
+            | Value::TimeDelta(_) => {
                 let rep = memo.content_rep(MemberContent::Scalar(scalar_content_key(value)));
                 let part = python_scalar_key(value)
                     .map(MemberPart::Scalar)
@@ -625,6 +650,8 @@ fn scalar_content_key(value: &Value) -> ItemKey {
         Value::Str(s) => ItemKey::Str(s.to_string()),
         Value::DateTime(dt) => ItemKey::DateTime(dt.instant()),
         Value::Date(date) => ItemKey::Date(date.ordinal()),
+        Value::Time(time) => ItemKey::Time(time.hash_seconds_of_day()),
+        Value::TimeDelta(value) => ItemKey::TimeDelta(*value),
         Value::Array(_)
         | Value::Tuple(_)
         | Value::Set(_)
@@ -690,6 +717,8 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
         Value::Str(s) => (ItemKey::Str(s.to_string()), part()),
         Value::DateTime(value) => (ItemKey::DateTime(value.instant()), part()),
         Value::Date(value) => (ItemKey::Date(value.ordinal()), part()),
+        Value::Time(value) => (ItemKey::Time(value.hash_seconds_of_day()), part()),
+        Value::TimeDelta(value) => (ItemKey::TimeDelta(*value), part()),
         Value::Number(n) => {
             let number = if n.is_f64() {
                 let f = n

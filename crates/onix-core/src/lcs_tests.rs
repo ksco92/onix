@@ -1,5 +1,5 @@
 use super::Tag;
-use crate::test_support::{cdate, cdt, cdt_at, cv, cvec};
+use crate::test_support::{cdate, cdt, cdt_at, ctime, ctimedelta, cv, cvec};
 use serde_json::json;
 
 // Thin wrappers routing each `serde_json`-literal-based test through the real
@@ -533,6 +533,60 @@ fn a_date_key_never_equals_a_datetime_key_or_another_dates() {
     assert_ne!(date, super::python_scalar_key(&cdt(2024, 1, 1, None)));
     assert_ne!(date, super::python_scalar_key(&cdate(2024, 1, 2)));
     assert_eq!(date, super::python_scalar_key(&cdate(2024, 1, 1)));
+}
+
+#[test]
+fn time_scalar_keys_follow_pythons_own_equality_not_the_engines() {
+    let naive = super::python_scalar_key(&ctime(10, 0, 0, 0, None));
+    let utc = super::python_scalar_key(&ctime(10, 0, 0, 0, Some(0)));
+    let plus_two = super::python_scalar_key(&ctime(12, 0, 0, 0, Some(2 * 3600)));
+
+    // Two aware values at one instant are Python-equal...
+    assert_eq!(utc, plus_two);
+    // ...but a naive value never equals an aware one -- unlike a datetime,
+    // no "read naive as UTC" rule applies here (see `crate::datetime`'s
+    // module doc).
+    assert_ne!(naive, utc);
+}
+
+/// `HashSet::insert`/`contains` forces both `Hash` and `Eq` to actually run
+/// (unlike a bare `assert_eq!`, which only exercises `PartialEq`) -- the
+/// only way this crate's suite exercises `ScalarKey`'s hand-written `Hash`
+/// impl for its `Time`/`TimeDelta` arms, which back `build_b2j`'s
+/// `HashMap<ScalarKey, _>` for a list-LCS all-scalar match.
+#[test]
+fn time_and_timedelta_scalar_keys_hash_consistently_with_their_equality() {
+    use std::collections::HashSet;
+
+    let mut seen: HashSet<super::ScalarKey> = HashSet::new();
+    seen.insert(super::python_scalar_key(&ctime(10, 0, 0, 0, Some(0))).expect("time is a scalar"));
+    seen.insert(super::python_scalar_key(&ctimedelta(0, 1, 0)).expect("timedelta is a scalar"));
+
+    assert!(seen.contains(
+        &super::python_scalar_key(&ctime(12, 0, 0, 0, Some(2 * 3600))).expect("time is a scalar")
+    ));
+    assert!(seen.contains(&super::python_scalar_key(&ctimedelta(0, 1, 0)).expect("scalar")));
+    assert!(!seen.contains(&super::python_scalar_key(&ctimedelta(0, 2, 0)).expect("scalar")));
+}
+
+/// A direct `Hasher` call (not routed through `HashSet`/hashbrown), so this
+/// exercises `ScalarKey::hash`'s `TimeDelta` arm unambiguously.
+#[test]
+fn timedelta_scalar_key_hash_agrees_with_equality_via_a_direct_hasher() {
+    use std::hash::{Hash, Hasher};
+
+    fn hash_of(key: &super::ScalarKey) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let a = super::python_scalar_key(&ctimedelta(0, 1, 0)).expect("timedelta is a scalar");
+    let b = super::python_scalar_key(&ctimedelta(0, 1, 0)).expect("timedelta is a scalar");
+    let c = super::python_scalar_key(&ctimedelta(0, 2, 0)).expect("timedelta is a scalar");
+
+    assert_eq!(hash_of(&a), hash_of(&b));
+    assert_ne!(hash_of(&a), hash_of(&c));
 }
 
 /// `mix_float_bits` must spread the low bits of integral and half-integer

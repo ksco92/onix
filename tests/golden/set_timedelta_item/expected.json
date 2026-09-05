@@ -1,0 +1,8 @@
+{
+  "set_item_added": [
+    "root['sentinel']"
+  ],
+  "set_item_removed": [
+    "root[1 day, 1:00:00]"
+  ]
+}

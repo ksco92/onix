@@ -1,0 +1,12 @@
+{
+  "d": {
+    "$timedelta": {
+      "days": 0,
+      "microseconds": 0,
+      "seconds": 1
+    }
+  },
+  "t": {
+    "$time": "10:30:00"
+  }
+}

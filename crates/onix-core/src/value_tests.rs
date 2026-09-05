@@ -19,7 +19,7 @@ use serde::de::value::{
 use serde_json::json;
 
 use super::{Builder, Number, Object, SetItems, Value};
-use crate::test_support::{cdate, cdt, cdt_at, cfrozen, cset, ctup, cv};
+use crate::test_support::{cdate, cdt, cdt_at, cfrozen, cset, ctime, ctimedelta, ctup, cv};
 
 /// The convenience alias for `serde`'s in-memory deserializer error type.
 type DeError = serde::de::value::Error;
@@ -541,6 +541,42 @@ fn a_date_is_never_equal_to_a_datetime_at_the_same_midnight() {
 }
 
 #[test]
+fn a_time_renders_as_its_isoformat_string_but_is_never_equal_to_one() {
+    let value = ctime(10, 30, 0, 123_456, Some(-5 * 3600));
+
+    assert_eq!(
+        value.to_serde_json(),
+        serde_json::json!("10:30:00.123456-05:00")
+    );
+    assert_ne!(value, cv(&serde_json::json!("10:30:00.123456-05:00")));
+    assert!(format!("{value:?}").contains("Time"));
+}
+
+#[test]
+fn time_equality_never_reads_a_naive_value_as_aware() {
+    let naive = ctime(10, 0, 0, 0, None);
+    let utc = ctime(10, 0, 0, 0, Some(0));
+    let plus_two = ctime(12, 0, 0, 0, Some(2 * 3600));
+
+    // Unlike DateTime, a naive time is NEVER equal to an aware one — no
+    // "read naive as UTC" rule applies (see `crate::datetime`'s module doc).
+    assert_ne!(naive, utc);
+    // Two aware values at the same offset-adjusted instant ARE equal.
+    assert_eq!(utc, plus_two);
+}
+
+#[test]
+fn a_timedelta_renders_as_its_python_str_but_is_never_equal_to_a_string() {
+    let value = ctimedelta(1, 3600, 0);
+
+    assert_eq!(value.to_serde_json(), serde_json::json!("1 day, 1:00:00"));
+    assert_ne!(value, cv(&serde_json::json!("1 day, 1:00:00")));
+    assert!(format!("{value:?}").contains("TimeDelta"));
+    assert_eq!(value, ctimedelta(1, 3600, 0));
+    assert_ne!(value, ctimedelta(1, 3601, 0));
+}
+
+#[test]
 fn json_parsing_never_produces_a_datetime_or_a_date() {
     // Same contract the tuple tag has: the corpus's `$datetime`/`$date`
     // encoding is decoded by test-only code, and every product parse path
@@ -883,6 +919,32 @@ fn canonical_order_ranks_calendar_values_last() {
             "2024-01-01 00:00:00",
             "2024-01-01",
             "2024-01-02",
+        ]
+    );
+}
+
+/// `Time` and `TimeDelta` sort after every other kind including `Date`, and
+/// a naive `Time` sorts before an aware one (an arbitrary but total split —
+/// see `crate::datetime::Time::sort_instant`'s doc).
+#[test]
+fn canonical_order_ranks_time_and_timedelta_last_of_all() {
+    let items = SetItems::new(vec![
+        ctimedelta(0, 2, 0),
+        cdate(2024, 1, 1),
+        ctime(10, 0, 0, 0, Some(0)),
+        ctime(1, 0, 0, 0, None),
+        ctimedelta(0, 1, 0),
+    ]);
+
+    let rendered: Vec<String> = items.iter().map(crate::path::set_item_repr).collect();
+    assert_eq!(
+        rendered,
+        [
+            "2024-01-01",
+            "01:00:00",
+            "10:00:00+00:00",
+            "0:00:01",
+            "0:00:02",
         ]
     );
 }

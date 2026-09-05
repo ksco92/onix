@@ -21,6 +21,8 @@
 //! | `frozenset` | `FrozenSet` | exactly `frozenset`; members restricted, see below |
 //! | `datetime.datetime` | `DateTime` | exactly `datetime`; naive or any `tzinfo`, see below |
 //! | `datetime.date` | `Date` | exactly `date` |
+//! | `datetime.time` | `Time` | exactly `time`; naive or any `tzinfo`, see below |
+//! | `datetime.timedelta` | `TimeDelta` | exactly `timedelta` |
 //!
 //! Every other type raises a Python exception instead of converting:
 //!
@@ -38,23 +40,23 @@
 //!   lone surrogate raises [`PyValueError`] the same way, naming the dict's
 //!   path (the key itself has no path segment of its own).
 //! - A `tzinfo` whose `utcoffset()` is not a whole number of seconds raises
-//!   [`PyValueError`]: the value model carries an offset in seconds.
+//!   [`PyValueError`]: the value model carries an offset in seconds. Applies
+//!   equally to a `datetime` and a `time`.
 //! - A `set`/`frozenset` member that is not one of the types this MVP allows
 //!   a set to hold (`None`, `bool`, `int`, `float`, `str`, `tuple`,
-//!   `frozenset`, `datetime`, `date`) raises [`PyTypeError`] naming the
-//!   member's type and its path. A plain `list` or `dict` cannot reach a set
-//!   member at all — Python itself refuses `{[1]}` with `TypeError:
-//!   unhashable type: 'list'` — but a `list`/`dict` *subclass* that defines
-//!   `__hash__` can, and real `DeepDiff` would report it under that
-//!   subclass's own name — the same reason a `tuple` subclass is refused
-//!   below — so it stays refused here too, including nested inside an
-//!   otherwise-allowed container: `{(datetime(2024, 1, 1),)}` converts, but
-//!   `{(HashableList([1]),)}` does not, for a `list` subclass `HashableList`
-//!   defining `__hash__`.
-//! - Any other unrecognized type (`datetime.time`, `datetime.timedelta`,
-//!   custom objects, …) raises [`PyTypeError`] naming the type and the exact
-//!   path it was found at (e.g. `"unsupported type for diffing: complex at
-//!   root['a'][2]"`).
+//!   `frozenset`, `datetime`, `date`, `time`, `timedelta`) raises
+//!   [`PyTypeError`] naming the member's type and its path. A plain `list`
+//!   or `dict` cannot reach a set member at all — Python itself refuses
+//!   `{[1]}` with `TypeError: unhashable type: 'list'` — but a `list`/`dict`
+//!   *subclass* that defines `__hash__` can, and real `DeepDiff` would
+//!   report it under that subclass's own name — the same reason a `tuple`
+//!   subclass is refused below — so it stays refused here too, including
+//!   nested inside an otherwise-allowed container: `{(datetime(2024, 1,
+//!   1),)}` converts, but `{(HashableList([1]),)}` does not, for a `list`
+//!   subclass `HashableList` defining `__hash__`.
+//! - Any other unrecognized type (custom objects, …) raises [`PyTypeError`]
+//!   naming the type and the exact path it was found at (e.g.
+//!   `"unsupported type for diffing: complex at root['a'][2]"`).
 //!
 //! # Datetimes and dates
 //!
@@ -73,6 +75,14 @@
 //! subclass such as `pandas.Timestamp` is never a plain `datetime` there, so
 //! it is refused like any other unsupported type rather than silently
 //! diffed as one.
+//!
+//! A `time` converts the same way a `datetime` does (wall-clock fields plus
+//! the fixed offset in force, again exact); unlike `datetime`, real
+//! `DeepDiff` never normalizes a `time` at report time, so onix reports it
+//! raw everywhere (see [`onix_core::datetime`]'s module doc for the exact,
+//! confirmed comparison and hashing rules — genuinely different from
+//! `datetime`'s). A `timedelta` converts to its exact
+//! `(days, seconds, microseconds)`, also exact.
 //!
 //! A `tuple` converts to [`onix_core::Value::Tuple`], which the engine
 //! diffs positionally exactly like a list while still reporting a
@@ -130,7 +140,9 @@
 //! intentionally a little stricter than `onix_core::diff_with_max_depth`'s
 //! guarantee that two *equal* inputs of any depth always diff cleanly,
 //! because equality can't be known yet at conversion time.
-use onix_core::datetime::{Date as CDate, DateTime as CDateTime};
+use onix_core::datetime::{
+    Date as CDate, DateTime as CDateTime, Time as CTime, TimeDelta as CTimeDelta,
+};
 use onix_core::path::{PathSegment, render_path};
 use onix_core::value::{Builder, Entries, SetItems};
 use onix_core::{Number as CNumber, Value as CValue};
@@ -143,7 +155,7 @@ use pyo3::types::iter::{
 };
 use pyo3::types::{
     PyBool, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet,
-    PyString, PyTuple, PyTzInfo,
+    PyString, PyTime, PyTuple, PyTzInfo,
 };
 
 use crate::errors::MaxDepthError;
@@ -300,6 +312,14 @@ fn classify<'py>(
 
     if current.cast_exact::<PyDate>().is_ok() {
         return Ok(Step::Done(CValue::Date(date_fields(current, path)?)));
+    }
+
+    if current.cast_exact::<PyTime>().is_ok() {
+        return Ok(Step::Done(time_to_value(current, path)?));
+    }
+
+    if current.cast_exact::<PyDelta>().is_ok() {
+        return Ok(Step::Done(timedelta_to_value(current, path)?));
     }
 
     if !set_member && let Ok(list) = current.cast::<PyList>() {
@@ -599,21 +619,54 @@ fn datetime_to_value(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<C
     let minute: u8 = obj.getattr("minute")?.extract()?;
     let second: u8 = obj.getattr("second")?.extract()?;
     let microsecond: u32 = obj.getattr("microsecond")?.extract()?;
-    let offset = utc_offset_seconds(obj, path)?;
+    let offset = utc_offset_seconds(obj, "datetime", path)?;
 
     CDateTime::new(date, hour, minute, second, microsecond, offset)
         .map(CValue::DateTime)
         .ok_or_else(|| out_of_range_error("datetime", path))
 }
 
-/// The datetime's fixed UTC offset in whole seconds, or `None` when it is
-/// naive.
+/// Converts an exact `datetime.time` — the same field-reading pattern as
+/// [`datetime_to_value`], minus the date.
+fn time_to_value(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<CValue> {
+    let hour: u8 = obj.getattr("hour")?.extract()?;
+    let minute: u8 = obj.getattr("minute")?.extract()?;
+    let second: u8 = obj.getattr("second")?.extract()?;
+    let microsecond: u32 = obj.getattr("microsecond")?.extract()?;
+    let offset = utc_offset_seconds(obj, "time", path)?;
+
+    CTime::new(hour, minute, second, microsecond, offset)
+        .map(CValue::Time)
+        .ok_or_else(|| out_of_range_error("time", path))
+}
+
+/// Converts an exact `datetime.timedelta`, reading its own already-normalized
+/// `days`/`seconds`/`microseconds` attributes — the same three fields
+/// [`utc_offset_seconds`] reads off the `timedelta` a `utcoffset()` call
+/// returns.
+fn timedelta_to_value(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<CValue> {
+    let days: i64 = obj.getattr("days")?.extract()?;
+    let seconds: i64 = obj.getattr("seconds")?.extract()?;
+    let microseconds: i64 = obj.getattr("microseconds")?.extract()?;
+
+    CTimeDelta::new(days, seconds, microseconds)
+        .map(CValue::TimeDelta)
+        .ok_or_else(|| out_of_range_error("timedelta", path))
+}
+
+/// The datetime's/time's fixed UTC offset in whole seconds, or `None` when
+/// it is naive.
 ///
 /// Asks the object itself (`utcoffset()`) rather than inspecting `tzinfo`,
 /// so any `tzinfo` implementation — `timezone`, `zoneinfo`, `pytz` — reports
 /// the offset in force at *this* moment, which is what
-/// `datetime_normalize`'s own `astimezone` would use.
-fn utc_offset_seconds(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<Option<i32>> {
+/// `datetime_normalize`'s own `astimezone` would use. `type_name` names the
+/// caller's own type (`"datetime"`/`"time"`) for the two error messages.
+fn utc_offset_seconds(
+    obj: &Bound<'_, PyAny>,
+    type_name: &str,
+    path: &[PathSegment],
+) -> PyResult<Option<i32>> {
     let offset = obj.call_method0("utcoffset")?;
 
     if offset.is_none() {
@@ -627,20 +680,22 @@ fn utc_offset_seconds(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<
     if microseconds != 0 {
         return Err(PyValueError::new_err(format!(
             "a tzinfo whose utcoffset() is not a whole number of seconds is not supported \
-             (at {}); onix stores a datetime's UTC offset in seconds",
+             (at {}); onix stores a {type_name}'s UTC offset in seconds",
             render_path(path),
         )));
     }
 
     i32::try_from(days * 86_400 + seconds)
         .map(Some)
-        .map_err(|_| out_of_range_error("datetime", path))
+        .map_err(|_| out_of_range_error(type_name, path))
 }
 
-/// A `date`/`datetime` whose fields the compact value model rejects. Python
-/// itself enforces every one of those bounds on a real `datetime` object, so
-/// this is reachable only through a custom `tzinfo` returning an out-of-range
-/// offset.
+/// A `date`/`datetime`/`time`/`timedelta` whose fields the compact value
+/// model rejects. Python itself enforces every one of those bounds on a real
+/// object of any of the four types, so this is reachable only through a
+/// custom `tzinfo` returning an out-of-range offset (`datetime`/`time`) —
+/// never for `date`/`timedelta`, whose own constructors already enforce
+/// every bound this crate's own `new` re-checks.
 fn out_of_range_error(type_name: &str, path: &[PathSegment]) -> PyErr {
     PyValueError::new_err(format!(
         "{type_name} at {} is out of range for onix's internal value model",
@@ -703,9 +758,9 @@ fn max_depth_error(max_depth: usize, path: &[PathSegment]) -> PyErr {
 fn unsupported_type_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
     PyTypeError::new_err(format!(
         "unsupported type for diffing: {} at {}; only \
-         None/bool/int/float/str/dict[str, ...]/list/tuple/set/frozenset/datetime/date are \
-         supported in this MVP (time, timedelta, subclasses of tuple/set/frozenset including \
-         namedtuples, datetime and date subclasses, and custom objects are not)",
+         None/bool/int/float/str/dict[str, ...]/list/tuple/set/frozenset/datetime/date/time/\
+         timedelta are supported in this MVP (subclasses of tuple/set/frozenset including \
+         namedtuples, datetime/date/time/timedelta subclasses, and custom objects are not)",
         type_name(obj),
         render_path(path),
     ))
@@ -717,7 +772,7 @@ fn unsupported_type_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr
 fn unhashable_member_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
     PyTypeError::new_err(format!(
         "unsupported type for a set member: {} at {}; a set member must be \
-         None/bool/int/float/str/tuple/frozenset/datetime/date",
+         None/bool/int/float/str/tuple/frozenset/datetime/date/time/timedelta",
         type_name(obj),
         render_path(path),
     ))
@@ -801,6 +856,8 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                 CValue::Str(s) => RenderStep::Done(s.as_ref().into_py_any(py)?),
                 CValue::DateTime(value) => RenderStep::Done(datetime_to_pyobject(py, *value)?),
                 CValue::Date(value) => RenderStep::Done(date_to_pyobject(py, *value)?),
+                CValue::Time(value) => RenderStep::Done(time_to_pyobject(py, *value)?),
+                CValue::TimeDelta(value) => RenderStep::Done(timedelta_to_pyobject(py, *value)?),
                 CValue::Array(items) => {
                     start_sequence(py, SeqKind::List, items, &mut stack, &mut pending)?
                 }
@@ -910,6 +967,43 @@ fn datetime_to_pyobject(py: Python<'_>, value: CDateTime) -> PyResult<Py<PyAny>>
         value.second(),
         value.microsecond(),
         tzinfo.as_ref(),
+    )?
+    .into_py_any(py)
+}
+
+/// Rebuilds a `datetime.time`, aware values carrying a fixed-offset
+/// `datetime.timezone` — [`datetime_to_pyobject`]'s twin minus the date.
+fn time_to_pyobject(py: Python<'_>, value: CTime) -> PyResult<Py<PyAny>> {
+    let tzinfo = value
+        .utc_offset_seconds()
+        .map(|offset| PyTzInfo::fixed_offset(py, PyDelta::new(py, 0, offset, 0, true)?))
+        .transpose()?;
+
+    PyTime::new(
+        py,
+        value.hour(),
+        value.minute(),
+        value.second(),
+        value.microsecond(),
+        tzinfo.as_ref(),
+    )?
+    .into_py_any(py)
+}
+
+/// Rebuilds a `datetime.timedelta` from its own normalized
+/// `(days, seconds, microseconds)`.
+fn timedelta_to_pyobject(py: Python<'_>, value: CTimeDelta) -> PyResult<Py<PyAny>> {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "onix_core::datetime::TimeDelta's own days/seconds/microseconds are already \
+                  bounded to Python's own timedelta range, which fits i32"
+    )]
+    PyDelta::new(
+        py,
+        value.days() as i32,
+        value.seconds() as i32,
+        value.microseconds() as i32,
+        true,
     )?
     .into_py_any(py)
 }

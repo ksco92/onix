@@ -1,0 +1,16 @@
+{
+  "values_changed": {
+    "root['micro']": {
+      "new_value": "0:00:00",
+      "old_value": "0:00:00.000001"
+    },
+    "root['one_day']": {
+      "new_value": "-1 day, 0:00:00",
+      "old_value": "1 day, 0:00:00"
+    },
+    "root['zero']": {
+      "new_value": "0:00:01",
+      "old_value": "0:00:00"
+    }
+  }
+}

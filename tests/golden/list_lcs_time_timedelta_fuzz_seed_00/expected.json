@@ -1,0 +1,28 @@
+{
+  "iterable_item_added": {
+    "root[5]": "0:00:00.000001",
+    "root[6]": "1 day, 0:00:00"
+  },
+  "type_changes": {
+    "root[4]": {
+      "new_type": "timedelta",
+      "new_value": "0:00:01",
+      "old_type": "time",
+      "old_value": "23:59:59.999999"
+    }
+  },
+  "values_changed": {
+    "root[0]": {
+      "new_value": "00:00:00",
+      "old_value": "10:30:00"
+    },
+    "root[1]": {
+      "new_value": "10:30:00+00:00",
+      "old_value": "00:00:00"
+    },
+    "root[3]": {
+      "new_value": "10:30:00+00:00",
+      "old_value": "10:30:00+02:00"
+    }
+  }
+}

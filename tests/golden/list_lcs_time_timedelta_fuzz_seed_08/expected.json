@@ -1,0 +1,26 @@
+{
+  "iterable_item_added": {
+    "root[0]": "10:30:00+02:00"
+  },
+  "iterable_item_removed": {
+    "root[4]": "10:30:00",
+    "root[5]": "1 day, 0:00:00",
+    "root[6]": "1 day, 0:00:00"
+  },
+  "type_changes": {
+    "root[2]": {
+      "new_path": "root[3]",
+      "new_type": "str",
+      "new_value": "anchor",
+      "old_type": "time",
+      "old_value": "10:30:00"
+    },
+    "root[3]": {
+      "new_path": "root[4]",
+      "new_type": "str",
+      "new_value": "anchor",
+      "old_type": "timedelta",
+      "old_value": "0:00:00.000001"
+    }
+  }
+}

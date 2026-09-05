@@ -69,7 +69,7 @@ use std::sync::Arc;
 
 use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
-use crate::datetime::{Date, DateTime};
+use crate::datetime::{Date, DateTime, Time, TimeDelta, times_equal};
 
 /// A compact JSON value: the memory-frugal counterpart of
 /// [`serde_json::Value`].
@@ -79,19 +79,19 @@ use crate::datetime::{Date, DateTime};
 /// are held as an [`Object`] (a sorted, exactly-sized entry slice) and
 /// numbers as a [`Number`] preserving the `i64`/`u64`/`f64` distinction.
 ///
-/// Five variants are the ones JSON itself cannot express:
+/// Seven variants are the ones JSON itself cannot express:
 /// [`Value::Tuple`], [`Value::Set`] and [`Value::FrozenSet`] — the Python
-/// `tuple`, `set` and `frozenset` — and [`Value::DateTime`] and
-/// [`Value::Date`]. Each is a *different type* from every other and from
-/// `list` (a `tuple`-vs-`list` or `set`-vs-`frozenset` pairing is a
-/// `type_changes` finding, and neither pair ever hash-matches under
-/// `ignore_order`), which is exactly why each gets its own variant: the type
-/// distinction is structural, so mixing two of them can only ever be a
+/// `tuple`, `set` and `frozenset` — and [`Value::DateTime`], [`Value::Date`],
+/// [`Value::Time`] and [`Value::TimeDelta`]. Each is a *different type* from
+/// every other and from `list` (a `tuple`-vs-`list` or `set`-vs-`frozenset`
+/// pairing is a `type_changes` finding, and neither pair ever hash-matches
+/// under `ignore_order`), which is exactly why each gets its own variant: the
+/// type distinction is structural, so mixing two of them can only ever be a
 /// compile error or a `type_changes`, never a silent equality. The three
 /// container kinds render to a JSON array in [`Value::to_serde_json`],
 /// matching what `DeepDiff`'s own `to_json()` shows.
 ///
-/// The two calendar types (see [`mod@crate::datetime`]) are kept as
+/// The four calendar types (see [`mod@crate::datetime`]) are kept as
 /// *structured* values rather than pre-rendered ISO strings because
 /// `DeepDiff` renders the same datetime two different ways depending on
 /// where it lands in a report (UTC-normalized in `values_changed`, raw
@@ -100,7 +100,7 @@ use crate::datetime::{Date, DateTime};
 /// possible once the value has collapsed to a string.
 ///
 /// Neither [`From`]`<`[`serde_json::Value`]`>` nor [`Deserialize`] can
-/// produce any of the five (JSON has no literal for them): they enter the
+/// produce any of the seven (JSON has no literal for them): they enter the
 /// model only from a caller holding real Python objects.
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -117,6 +117,10 @@ pub enum Value {
     DateTime(DateTime),
     /// A Python `datetime.date` — see [`Date`].
     Date(Date),
+    /// A Python `datetime.time` — see [`Time`].
+    Time(Time),
+    /// A Python `datetime.timedelta` — see [`TimeDelta`].
+    TimeDelta(TimeDelta),
     /// An array, stored as an exactly-sized `Box<[Value]>`.
     Array(Box<[Value]>),
     /// A Python tuple, stored exactly like [`Value::Array`] but kept as a
@@ -159,6 +163,8 @@ impl Value {
             Value::Str(s) => serde_json::Value::String(s.as_ref().to_owned()),
             Value::DateTime(value) => serde_json::Value::String(value.isoformat()),
             Value::Date(value) => serde_json::Value::String(value.isoformat()),
+            Value::Time(value) => serde_json::Value::String(value.isoformat()),
+            Value::TimeDelta(value) => serde_json::Value::String(value.python_str()),
             Value::Array(items) | Value::Tuple(items) => {
                 serde_json::Value::Array(items.iter().map(Value::to_serde_json).collect())
             }
@@ -255,7 +261,9 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
         | Value::Number(_)
         | Value::Str(_)
         | Value::DateTime(_)
-        | Value::Date(_) => {}
+        | Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeDelta(_) => {}
     }
 }
 
@@ -302,6 +310,20 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
                 }
             }
             (Value::Date(x), Value::Date(y)) => {
+                if x != y {
+                    return false;
+                }
+            }
+            (Value::Time(x), Value::Time(y)) => {
+                // `times_equal`, not the struct's own derived `==`: real
+                // `_diff_time` never normalizes, so this is the exact rule a
+                // naive value can never equal an aware one (see
+                // `crate::datetime`'s module doc).
+                if !times_equal(*x, *y) {
+                    return false;
+                }
+            }
+            (Value::TimeDelta(x), Value::TimeDelta(y)) => {
                 if x != y {
                     return false;
                 }
@@ -637,6 +659,8 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
             Value::Object(_) => 9,
             Value::DateTime(_) => 10,
             Value::Date(_) => 11,
+            Value::Time(_) => 12,
+            Value::TimeDelta(_) => 13,
         }
     }
 
@@ -680,6 +704,23 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
                         .cmp(&y.instant())
                         .then_with(|| x.utc_offset_seconds().cmp(&y.utc_offset_seconds())),
                     (Value::Date(x), Value::Date(y)) => x.ordinal().cmp(&y.ordinal()),
+                    // Naive sorts before aware (an arbitrary but total
+                    // split — `Time` has no cross-awareness instant the way
+                    // `DateTime` does, since a naive value is never Python-
+                    // equal to an aware one); within a group, by the same
+                    // instant `times_equal` compares by, then by the raw
+                    // offset as a final tie-break for two aware values that
+                    // are Python-equal despite differing stored offsets —
+                    // reachable only by building a `Value` directly, never a
+                    // real Python set (see `SetItems::new`'s doc, and
+                    // `DateTime`'s identical tie-break above).
+                    (Value::Time(x), Value::Time(y)) => x
+                        .utc_offset_seconds()
+                        .is_some()
+                        .cmp(&y.utc_offset_seconds().is_some())
+                        .then_with(|| x.sort_instant().cmp(&y.sort_instant()))
+                        .then_with(|| x.utc_offset_seconds().cmp(&y.utc_offset_seconds())),
+                    (Value::TimeDelta(x), Value::TimeDelta(y)) => x.cmp(y),
                     (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
                         push_slices(&mut stack, x, y);
                         Ordering::Equal

@@ -1,0 +1,12 @@
+{
+  "iterable_item_removed": {
+    "root[1]": "23:59:59.999999"
+  },
+  "values_changed": {
+    "root[0]": {
+      "new_path": "root[1]",
+      "new_value": "0:00:00.000001",
+      "old_value": "1 day, 0:00:00"
+    }
+  }
+}

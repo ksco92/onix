@@ -143,6 +143,12 @@ each lives at its pointer, not restated here:
   "Set iteration order" section, its "`frozenset` values are a superset" point.
 - **`date` JSON superset** — `tests/golden/README.md`'s "The `date` superset"
   section.
+- **`time`/`timedelta` JSON superset** — `tests/golden/README.md`'s "The
+  `time`/`timedelta` superset" section.
+- **`time` hashes by whole seconds-of-day under `ignore_order`**, dropping
+  the microsecond and any offset — a real, confirmed `DeepHash` quirk this
+  reproduces exactly — `tests/golden/README.md`'s "Known DeepDiff quirks"
+  section.
 - **Naive datetimes read as UTC**, including for `ignore_order` pairing —
   [`crates/onix-core/src/ignore_order/distance.rs`](crates/onix-core/src/ignore_order/distance.rs)'s
   `distance_family` doc.
@@ -172,7 +178,7 @@ uv run scripts/gen_goldens.py
 
 Never hand-edit files under `tests/golden/`; every case is defined in
 `scripts/gen_goldens.py`. A case value JSON cannot express (a tuple, a set,
-a frozenset, a datetime or a date) is written in the tagged encoding
+a frozenset, a datetime, a date, a time or a timedelta) is written in the tagged encoding
 `scripts/golden_tags.py` defines and
 [`tests/golden/README.md`](tests/golden/README.md) documents; the product's
 own parse paths never interpret those tags. `scripts/differential_fuzz.py`
