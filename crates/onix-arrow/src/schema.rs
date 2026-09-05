@@ -93,15 +93,18 @@ fn normalized_type(data_type: &DataType) -> DataType {
         DataType::Dictionary(_, value) => normalized_type(value),
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => DataType::Utf8,
         DataType::Binary | DataType::LargeBinary | DataType::BinaryView => DataType::Binary,
-        // Only a `LargeList` whose element carries polars' map signature is
-        // read as a map; a plain pyarrow `List` (or any other list variant) of
-        // a struct stays a list, so a genuine `list<struct{key, value}>` and a
-        // real `map` remain distinguishable. See [`map_entries`].
-        DataType::LargeList(field) => match map_entries(field) {
+        // A `List` or `LargeList` whose element carries the map signature (see
+        // [`map_entries`]) is read as a map, on every library path: polars has
+        // no map type and re-exports both a real Arrow map and an ordinary list
+        // of key/value structs as the identical `LargeList<Struct<key, value>>`,
+        // while pyarrow uses `List` for such a list, so the two must normalize
+        // the same way to keep cross-library identity. `ListView`/
+        // `LargeListView` are never used for maps and stay lists.
+        DataType::List(field) | DataType::LargeList(field) => match map_entries(field) {
             Some((key, value)) => canonical_map(key, value),
             None => canonical_list(field.data_type()),
         },
-        DataType::List(field) | DataType::ListView(field) | DataType::LargeListView(field) => {
+        DataType::ListView(field) | DataType::LargeListView(field) => {
             canonical_list(field.data_type())
         }
         DataType::FixedSizeList(field, size) => DataType::FixedSizeList(
@@ -154,18 +157,22 @@ fn canonical_map(key: &DataType, value: &DataType) -> DataType {
     )
 }
 
-/// If `element` is the element field of a polars Arrow-map export — a struct of
-/// exactly two fields named `key` (nullable, as polars emits it) and `value` —
-/// returns the key and value types so the enclosing `LargeList` is treated as a
-/// map. `None` otherwise, so an ordinary list of a two-field struct is left as
-/// a list.
+/// If `element` is a struct of exactly two fields named `key` (nullable) and
+/// `value` — the signature both an Arrow map and polars' map export carry —
+/// returns the key and value types so the enclosing `List`/`LargeList` is
+/// treated as a map. `None` otherwise (different names, a non-null key, or not
+/// a two-field struct), so an ordinary list of a two-field struct is left as a
+/// list.
 ///
-/// This is deliberately narrow: it matches the exact signature polars produces
-/// for an Arrow `Map` (a `LargeList` of a nullable-keyed `key`/`value` struct)
-/// rather than any list of a `key`/`value` struct, so a genuine
-/// `list<struct{key, value}>` from another producer is not silently rewritten
-/// to a map. A residual ambiguity remains — a `LargeList` a user builds by hand
-/// with that exact struct shape is read as a map — which the README documents.
+/// This applies to `List` and `LargeList` alike, which forces one accepted
+/// false negative: polars has no map type and re-exports both a real Arrow
+/// `map<k, v>` and an ordinary `list<struct{key, value}>` as the byte-identical
+/// `LargeList<Struct<key, value>>`. To keep the same table read through
+/// different libraries reporting no spurious change, onix treats a list of
+/// structs named exactly `key`/`value` with a nullable key as a map on every
+/// path — so a migration between those two shapes (a real map ⇄ a list of
+/// key/value structs) is not reported as a type change. The README documents
+/// this.
 fn map_entries(element: &FieldRef) -> Option<(&DataType, &DataType)> {
     if let DataType::Struct(fields) = element.data_type()
         && fields.len() == 2
@@ -636,9 +643,12 @@ mod tests {
     }
 
     #[test]
-    fn plain_list_of_key_value_struct_is_not_a_map() {
-        // A genuine (non-LargeList) list of a key/value struct must stay a list
-        // and read as a type change against a real map, not silently equal.
+    fn list_and_large_list_of_key_value_struct_both_read_as_a_map() {
+        // polars re-exports both a real map and a plain list of key/value
+        // structs as the same LargeList<Struct<key,value>>, so a List (pyarrow)
+        // and a LargeList (polars) of that struct, and a real Map, must all
+        // normalize to the same type — an accepted false negative (a real map
+        // and a list of key/value structs are not distinguished).
         let kv = || {
             DataType::Struct(
                 vec![
@@ -648,12 +658,17 @@ mod tests {
                 .into(),
             )
         };
-        let left = schema(vec![Field::new("m", list_of(kv()), true)]);
-        let right = schema(vec![Field::new("m", map_with(DataType::Int32), true)]);
-        let changes = diff_schemas(&left, &right).unwrap();
+        let as_list = schema(vec![Field::new("m", list_of(kv()), true)]);
+        let as_large_list = schema(vec![Field::new(
+            "m",
+            DataType::LargeList(std::sync::Arc::new(Field::new("item", kv(), true))),
+            true,
+        )]);
+        let as_map = schema(vec![Field::new("m", map_with(DataType::Int32), true)]);
 
-        assert_eq!(changes.len(), 1, "a plain list of pairs is not a map");
-        assert_eq!(changes[0].change, ChangeKind::TypeChanged);
+        assert!(diff_schemas(&as_list, &as_map).unwrap().is_empty());
+        assert!(diff_schemas(&as_large_list, &as_map).unwrap().is_empty());
+        assert!(diff_schemas(&as_list, &as_large_list).unwrap().is_empty());
     }
 
     #[test]
