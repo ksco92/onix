@@ -77,9 +77,9 @@ pub struct SchemaChange {
 ///   producers disagree on both (`DuckDB` names the element `l`, pyarrow
 ///   `item`, Parquet `element`); a `FixedSizeList` keeps its width but has its
 ///   element normalized the same way;
-/// - a `Map`, and the specific `LargeList<Struct<key, value>>` polars
-///   re-exports an Arrow map as (see [`map_entries`]), both become one
-///   canonical `Map` shape, so a map column compares equal across libraries.
+/// - a `Map`, and any list variant whose element carries the map signature
+///   (see [`map_entries`]), both become one canonical `Map` shape, so a map
+///   column compares equal across libraries.
 ///
 /// Every other parameter — timestamp unit and timezone, decimal precision and
 /// scale — is preserved and counts as a difference. Nullability never counts
@@ -159,14 +159,15 @@ fn canonical_map(key: &DataType, value: &DataType) -> DataType {
 
 /// If `element` is a struct of exactly two fields named `key` (nullable) and
 /// `value` — the signature both an Arrow map and polars' map export carry —
-/// returns the key and value types so the enclosing `List`/`LargeList` is
-/// treated as a map. `None` otherwise (different names, a non-null key, or not
+/// returns the key and value types so the enclosing list variant is treated
+/// as a map. `None` otherwise (different names, a non-null key, or not
 /// a two-field struct), so an ordinary list of a two-field struct is left as a
 /// list.
 ///
-/// This applies to `List` and `LargeList` alike, which forces one accepted
-/// false negative: polars has no map type and re-exports both a real Arrow
-/// `map<k, v>` and an ordinary `list<struct{key, value}>` as the byte-identical
+/// This applies to every list variant (`List`, `LargeList`, `ListView`,
+/// `LargeListView`) alike, which forces one accepted false negative: polars
+/// has no map type and re-exports both a real Arrow `map<k, v>` and an
+/// ordinary `list<struct{key, value}>` as the byte-identical
 /// `LargeList<Struct<key, value>>`. To keep the same table read through
 /// different libraries reporting no spurious change, onix treats a list of
 /// structs named exactly `key`/`value` with a nullable key as a map on every

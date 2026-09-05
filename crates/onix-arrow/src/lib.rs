@@ -19,18 +19,14 @@
 //! [`arrow_schema::DataType`]s differ, comparing every logical parameter
 //! (timestamp unit and timezone, decimal precision and scale). Nullability is
 //! ignored (but reported). Physical encodings that carry the same logical type
-//! are treated as equal, so a column keeps the same type when a producer picks
-//! a different encoding of it (`diff_tables(pl.DataFrame, pa.Table)` does not
-//! flag every string column, for instance). The normalized-away encodings,
-//! applied recursively through `List`/`LargeList`/`ListView`/`LargeListView`,
-//! `Struct`, and `Map` children:
-//!
-//! - a dictionary-encoded type compares as its value type (dictionary-encoded
-//!   string == plain string; `list<dictionary<int32, string>>` ==
-//!   `list<string>`);
-//! - `Utf8View` and `LargeUtf8` compare as `Utf8`;
-//! - `BinaryView` and `LargeBinary` compare as `Binary`;
-//! - `LargeList`, `ListView`, and `LargeListView` compare as `List`.
+//! are treated as equal — recursively — so a column keeps the same type when a
+//! producer picks a different encoding of it: dictionary encoding, string and
+//! binary views, and the several list variants all normalize together
+//! (`diff_tables(pl.DataFrame, pa.Table)` does not flag every string column, for
+//! instance); a `FixedSizeList` keeps its width; and a list of structs named
+//! exactly `key`/`value` with a nullable key is read as a map, on every list
+//! variant, so a real map and such a list are not distinguished. See
+//! `normalized_type` in `src/schema.rs` for the exact, enumerated rule list.
 //!
 //! The reported `left_type`/`right_type` strings show the actual (un-normalized)
 //! Arrow type, so a real change reports exactly what each side holds.
