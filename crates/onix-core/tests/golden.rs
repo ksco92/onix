@@ -240,10 +240,14 @@ fn decode_tagged_dict(
 }
 
 /// Decodes an `$object` fixture — a custom object (issue #66): its payload is
-/// `{"class": "<name>", "attrs": {<str-keyed attributes>}}`, mirroring
-/// `scripts/golden_tags.py`'s `encode_tags`/`decode_tags`. Builds the same
-/// class-tagged, attribute-diffed value onix's own bindings build for a live
-/// instance.
+/// `{"class": "<name>", "attrs": {…}, ["identity": "<module.qualname>"]}`,
+/// mirroring `scripts/golden_tags.py`'s `encode_tags`/`decode_tags`. Builds
+/// the same class-tagged, attribute-diffed value onix's own bindings build for
+/// a live instance. `identity` (the qualified type identity onix decides
+/// `type_changes` by) defaults to `class` when a fixture omits it — every
+/// committed object fixture uses a distinct `class` per distinct type, so name
+/// and identity coincide for them; the same-name-different-identity cases are
+/// pinned by the Python differential suite against live `DeepDiff` instead.
 fn decode_tagged_object(
     map: &serde_json::Map<String, Value>,
     builder: &mut onix_core::value::Builder,
@@ -257,6 +261,11 @@ fn decode_tagged_object(
     let Some(Value::Object(attrs)) = payload.get("attrs") else {
         panic!("an \"$object\" tag must carry an \"attrs\" object");
     };
+    let identity = match payload.get("identity") {
+        Some(Value::String(id)) => id.as_str(),
+        Some(_) => panic!("an \"$object\" tag's \"identity\" must be a string"),
+        None => class.as_str(),
+    };
 
     let entries: Vec<(onix_core::value::ObjectKey, onix_core::Value)> = attrs
         .iter()
@@ -268,7 +277,11 @@ fn decode_tagged_object(
         })
         .collect();
 
-    builder.custom_object(entries, std::sync::Arc::from(class.as_str()))
+    builder.custom_object(
+        entries,
+        std::sync::Arc::from(class.as_str()),
+        std::sync::Arc::from(identity),
+    )
 }
 
 /// The decoded members of a `$set`/`$frozenset` fixture.

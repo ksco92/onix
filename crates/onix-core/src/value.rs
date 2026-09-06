@@ -635,6 +635,22 @@ pub(crate) fn class_name(value: &Value) -> Option<&str> {
     }
 }
 
+/// Whether `a` and `b` are the same Python class, the single identity check
+/// `diff_at` (`crate::diff::dispatch`) and [`Value`]'s own structural equality
+/// both use so they cannot drift. Two [`Object`]s compare by qualified
+/// identity *and* kind (see [`Object::same_class`]) — a `dict` subclass and a
+/// custom object sharing a `__name__`, or two same-named classes from
+/// different modules, are different classes. Every other variant compares by
+/// the rendered [`class_name`], which is all its (base-type-plus-subclass-name)
+/// identity has ever needed.
+#[must_use]
+pub(crate) fn same_class(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => x.same_class(y),
+        _ => class_name(a) == class_name(b),
+    }
+}
+
 /// Delegates to the iterative `structural_eq`. The result is exactly what a
 /// derived `PartialEq` produces, verified by a differential property test
 /// against the derive before it was replaced. See the [module
@@ -962,12 +978,12 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
     while let Some((a, b)) = stack.pop() {
         // `DeepDiff` reports a subclass-vs-base pair as a `type_changes`
         // finding even when every field matches (see [`Typed`]'s doc), so
-        // two otherwise-identical values with different class names are not
-        // structurally equal — checked once here rather than per-arm below,
-        // since it applies identically to every variant that can carry a
-        // class name (see `same_class`'s doc, `crate::diff::dispatch`, for
-        // the exact list) and is a no-op (`None == None`) for the rest.
-        if class_name(a) != class_name(b) {
+        // two values that are not the same class are not structurally equal —
+        // checked once here rather than per-arm below through the one shared
+        // [`same_class`] definition `diff_at` also uses (an [`Object`] compares
+        // by qualified identity plus kind, every other variant by render name),
+        // a no-op (both `None`) for a variant that carries no class at all.
+        if !same_class(a, b) {
             return false;
         }
 
@@ -1762,18 +1778,27 @@ pub struct Object {
     /// `Option<Arc<str>>`-plus-kind so [`Value`] stays within its
     /// frame-budget size cap (`value_is_compact`): a plain `dict` pays a
     /// single pointer here, and only a `dict` subclass or a custom object —
-    /// both rare — pays the one small heap allocation. See [`ObjectClass`].
+    /// both rare — pays the one small heap allocation. See the `ObjectClass` struct.
     class: Option<Box<ObjectClass>>,
 }
 
-/// A non-plain-`dict` [`Object`]'s class: the subclass/class name plus whether
-/// the entries are a `dict`'s items or a custom object's attributes. Held
-/// behind [`Object::class`]'s `Box` so a plain `dict` carries none of it.
+/// A non-plain-`dict` [`Object`]'s class: the class name, a qualified identity,
+/// and whether the entries are a `dict`'s items or a custom object's
+/// attributes. Held behind [`Object::class`]'s `Box` so a plain `dict` carries
+/// none of it.
 #[derive(Debug, Clone)]
 struct ObjectClass {
-    /// The Python class name: a `dict` subclass's name, or a custom object's
-    /// class (the name `DeepDiff` reports as `old_type`/`new_type`).
+    /// The Python class *name* (`__name__`): a `dict` subclass's name, or a
+    /// custom object's class — the name `DeepDiff` renders in `old_type`/
+    /// `new_type`. Used only for *rendering*, never for identity: two
+    /// different classes can share a `__name__`.
     name: Arc<str>,
+    /// The class's qualified *identity* (`__module__` + `__qualname__`), used
+    /// to decide whether two objects are the same class — `DeepDiff` compares
+    /// the actual `type` objects (`type(t1) != type(t2)` -> `type_changes`),
+    /// so two same-named classes from different modules must not compare equal.
+    /// A finer proxy than `name`; see [`Object::same_class`].
+    identity: Arc<str>,
     /// Whether these entries are a `dict`'s items or a custom object's
     /// attributes.
     kind: ObjectKind,
@@ -1805,14 +1830,16 @@ impl Object {
         }
     }
 
-    /// Attaches a `dict` subclass name (`None` for the exact base type), for
-    /// a caller (`onix-py`'s converter) that already has a built [`Object`]
-    /// and knows which concrete class it came from.
+    /// Attaches a `dict` subclass's `name` and qualified `identity` (`None`
+    /// for the exact base `dict`), for a caller (`onix-py`'s converter) that
+    /// already has a built [`Object`] and knows which concrete class it came
+    /// from. See the `ObjectClass` struct for the name-versus-identity split.
     #[must_use]
-    pub fn with_type_name(mut self, type_name: Option<Arc<str>>) -> Self {
-        self.class = type_name.map(|name| {
+    pub fn with_dict_class(mut self, class: Option<(Arc<str>, Arc<str>)>) -> Self {
+        self.class = class.map(|(name, identity)| {
             Box::new(ObjectClass {
                 name,
+                identity,
                 kind: ObjectKind::Dict,
             })
         });
@@ -1820,23 +1847,41 @@ impl Object {
     }
 
     /// Marks these entries as a custom object's attributes (rather than a
-    /// `dict`'s items) under `class_name`, the object's class — see
-    /// [`ObjectKind`]. The name is always present for a custom object, unlike
-    /// a `dict` subclass's optional name.
+    /// `dict`'s items) under class `name` and qualified `identity` — see
+    /// [`ObjectKind`] and the `ObjectClass` struct. Both are always present for a custom
+    /// object, unlike a `dict` subclass's optional name.
     #[must_use]
-    pub fn into_custom_object(mut self, class_name: Arc<str>) -> Self {
+    pub fn into_custom_object(mut self, name: Arc<str>, identity: Arc<str>) -> Self {
         self.class = Some(Box::new(ObjectClass {
-            name: class_name,
+            name,
+            identity,
             kind: ObjectKind::CustomObject,
         }));
         self
     }
 
-    /// The subclass name this object carries, or `None` for the exact base
-    /// type.
+    /// The class *name* (`__name__`) this object carries, or `None` for the
+    /// exact base type — the name for *rendering*, not identity (see
+    /// [`Object::same_class`]).
     #[must_use]
     pub fn type_name(&self) -> Option<&str> {
         self.class.as_ref().map(|class| class.name.as_ref())
+    }
+
+    /// Whether `self` and `other` are the same Python class: same qualified
+    /// identity *and* same kind. `DeepDiff` reports `type_changes` between two
+    /// values whose `type()` objects are not identical, so a `dict` subclass
+    /// and a custom object sharing a `__name__`, or two same-named classes from
+    /// different modules, are *not* the same class here — matched by the
+    /// `ObjectClass::identity` proxy, not the render name. Two plain `dict`s
+    /// (no class) are the same class.
+    #[must_use]
+    pub fn same_class(&self, other: &Object) -> bool {
+        match (self.class.as_ref(), other.class.as_ref()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.kind == b.kind && a.identity == b.identity,
+            _ => false,
+        }
     }
 
     /// Whether these entries are a `dict`'s items or a custom object's
@@ -2104,30 +2149,33 @@ impl Builder {
     }
 
     /// [`Builder::object_with_keys`], additionally attaching a `dict`
-    /// subclass name (`None` for the exact base type) — the entry point
-    /// `onix-py`'s converter uses for every `dict` subclass, whether or not
-    /// its keys are all `str`, see [`Object::with_type_name`] and the module
-    /// documentation's "Subclasses" section.
+    /// subclass's `(name, identity)` (`None` for the exact base `dict`) — the
+    /// entry point `onix-py`'s converter uses for every `dict` subclass,
+    /// whether or not its keys are all `str`. See [`Object::with_dict_class`]
+    /// for the name-versus-identity split and the module documentation's
+    /// "Subclasses" section.
     #[must_use]
-    pub fn object_with_keys_and_type_name(
+    pub fn object_with_keys_and_class(
         &mut self,
         entries: Vec<(ObjectKey, Value)>,
-        type_name: Option<Arc<str>>,
+        class: Option<(Arc<str>, Arc<str>)>,
     ) -> Value {
-        Value::Object(Object::from_pairs(entries).with_type_name(type_name))
+        Value::Object(Object::from_pairs(entries).with_dict_class(class))
     }
 
     /// Builds a custom object [`Value`] from its attribute `entries` (all
-    /// `str`-keyed) under `class_name` — the entry point `onix-py`'s
-    /// converter uses for an instance of a user-defined class, diffed by its
-    /// attributes rather than as a `dict`. See [`ObjectKind::CustomObject`].
+    /// `str`-keyed) under class `name` and qualified `identity` — the entry
+    /// point `onix-py`'s converter uses for an instance of a user-defined
+    /// class, diffed by its attributes rather than as a `dict`. See
+    /// [`ObjectKind::CustomObject`] and [`Object::same_class`].
     #[must_use]
     pub fn custom_object(
         &mut self,
         entries: Vec<(ObjectKey, Value)>,
-        class_name: Arc<str>,
+        name: Arc<str>,
+        identity: Arc<str>,
     ) -> Value {
-        Value::Object(Object::from_pairs(entries).into_custom_object(class_name))
+        Value::Object(Object::from_pairs(entries).into_custom_object(name, identity))
     }
 }
 

@@ -359,13 +359,13 @@ pub(crate) fn count_diff_leaves(
     }
 }
 
-/// Whether two objects are the same Python class — the pairing/distance
-/// mirror of `crate::diff::dispatch`'s `same_class` for the `Object` variant:
-/// same class name *and* same kind (a `dict` subclass named `X` and a custom
-/// object named `X` are different Python types, so their attribute sets are
-/// never compared directly).
+/// Whether two objects are the same Python class — the pairing/distance use of
+/// [`Object::same_class`] (qualified identity plus kind), so a `dict` subclass
+/// and a custom object sharing a `__name__`, or two same-named classes from
+/// different modules, are never compared attribute-by-attribute here (they are
+/// a `type_changes` instead), exactly as `crate::diff::dispatch` treats them.
 fn objects_same_class(x: &Object, y: &Object) -> bool {
-    x.type_name() == y.type_name() && x.kind() == y.kind()
+    x.same_class(y)
 }
 
 /// [`count_diff_leaves`]'s type-mismatch contribution: `DeepDiff`'s own

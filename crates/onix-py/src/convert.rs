@@ -208,7 +208,7 @@ use onix_core::value::{
 };
 use onix_core::{Number as CNumber, Value as CValue};
 use pyo3::conversion::IntoPyObjectExt;
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyAttributeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::iter::{
     BoundDictIterator, BoundFrozenSetIterator, BoundListIterator, BoundSetIterator,
@@ -306,8 +306,9 @@ enum Frame<'py> {
         remaining: BoundDictIterator<'py>,
         built: Vec<(ObjectKey, CValue)>,
         current_key: ObjectKey,
-        /// See [`Frame::Seq::class_name`].
-        class_name: Option<Arc<str>>,
+        /// The `dict` subclass or custom object's class (`None` for a plain
+        /// `dict`) — its render name and qualified identity. See [`PyClass`].
+        class: Option<PyClass>,
         /// Whether the entries being collected are a `dict`'s items or a
         /// custom object's attributes — decides which `Value` this frame
         /// builds (see [`finish_object`]).
@@ -331,8 +332,8 @@ enum Step<'py> {
         iter: BoundDictIterator<'py>,
         first_key: ObjectKey,
         first_value: Bound<'py, PyAny>,
-        /// See [`Frame::Seq::class_name`].
-        class_name: Option<Arc<str>>,
+        /// See [`Frame::Dict::class`].
+        class: Option<PyClass>,
         /// See [`Frame::Dict::kind`].
         kind: ObjectKind,
     },
@@ -508,46 +509,137 @@ fn classify<'py>(
     }
 
     if !set_member && let Ok(dict) = current.cast::<PyDict>() {
-        let class_name = current
+        // A plain `dict` carries no class; a `dict` subclass carries its name
+        // and qualified identity (a subclass is a `type_changes` against the
+        // base `dict` and against another same-named subclass from elsewhere).
+        let class = current
             .cast_exact::<PyDict>()
             .is_err()
-            .then(|| class_name(current));
+            .then(|| py_class(current));
         let mut iter = dict.iter();
 
         return Ok(match next_dict_entry(&mut iter, path, builder)? {
-            None => Step::Done(builder.object_with_keys_and_type_name(Vec::new(), class_name)),
+            None => Step::Done(finish_object(builder, Vec::new(), class, ObjectKind::Dict)),
             Some((first_key, first_value)) => Step::Dict {
                 iter,
                 first_key,
                 first_value,
-                class_name,
+                class,
                 kind: ObjectKind::Dict,
             },
         });
     }
 
     // A custom object: diffed by its attributes, matching `DeepDiff`'s
-    // `_diff_obj` (see [`object_attributes`]). Never a set member — a set
-    // member is restricted to the hashable base types (see this function's
-    // own doc); a custom object reaching one is refused like any other
-    // unsupported member type.
-    if !set_member {
-        let class = class_name(current);
-        let attrs = object_attributes(current, path)?;
+    // `_diff_obj` (see [`object_attributes`]), but only for a value that
+    // reaches `_diff_obj`'s slot in `DeepDiff`'s own dispatch ladder — see
+    // [`is_diffable_object`] for the accept-list. Anything `DeepDiff` routes to
+    // an earlier, dedicated handler (a number, an iterable, `uuid`,
+    // `ipaddress`, an `Enum` aside, a class, a module) is refused with the
+    // typed path-naming error rather than reshaped into an (often
+    // attribute-less) object that would silently report `{}` for unequal
+    // values. Never a set member either (restricted to the hashable base
+    // types).
+    if !set_member && is_diffable_object(current)? {
+        let class = py_class(current);
+        let attrs = object_attributes(current)?;
         let mut iter = attrs.iter();
         return Ok(match next_dict_entry(&mut iter, path, builder)? {
-            None => Step::Done(builder.custom_object(Vec::new(), class)),
+            None => Step::Done(finish_object(
+                builder,
+                Vec::new(),
+                Some(class),
+                ObjectKind::CustomObject,
+            )),
             Some((first_key, first_value)) => Step::Dict {
                 iter,
                 first_key,
                 first_value,
-                class_name: Some(class),
+                class: Some(class),
                 kind: ObjectKind::CustomObject,
             },
         });
     }
 
-    Err(unhashable_member_error(current, path))
+    Err(if set_member {
+        unhashable_member_error(current, path)
+    } else {
+        unsupported_type_error(current, path)
+    })
+}
+
+/// Whether `obj` reaches `_diff_obj`'s slot in `DeepDiff`'s own dispatch ladder
+/// (`diff.py::_diff`) and so is diffed by its attributes, rather than a type
+/// `DeepDiff` routes to an earlier, dedicated handler that onix does not have.
+///
+/// This is the accept-list the `.claude/rules/fallback-accept-list.md` rule
+/// requires (enumerated against that ladder), so nothing is silently reshaped:
+///
+/// - A **class object** (instance of `type`) or a **module** is refused:
+///   `DeepDiff` diffs a class by its class `dict` / reports `type_changes`, and
+///   a class's `__dict__` is a `mappingproxy` onix does not read.
+/// - An **`Enum` member** is accepted: `DeepDiff`'s `_diff_enum` reports it by
+///   its `name`/`value`, which are exactly the non-callable attributes
+///   attribute enumeration extracts — so onix matches it with no special case
+///   (confirmed against `deepdiff==9.1.0`).
+/// - A **number** (`complex`, `Decimal`, `Fraction`; `int`/`float`/`bool` were
+///   handled far earlier), any **iterable** (`bytes`, `bytearray`,
+///   `memoryview`, `range`, a generator, any object defining `__iter__`), a
+///   **`uuid`**, or an **`ipaddress`** address/network/interface is refused —
+///   each is a `DeepDiff` handler (`_diff_numbers`, `_diff_iterable`/`_diff_str`,
+///   `_diff_uuids`, `_diff_ipranges`) onix lacks. Refusing beats reshaping:
+///   `complex`/`Decimal` have an `.imag`/`.real` that would recurse to
+///   `MaxDepthError`, and the attribute-less ones would report `{}` for two
+///   unequal values.
+/// - Otherwise a value with a `__dict__` or `__slots__` is a genuine object
+///   `_diff_obj` enumerates; an attribute-less non-iterable value with neither
+///   (a bare `object()`) is refused rather than reported as `{}`.
+///
+/// The `Enum`/number/iterable/uuid/ipaddress/module type objects are imported
+/// per call, on this rare fallback path only — never on the scalar or
+/// container fast paths.
+fn is_diffable_object(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = obj.py();
+
+    if obj.is_instance_of::<PyType>() {
+        return Ok(false);
+    }
+    // An `Enum` member matches `_diff_enum` via ordinary attribute enumeration.
+    if obj.is_instance(&py.import("enum")?.getattr("Enum")?)? {
+        return Ok(true);
+    }
+    // Types `DeepDiff` routes to a dedicated handler before `_diff_obj`.
+    if obj.is_instance(&py.import("numbers")?.getattr("Number")?)?
+        || obj.is_instance(&py.import("collections.abc")?.getattr("Iterable")?)?
+        || obj.is_instance(&py.import("uuid")?.getattr("UUID")?)?
+        || is_ipaddress(obj)?
+        || obj.is_instance(&py.import("types")?.getattr("ModuleType")?)?
+    {
+        return Ok(false);
+    }
+    let dir = obj.dir()?;
+    Ok(dir_contains(&dir, "__dict__")? || dir_contains(&dir, "__slots__")?)
+}
+
+/// Whether `obj` is an `ipaddress` address, network, or interface — the types
+/// `DeepDiff` routes to its `ipranges` handler. Checked against the six public
+/// `ipaddress` classes rather than a private base, so it stays correct if the
+/// module's internals change.
+fn is_ipaddress(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let module = obj.py().import("ipaddress")?;
+    for class in [
+        "IPv4Address",
+        "IPv6Address",
+        "IPv4Network",
+        "IPv6Network",
+        "IPv4Interface",
+        "IPv6Interface",
+    ] {
+        if obj.is_instance(&module.getattr(class)?)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The attributes `DeepDiff`'s `_diff_obj` (diff.py, `deepdiff==9.1.0`) sees
@@ -568,19 +660,20 @@ fn classify<'py>(
 ///   underscore (`_x`) and a name-mangled (`_Cls__x`) one.
 /// - else `'__slots__' in dir(obj)`: `_diff_obj._dict_from_slots` — the slot
 ///   values gathered up the MRO, un-mangling each slot name to read it.
-/// - else: `getmembers(obj)` keeping the non-callable members.
+/// - else: `getmembers`-style — every non-callable `dir(obj)` name. Reached
+///   only by an `Enum` member (every other value with neither `__dict__` nor
+///   `__slots__` was refused by [`is_diffable_object`]); it extracts exactly
+///   the `name`/`value` `DeepDiff`'s `_diff_enum` reports.
+///
+/// A non-`AttributeError` from any getter (a `ValueError`, or a
+/// `BaseException` such as `KeyboardInterrupt`) propagates as the Python error
+/// at this path; an `AttributeError` leaves that attribute out (see the
+/// per-strategy helpers).
 ///
 /// A final pass drops any attribute whose name starts with `__`, matching
-/// `_diff_dict`'s own `print_as_attribute` key filter (diff.py) — so a slot
-/// or member named `__x` never reaches the diff, exactly as in `DeepDiff`.
-///
-/// `getattr` here runs user code for a `@property`, precisely as `DeepDiff`
-/// does; a property that raises is skipped (its name simply does not appear),
-/// keeping conversion total rather than propagating a mid-walk failure.
-fn object_attributes<'py>(
-    obj: &Bound<'py, PyAny>,
-    _path: &[PathSegment],
-) -> PyResult<Bound<'py, PyDict>> {
+/// `_diff_dict`'s own `print_as_attribute` key filter (diff.py) — so a slot or
+/// member named `__x` never reaches the diff, exactly as in `DeepDiff`.
+fn object_attributes<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
     let dir = obj.dir()?;
     let result = if dir_contains(&dir, "__dict__")? {
         detailed_dict(obj, &dir)?
@@ -592,7 +685,7 @@ fn object_attributes<'py>(
 
     // `_diff_dict`'s `print_as_attribute` filter: no dunder-named attribute
     // is ever diffed. `detailed__dict__` already excludes them, but the slots
-    // and getmembers strategies can still surface one.
+    // strategy can still surface one.
     let dunder: Vec<Bound<'py, PyAny>> = result
         .keys()
         .iter()
@@ -621,7 +714,12 @@ fn detailed_dict<'py>(
     let result = PyDict::new(py);
     let private_prefix = format!("_{}__", type_name(obj));
 
-    let instance_dict = obj.getattr("__dict__")?;
+    // `obj.__dict__.copy()`, exactly as `detailed__dict__` does. The copy is a
+    // *snapshot*: iterating it cannot raise "dictionary changed size during
+    // iteration" if a `@property` getter in the `dir` loop below mutates the
+    // live `__dict__` (a class's `mappingproxy` never reaches here — a class
+    // object is refused by `is_diffable_object`).
+    let instance_dict = obj.getattr("__dict__")?.call_method0("copy")?;
     let instance_dict = instance_dict.cast::<PyDict>()?;
     for (key, value) in instance_dict.iter() {
         if let Ok(name) = key.extract::<String>()
@@ -644,9 +742,15 @@ fn detailed_dict<'py>(
             continue;
         }
         // `getattr` runs a `@property`'s getter — user code, exactly as
-        // `DeepDiff` does; one that raises just leaves its name out.
-        let Ok(value) = obj.getattr(&*text) else {
-            continue;
+        // `DeepDiff` does. An `AttributeError` leaves the name out (DeepDiff
+        // marks the whole object `unprocessed`, a category onix does not have —
+        // see `tests/golden/README.md`); any other exception, including a
+        // `BaseException` like `KeyboardInterrupt`/`SystemExit`, propagates as
+        // the Python error at this path, never swallowed.
+        let value = match obj.getattr(&*text) {
+            Ok(value) => value,
+            Err(err) if err.is_instance_of::<PyAttributeError>(py) => continue,
+            Err(err) => return Err(err),
         };
         if value.is_callable() {
             continue;
@@ -694,9 +798,12 @@ fn slots_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
     Ok(result)
 }
 
-/// `{k: v for k, v in getmembers(obj) if not callable(v)}` (diff.py's
-/// `_diff_obj` fallback) — see [`object_attributes`]. `getmembers` reads
-/// every `dir(obj)` name through `getattr`, skipping any that raises.
+/// `{k: v for k, v in getmembers(obj) if not callable(v)}` — the strategy for a
+/// value with neither `__dict__` nor `__slots__`. Reached only by an `Enum`
+/// member (see [`object_attributes`]), for which `dir` yields exactly `name`
+/// and `value`, matching `DeepDiff`'s `_diff_enum`. An `AttributeError` from a
+/// getter skips that name; any other exception propagates (see
+/// [`detailed_dict`]).
 fn getmembers_noncallable<'py>(
     obj: &Bound<'py, PyAny>,
     dir: &Bound<'py, PyList>,
@@ -707,8 +814,10 @@ fn getmembers_noncallable<'py>(
         let Ok(text) = name.extract::<String>() else {
             continue;
         };
-        let Ok(value) = obj.getattr(&*text) else {
-            continue;
+        let value = match obj.getattr(&*text) {
+            Ok(value) => value,
+            Err(err) if err.is_instance_of::<PyAttributeError>(py) => continue,
+            Err(err) => return Err(err),
         };
         if value.is_callable() {
             continue;
@@ -798,7 +907,7 @@ fn advance_frame<'py>(
             mut remaining,
             mut built,
             current_key,
-            class_name,
+            class,
             kind,
         } => {
             built.push((current_key, value));
@@ -814,14 +923,12 @@ fn advance_frame<'py>(
                             remaining,
                             built,
                             current_key: key,
-                            class_name,
+                            class,
                             kind,
                         },
                     })
                 }
-                None => Ok(Advance::Done(finish_object(
-                    builder, built, class_name, kind,
-                ))),
+                None => Ok(Advance::Done(finish_object(builder, built, class, kind))),
             }
         }
     }
@@ -840,20 +947,22 @@ fn entry_path_segment(kind: ObjectKind, key: &ObjectKey) -> PathSegment {
 }
 
 /// Builds the finished [`CValue`] for a `Frame::Dict`, as the kind selects: a
-/// `dict` (carrying its optional subclass name) or a custom object (carrying
-/// its class name).
+/// `dict` (carrying its optional subclass class) or a custom object (carrying
+/// its class). See [`PyClass`] for the name/identity split.
 fn finish_object(
     builder: &mut Builder,
     built: Vec<(ObjectKey, CValue)>,
-    class_name: Option<Arc<str>>,
+    class: Option<PyClass>,
     kind: ObjectKind,
 ) -> CValue {
     match kind {
-        ObjectKind::Dict => builder.object_with_keys_and_type_name(built, class_name),
-        ObjectKind::CustomObject => builder.custom_object(
-            built,
-            class_name.expect("a custom object always carries its class name"),
-        ),
+        ObjectKind::Dict => {
+            builder.object_with_keys_and_class(built, class.map(|c| (c.name, c.identity)))
+        }
+        ObjectKind::CustomObject => {
+            let class = class.expect("a custom object always carries its class");
+            builder.custom_object(built, class.name, class.identity)
+        }
     }
 }
 
@@ -929,7 +1038,7 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<(CV
                     iter,
                     first_key,
                     first_value,
-                    class_name,
+                    class,
                     kind,
                 } => {
                     let child_depth = depth + 1;
@@ -942,7 +1051,7 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<(CV
                         remaining: iter,
                         built: Vec::with_capacity(capacity),
                         current_key: first_key,
-                        class_name,
+                        class,
                         kind,
                     });
                     pending = Some((first_value, child_depth, false));
@@ -1346,6 +1455,23 @@ fn max_depth_error(max_depth: usize, path: &[PathSegment]) -> PyErr {
     ))
 }
 
+/// The error for a value that is neither one of onix's supported types nor a
+/// diffable custom object — a type `DeepDiff` routes to a handler onix lacks
+/// (`bytes`, `bytearray`, an `Enum`, a generator, any other iterable) or an
+/// attribute-less builtin (`complex`, bare `object()`). Restores the
+/// pre-object-support behavior rather than reporting `{}` for unequal values
+/// (see [`is_diffable_object`]).
+fn unsupported_type_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
+    PyTypeError::new_err(format!(
+        "unsupported type for diffing: {} at {}; a custom object is diffed by \
+         its attributes, but a value DeepDiff routes to a handler onix lacks \
+         (bytes/bytearray/memoryview or another iterable, a number such as \
+         complex/Decimal/Fraction, uuid, ipaddress, a class or module) is not",
+        type_name(obj),
+        render_path(path),
+    ))
+}
+
 /// The error for an object that reached a set member, or anything nested
 /// inside one, but is not a type this MVP allows there — see [`classify`]'s
 /// `set_member` parameter.
@@ -1370,6 +1496,38 @@ fn type_name(obj: &Bound<'_, PyAny>) -> String {
 /// carry for a subclass instance — see the module doc's "Subclasses" section.
 fn class_name(obj: &Bound<'_, PyAny>) -> Arc<str> {
     Arc::from(type_name(obj))
+}
+
+/// An [`onix_core::value::Object`]'s class as onix carries it: the `__name__`
+/// `DeepDiff` renders (`name`), and a qualified `identity` (`__module__` +
+/// `__qualname__`) onix decides `type_changes` by — `DeepDiff` compares the
+/// actual `type` objects, so two same-named classes from different modules
+/// must not compare equal. See [`onix_core::value::Object::same_class`].
+struct PyClass {
+    name: Arc<str>,
+    identity: Arc<str>,
+}
+
+/// The [`PyClass`] of `obj`'s type: its `__name__` for rendering, and
+/// `"<module>.<qualname>"` for identity. Either attribute missing (an exotic
+/// type) falls back to the render name, which still distinguishes classes by
+/// name — no worse than the pre-identity behavior for that rare case.
+fn py_class(obj: &Bound<'_, PyAny>) -> PyClass {
+    let name = class_name(obj);
+    let ty = obj.get_type();
+    let module = ty
+        .getattr("__module__")
+        .ok()
+        .and_then(|m| m.extract::<String>().ok());
+    let qualname = ty
+        .getattr("__qualname__")
+        .ok()
+        .and_then(|q| q.extract::<String>().ok());
+    let identity = match (module, qualname) {
+        (Some(module), Some(qualname)) => Arc::from(format!("{module}.{qualname}")),
+        _ => Arc::clone(&name),
+    };
+    PyClass { name, identity }
 }
 
 /// Which Python sequence [`value_to_pyobject`] rebuilds a run of items into
