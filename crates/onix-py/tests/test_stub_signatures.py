@@ -10,6 +10,7 @@ surfacing later as a wrong IDE tooltip or a `mypy` false negative.
 import ast
 import importlib.metadata
 import inspect
+import sys
 from pathlib import Path
 
 import pytest
@@ -114,6 +115,12 @@ def test_module_function_signature_matches_the_stub(name: str) -> None:
 
 
 def test_deepdiff_init_signature_matches_the_stub() -> None:
+    if sys.version_info < (3, 10):
+        pytest.skip(
+            "CPython 3.9 leaves a PyO3 extension class's own __text_signature__ "
+            "unset (fixed by 3.10), so inspect.signature() cannot recover it"
+        )
+
     init = _class_members(CLASSES["DeepDiff"])["__init__"]
     stub_params = _params(init.args)
     runtime_params = _runtime_params(deepdiff_rs.DeepDiff)

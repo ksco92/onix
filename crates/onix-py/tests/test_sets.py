@@ -23,6 +23,9 @@ import unicodedata
 from typing import Final
 
 import pytest
+
+pytest.importorskip("deepdiff", reason="deepdiff requires Python >= 3.10")
+
 from deepdiff import DeepDiff as RealDeepDiff
 
 from deepdiff_rs import DeepDiff, diff_json
@@ -278,6 +281,9 @@ def test_str_inside_tuple_matches_python_repr_over_the_full_bmp() -> None:
 
 def test_str_inside_tuple_matches_python_repr_beyond_the_bmp() -> None:
     """The `\\UXXXXXXXX` escape width, and printable astral text left bare."""
+    if unicodedata.unidata_version != "16.0.0":
+        pytest.skip("valid only against Unicode 16.0.0 (Python 3.14); see tests/golden/README.md")
+
     _assert_batch_matches_python_repr(SUPPLEMENTARY_SAMPLE)
 
 

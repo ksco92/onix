@@ -10,5 +10,7 @@ script's own directory to `sys.path` (`uv run` inherits this), so they
 cannot reach this module.
 """
 
+from typing import Union
+
 # A JSON-shaped value (no `typing.Any` per the python-coding-guide's ban).
-type JsonValue = dict[str, "JsonValue"] | list["JsonValue"] | str | int | float | bool | None
+JsonValue = Union[dict[str, "JsonValue"], list["JsonValue"], str, int, float, bool, None]

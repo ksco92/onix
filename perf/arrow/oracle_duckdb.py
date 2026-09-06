@@ -95,6 +95,8 @@ Writes `<out>/schema_diff.parquet`, `<out>/rows_added.parquet`,
 stdout (comparable against `generate_fixtures.py`'s sidecar `manifest.json`).
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 from pathlib import Path
@@ -316,15 +318,24 @@ def _write_cells_changed(
         """
         for column in compare_columns
     )
+    # The long-format rows are ordered from inside a derived table (`changed`),
+    # never directly after `matched`/`vb`: with exactly one compare column
+    # `per_column_selects` is a single SELECT rather than a real UNION ALL, and
+    # an ORDER BY placed right after it resolves an unqualified key column
+    # against both `matched`'s and `vb`'s same-named column instead of the
+    # output list alone -- ambiguous per DuckDB's binder (observed on 1.4.5;
+    # 1.5.5 does not raise it, but the query must not depend on that).
     con.execute(
         f"""
         COPY (
-            WITH matched AS (
-                SELECT a.* FROM va a
-                INNER JOIN (SELECT {key_list} FROM key_summary WHERE left_count = 1 AND right_count = 1) k
-                    ON {matched_join}
-            )
-            {per_column_selects}
+            SELECT * FROM (
+                WITH matched AS (
+                    SELECT a.* FROM va a
+                    INNER JOIN (SELECT {key_list} FROM key_summary WHERE left_count = 1 AND right_count = 1) k
+                        ON {matched_join}
+                )
+                {per_column_selects}
+            ) changed
             ORDER BY {key_list}, "column"
         ) TO {_quote_literal(str(out_path))} (FORMAT PARQUET)
         """,

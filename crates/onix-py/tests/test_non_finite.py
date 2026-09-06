@@ -47,6 +47,10 @@ import random
 import time
 from typing import Final
 
+import pytest
+
+pytest.importorskip("deepdiff", reason="deepdiff requires Python >= 3.10")
+
 from deepdiff import DeepDiff as RealDeepDiff
 
 from deepdiff_rs import MAX_DEPTH_CEILING

@@ -106,6 +106,8 @@ is always a plain finite number, never NaN or signed zero, so a `value_changed` 
 rendering is never ambiguous with the unmutated NaN/-0.0 cells this fixture also carries.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import random
@@ -114,7 +116,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Final, Self
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from typing_extensions import Self
 
 import pyarrow as pa
 import pyarrow.parquet as pq

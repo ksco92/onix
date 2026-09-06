@@ -14,6 +14,9 @@ Two things this file pins that the golden corpus cannot:
 import datetime
 
 import pytest
+
+pytest.importorskip("deepdiff", reason="deepdiff requires Python >= 3.10")
+
 from conftest import _normalize_types
 from deepdiff import DeepDiff as RealDeepDiff
 

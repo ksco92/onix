@@ -218,6 +218,21 @@ uv run --group test pytest tests/test_table_diff.py -q
 The pure-Rust schema logic lives in `crates/onix-arrow` and is covered by
 `cargo test` / `make check` like the other Rust crates.
 
+### Interpreter coverage
+
+`pyproject.toml` declares `requires-python = ">=3.9"`, and CI runs the suite
+on both 3.14 (`python-test`) and 3.9, the oldest supported interpreter
+(`python-oldest`), so a construct that only resolves on one of them cannot
+merge unnoticed. A handful of tests stay skipped on anything below 3.14: the
+golden-corpus parity suite (`test_golden_parity.py`) and the BMP/beyond-BMP
+`str`-repr sweeps in `test_sets.py`, because the corpus and those sweeps are
+generated against Python 3.14's Unicode 16.0.0 table (see
+`tests/golden/README.md`, "Pinned versions") and compare byte-for-byte
+against it. `test_stub_signatures.py`'s `DeepDiff.__init__` check also skips
+below 3.10: CPython 3.9 leaves a PyO3 extension class's own
+`__text_signature__` unset, so `inspect.signature()` cannot recover it there.
+Every other test is expected to pass on 3.9 through 3.14 alike.
+
 ### Type stub
 
 [`crates/onix-py/deepdiff_rs.pyi`](crates/onix-py/deepdiff_rs.pyi) is the

@@ -14,6 +14,9 @@ import collections
 import json
 
 import pytest
+
+pytest.importorskip("deepdiff", reason="deepdiff requires Python >= 3.10")
+
 from deepdiff import DeepDiff as RealDeepDiff
 
 from deepdiff_rs import DeepDiff, diff_json
