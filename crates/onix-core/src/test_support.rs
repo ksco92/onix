@@ -129,12 +129,9 @@ pub(crate) fn cobj(map: &serde_json::Map<String, serde_json::Value>) -> Object {
 /// user-defined class, diffed by its attributes). See
 /// [`crate::value::ObjectKind::CustomObject`].
 pub(crate) fn ccustom(class: &str, map: &serde_json::Map<String, serde_json::Value>) -> Value {
-    // Tests use the class name as its own qualified identity (same-module),
-    // the common case; the cross-module distinction is exercised where it
-    // matters via `ccustom_id`.
-    Value::Object(
-        cobj(map).into_custom_object(std::sync::Arc::from(class), std::sync::Arc::from(class)),
-    )
+    // The class name is its own qualified identity (same-module), the common
+    // case; the cross-module distinction is exercised via `ccustom_id`.
+    ccustom_id(class, class, map)
 }
 
 /// [`ccustom`] with an explicit qualified `identity` distinct from the render

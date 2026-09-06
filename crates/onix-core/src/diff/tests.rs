@@ -3203,3 +3203,33 @@ fn ignore_order_object_with_added_and_removed_attributes_pairs_and_reports_both(
         })
     );
 }
+
+#[test]
+fn ignore_order_two_disjoint_attribute_objects_collapse_to_a_whole_value_change() {
+    // Disjoint attribute sets are below `threshold_to_diff_deeper`, so the
+    // distance probe's `count_object_diff_leaves` takes its collapse branch
+    // (`b.len()` for a custom object), and the pair reports as one whole-value
+    // `values_changed` — matching real DeepDiff.
+    let a = carr(vec![ccustom(
+        "A",
+        json!({"x": 1, "y": 2}).as_object().unwrap(),
+    )]);
+    let b = carr(vec![ccustom(
+        "A",
+        json!({"p": 3, "q": 4}).as_object().unwrap(),
+    )]);
+
+    let opts = super::DiffOptions {
+        ignore_order: true,
+        ..super::DiffOptions::default()
+    };
+    assert_eq!(
+        super::diff_with_options(&a, &b, &opts)
+            .expect("shallow diff is clean")
+            .to_json_value(),
+        json!({"values_changed": {"root[0]": {
+            "old_value": {"x": 1, "y": 2},
+            "new_value": {"p": 3, "q": 4},
+        }}})
+    );
+}

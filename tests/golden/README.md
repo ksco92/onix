@@ -620,17 +620,21 @@ Divergences, all deterministic. The first three (a whole object's serialized val
    `serialization.json_convertor_default`, which serializes **only** public
    `@property` values, or failing that only public `__dict__` entries, and
    raises `TypeError` for a slots-only object with neither. For a plain class the
-   two coincide; they differ only for an object carrying a `@property`, a class
-   attribute, or a private attribute that reaches a whole-value position — and
-   for a slots-only object there, where DeepDiff crashes and onix renders. onix's
-   value is self-consistent (the value shown equals the value diffed) and total.
+   two coincide; they differ only for a whole-value object with one of these
+   four triggers: a `@property`, a class attribute, a private (`_x`) attribute,
+   or a **slot value on a class that also has `__dict__`** — for
+   `class SlotBase: __slots__ = ("p",)` and `class Mixed(SlotBase)` with `p`
+   set, `vars(m)` is `{}`, so DeepDiff renders an added `Mixed` as `{}` while
+   onix renders `{"p": "x"}` — and, separately, for a slots-only object, where
+   DeepDiff crashes and onix renders. onix's value is self-consistent (the value
+   shown equals the value diffed) and total.
 
 2. **`ignore_order` object hashing.** DeepDiff's `DeepHash._prep_obj` hashes an
    object by its raw `__dict__` (or its slots), never the `dir()`-derived
    properties and class attributes `_diff_obj` reads. onix hashes the one
    attribute view it holds (the diffed one), so pairing can differ for an object
    whose `@property`/class attributes change what its diffed view contains. Both
-   tag the hash with the class identity, so a custom object never pairs with a
+   tag the hash with the class name, so a custom object never pairs with a
    plain `dict` or an instance of another class.
 
 3. **`to_dict()` returns attribute dicts, not the original objects.** DeepDiff's
