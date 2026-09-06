@@ -1436,10 +1436,9 @@ fn wtf8_chars_decode_validates_at_most_a_constant_number_of_bytes_per_call_and_o
         for chars in [25_000usize, 100_000] {
             let bytes = build(chars, with_surrogate);
 
-            super::wtf8_decode_stats::reset();
+            super::wtf8_decode_stats::take();
             let char_count = Wtf8Chars::new(&bytes).count();
-            let validated = super::wtf8_decode_stats::total_bytes();
-            let max_call = super::wtf8_decode_stats::max_call_bytes();
+            let (validated, max_call) = super::wtf8_decode_stats::take();
 
             assert!(char_count > 0);
             assert!(

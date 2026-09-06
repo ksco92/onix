@@ -224,46 +224,37 @@ fn utf8_sequence_width(first_byte: u8) -> usize {
 }
 
 /// Test-only instrumentation proving [`Wtf8Chars::next`] validates `O(n)`
-/// bytes total over a full decode, not `O(n^2)`: a byte counter, incremented
-/// with the size of every slice `next` hands to `str::from_utf8`, plus the
-/// largest single call it ever saw. A counter rather than a wall-clock
-/// measurement, so the check is exact and noise-free instead of tolerating
-/// a fudge factor for scheduler jitter — the same reason
-/// `crate::ignore_order::memo`'s recomputation count replaced a timing
-/// assertion (issue #37). Thread-local, not a shared `static`: the test
-/// harness runs each `#[test]` on its own thread by default, and a process-
-/// global counter would let an unrelated test's concurrent decode inflate
-/// this one's count, reintroducing exactly the kind of nondeterminism a
-/// counter is meant to avoid.
+/// bytes total over a full decode, not `O(n^2)`: a counter, incremented
+/// with the size of every slice `next` hands to `str::from_utf8`. A counter
+/// rather than a wall-clock measurement, so the check is exact and
+/// noise-free instead of tolerating a fudge factor for scheduler jitter —
+/// the same reason `crate::ignore_order::memo`'s recomputation count
+/// replaced a timing assertion (issue #37). Thread-local, not a shared
+/// `static`: the test harness runs each `#[test]` on its own thread by
+/// default, and a process-global counter would let an unrelated test's
+/// concurrent decode inflate this one's count, reintroducing exactly the
+/// kind of nondeterminism a counter is meant to avoid.
 #[cfg(test)]
 pub(crate) mod wtf8_decode_stats {
     use std::cell::Cell;
 
     thread_local! {
-        static TOTAL_BYTES: Cell<usize> = const { Cell::new(0) };
-        static MAX_CALL_BYTES: Cell<usize> = const { Cell::new(0) };
+        static STATS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     }
 
-    /// Zeroes both counters before a fresh measurement, on this thread only.
-    pub(crate) fn reset() {
-        TOTAL_BYTES.with(|c| c.set(0));
-        MAX_CALL_BYTES.with(|c| c.set(0));
-    }
-
+    /// Adds `bytes` to the running total and folds it into the running max.
     pub(crate) fn record(bytes: usize) {
-        TOTAL_BYTES.with(|c| c.set(c.get() + bytes));
-        MAX_CALL_BYTES.with(|c| c.set(c.get().max(bytes)));
+        STATS.with(|c| {
+            let (total, max) = c.get();
+            c.set((total + bytes, max.max(bytes)));
+        });
     }
 
-    /// Total bytes validated on this thread since the last [`reset`].
-    pub(crate) fn total_bytes() -> usize {
-        TOTAL_BYTES.with(Cell::get)
-    }
-
-    /// The largest single slice validated on this thread since the last
-    /// [`reset`].
-    pub(crate) fn max_call_bytes() -> usize {
-        MAX_CALL_BYTES.with(Cell::get)
+    /// Reads `(total bytes, largest single call)` on this thread and resets
+    /// both to zero in the same step, so a caller need not remember to
+    /// clear residue from an earlier measurement separately.
+    pub(crate) fn take() -> (usize, usize) {
+        STATS.with(|c| c.replace((0, 0)))
     }
 }
 
