@@ -46,6 +46,14 @@ pub enum PathSegment {
     /// that splits it into several bracket groups, so [`render_path`] wraps
     /// it in exactly one outer pair, same as any other key).
     KeyRepr(String),
+    /// A custom object's attribute access, e.g. the `x` in `root.x` — a
+    /// [`Str`] for the same reason [`PathSegment::Key`] is (a distinct
+    /// structural identity per name). Rendered `.name` with no brackets and
+    /// no quoting, matching `DeepDiff`'s `AttributeRelationship`
+    /// (`param_repr_format=".{}"`, no `quote_str`); an attribute name read
+    /// from an object's `__dict__`/`__slots__` is a Python identifier, so
+    /// nothing it can hold needs escaping.
+    Attribute(Str),
     /// A list index access, e.g. the `3` in `root[3]`.
     Index(usize),
     /// A set item, e.g. the `1` in `root[1]` for the set `{1}` — carrying
@@ -104,6 +112,10 @@ pub fn render_path(segments: &[PathSegment]) -> Str {
                 rendered.push(b'[');
                 rendered.extend_from_slice(key.as_bytes());
                 rendered.push(b']');
+            }
+            PathSegment::Attribute(name) => {
+                rendered.push(b'.');
+                rendered.extend_from_slice(name.as_bytes());
             }
             PathSegment::Index(index) => {
                 rendered.push(b'[');
@@ -313,6 +325,18 @@ pub fn object_key_path_segment(key: &ObjectKey) -> PathSegment {
     match key {
         ObjectKey::Str(s) => PathSegment::Key(s.into()),
         ObjectKey::Other(value) => PathSegment::KeyRepr(dict_key_repr(value)),
+    }
+}
+
+/// The [`PathSegment::Attribute`] a custom object's attribute key
+/// contributes — `root.name`. A custom object's keys are always `str`
+/// attribute names ([`ObjectKey::Str`]); a non-`str` key is impossible for
+/// one and falls back to the ordinary key segment so this stays total.
+#[must_use]
+pub fn attribute_path_segment(key: &ObjectKey) -> PathSegment {
+    match key {
+        ObjectKey::Str(s) => PathSegment::Attribute(s.into()),
+        ObjectKey::Other(_) => object_key_path_segment(key),
     }
 }
 
@@ -750,10 +774,11 @@ pub(crate) fn python_float_repr(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        PathSegment, escape_non_printable, python_repr, quote_key, render_path, set_item_repr,
+        PathSegment, attribute_path_segment, escape_non_printable, python_repr, quote_key,
+        render_path, set_item_repr,
     };
     use crate::test_support::{cdate, cdt_at, ctime, ctimedelta};
-    use crate::value::{Builder, Number, SetItems, Value};
+    use crate::value::{Builder, Number, ObjectKey, SetItems, Value};
 
     #[test]
     fn empty_path_renders_as_root() {
@@ -1270,5 +1295,25 @@ mod tests {
         expected.push('\'');
 
         assert_eq!(quote_key(&key.as_str().into()).to_string(), expected);
+    }
+
+    #[test]
+    fn attribute_path_segment_str_key_is_a_dotted_attribute() {
+        let key = ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x")));
+        assert_eq!(
+            render_path(&[attribute_path_segment(&key)]).to_string(),
+            "root.x"
+        );
+    }
+
+    #[test]
+    fn attribute_path_segment_non_str_key_falls_back_to_the_subscript_form() {
+        // A custom object never has a non-`str` attribute key; the defensive
+        // `Other` arm mirrors `object_key_path_segment` so it stays total.
+        let key = ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1))));
+        assert_eq!(
+            render_path(&[attribute_path_segment(&key)]).to_string(),
+            "root[1]"
+        );
     }
 }

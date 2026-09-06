@@ -244,8 +244,14 @@ fn finding_count_sums_every_category_distinctly() {
     for i in 0..7 {
         report.insert_iterable_item_removed(index_path(i), cv(&json!(1)));
     }
+    for i in 0..8 {
+        report.insert_attribute_added(index_path(i), cv(&json!(1)));
+    }
+    for i in 0..9 {
+        report.insert_attribute_removed(index_path(i), cv(&json!(1)));
+    }
 
-    assert_eq!(report.finding_count(), 2 + 3 + 4 + 5 + 6 + 7);
+    assert_eq!(report.finding_count(), 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9);
 }
 
 #[test]

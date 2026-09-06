@@ -161,9 +161,15 @@ type DistanceKey = (DistKey, DistKey);
 /// that is an integer beyond `i128` is keyed by an [`ItemKey::BigInt`] (in the
 /// `cache`'s `DistKey`s and, when a set member, in `member_content`), hashed
 /// and compared by its magnitude at `O(digit length)` — a per-lookup cost the
-/// element-count bounds above do not cap (see `super::fxhash`'s doc).
+/// element-count bounds above do not cap (see `super::fxhash`'s doc). A custom
+/// object reaches the `cache`'s `DistKey`s as a class-tagged
+/// [`ItemKey::Object`] (hash and equality are a full attribute-tree walk, like
+/// `ItemKey::Dict`, plus one class-name comparison — see `super::fxhash`'s
+/// doc); its distance is memoized here the way a `dict`'s is (see
+/// [`is_container`]).
 ///
 /// [`rough_distance`]: super::distance::rough_distance
+/// [`is_container`]: super::memo::is_container
 pub(crate) struct IgnoreOrderMemo {
     cache: RefCell<HashMap<DistanceKey, f64>>,
     /// Interns each distinct hashable-tuple identity to its place in
@@ -356,9 +362,14 @@ impl IgnoreOrderMemo {
     }
 }
 
-/// Whether `key` is a container (list/tuple/dict) rather than a scalar — the
-/// variants whose distance is computed by a recursive trial diff, and so the
-/// only ones worth memoizing.
+/// Whether `key` is a container (list/tuple/dict/custom object) rather than a
+/// scalar — the variants whose distance is computed by a recursive trial
+/// diff, and so the only ones worth memoizing. A custom object joins the list
+/// for the same reason a `dict` is on it: its distance walks its attribute
+/// values, which can themselves be arbitrarily deep.
 pub(crate) fn is_container(key: &ItemKey) -> bool {
-    matches!(key, ItemKey::List(_) | ItemKey::Tuple(_) | ItemKey::Dict(_))
+    matches!(
+        key,
+        ItemKey::List(_) | ItemKey::Tuple(_) | ItemKey::Dict(_) | ItemKey::Object(..)
+    )
 }

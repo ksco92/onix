@@ -187,8 +187,9 @@ fn rendered(path: &[PathSegment]) -> Value {
 /// Categories implemented so far: `type_changes`, `values_changed`,
 /// `dictionary_item_added`, `dictionary_item_removed`,
 /// `iterable_item_added`, `iterable_item_removed`, `set_item_added`,
-/// `set_item_removed`. Further categories would be added the same way (an
-/// additive change, no restructuring of existing ones).
+/// `set_item_removed`, `attribute_added`, `attribute_removed`. Further
+/// categories would be added the same way (an additive change, no
+/// restructuring of existing ones).
 ///
 /// Every category is keyed by the structural path (`Vec<PathSegment>`), not
 /// the rendered string — see this module's doc for why. The two set
@@ -215,6 +216,11 @@ pub struct Report {
     /// one pointer costs 8 and is `None` for the overwhelming majority of
     /// diffs, which involve no set at all.
     set_items: Option<Box<SetCategories>>,
+    /// The two custom-object attribute categories, allocated only once an
+    /// attribute finding exists — boxed for the same frame-budget reason as
+    /// [`Self::set_items`], and `None` for the overwhelming majority of
+    /// diffs, which involve no custom object at all.
+    attribute_items: Option<Box<AttributeCategories>>,
 }
 
 /// [`Report`]'s two set categories — see the field's own doc for why they
@@ -225,14 +231,34 @@ struct SetCategories {
     removed: BTreeMap<Vec<PathSegment>, Value>,
 }
 
+/// [`Report`]'s two custom-object attribute categories — see the field's own
+/// doc for why they live behind one pointer.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct AttributeCategories {
+    added: BTreeMap<Vec<PathSegment>, Value>,
+    removed: BTreeMap<Vec<PathSegment>, Value>,
+}
+
 /// The empty pair, for the read paths that need one when nothing was found.
 static NO_SET_ITEMS: std::sync::LazyLock<SetCategories> =
     std::sync::LazyLock::new(SetCategories::default);
+
+/// [`NO_SET_ITEMS`]'s twin for the attribute categories.
+static NO_ATTRIBUTE_ITEMS: std::sync::LazyLock<AttributeCategories> =
+    std::sync::LazyLock::new(AttributeCategories::default);
 
 impl Report {
     /// The two set categories, or an empty pair when no set finding exists.
     fn set_items(&self) -> &SetCategories {
         self.set_items.as_deref().unwrap_or(&NO_SET_ITEMS)
+    }
+
+    /// The two attribute categories, or an empty pair when no attribute
+    /// finding exists.
+    fn attribute_items(&self) -> &AttributeCategories {
+        self.attribute_items
+            .as_deref()
+            .unwrap_or(&NO_ATTRIBUTE_ITEMS)
     }
 }
 
@@ -445,6 +471,30 @@ impl Report {
         );
     }
 
+    /// Records an `attribute_added` finding at the structural `path` (whose
+    /// last segment is a [`crate::path::PathSegment::Attribute`]): `value` is
+    /// the added attribute's value itself, matching `DeepDiff`'s `to_json()`
+    /// shape at `verbose_level=2` — the same shape as
+    /// [`Self::insert_dictionary_item_added`], for a custom object rather
+    /// than a `dict`.
+    pub(crate) fn insert_attribute_added(&mut self, path: Vec<PathSegment>, value: Value) {
+        insert_checked(
+            &mut self.attribute_items.get_or_insert_default().added,
+            path,
+            value,
+        );
+    }
+
+    /// Records an `attribute_removed` finding at the structural `path` — see
+    /// [`Self::insert_attribute_added`] for the shape.
+    pub(crate) fn insert_attribute_removed(&mut self, path: Vec<PathSegment>, value: Value) {
+        insert_checked(
+            &mut self.attribute_items.get_or_insert_default().removed,
+            path,
+            value,
+        );
+    }
+
     /// Folds another report's findings into `self`, one entry at a time
     /// (through the guarded `insert_*` methods for `type_changes`/
     /// `values_changed`, and through [`merge_map`] — which shares the same
@@ -474,6 +524,11 @@ impl Report {
             let own = self.set_items.get_or_insert_default();
             merge_map(&mut own.added, set_items.added);
             merge_map(&mut own.removed, set_items.removed);
+        }
+        if let Some(attribute_items) = other.attribute_items {
+            let own = self.attribute_items.get_or_insert_default();
+            merge_map(&mut own.added, attribute_items.added);
+            merge_map(&mut own.removed, attribute_items.removed);
         }
     }
 
@@ -648,6 +703,8 @@ impl Report {
             .chain(self.iterable_item_removed.values())
             .chain(self.set_items().added.values())
             .chain(self.set_items().removed.values())
+            .chain(self.attribute_items().added.values())
+            .chain(self.attribute_items().removed.values())
             .map(crate::ignore_order::item_length)
             .sum();
 
@@ -665,6 +722,8 @@ impl Report {
             && self.iterable_item_removed.is_empty()
             && self.set_items().added.is_empty()
             && self.set_items().removed.is_empty()
+            && self.attribute_items().added.is_empty()
+            && self.attribute_items().removed.is_empty()
     }
 
     /// The total number of findings across every category.
@@ -685,6 +744,8 @@ impl Report {
             + self.iterable_item_removed.len()
             + self.set_items().added.len()
             + self.set_items().removed.len()
+            + self.attribute_items().added.len()
+            + self.attribute_items().removed.len()
     }
 
     /// Renders the report into the `DeepDiff` `to_json()` shape at
@@ -753,6 +814,18 @@ impl Report {
         );
         push_set_category(&mut root, "set_item_added", &self.set_items().added);
         push_set_category(&mut root, "set_item_removed", &self.set_items().removed);
+        push_raw_category(
+            &mut root,
+            &mut builder,
+            "attribute_added",
+            &self.attribute_items().added,
+        );
+        push_raw_category(
+            &mut root,
+            &mut builder,
+            "attribute_removed",
+            &self.attribute_items().removed,
+        );
 
         builder.object(root)
     }
@@ -815,6 +888,12 @@ impl Report {
         );
         serialize_set_category(&mut root, "set_item_added", &self.set_items().added);
         serialize_set_category(&mut root, "set_item_removed", &self.set_items().removed);
+        serialize_raw_category(&mut root, "attribute_added", &self.attribute_items().added);
+        serialize_raw_category(
+            &mut root,
+            "attribute_removed",
+            &self.attribute_items().removed,
+        );
 
         serde_json::Value::Object(root)
     }

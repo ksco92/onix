@@ -247,6 +247,16 @@ pub(crate) fn item_length(value: &Value) -> usize {
         | Value::TimeDelta(_) => 1,
         Value::Array(items) | Value::Tuple(items) => items.iter().map(item_length).sum(),
         Value::Set(items) | Value::FrozenSet(items) => items.iter().map(item_length).sum(),
+        // A custom object hits `_get_item_length`'s `else`/`__dict__` branch
+        // (distance.py), which iterates the object's `__dict__` *keys* — each
+        // an attribute-name string counting `1` — and never recurses into the
+        // attribute *values*, so a whole object contributes exactly its
+        // attribute count, unlike a `dict` (the `Mapping` branch, which sums
+        // its values). `map.len()` is that attribute count for a plain class
+        // (where the enumerated attributes are exactly `__dict__`); an object
+        // carrying `@property`/class attributes is the documented divergence
+        // (see `tests/golden/README.md`).
+        Value::Object(map) if map.is_custom_object() => map.len(),
         Value::Object(map) => item_length_of_map(map),
     }
 }
@@ -337,7 +347,15 @@ pub(crate) fn count_diff_leaves(
         (Value::Set(x), Value::Set(y)) | (Value::FrozenSet(x), Value::FrozenSet(y)) => {
             count_set_diff_leaves(x, y, memo)
         }
-        (Value::Object(x), Value::Object(y)) => count_object_diff_leaves(x, y, depth, opts, memo),
+        // Two objects of the *same* class ([`Object::same_class`], qualified
+        // identity plus kind) diff by their entries; a `dict` and a custom
+        // object, or two different classes, are a `type_changes` here exactly
+        // as `diff_at` treats them — so a candidate pair's distance reflects
+        // the whole-value change `DeepDiff` would report, not a spurious
+        // near-zero attribute diff.
+        (Value::Object(x), Value::Object(y)) if x.same_class(y) => {
+            count_object_diff_leaves(x, y, depth, opts, memo)
+        }
         _ => type_change_leaf_length(a, b),
     }
 }
@@ -901,7 +919,14 @@ pub(crate) fn count_object_diff_leaves(
     memo: &IgnoreOrderMemo,
 ) -> usize {
     if is_below_threshold_to_diff_deeper(a, b) {
-        return item_length_of_map(b);
+        // The collapse is one wholesale `values_changed` whose new value is
+        // the whole object `b`; `_get_item_length` of a custom object is its
+        // attribute count (see [`item_length`]), not its values' sum.
+        return if b.is_custom_object() {
+            b.len()
+        } else {
+            item_length_of_map(b)
+        };
     }
 
     // Dispatched to a separate function, kept off this frame for the

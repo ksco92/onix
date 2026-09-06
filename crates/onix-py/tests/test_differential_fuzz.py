@@ -4,7 +4,7 @@ Runs through the actual `deepdiff_rs.DeepDiff` class (not the fast JSON-string
 path), so this exercises the Python-object-to-`Value` conversion layer itself,
 not just the diff engine underneath it.
 
-Eleven batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
+Thirteen batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
 and `ignore_order=True`): the JSON-shaped types; the same plus tuples, as
 containers in their own right and as elements of lists, dicts and other
 tuples; the same plus sets and frozensets, likewise; the same plus naive and
@@ -27,10 +27,18 @@ key matching is class-agnostic); and, at `SEED_COUNT` cases, JSON-shaped values
 whose leaves may be arbitrary-precision `int`s beyond `i64`/`u64` in both signs
 (issue #65) — as bare scalars only (no tuples/sets), so the batch stays on the
 big-int property rather than the pre-existing container-hashing one a biased
-alphabet inside a hashable container would surface.
+alphabet inside a hashable container would surface; and, at `SEED_COUNT` cases,
+graphs of custom objects (issue #66) — instances of a few plain classes with
+bare-scalar (and nested object/list/dict) attributes, diffed by attribute with
+class swaps producing `type_changes` — on the object property rather than the
+container-hashing one.
 Every batch compares `to_json()` (canonically, i.e. parsed, since neither
 tool promises a key order) *and* `to_dict()` by `==`, the comparison that can
-see a tuple, a set, a `datetime` or a `date` where the JSON one cannot.
+see a tuple, a set, a `datetime` or a `date` where the JSON one cannot — except
+the custom-object batch, which compares `to_json()` only: DeepDiff's `to_dict()`
+returns the original instances, which onix's value model cannot reconstruct, so
+its `to_dict()` returns attribute dicts (a documented divergence, see
+`tests/golden/README.md`).
 
 The three calendar batches and the combined batch run under a pinned
 `TZ=UTC` — see `utc_timezone`.
@@ -1903,4 +1911,143 @@ def test_differential_fuzz_with_surrogate_strings_matches_real_deepdiff() -> Non
     assert not mismatches, (
         f"{len(mismatches)} of {SEED_COUNT} surrogate-string fuzz cases diverged from "
         f"real DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+# The custom-object batch (issue #66): its own seed range, independent of every
+# batch above. Objects are diffed by their attributes, matching DeepDiff's
+# `_diff_obj`. Attribute values are bare scalars, nested objects, lists or
+# dicts only -- never a tuple/set/frozenset, keeping the batch on the object
+# property rather than surfacing the pre-existing container-hashing divergence
+# a biased alphabet inside a hashable container would (see
+# `tests/golden/README.md` and the differential-fuzz alphabet rule).
+OBJECT_SEED_BASE: Final[int] = 12_000_000
+
+# A small pool of distinct plain, attribute-only classes, so a mutation can
+# swap an instance's class and produce a `type_changes`. Built from one shared
+# `__init__` via `type(...)` so the three bodies do not repeat; each class is
+# created once (module load), so two instances of the same one share one `type`
+# -- the same-class invariant `golden_tags._object_class` also relies on.
+_OBJECT_ATTR_NAMES: Final[list[str]] = ["p", "q", "r", "s"]
+
+
+def _object_init(self: object, **attrs: object) -> None:
+    """Set each keyword as an instance attribute -- the shared body of the fuzz classes."""
+    for key, value in attrs.items():
+        setattr(self, key, value)
+
+
+_OBJECT_CLASSES: Final[list[type]] = [
+    type(f"_Obj{i}", (), {"__init__": _object_init}) for i in range(1, 4)
+]
+
+
+def _gen_object_attr(rng: random.Random, depth: int) -> object:
+    """Generate one attribute value: a scalar, or (with budget) a nested object/list/dict."""
+    roll = rng.random()
+    if depth > 0 and roll < 0.12:
+        return _gen_object(rng, depth - 1)
+    if depth > 0 and roll < 0.24:
+        return [_gen_object_attr(rng, depth - 1) for _ in range(rng.randint(0, 3))]
+    if depth > 0 and roll < 0.34:
+        return {
+            key: _gen_object_attr(rng, depth - 1)
+            for key in rng.sample(DICT_KEYS, rng.randint(0, 2))
+        }
+    return _gen_scalar(rng)
+
+
+def _gen_object(rng: random.Random, depth: int) -> object:
+    """Generate one custom-object instance with a random subset of scalar (or nested) attributes."""
+    cls = rng.choice(_OBJECT_CLASSES)
+    names = rng.sample(_OBJECT_ATTR_NAMES, rng.randint(0, len(_OBJECT_ATTR_NAMES)))
+    return cls(**{name: _gen_object_attr(rng, depth) for name in names})
+
+
+def _gen_object_top(rng: random.Random, depth: int) -> object:
+    """Generate a top-level value: a bare object, or a list/dict/tuple of them."""
+    roll = rng.random()
+    if roll < 0.55 or depth <= 0:
+        return _gen_object(rng, depth)
+    if roll < 0.75:
+        return [_gen_object_top(rng, depth - 1) for _ in range(rng.randint(0, 4))]
+    if roll < 0.9:
+        return {key: _gen_object_top(rng, depth - 1) for key in rng.sample(DICT_KEYS, rng.randint(0, 3))}
+    return tuple(_gen_object_top(rng, depth - 1) for _ in range(rng.randint(0, 3)))
+
+
+def _mutate_object(rng: random.Random, obj: object) -> object:
+    """Rebuild `obj` with a random subset of attributes changed, added, removed, or the class swapped."""
+    cls = rng.choice(_OBJECT_CLASSES) if rng.random() < 0.15 else type(obj)
+    attrs = dict(vars(obj))
+    if attrs and rng.random() < 0.3:
+        del attrs[rng.choice(list(attrs))]
+    if rng.random() < 0.3:
+        attrs[rng.choice(_OBJECT_ATTR_NAMES)] = _gen_scalar(rng)
+    for key in list(attrs):
+        if rng.random() < 0.4:
+            attrs[key] = _mutate_object_value(rng, attrs[key])
+    return cls(**attrs)
+
+
+def _mutate_object_value(rng: random.Random, value: object) -> object:
+    """Recursively mutate a value drawn from the object batch (objects, lists, dicts, tuples, scalars)."""
+    if isinstance(value, tuple(_OBJECT_CLASSES)):
+        return _mutate_object(rng, value)
+    if isinstance(value, list):
+        shuffled = list(value)
+        rng.shuffle(shuffled)
+        return [_mutate_object_value(rng, item) for item in shuffled]
+    if isinstance(value, dict):
+        return {key: _mutate_object_value(rng, item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_mutate_object_value(rng, item) for item in value)
+    return _gen_scalar(rng) if rng.random() < 0.5 else value
+
+
+def _object_diverges(a: object, b: object, ignore_order: bool) -> tuple[object, object] | None:
+    """
+    Diff `a`/`b` through both engines and return both `to_json` reports if they disagree.
+
+    Only `to_json()` is compared, not `to_dict()`: DeepDiff's `to_dict()` returns
+    the original object instances (its `type_changes` old/new values, its added
+    items), which onix cannot reconstruct from its value model, so onix's
+    `to_dict()` returns the attribute dict instead -- a documented divergence
+    (see `tests/golden/README.md`). `to_json()` is the byte-parity target, where
+    both serialize a whole object to its public attributes.
+
+    :param a: The first value.
+    :param b: The second value.
+    :param ignore_order: Whether to diff with `ignore_order=True`.
+    :return: `(expected, actual)` if they diverge, else `None`.
+    """
+    real = RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)
+    onix = OnixDeepDiff(a, b, ignore_order=ignore_order)
+
+    expected = json.loads(real.to_json())
+    actual = json.loads(onix.to_json())
+
+    if expected != actual:
+        return expected, actual
+    return None
+
+
+def test_differential_fuzz_with_custom_objects_matches_real_deepdiff() -> None:
+    """Runs a SEED_COUNT-case batch of custom-object graphs, ordered and ignore_order=True (issue #66)."""
+    mismatches = []
+
+    for seed in range(OBJECT_SEED_BASE, OBJECT_SEED_BASE + SEED_COUNT):
+        rng = random.Random(seed)
+        a = _gen_object_top(rng, 3)
+        b = _mutate_object_value(rng, a) if rng.random() < 0.9 else _gen_object_top(rng, 3)
+
+        for ignore_order in (False, True):
+            divergence = _object_diverges(a, b, ignore_order)
+            if divergence is not None:
+                expected, actual = divergence
+                mismatches.append((seed, ignore_order, expected, actual))
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} custom-object fuzz cases diverged from real "
+        f"DeepDiff (showing up to 3): {mismatches[:3]}"
     )
