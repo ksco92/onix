@@ -76,26 +76,13 @@ two speed baselines a data engineer would otherwise reach for (#43).
   oracle, not a bug -- `perf/arrow/README.md`'s "Oracle semantics" section
   restates it, and the dictionary retype is instead verified directly via
   `pyarrow` in `tests/test_oracle_duckdb.py`.
-* **Timestamp zone-awareness is a value nuance here, not a mismatch.** The
-  `wide` fixture's `ts_cast` column (#84, `generate_fixtures.py`) drops the
-  zone alongside a unit change; the "Timestamps across units" bullet above
-  already establishes that DuckDB's parquet reader normalizes both sides to
-  one internal instant type before `IS DISTINCT FROM` ever runs, so a zone
-  drop with the same underlying instant compares equal at the value level,
-  where onix reports it as `type_changed` for every row regardless of the
-  instant (a zone-aware/naive pair is always a type change --
-  `row_diff.rs`). The schema-level diff still sees it, since
-  `parquet_schema()` reads the file's stored annotation rather than
-  DuckDB's normalized type, the same mechanism the unit-change bullet relies
-  on.
-* **`decimal256` above precision 38 is unusable, not just unrepresentable.**
-  Verified empirically: a `decimal256` column with precision over 38 is
-  silently decoded to the wrong number by this DuckDB version (no error),
-  and rejected outright by polars' parquet and IPC readers. `wide`'s
-  `dec256` column is therefore kept at precision 38 -- distinct from
-  `decimal128` at the Arrow-type level, but numerically representable by
-  both baselines -- and is never mutated, so this gap costs no correctness
-  signal (see `generate_fixtures.py`'s module docstring).
+* **Timestamp zone-awareness.** DuckDB normalizes both sides to one instant
+  type before comparing, so `wide`'s `ts_cast` zone drop (#84) is invisible
+  at the value level here (onix reports `type_changed` instead);
+  `parquet_schema()` still sees it at the schema level.
+* **`decimal256` above precision 38.** This DuckDB version silently decodes
+  it wrong; polars' parquet/IPC readers reject it outright. `wide` keeps
+  `dec256` at precision 38 and never mutates it.
 
 Usage::
 

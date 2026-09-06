@@ -58,31 +58,15 @@ Neither the polars script nor `diff_tables` writes its result to disk.
 
 # The `wide` kind (#84)
 
-`--kind wide` benchmarks `generate_fixtures.py`'s full cell-type-surface
-fixture instead of the narrow one; its own module docstring is the single
-home for the column set and mutation mix. Two adjustments follow from
-Parquet's own type limits (also documented there):
+`--kind wide` benchmarks `generate_fixtures.py`'s full cell-type-surface fixture; its own module
+docstring is the single home for the column set and mutation mix.
 
-* `date64_millis` and `interval_months`/`_days`/`_nanos` are read as plain
-  integer columns by all three tools, `onix` included -- rebuilding them into
-  real `Date64`/`Interval(MonthDayNano)` columns first (verified separately,
-  in `tests/test_generate_fixtures_wide.py`, and by `row_diff.rs`'s own unit
-  tests) costs tens of gigabytes of Python list overhead at the full fixture
-  size, measured empirically, which would benchmark that rebuild's cost
-  instead of `diff_tables`'. Both columns are never mutated (see the
-  generator's docstring), so every tool's contribution from them is zero
-  regardless of which type each one reads them as.
-* `_polars_counts` drops `ts_cast` from its compared columns for `wide`:
-  polars refuses to compare a zone-aware and a zone-naive `Datetime` series
-  at all (`SchemaError`, verified empirically), where DuckDB's `IS DISTINCT
-  FROM` silently normalizes both to the same instant instead (see
-  `oracle_duckdb.py`'s docstring). Because of this, `wide`'s expected
-  `cells_changed` differs by tool: `onix` reports `type_changed` for every
-  surviving row of `ts_cast` (a zone-awareness mismatch is always a type
-  change, never a value comparison -- `row_diff.rs`), while DuckDB and
-  polars can only ever report the fixture's `value_changed`/
-  `became_null`/`became_non_null` cells. `_manifest_counts` computes both
-  expected totals; `_check_correctness` compares each tool against its own.
+* `date64_millis` and `interval_months`/`_days`/`_nanos` are read as plain integer columns by all
+  three tools, `onix` included, never rebuilt into `Date64`/`Interval(MonthDayNano)` here.
+* `_polars_counts` drops `ts_cast` from its compared columns: polars raises `SchemaError` on a
+  zone-aware vs. zone-naive `Datetime` comparison, where DuckDB's `IS DISTINCT FROM` normalizes
+  both to the same instant instead. `_manifest_counts` derives a separate expected `cells_changed`
+  for `onix` (which also counts `ts_cast`'s `type_changed` cells) and for DuckDB/polars.
 
 Usage (from the repo root, using `crates/onix-py`'s own venv, which already
 carries deepdiff_rs, pyarrow, polars, and duckdb pinned together for its own

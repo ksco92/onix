@@ -25,12 +25,18 @@ _EXPECTED_A_TYPES: dict[str, str] = {
     "u64": "uint64",
     "f32": "float",
     "f64": "double",
+    "float16_col": "halffloat",
     "dec_scale4": "decimal128(18, 4)",
     "dec_scale10": "decimal128(38, 10)",
     "dec256": "decimal256(38, 10)",
+    "decimal32_col": "decimal32(5, 2)",
+    "decimal64_col": "decimal64(10, 2)",
     "utf8_col": "string",
     "large_utf8_col": "large_string",
+    "utf8_view_col": "string_view",
     "binary_col": "binary",
+    "binary_view_col": "binary_view",
+    "fixed_size_binary_col": "fixed_size_binary[4]",
     "bool_col": "bool",
     "date32_col": "date32[day]",
     "date64_millis": "int64",
@@ -130,6 +136,15 @@ def test_wide_value_changed_columns_carry_a_positive_count(tmp_path: Path) -> No
     manifest = generate(20_000, SEED, tmp_path / "fixture", kind="wide")
     assert manifest["value_changed_per_column"]
     assert all(count > 0 for count in manifest["value_changed_per_column"].values())
+
+
+def test_wide_value_changed_covers_float16_decimal32_decimal64_and_the_view_types(tmp_path: Path) -> None:
+    """The six added types each carry their own `value_changed` count."""
+    manifest = generate(20_000, SEED, tmp_path / "fixture", kind="wide")
+    for column in (
+        "float16_col", "decimal32_col", "decimal64_col", "utf8_view_col", "binary_view_col", "fixed_size_binary_col",
+    ):
+        assert manifest["value_changed_per_column"][column] > 0
 
 
 def test_wide_became_null_and_became_non_null_are_tracked_for_i16_and_large_utf8(tmp_path: Path) -> None:
