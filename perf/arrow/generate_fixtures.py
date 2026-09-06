@@ -60,8 +60,8 @@ target, so fewer, much wider rows (see `_wide_column_specs` for the exact list a
 skips a nested non-key column entirely -- see row_diff.rs's "Which column types are hashed,
 refused, or skipped").
 
-Three gaps follow from what pyarrow and Parquet can represent, verified empirically against this
-repo's pinned pyarrow:
+Four gaps follow from what pyarrow and Parquet can represent, verified empirically against this
+repo's pinned pyarrow, plus one deliberate omission:
 
 * `month_day_nano_interval` has no Parquet representation (`ArrowNotImplementedError` on write) and
   `date64` is silently downcast to `date32` on write (Parquet's DATE logical type is a 32-bit day
@@ -81,6 +81,9 @@ repo's pinned pyarrow:
   `row_diff.rs` hashes -- have no pyarrow constructor at all (only `month_day_nano_interval`
   exists), so neither is in this fixture; only the interval cross-variant `type_changed` path is
   therefore untested here, and stays covered by `row_diff.rs`'s own unit tests.
+* `DataType::Null` -- `row_diff.rs` hashes it (every row a null) -- has no column here, deliberately:
+  an all-null column has no value variance to hash or render beyond the null branch, which every
+  other nullable column in this fixture already exercises.
 
 The `ts_cast` column is `wide`'s "one unit cast": nanosecond, zone-aware on `a`; microsecond,
 zone-naive on `b`. Dropping the zone alongside the unit is deliberate -- a zone-aware/naive pair is
