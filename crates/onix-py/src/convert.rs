@@ -572,8 +572,8 @@ fn classify<'py>(
 /// (`diff.py::_diff`) and so is diffed by its attributes, rather than a type
 /// `DeepDiff` routes to an earlier, dedicated handler that onix does not have.
 ///
-/// This is the accept-list the `.claude/rules/fallback-accept-list.md` rule
-/// requires (enumerated against that ladder), so nothing is silently reshaped:
+/// This is the accept-list enumerated against `DeepDiff`'s `_diff` ladder, so
+/// nothing is silently reshaped:
 ///
 /// - A **class object** (instance of `type`) or a **module** is refused:
 ///   `DeepDiff` diffs a class by its class `dict` / reports `type_changes`, and
