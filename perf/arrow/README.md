@@ -147,6 +147,6 @@ uv run --group perf pytest tests -q -m slow      # also regenerates and checks t
 the narrow and wide fixture pairs (`--kind narrow`/`--kind wide`), at 1M rows and full size each;
 its own module docstring is the single home for the methodology, correctness check, and fairness
 rules. Results for both kinds, and both fixture pairs' disk usage (about 20.8 GB for all four
-sizes at once), are in [`RESULTS.md`](RESULTS.md). The full-size `wide` run peaks at about 33.8 GB
-of resident memory for `onix` alone (the streaming cell pass, issue #87; it was about 67 GB
-before); size the runner accordingly before starting it.
+sizes at once), are in [`RESULTS.md`](RESULTS.md). The full-size `wide` run peaks at about 33.1 GB
+of resident memory for `onix` alone at the default 18 threads (the streaming cell pass, issue #87;
+it was about 67 GB before); size the runner accordingly before starting it.

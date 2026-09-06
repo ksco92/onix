@@ -20,11 +20,10 @@ onix-arrow = { path = "../onix-arrow" }
 # so the record batches crossing between all three are the identical types.
 arrow-array = "=59.3.0"
 arrow-schema = "=59.3.0"
-# Spools each one-shot imported Python Arrow stream to a temporary IPC file so
-# the multi-pass row diff can re-read it; the stream format is used (not the file
-# format) because it permits the dictionary replacement pyarrow/DuckDB emit
-# across batches. Compression off: the spool is transient and local.
-arrow-ipc = { version = "=59.3.0", default-features = false }
+# Each one-shot imported Python Arrow stream is spooled to an anonymous IPC file
+# so the multi-pass row diff can re-read it; that spooling now lives in the
+# shared `onix_arrow::spool` primitive (which owns the `arrow-ipc`/`tempfile`
+# dependencies), used by both this crate and the row diff's cell pass.
 # The Arrow C Data Interface bridge: imports/exports Arrow PyCapsule objects
 # with its `unsafe` FFI encapsulated, so this crate stays `unsafe`-free; pinned
 # to arrow ^59 to match onix-arrow's 59.3.0.
@@ -33,10 +32,6 @@ arrow-ipc = { version = "=59.3.0", default-features = false }
 # it is unused here.
 pyo3-arrow = { version = "0.19", default-features = false }
 pyo3 = { version = "0.29", features = ["abi3-py39"] }
-# Anonymous (unlinked, 0600) temp files for spooling each imported input; no
-# predictable name for a local user to squat, and nothing left on disk if the
-# process is killed.
-tempfile = "3"
 serde_json = "1"
 # Arbitrary-precision integers crossing the Python boundary; the same 0.5 line
 # arrow-buffer already resolves in this workspace, so no second copy enters.

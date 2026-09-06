@@ -66,13 +66,17 @@
 //! figures. The duplicate-key report holds the actual key values of every
 //! *distinct duplicated* key, so a duplicate-heavy input adds a term
 //! proportional to the number of distinct duplicated keys times the key width.
-//! The cell pass spills both sides' changed value rows to anonymous temporary
-//! IPC files (in page cache / on the temp filesystem, not resident) and holds
-//! one key-hash partition at a time, so its resident term is bounded by about
-//! twice the `cells_changed` output plus the per-row hash vectors — the output
-//! reordered into its final order — not by the number of changed rows times the
-//! row width. The README's Known-limitations bullet states these with measured
-//! figures.
+//! The cell pass spills both sides' changed value rows — every common value
+//! column of every changed row, changed or not — to anonymous temporary IPC
+//! files and holds one key-hash partition plus the reordered output resident.
+//! Its peak term is the spilled changed value rows (the changed-row count times
+//! the total width of the common value columns, both sides — resident where
+//! written temp pages count, e.g. macOS or a RAM-backed tmpfs) plus about twice
+//! the `cells_changed` output (its one out-of-place reorder) plus the per-row
+//! hash vectors; the spill term dominates for wide rows with few changed cells,
+//! the output term for many changed cells. It is not bounded by the changed
+//! *cell* count alone. The README's Known-limitations bullet states these with
+//! measured figures.
 //!
 //! # Hashing
 //!
@@ -180,14 +184,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::hash::Hasher;
-use std::io::{Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
 
-use arrow_ipc::reader::StreamReader;
-use arrow_ipc::writer::StreamWriter;
 use siphasher::sip128::{Hasher128, SipHasher13};
 
 use arrow_array::builder::StringBuilder;
@@ -1094,6 +1095,25 @@ thread_local! {
     // so a test can assert the parallel diff takes the streaming cell path and
     // the sequential diff does not.
     static CELL_STREAMING_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    // A per-thread override of the spill flush threshold, so a test can force a
+    // partition to flush mid-stream and spill more than one batch per file.
+    static SPILL_FLUSH_ROWS_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    // When set, a spill write is forced to fail, so a test can exercise the
+    // write-failure error path (a full temp filesystem) without one.
+    static FAIL_SPILL_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// In tests, forces a spill write to fail so the write-failure error mapping is
+/// exercised; production always returns the writer's own outcome.
+#[cfg(test)]
+fn inject_spill_write_failure(outcome: Result<(), ArrowError>) -> Result<(), ArrowError> {
+    if FAIL_SPILL_WRITE.with(std::cell::Cell::get) {
+        return Err(ArrowError::ComputeError(
+            "injected spill write failure".to_string(),
+        ));
+    }
+    outcome
 }
 
 /// This thread's count of parallel hash passes run so far.
@@ -2559,18 +2579,52 @@ fn indices_schema(schema: &Schema, indices: &[usize]) -> SchemaRef {
     SchemaRef::new(Schema::new(fields))
 }
 
-/// Maps a spill I/O failure (temp-file creation, clone, seek) to a typed error.
-fn spill_io_error(context: &str, error: &std::io::Error) -> TableDiffError {
-    TableDiffError::Read {
-        message: format!("{context}: {error}"),
+/// The type a value column is spilled as. [`decoded_type`] unwraps a dictionary
+/// to its value type first, since `take` keeps the whole values array; a byte-view
+/// type then casts to its non-view type, since `take` keeps the variadic buffers;
+/// everything else spills as itself (its `take` copies only the selected rows).
+fn spill_field_type(data_type: &DataType) -> DataType {
+    match decoded_type(data_type) {
+        DataType::Utf8View => DataType::Utf8,
+        DataType::BinaryView => DataType::Binary,
+        other => other,
     }
 }
 
+/// The spill schema for a projection: [`indices_schema`] with byte-view columns
+/// mapped to their non-view type (see [`spill_field_type`]).
+fn spill_schema(schema: &Schema, indices: &[usize]) -> SchemaRef {
+    let fields: Vec<_> = indices
+        .iter()
+        .map(|&i| {
+            let field = &schema.fields()[i];
+            field
+                .as_ref()
+                .clone()
+                .with_data_type(spill_field_type(field.data_type()))
+        })
+        .collect();
+    SchemaRef::new(Schema::new(fields))
+}
+
+/// Casts each column of `batch` whose type differs from `schema` to `schema`'s
+/// type -- the byte-view columns (compacted) and the dictionary columns (decoded
+/// to their value type) that [`spill_field_type`] rewrites -- leaving the rest
+/// shared.
+fn cast_batch_to(batch: &RecordBatch, schema: &SchemaRef) -> Result<RecordBatch, TableDiffError> {
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    for (column, field) in batch.columns().iter().zip(schema.fields()) {
+        if column.data_type() == field.data_type() {
+            columns.push(column.clone());
+        } else {
+            columns.push(arrow_cast::cast(column, field.data_type()).map_err(|e| read_error(&e))?);
+        }
+    }
+    RecordBatch::try_new(schema.clone(), columns).map_err(|e| read_error(&e))
+}
+
 /// One side's changed value rows, spilled by key-hash partition to anonymous
-/// temporary Arrow IPC files so the parallel cell pass holds one partition in
-/// memory at a time. Each file is a [`tempfile::tempfile`] — unlinked at
-/// creation, mode 0600, never given a path — re-read through a rewound
-/// `try_clone`, the anonymous-spool posture the input spooling already uses.
+/// [`crate::spool`] IPC files so the cell pass holds one partition at a time.
 struct SideSpill {
     files: Vec<File>,
     /// Per partition, the key hash of each spilled row in spill (scan) order.
@@ -2592,12 +2646,22 @@ struct LeftSpill {
 /// IPC batch, so each partition file holds few batches and the read-back is cheap.
 const SPILL_FLUSH_ROWS: usize = 65_536;
 
+/// The spill flush threshold. A test can override it per-thread to force a
+/// mid-stream flush on a small input; production always uses [`SPILL_FLUSH_ROWS`].
+fn spill_flush_rows() -> usize {
+    #[cfg(test)]
+    if let Some(value) = SPILL_FLUSH_ROWS_OVERRIDE.with(std::cell::Cell::get) {
+        return value;
+    }
+    SPILL_FLUSH_ROWS
+}
+
 /// The open per-partition spill writers for one side, over anonymous temp
 /// files, each with a small buffer of routed slices coalesced on flush. `finish`
 /// flushes the buffers and the streams and yields the re-openable files.
 struct PartitionWriters {
     files: Vec<File>,
-    writers: Vec<StreamWriter<std::io::BufWriter<File>>>,
+    writers: Vec<crate::spool::SpoolWriter>,
     value_schema: SchemaRef,
     buffers: Vec<Vec<RecordBatch>>,
     buffered_rows: Vec<usize>,
@@ -2608,13 +2672,7 @@ impl PartitionWriters {
         let mut files = Vec::with_capacity(partitions);
         let mut writers = Vec::with_capacity(partitions);
         for _ in 0..partitions {
-            let file = tempfile::tempfile()
-                .map_err(|e| spill_io_error("could not create a spool file", &e))?;
-            let handle = file
-                .try_clone()
-                .map_err(|e| spill_io_error("could not open a spool file", &e))?;
-            let writer =
-                StreamWriter::try_new_buffered(handle, value_schema).map_err(|e| read_error(&e))?;
+            let (file, writer) = crate::spool::open(value_schema)?;
             files.push(file);
             writers.push(writer);
         }
@@ -2628,8 +2686,9 @@ impl PartitionWriters {
     }
 
     /// Groups the batch's selected rows by partition with a single reorder
-    /// `take`, then buffers each partition's contiguous slice (zero-copy),
-    /// flushing a partition once it holds [`SPILL_FLUSH_ROWS`] rows.
+    /// `take`, then buffers each partition's contiguous slice (zero-copy except
+    /// for a byte-view or dictionary compaction cast), flushing a partition once
+    /// it holds [`SPILL_FLUSH_ROWS`] rows.
     fn write_routed(
         &mut self,
         value_batch: &RecordBatch,
@@ -2644,8 +2703,11 @@ impl PartitionWriters {
             perm.extend_from_slice(rows);
         }
         let indices = UInt32Array::from(perm);
-        let reordered = arrow_select::take::take_record_batch(value_batch, &indices)
+        let taken = arrow_select::take::take_record_batch(value_batch, &indices)
             .map_err(|e| read_error(&e))?;
+        // Compact byte-view columns so a spilled partition holds only its rows'
+        // view data, not the whole side's retained variadic buffers.
+        let reordered = cast_batch_to(&taken, &self.value_schema)?;
         let mut offset = 0;
         for (partition, rows) in part_rows.iter().enumerate() {
             if rows.is_empty() {
@@ -2654,7 +2716,7 @@ impl PartitionWriters {
             self.buffers[partition].push(reordered.slice(offset, rows.len()));
             self.buffered_rows[partition] += rows.len();
             offset += rows.len();
-            if self.buffered_rows[partition] >= SPILL_FLUSH_ROWS {
+            if self.buffered_rows[partition] >= spill_flush_rows() {
                 self.flush(partition)?;
             }
         }
@@ -2670,9 +2732,10 @@ impl PartitionWriters {
         let batches = std::mem::take(&mut self.buffers[partition]);
         self.buffered_rows[partition] = 0;
         let coalesced = concat_or_empty(&self.value_schema, &batches)?;
-        self.writers[partition]
-            .write(&coalesced)
-            .map_err(|e| read_error(&e))
+        let outcome = self.writers[partition].write(&coalesced);
+        #[cfg(test)]
+        let outcome = inject_spill_write_failure(outcome);
+        outcome.map_err(|e| crate::spool::error("write to", &e))
     }
 
     fn finish(mut self) -> Result<Vec<File>, TableDiffError> {
@@ -2680,7 +2743,9 @@ impl PartitionWriters {
             self.flush(partition)?;
         }
         for writer in &mut self.writers {
-            writer.finish().map_err(|e| read_error(&e))?;
+            writer
+                .finish()
+                .map_err(|e| crate::spool::error("finish writing", &e))?;
         }
         Ok(self.files)
     }
@@ -2691,13 +2756,7 @@ impl PartitionWriters {
 /// time in [`plan_columns`], never all at once, so the read never holds a second
 /// full copy of the partition.
 fn read_partition_batches(file: &File) -> Result<Vec<RecordBatch>, TableDiffError> {
-    let mut handle = file
-        .try_clone()
-        .map_err(|e| spill_io_error("could not re-open a spool file", &e))?;
-    handle
-        .seek(SeekFrom::Start(0))
-        .map_err(|e| spill_io_error("could not rewind a spool file", &e))?;
-    let reader = StreamReader::try_new_buffered(handle, None).map_err(|e| read_error(&e))?;
+    let reader = crate::spool::reopen(file)?;
     let mut batches = Vec::new();
     for batch in reader {
         batches.push(batch.map_err(|e| read_error(&e))?);
@@ -2729,62 +2788,98 @@ struct SpillPlan<'a> {
     value_schema: &'a SchemaRef,
 }
 
-/// Streams the right side once, filtering to changed rows and routing each row's
-/// value columns to its key-hash partition's spill file, capturing that row's
-/// key hash per partition for the pairing step.
-// `row as u32` is a batch-local row index and `counter` a changed-row count;
-// both are bounded by the changed-row count `diff_cells_streaming` has already
-// checked fits `u32`, and `take` indices are `u32` regardless.
-#[allow(clippy::cast_possible_truncation)]
+/// The per-partition writers and buffers shared by both spill passes.
+struct SpillState {
+    writers: PartitionWriters,
+    key_hashes: Vec<Vec<u128>>,
+    part_rows: Vec<Vec<u32>>,
+}
+
+impl SpillState {
+    fn open(partitions: usize, value_schema: &SchemaRef) -> Result<Self, TableDiffError> {
+        Ok(Self {
+            writers: PartitionWriters::open(partitions, value_schema)?,
+            key_hashes: (0..partitions).map(|_| Vec::new()).collect(),
+            part_rows: (0..partitions).map(|_| Vec::new()).collect(),
+        })
+    }
+
+    /// Routes one batch's changed rows to their key-hash partitions, records each
+    /// routed row's key hash and (into `mask`) every row's changed flag, calls
+    /// `on_changed(partition)` per changed row in scan order for the left pass's
+    /// global-index bookkeeping, and writes the routed value columns.
+    // `row as u32` is a batch-local index bounded by the changed-row count
+    // `diff_cells_streaming` has checked fits `u32`; `take` indices are `u32`.
+    #[allow(clippy::cast_possible_truncation)]
+    fn route_batch<F: FnMut(usize)>(
+        &mut self,
+        batch: &RecordBatch,
+        hashes: &[u128],
+        plan: &SpillPlan<'_>,
+        mask: &mut Vec<bool>,
+        mut on_changed: F,
+    ) -> Result<(), TableDiffError> {
+        mask.clear();
+        for rows in &mut self.part_rows {
+            rows.clear();
+        }
+        for (row, &hash) in hashes.iter().enumerate() {
+            let is_changed = plan.changed.contains(&hash);
+            mask.push(is_changed);
+            if is_changed {
+                let partition = partition_of(hash, plan.partitions);
+                self.part_rows[partition].push(row as u32);
+                self.key_hashes[partition].push(hash);
+                on_changed(partition);
+            }
+        }
+        let value_proj = batch
+            .project(&plan.columns.value)
+            .map_err(|e| read_error(&e))?;
+        self.writers.write_routed(&value_proj, &self.part_rows)
+    }
+
+    fn finish(self) -> Result<SideSpill, TableDiffError> {
+        Ok(SideSpill {
+            files: self.writers.finish()?,
+            key_hashes: self.key_hashes,
+        })
+    }
+}
+
+/// Streams the right side once, routing each changed row's value columns to its
+/// key-hash partition's spill file and capturing that row's key hash per
+/// partition for the pairing step.
 fn spill_right(
     source: &impl TableInput,
     plan: &SpillPlan<'_>,
 ) -> Result<SideSpill, TableDiffError> {
-    let mut writers = PartitionWriters::open(plan.partitions, plan.value_schema)?;
-    let mut key_hashes: Vec<Vec<u128>> = (0..plan.partitions).map(|_| Vec::new()).collect();
-    let mut part_rows: Vec<Vec<u32>> = (0..plan.partitions).map(|_| Vec::new()).collect();
+    let mut state = SpillState::open(plan.partitions, plan.value_schema)?;
+    let mut mask = Vec::new();
     drive_key_hashes(
         source,
         &plan.columns.key,
         plan.key_names,
         plan.hasher,
         plan.threads,
-        |batch, hashes| {
-            for rows in &mut part_rows {
-                rows.clear();
-            }
-            for (row, &hash) in hashes.iter().enumerate() {
-                if plan.changed.contains(&hash) {
-                    let partition = partition_of(hash, plan.partitions);
-                    part_rows[partition].push(row as u32);
-                    key_hashes[partition].push(hash);
-                }
-            }
-            let value_proj = batch
-                .project(&plan.columns.value)
-                .map_err(|e| read_error(&e))?;
-            writers.write_routed(&value_proj, &part_rows)
-        },
+        |batch, hashes| state.route_batch(batch, hashes, plan, &mut mask, |_partition| {}),
     )?;
-    let files = writers.finish()?;
-    Ok(SideSpill { files, key_hashes })
+    state.finish()
 }
 
 /// Streams the left side once: routes each changed row's value columns to its
 /// key-hash partition, assigns each changed row a global scan-order index, and
 /// accumulates every changed row's key columns into `left_keys` (in scan order).
-#[allow(clippy::cast_possible_truncation)]
 fn spill_left(
     source: &impl TableInput,
     plan: &SpillPlan<'_>,
     key_schema: &SchemaRef,
 ) -> Result<LeftSpill, TableDiffError> {
-    let mut writers = PartitionWriters::open(plan.partitions, plan.value_schema)?;
-    let mut key_hashes: Vec<Vec<u128>> = (0..plan.partitions).map(|_| Vec::new()).collect();
+    let mut state = SpillState::open(plan.partitions, plan.value_schema)?;
     let mut global_index: Vec<Vec<u32>> = (0..plan.partitions).map(|_| Vec::new()).collect();
-    let mut part_rows: Vec<Vec<u32>> = (0..plan.partitions).map(|_| Vec::new()).collect();
     let mut key_batches: Vec<RecordBatch> = Vec::new();
     let mut counter: u32 = 0;
+    let mut mask = Vec::new();
     drive_key_hashes(
         source,
         &plan.columns.key,
@@ -2792,35 +2887,19 @@ fn spill_left(
         plan.hasher,
         plan.threads,
         |batch, hashes| {
-            for rows in &mut part_rows {
-                rows.clear();
-            }
-            let mut changed_mask = Vec::with_capacity(hashes.len());
-            for (row, &hash) in hashes.iter().enumerate() {
-                let is_changed = plan.changed.contains(&hash);
-                changed_mask.push(is_changed);
-                if is_changed {
-                    let partition = partition_of(hash, plan.partitions);
-                    part_rows[partition].push(row as u32);
-                    key_hashes[partition].push(hash);
-                    global_index[partition].push(counter);
-                    counter += 1;
-                }
-            }
+            state.route_batch(batch, hashes, plan, &mut mask, |partition| {
+                global_index[partition].push(counter);
+                counter += 1;
+            })?;
             let key_proj = batch
                 .project(&plan.columns.key)
                 .map_err(|e| read_error(&e))?;
-            push_filtered(&key_proj, changed_mask, &mut key_batches)?;
-            let value_proj = batch
-                .project(&plan.columns.value)
-                .map_err(|e| read_error(&e))?;
-            writers.write_routed(&value_proj, &part_rows)
+            push_filtered(&key_proj, mask.clone(), &mut key_batches)
         },
     )?;
-    let files = writers.finish()?;
     let left_keys = concat_or_empty(key_schema, &key_batches)?;
     Ok(LeftSpill {
-        spill: SideSpill { files, key_hashes },
+        spill: state.finish()?,
         global_index,
         left_keys,
     })
@@ -3098,8 +3177,8 @@ fn diff_cells_streaming(
         });
     }
     let key_count = ctx.key.len();
-    let left_value_schema = indices_schema(ctx.left_schema, &ctx.left_columns.value);
-    let right_value_schema = indices_schema(ctx.right_schema, &ctx.right_columns.value);
+    let left_value_schema = spill_schema(ctx.left_schema, &ctx.left_columns.value);
+    let right_value_schema = spill_schema(ctx.right_schema, &ctx.right_columns.value);
     let key_schema = indices_schema(ctx.left_schema, &ctx.left_columns.key);
 
     let left_plan = SpillPlan {
@@ -3241,8 +3320,9 @@ fn reorder_output(
         let taken = arrow_select::take::take(&cast, &key_take, None).map_err(|e| read_error(&e))?;
         columns.push(taken);
     }
-    // Reorder each cell column in turn, dropping its per-partition sources right
-    // after so at most one column's source and destination are resident at once.
+    // Reorder the four cell columns, dropping each column's per-partition sources
+    // once it is built; the sources (one copy of the output) and the built
+    // columns (up to another) bound the reorder at about twice the output.
     cell_columns.reorder_into(&sources, &mut columns)?;
     RecordBatch::try_new(out_schema.clone(), columns).map_err(|e| read_error(&e))
 }
@@ -3306,9 +3386,10 @@ impl CellColumns {
         self.change.push(Arc::new(part.change.finish()));
     }
 
-    /// Interleaves each column's per-partition arrays into the sorted output,
-    /// dropping each column's sources as soon as it is built so the reorder
-    /// holds one source column and one destination column at a time.
+    /// Interleaves each column's per-partition arrays into the sorted output.
+    /// The four columns' per-partition sources together are one copy of the
+    /// output and the built columns accumulate to another, so the reorder holds
+    /// about twice the output; each column's sources drop once it is interleaved.
     fn reorder_into(
         self,
         sources: &[(usize, usize)],
@@ -3469,14 +3550,14 @@ mod tests {
         DurationMicrosecondArray, DurationMillisecondArray, DurationNanosecondArray,
         DurationSecondArray, Float32Array, Float64Array, Int32Array, Int64Array,
         IntervalDayTimeArray, IntervalMonthDayNanoArray, IntervalYearMonthArray, ListArray,
-        NullArray, RecordBatch, RecordBatchReader, StringArray, Time32MillisecondArray,
-        Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
+        NullArray, RecordBatch, RecordBatchReader, StringArray, StringViewArray,
+        Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
         TimestampMicrosecondArray, TimestampMillisecondArray,
     };
     use arrow_buffer::{IntervalDayTime, IntervalMonthDayNano, i256};
     use arrow_cast::display::{ArrayFormatter, FormatOptions};
     use arrow_schema::{ArrowError, DataType, Field, IntervalUnit, Schema, SchemaRef, TimeUnit};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::num::NonZeroUsize;
     use std::sync::Arc;
 
@@ -5953,6 +6034,29 @@ mod tests {
     }
 
     #[test]
+    fn streaming_cell_pass_surfaces_a_spill_write_failure() {
+        // A spill write failure (a full temp filesystem, forced here) must
+        // surface from the parallel cell pass as a typed error naming the spool
+        // and the temporary directory, not a panic.
+        force_parallel_path();
+        super::FAIL_SPILL_WRITE.with(|c| c.set(true));
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
+        let build = |shift: i64| {
+            let ids: Int64Array = (0..60_000).map(Some).collect();
+            let v: Int64Array = (0..60_000).map(|i| Some(i + shift)).collect();
+            reader(&sch, vec![Arc::new(ids), Arc::new(v)])
+        };
+        let error = diff_rows_with(&build(0), &build(1), &sch, &sch, &key(), 4).unwrap_err();
+        super::FAIL_SPILL_WRITE.with(|c| c.set(false));
+        use_real_size_gate();
+        assert!(
+            matches!(&error, TableDiffError::Read { message }
+                if message.contains("write to") && message.contains("TMPDIR")),
+            "expected a spool write error naming TMPDIR, got {error:?}"
+        );
+    }
+
+    #[test]
     fn streaming_cell_pass_surfaces_a_render_error() {
         // A negative Time32 is out of the formatter's range; on the streaming
         // path it must surface as a typed Render error from a worker, not
@@ -6012,6 +6116,179 @@ mod tests {
                     "value_changed".into()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn streaming_mid_stream_flush_matches_sequential_with_a_dictionary_column() {
+        // Lower the flush threshold so a partition coalesces and writes more than
+        // one spill batch mid-stream, and include a dictionary column so the
+        // multi-batch read-back and decode are exercised. Output must still match
+        // the sequential path.
+        super::SPILL_FLUSH_ROWS_OVERRIDE.with(|c| c.set(Some(100)));
+        let sch = schema(vec![
+            id_field(),
+            Field::new(
+                "d",
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                false,
+            ),
+            Field::new("n", DataType::Int64, false),
+        ]);
+        let build = |shift: i64| {
+            let rows = 1_000i64;
+            let mut batches = Vec::new();
+            let mut row = 0;
+            while row < rows {
+                let end = (row + 250).min(rows);
+                let id: Int64Array = (row..end).map(Some).collect();
+                let strings: StringArray = (row..end)
+                    .map(|i| Some(format!("v{}", (i + shift) % 7)))
+                    .collect();
+                let d = arrow_cast::cast(
+                    &(Arc::new(strings) as ArrayRef),
+                    &DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                )
+                .unwrap();
+                let n: Int64Array = (row..end).map(|i| Some(i + shift)).collect();
+                batches.push(
+                    RecordBatch::try_new(sch.clone(), vec![Arc::new(id), d, Arc::new(n)]).unwrap(),
+                );
+                row = end;
+            }
+            multi_reader(&sch, batches)
+        };
+        assert_streaming_matches_rich(&build(0), &build(1), &sch, &sch, &key());
+        super::SPILL_FLUSH_ROWS_OVERRIDE.with(|c| c.set(None));
+    }
+
+    #[test]
+    fn streaming_matches_sequential_with_a_binary_view_column() {
+        // A BinaryView value column with long out-of-line values: the spill casts
+        // it to Binary (not Utf8), so the streaming path must match the
+        // sequential path, which decodes the view directly.
+        let sch = schema(vec![
+            id_field(),
+            Field::new("b", DataType::BinaryView, false),
+        ]);
+        let build = |shift: i64| {
+            let rows = 60_000i64;
+            let id: Int64Array = (0..rows).map(Some).collect();
+            let owned: Vec<Vec<u8>> = (0..rows)
+                .map(|i| format!("binary-view-{}-{}", i + shift, "z".repeat(40)).into_bytes())
+                .collect();
+            let b =
+                BinaryViewArray::from(owned.iter().map(|v| Some(v.as_slice())).collect::<Vec<_>>());
+            reader(&sch, vec![Arc::new(id), Arc::new(b)])
+        };
+        assert_streaming_matches_rich(&build(0), &build(1), &sch, &sch, &key());
+    }
+
+    #[test]
+    fn streaming_matches_sequential_with_a_null_first_composite_key_component() {
+        // A composite key (a, b) where `a` is null on every changed row: the
+        // output sort compares the rendered key columns and must take the
+        // both-null branch on `a` and order by `b`. Compared to the sequential
+        // path. `a` null makes each key a null key, still classified and diffed.
+        let sch = schema(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Int64, true),
+            Field::new("v", DataType::Int64, false),
+        ]);
+        let build = |shift: i64| {
+            let rows = 60_000i64;
+            let a: Int64Array = (0..rows).map(|_| None).collect();
+            let b: Int64Array = (0..rows).map(Some).collect();
+            let v: Int64Array = (0..rows).map(|i| Some(i + shift)).collect();
+            reader(&sch, vec![Arc::new(a), Arc::new(b), Arc::new(v)])
+        };
+        let key = vec!["a".to_string(), "b".to_string()];
+        assert_streaming_matches_rich(&build(0), &build(1), &sch, &sch, &key);
+    }
+
+    /// Sums the spill file bytes for a one-value-column right side across a
+    /// partition count, for the byte-view / dictionary spill-scaling tests.
+    #[allow(clippy::cast_possible_wrap)]
+    fn spill_bytes_for(value: ArrayRef, partitions: usize) -> u64 {
+        let sch = schema(vec![
+            id_field(),
+            Field::new("v", value.data_type().clone(), false),
+        ]);
+        let rows = value.len() as i64;
+        let id: Int64Array = (0..rows).map(Some).collect();
+        let batch = RecordBatch::try_new(sch.clone(), vec![Arc::new(id), value]).unwrap();
+        let source = MemoryInput::new(sch.clone(), vec![batch.clone()]);
+        let hasher = super::RowHasher::new().unwrap();
+        let key = vec!["id".to_string()];
+        let key_names = vec!["id"];
+        let common = vec!["v".to_string()];
+        let columns = super::side_columns(&sch, &key, &common);
+        let changed: HashSet<u128> =
+            super::hash_batch_keys(&batch, &columns.key, &key_names, &hasher)
+                .unwrap()
+                .into_iter()
+                .collect();
+        let value_schema = super::spill_schema(&sch, &columns.value);
+        let plan = super::SpillPlan {
+            columns: &columns,
+            key_names: &key_names,
+            hasher: &hasher,
+            changed: &changed,
+            partitions,
+            threads: 1,
+            value_schema: &value_schema,
+        };
+        super::spill_right(&source, &plan)
+            .unwrap()
+            .files
+            .iter()
+            .map(|f| f.metadata().unwrap().len())
+            .sum()
+    }
+
+    #[test]
+    fn dictionary_spill_bytes_do_not_scale_with_the_partition_count() {
+        // `take` on a dictionary keeps the whole values array, so before the
+        // spill decodes dictionaries a spilled partition carried the entire
+        // side's dictionary. A high-cardinality (all-distinct) dictionary column
+        // must spill flat across 2, 18, and 64 partitions.
+        let rows = 40_000i64;
+        let strings: StringArray = (0..rows)
+            .map(|i| Some(format!("value-{i}-{}", "x".repeat(64))))
+            .collect();
+        let dict = arrow_cast::cast(
+            &(Arc::new(strings) as ArrayRef),
+            &DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+        )
+        .unwrap();
+        let two = spill_bytes_for(dict.clone(), 2);
+        let eighteen = spill_bytes_for(dict.clone(), 18);
+        let sixty_four = spill_bytes_for(dict, 64);
+        assert!(
+            eighteen <= two * 2 && sixty_four <= two * 2,
+            "dictionary spill must not scale with partitions: 2={two} 18={eighteen} 64={sixty_four}"
+        );
+    }
+
+    #[test]
+    fn utf8_view_spill_bytes_do_not_scale_with_the_partition_count() {
+        // `take` on a byte-view column retains the source's whole variadic buffer,
+        // so before the spill casts views to their non-view type a partition
+        // carried the entire side's view data and the total grew with the
+        // partition count. The cast compacts it: flat across 2, 18, and 64.
+        let rows = 40_000i64;
+        let v: ArrayRef = Arc::new(StringViewArray::from(
+            (0..rows)
+                .map(|i| format!("value-{i}-{}", "x".repeat(64)))
+                .collect::<Vec<_>>(),
+        ));
+        let two = spill_bytes_for(v.clone(), 2);
+        let eighteen = spill_bytes_for(v.clone(), 18);
+        let sixty_four = spill_bytes_for(v, 64);
+        // Without the cast, 64 partitions spilled ~32x the 2-partition bytes.
+        assert!(
+            sixty_four <= two * 2 && eighteen <= two * 2,
+            "view spill must not scale with partitions: 2={two} 18={eighteen} 64={sixty_four}"
         );
     }
 

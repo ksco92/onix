@@ -16,6 +16,8 @@
 //! # every row changed with a wide (1 KB) string cell: the rendering worst case
 //! /usr/bin/time -l target/release/examples/row_diff_rss 100000 wide 1024
 //! /usr/bin/time -l target/release/examples/row_diff_rss 200000 wide 1024
+//! # wide rows, few changed cells: id + 8 512-byte columns, only one differing
+//! ROW_DIFF_THREADS=18 /usr/bin/time -l target/release/examples/row_diff_rss 150000 manycols 8 512
 //! # duplicate-heavy shape: every key duplicated, wide string key
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 dup 16
 //! /usr/bin/time -l target/release/examples/row_diff_rss 200000 dup 1024
@@ -76,6 +78,15 @@ enum Shape {
     /// is changed and every changed cell renders `value_width` bytes — the
     /// wide-cell worst case for the per-cell diff's rendering memory.
     Wide { value_width: usize, fill: u8 },
+    /// `(id, value0..value{ncols})` each a `width`-byte string; only `value0`
+    /// differs between the sides (`first_fill`), so every row is changed but only
+    /// one cell per row — the wide-rows-few-changed-cells case, where the spill
+    /// holds every common value column of every changed row though few change.
+    ManyCols {
+        ncols: usize,
+        width: usize,
+        first_fill: u8,
+    },
 }
 
 /// A table generated on demand, retaining nothing between batches.
@@ -148,6 +159,25 @@ impl Iterator for GenReader {
                 let values: StringArray = (self.next..end).map(|_| Some(cell.as_str())).collect();
                 vec![Arc::new(ids), Arc::new(values)]
             }
+            Shape::ManyCols {
+                ncols,
+                width,
+                first_fill,
+            } => {
+                let ids: Int64Array = (self.next..end).map(Some).collect();
+                let mut columns: Vec<ArrayRef> = Vec::with_capacity(ncols + 1);
+                columns.push(Arc::new(ids));
+                for c in 0..ncols {
+                    // Only value0 differs between the sides; the rest are equal,
+                    // so every row is changed but only one cell per row.
+                    let fill = if c == 0 { first_fill } else { b'a' };
+                    let cell = String::from_utf8(vec![fill; width]).unwrap();
+                    let values: StringArray =
+                        (self.next..end).map(|_| Some(cell.as_str())).collect();
+                    columns.push(Arc::new(values));
+                }
+                columns
+            }
         };
         self.next = end;
 
@@ -178,21 +208,15 @@ fn options_from_env(key: &str) -> TableDiffOptions {
     options
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let rows: i64 = args
-        .get(1)
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(1_000_000);
-    // Mode selects the shape: "dup" (duplicate-heavy), "wide" (all rows changed,
-    // wide string value column), "nochange"/"allchange"/default (linear int).
-    let mode = args.get(2).map_or("", String::as_str);
-    let width: usize = args
-        .get(3)
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(if mode == "wide" { 1024 } else { 16 });
-
-    let (schema, left_shape, right_shape, key, label) = match mode {
+/// Builds the (schema, left shape, right shape, key column, label) for a mode.
+#[allow(clippy::too_many_lines)]
+fn build_case(
+    mode: &str,
+    rows: i64,
+    width: usize,
+    args: &[String],
+) -> (SchemaRef, Shape, Shape, &'static str, String) {
+    match mode {
         "dup" => {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("key", DataType::Utf8, false),
@@ -229,6 +253,30 @@ fn main() {
                 format!(" ({mode}, value_width={width})"),
             )
         }
+        "manycols" => {
+            let ncols: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(8);
+            let cell_width: usize = args.get(4).and_then(|a| a.parse().ok()).unwrap_or(512);
+            let mut fields = vec![Field::new("id", DataType::Int64, false)];
+            for c in 0..ncols {
+                fields.push(Field::new(format!("value{c}"), DataType::Utf8, false));
+            }
+            let schema = Arc::new(Schema::new(fields));
+            (
+                schema,
+                Shape::ManyCols {
+                    ncols,
+                    width: cell_width,
+                    first_fill: b'a',
+                },
+                Shape::ManyCols {
+                    ncols,
+                    width: cell_width,
+                    first_fill: b'b',
+                },
+                "id",
+                format!(" (manycols, ncols={ncols}, width={cell_width})"),
+            )
+        }
         _ => {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("id", DataType::Int64, false),
@@ -257,7 +305,25 @@ fn main() {
                 label.to_string(),
             )
         }
-    };
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let rows: i64 = args
+        .get(1)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(1_000_000);
+    // Mode selects the shape: "dup" (duplicate-heavy), "wide" (all rows changed,
+    // wide string value column), "manycols" (wide rows, one differing column),
+    // "nochange"/"allchange"/default (linear int).
+    let mode = args.get(2).map_or("", String::as_str);
+    let width: usize = args
+        .get(3)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(if mode == "wide" { 1024 } else { 16 });
+
+    let (schema, left_shape, right_shape, key, label) = build_case(mode, rows, width, &args);
 
     let batch = batch_rows();
     let left = Generated {

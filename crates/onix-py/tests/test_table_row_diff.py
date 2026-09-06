@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import decimal
+import hashlib
 import random
 import time as time_module
 from collections import defaultdict
@@ -575,6 +576,41 @@ def test_wide_fixture_thread_count_does_not_change_the_result(tmp_path: Path) ->
         other = diff_tables(left, right, key=["id"], threads=threads)
         assert other.summary() == single.summary(), f"summary at threads={threads}"
         assert _members_byte_identical(other, single), f"batches at threads={threads}"
+
+
+# Digest pinning cells_changed's record order (and every member's row count)
+# against 0.10.0. Produced from origin/main at 8ab614d (pre-#87) with the
+# identical function on the same generate(60000, 20260906) narrow shape at
+# threads=18: sha256 over each member's name and row count, then repr() of every
+# cells_changed cell in output order. cells_changed carries the key plus rendered
+# strings only, so its repr() is stable across pyarrow versions (unlike
+# rows_added/removed's raw decimal/timestamp), and the test runs on both legs.
+_GOLDEN_0_10_0_60K = "a6b8ecab672e1eb4ea5c7381e7923a2173b0a7cbb88d06b286f6918e0858726d"
+
+
+def _member_value_digest(diff: object) -> str:
+    h = hashlib.sha256()
+    for member in ("rows_added", "rows_removed", "cells_changed", "duplicate_keys"):
+        table = _table(getattr(diff, member)())
+        h.update(member.encode())
+        h.update(str(table.num_rows).encode())
+    cells = _table(diff.cells_changed())
+    for name in cells.schema.names:
+        for value in cells.column(name).to_pylist():
+            h.update(repr(value).encode())
+    return h.hexdigest()
+
+
+def test_cells_changed_order_matches_the_0_10_0_golden(tmp_path: Path) -> None:
+    """The streaming cell pass reproduces 0.10.0's output byte-for-byte: the
+    four members' record order and content on a fixed seeded 60,000-row shape
+    match a digest captured from origin/main at 8ab614d (see above)."""
+    fixture_dir = tmp_path / "fixture"
+    generate(60_000, 20260906, fixture_dir)
+    left = pq.read_table(fixture_dir / "a.parquet")
+    right = pq.read_table(fixture_dir / "b.parquet")
+    diff = diff_tables(left, right, key=["id"], threads=18)
+    assert _member_value_digest(diff) == _GOLDEN_0_10_0_60K
 
 
 def _stack(base: pa.Table, copies: int) -> pa.Table:

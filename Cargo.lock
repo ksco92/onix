@@ -672,7 +672,6 @@ name = "onix-py"
 version = "0.11.1"
 dependencies = [
  "arrow-array",
- "arrow-ipc",
  "arrow-schema",
  "num-bigint",
  "onix-arrow",
@@ -680,7 +679,6 @@ dependencies = [
  "pyo3",
  "pyo3-arrow",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]
