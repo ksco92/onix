@@ -337,6 +337,40 @@ fn item_key_handles_a_u64_beyond_i64_range() {
 }
 
 #[test]
+fn item_key_distinguishes_arbitrary_precision_integers() {
+    use crate::value::Number;
+
+    let big = |s: &str| CValue::Number(Number::from_bigint(s.parse().expect("integer")));
+    let memo = IgnoreOrderMemo::new();
+    let k = |v: &CValue| super::hash::item_key(v, &memo);
+
+    // A big int fitting i128 keys as `Int`; one beyond i128 as `BigInt`. Two
+    // equal big ints share a key; different ones do not; and neither collides
+    // with a small int or an equal-valued float (numbers stay type-distinct
+    // under DeepHash — see `hash::ItemKey`'s doc).
+    let two_pow_100 = "1267650600228229401496703205376";
+    let beyond_i128 = "1".to_string() + &"0".repeat(40);
+    assert_eq!(k(&big(two_pow_100)), k(&big(two_pow_100)));
+    assert_ne!(
+        k(&big(two_pow_100)),
+        k(&big("1267650600228229401496703205377"))
+    );
+    assert_ne!(k(&big(two_pow_100)), k(&big(&beyond_i128)));
+    assert_ne!(k(&big(two_pow_100)), k(&cv(&json!(1))));
+    assert_ne!(
+        k(&big(two_pow_100)),
+        k(&CValue::Number(Number::from_f64(2f64.powi(100)))),
+    );
+
+    // Hashing a beyond-i128 `ItemKey::BigInt` agrees with its equality: the
+    // same value re-inserts as a duplicate, a different one as a new entry.
+    let mut seen = std::collections::HashSet::new();
+    assert!(seen.insert(k(&big(&beyond_i128))));
+    assert!(!seen.insert(k(&big(&beyond_i128))));
+    assert!(seen.insert(k(&big(two_pow_100))));
+}
+
+#[test]
 fn numeric_pairing_at_two_distances_reuses_the_used_check_across_buckets() {
     // "5" (added) has candidates at two distinct distances: "4"
     // (closer) and "100" (farther, still under the 0.3 cutoff). It

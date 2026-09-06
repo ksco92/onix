@@ -86,4 +86,8 @@ python-test:
 	@command -v maturin >/dev/null 2>&1 || { echo "maturin not installed: uv tool install maturin"; exit 1; }
 	cd crates/onix-py && uv sync --group test
 	cd crates/onix-py && uv run --group test maturin develop --release
-	cd crates/onix-py && uv run --group test pytest tests -q
+	# `--no-sync`: the env is already synced above and `maturin develop` has just
+	# installed the freshly built extension; a re-sync here would reinstall the
+	# package from uv's build cache (keyed on the dynamic version, not the source),
+	# silently replacing that fresh build with a stale one.
+	cd crates/onix-py && uv run --no-sync --group test pytest tests -q

@@ -221,8 +221,9 @@ pub(crate) fn serialize_value(
 /// whether `value` could hold a lone surrogate, passed in so this never
 /// re-walks `value` with [`onix_core::value::contains_wtf8`] just to answer a
 /// question the caller already knows the answer to; whether a non-finite
-/// float is present has no such byproduct anywhere upstream, so it is still
-/// checked here, once, by [`has_non_finite_float`].
+/// float or an arbitrary-precision integer is present has no such byproduct
+/// anywhere upstream, so it is still checked here, once, by
+/// [`needs_written_number`].
 ///
 /// `may_have_wtf8` is a *whole-report* flag, not a per-leaf one: once any
 /// single `Str`/key anywhere in `value` holds a surrogate, every `Str` in
@@ -235,7 +236,7 @@ pub(crate) fn serialize_value(
 /// are themselves `O(length)`, not `O(length²)`, per string — see that
 /// type's own doc for the `O(n²)` regression this guards against.
 fn to_json_string(value: &Value, may_have_wtf8: bool) -> String {
-    if !may_have_wtf8 && !has_non_finite_float(value) {
+    if !may_have_wtf8 && !needs_written_number(value) {
         return serde_json::to_string(&value.to_serde_json())
             .expect("a compact Value's to_serde_json() output always serializes");
     }
@@ -244,14 +245,18 @@ fn to_json_string(value: &Value, may_have_wtf8: bool) -> String {
     out
 }
 
-/// Returns `true` if `value` is, or contains anywhere within it, a
-/// non-finite float.
-fn has_non_finite_float(value: &Value) -> bool {
+/// Returns `true` if `value` is, or contains anywhere within it, a number
+/// `serde_json`'s ordinary path cannot render exactly: a non-finite float
+/// (which has no JSON literal) or an arbitrary-precision integer beyond
+/// `u64`/`i64` (which [`Value::to_serde_json`] would collapse to its nearest
+/// `f64`). Either forces the hand-written [`write_json`] path, which emits the
+/// non-finite token or the integer's full decimal digits.
+fn needs_written_number(value: &Value) -> bool {
     match value {
-        Value::Number(n) => n.as_f64().is_some_and(|f| !f.is_finite()),
-        Value::Array(items) | Value::Tuple(items) => items.iter().any(has_non_finite_float),
-        Value::Set(items) | Value::FrozenSet(items) => items.iter().any(has_non_finite_float),
-        Value::Object(obj) => obj.values().any(has_non_finite_float),
+        Value::Number(n) => n.as_big().is_some() || n.as_f64().is_some_and(|f| !f.is_finite()),
+        Value::Array(items) | Value::Tuple(items) => items.iter().any(needs_written_number),
+        Value::Set(items) | Value::FrozenSet(items) => items.iter().any(needs_written_number),
+        Value::Object(obj) => obj.values().any(needs_written_number),
         Value::Null
         | Value::Bool(_)
         | Value::Str(_)
@@ -262,7 +267,7 @@ fn has_non_finite_float(value: &Value) -> bool {
     }
 }
 
-/// [`to_json_string`]'s slow path, reached once either [`has_non_finite_float`]
+/// [`to_json_string`]'s slow path, reached once either [`needs_written_number`]
 /// or the caller's `may_have_wtf8` verdict says `value` needs hand-written
 /// rendering somewhere in it. Writes every node's JSON text by hand — a
 /// `Number` decides its own rendering directly from its own finiteness (the
@@ -279,20 +284,27 @@ fn has_non_finite_float(value: &Value) -> bool {
 fn write_json(value: &Value, out: &mut String) {
     match value {
         Value::Number(n) => {
-            let f = n
-                .as_f64()
-                .expect("a Number is always an i64, a u64, or an f64");
-            if f.is_finite() {
-                out.push_str(
-                    &serde_json::to_string(&value.to_serde_json())
-                        .expect("a finite Number always serializes"),
-                );
-            } else if f.is_nan() {
-                out.push_str("NaN");
-            } else if f.is_sign_positive() {
-                out.push_str("Infinity");
+            if let Some(big) = n.as_big() {
+                // No serde_json::Number form exists for a value beyond
+                // u64/i64; write its exact decimal digits, matching Python's
+                // json.dumps.
+                out.push_str(&big.to_string());
             } else {
-                out.push_str("-Infinity");
+                let f = n
+                    .as_f64()
+                    .expect("a non-Big Number is an i64, a u64, or an f64");
+                if f.is_finite() {
+                    out.push_str(
+                        &serde_json::to_string(&value.to_serde_json())
+                            .expect("a finite Number always serializes"),
+                    );
+                } else if f.is_nan() {
+                    out.push_str("NaN");
+                } else if f.is_sign_positive() {
+                    out.push_str("Infinity");
+                } else {
+                    out.push_str("-Infinity");
+                }
             }
         }
         Value::Str(s) => {

@@ -817,3 +817,48 @@ fn build_b2j_purges_only_above_the_autojunk_threshold() {
     let unpurged = super::build_b2j(&b_keys, false);
     assert!(unpurged.contains_key(&scalar_key(&json!("pop"))));
 }
+
+// --- arbitrary-precision integer scalar keys ----------------------------
+
+/// A big integer collapses onto the same `ScalarKey` as a float exactly equal
+/// to it (Python's `10**20 == 1e20`), and stays distinct from a float it does
+/// not equal — the ordered-list matcher's Python-`==` rule. Floats are built
+/// directly from their exact `f64` bits here, not parsed from text, so this
+/// pins the collapse logic independently of the JSON reader's own float
+/// rounding.
+#[test]
+fn big_integer_scalar_key_collapses_with_its_equal_float_only() {
+    use crate::value::{Number, Value};
+
+    let bigint = |s: &str| Value::Number(Number::from_bigint(s.parse().expect("integer")));
+    let float = |f: f64| Value::Number(Number::from_f64(f));
+
+    // 2^70 is exactly representable, so the big int and the float share a key.
+    let two_pow_70 = "1180591620717411303424";
+    assert_eq!(
+        super::python_scalar_key(&bigint(two_pow_70)),
+        super::python_scalar_key(&float(2f64.powi(70))),
+    );
+
+    // 10^23 is NOT exactly representable (`10**23 != 1e23` in f64), so the big
+    // int keeps its own `Big` key and never matches the float `1e23`.
+    let ten_pow_23 = "100000000000000000000000";
+    assert_ne!(
+        super::python_scalar_key(&bigint(ten_pow_23)),
+        super::python_scalar_key(&float(1e23)),
+    );
+    assert!(matches!(
+        super::python_scalar_key(&bigint(ten_pow_23)),
+        Some(super::ScalarKey::Big(_))
+    ));
+
+    // Two equal big ints share a key; two different ones do not.
+    assert_eq!(
+        super::python_scalar_key(&bigint(ten_pow_23)),
+        super::python_scalar_key(&bigint(ten_pow_23)),
+    );
+    assert_ne!(
+        super::python_scalar_key(&bigint(ten_pow_23)),
+        super::python_scalar_key(&bigint("100000000000000000000001")),
+    );
+}

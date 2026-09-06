@@ -11,8 +11,10 @@
 //! regenerates those files; it only reads them.
 //!
 //! The two input files carry Python values JSON cannot express (a tuple, a
-//! set, a frozenset, a datetime, a date, a time or a timedelta) in the tagged encoding
-//! `tests/golden/README.md` documents, decoded
+//! set, a frozenset, a datetime, a date, a time or a timedelta) — plus an
+//! arbitrary-precision integer, which JSON *can* express but this test's
+//! `serde_json` reader parses back lossily past `u64`/`i64` — in the tagged
+//! encoding `tests/golden/README.md` documents, decoded
 //! here by [`decode_tagged`] — the Rust half of the same rule
 //! `scripts/golden_tags.py` implements for the corpus's Python readers. This
 //! decoding is test-only: the engine's own parse paths never interpret a tag
@@ -49,6 +51,39 @@ fn read_json(path: &Path) -> Value {
         .unwrap_or_else(|err| panic!("failed to read fixture {}: {err}", path.display()));
     serde_json::from_str(&raw)
         .unwrap_or_else(|err| panic!("failed to parse fixture {} as JSON: {err}", path.display()))
+}
+
+/// Rewrites every `{"$bigint": "<digits>"}` tag in an `expected.json` report to
+/// the `f64` nearest those digits — the exact resolution `onix`'s own
+/// `Report::to_json_value` renders an arbitrary-precision integer at, since
+/// `serde_json::Value` (absent the `arbitrary_precision` feature) has no
+/// integer form beyond `u64`/`i64`. The generator tags a big integer in a
+/// report value the same way it tags one in an input, so this test collapses
+/// both sides to `f64` before comparing: the diff *structure* (which category,
+/// which path, int-vs-float type splits) is checked exactly, while a big
+/// integer *value* is compared at `f64` resolution. onix's exact-digit
+/// rendering is pinned separately by the crate's own JSON-writer tests and the
+/// Python bindings' round-trip tests. See `tests/golden/README.md`.
+fn collapse_bigint_tags(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(digits)) = map.get("$bigint")
+                && map.len() == 1
+            {
+                let as_float: f64 = digits
+                    .parse()
+                    .expect("a $bigint tag carries a decimal integer string");
+                return serde_json::Number::from_f64(as_float).map_or(Value::Null, Value::Number);
+            }
+            Value::Object(
+                map.into_iter()
+                    .map(|(key, item)| (key, collapse_bigint_tags(item)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(collapse_bigint_tags).collect()),
+        other => other,
+    }
 }
 
 /// Every case directory name under `tests/golden/`, sorted for a
@@ -101,6 +136,7 @@ const RESERVED_TAGS: &[&str] = &[
     "$time",
     "$timedelta",
     "$dict",
+    "$bigint",
 ];
 
 /// Decodes one parsed fixture value into the engine's own value model,
@@ -123,6 +159,11 @@ fn decode_tagged(value: &Value, builder: &mut onix_core::value::Builder) -> onix
             Some("$tuple") => {
                 onix_core::Value::Tuple(decode_tagged_items(map, "$tuple", builder).into())
             }
+            Some("$bigint") => onix_core::Value::Number(onix_core::Number::from_bigint(
+                tag_text(map, "$bigint")
+                    .parse::<num_bigint::BigInt>()
+                    .expect("a $bigint tag carries a decimal integer string"),
+            )),
             Some("$datetime") => {
                 onix_core::Value::DateTime(parse_datetime(tag_text(map, "$datetime")).into())
             }
@@ -381,6 +422,22 @@ fn diff_case(name: &str) -> Value {
 /// `tests/golden/README.md`.
 const KNOWN_DIVERGENT_CASES: &[&str] = &["path_rendering_collision"];
 
+/// Every crash-class case (its `expected.json` a `deepdiff_raises` marker —
+/// real `DeepDiff` raises rather than returning a diff) that has a dedicated
+/// pin test below. [`every_deepdiff_crash_case_is_pinned`] asserts the corpus
+/// grows no crash-class case without a pin here, so onix's own (non-crashing)
+/// result is never left unchecked.
+const DEEPDIFF_CRASH_CASES: &[&str] = &["ignore_order_big_int_beyond_f64_deepdiff_overflows"];
+
+/// Whether `case_dir`'s `expected.json` is a `deepdiff_raises` crash marker
+/// (a `{"deepdiff_raises": ..., "onix": ...}` object) rather than a report —
+/// the single detection rule both golden harnesses share (the Python one is
+/// `test_golden_parity.py`'s same key check). Takes the already-parsed
+/// `expected.json` so each case reads it once.
+fn is_deepdiff_crash_case(expected: &Value) -> bool {
+    expected.get("deepdiff_raises").is_some()
+}
+
 /// Every golden case not listed in [`KNOWN_DIVERGENT_CASES`] must match its
 /// `expected.json` exactly. Failures across the *whole* corpus are
 /// collected and reported together, so a regression run shows every
@@ -395,7 +452,15 @@ fn every_golden_case_matches_deepdiff() {
         }
 
         let case_dir = golden_root().join(&name);
-        let expected = read_json(&case_dir.join("expected.json"));
+        let expected_raw = read_json(&case_dir.join("expected.json"));
+        // A case whose `expected.json` is a `deepdiff_raises` marker is one real
+        // DeepDiff crashes on; onix's own (non-crashing) result is pinned in a
+        // dedicated test below, since there is no DeepDiff output to match. See
+        // `tests/golden/README.md`.
+        if is_deepdiff_crash_case(&expected_raw) {
+            continue;
+        }
+        let expected = collapse_bigint_tags(expected_raw);
         let actual = diff_case(&name);
 
         if actual != expected {
@@ -444,6 +509,43 @@ fn path_rendering_collision_does_not_panic_and_is_deepdiff_shaped() {
         }
     });
     assert_eq!(actual, expected_survivor);
+}
+
+/// Pins onix's deterministic result for `ignore_order_big_int_beyond_f64_deepdiff_overflows`,
+/// whose `expected.json` is a `deepdiff_raises` marker (real `DeepDiff` crashes
+/// with `OverflowError` on `float(2**2000)` in its `ignore_order` distance
+/// function — see `tests/golden/README.md`). onix reads such an integer as a
+/// saturated `f64` infinity, so the pair's distance short-circuits and it
+/// reports `values_changed` rather than crashing. The two paired values are
+/// beyond `f64`, which the `serde_json` bridge (`to_json_value`) has no integer
+/// form for, so they render as `null` here — the byte-exact writer and
+/// `to_dict()` keep the exact digits (see `tests/golden/README.md`).
+#[test]
+fn ignore_order_big_int_beyond_f64_pairs_without_panicking() {
+    let actual = diff_case("ignore_order_big_int_beyond_f64_deepdiff_overflows");
+    assert_eq!(
+        actual,
+        serde_json::json!({
+            "values_changed": {"root[0]": {"new_value": null, "old_value": null}}
+        })
+    );
+}
+
+/// Every crash-class case in the corpus has a dedicated pin test — so a newly
+/// added `deepdiff_raises` case cannot slip in without one, leaving onix's own
+/// result unchecked. Guards the registration in [`DEEPDIFF_CRASH_CASES`].
+#[test]
+fn every_deepdiff_crash_case_is_pinned() {
+    for name in case_names() {
+        let expected = read_json(&golden_root().join(&name).join("expected.json"));
+        if is_deepdiff_crash_case(&expected) {
+            assert!(
+                DEEPDIFF_CRASH_CASES.contains(&name.as_str()),
+                "crash-class case {name:?} has no dedicated pin test; add it to \
+                 DEEPDIFF_CRASH_CASES and pin onix's result"
+            );
+        }
+    }
 }
 
 /// Pins `ignore_order_nested_low_overlap_dict_pairing` directly against the

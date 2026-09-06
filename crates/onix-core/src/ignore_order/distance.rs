@@ -695,7 +695,9 @@ fn coerce_to_python_str(value: &Value) -> Option<String> {
             } else if let Some(i) = n.as_i64() {
                 Some(i.to_string())
             } else {
-                n.as_u64().map(|u| u.to_string())
+                n.as_u64()
+                    .map(|u| u.to_string())
+                    .or_else(|| n.as_big().map(ToString::to_string))
             }
         }
         // `str(x)` is the identity for a value already a `str`, including

@@ -36,16 +36,169 @@ def test_int_within_u64_range_is_accepted() -> None:
     assert diff.to_dict()["values_changed"]["root"]["old_value"] == 2**64 - 1
 
 
-def test_int_beyond_u64_max_raises_value_error() -> None:
-    """An int beyond u64::MAX raises ValueError naming the MVP limitation."""
-    with pytest.raises(ValueError, match="arbitrary-precision integers"):
-        DeepDiff(2**64, 0)
+def test_int_beyond_u64_max_is_accepted_and_kept_exact() -> None:
+    """An int beyond u64::MAX converts and round-trips through to_dict() exactly."""
+    diff = DeepDiff(2**100, 2**100 + 1)
+    assert diff.to_dict() == {
+        "values_changed": {"root": {"new_value": 2**100 + 1, "old_value": 2**100}}
+    }
 
 
-def test_int_below_i64_min_raises_value_error() -> None:
-    """An int below i64::MIN raises ValueError naming the MVP limitation."""
-    with pytest.raises(ValueError, match="arbitrary-precision integers"):
-        DeepDiff(-(2**63) - 1, 0)
+def test_int_below_i64_min_is_accepted_and_kept_exact() -> None:
+    """An int below i64::MIN converts and keeps its exact negative value."""
+    diff = DeepDiff(-(2**100), -(2**100) - 1)
+    assert diff.to_dict()["values_changed"]["root"]["old_value"] == -(2**100)
+
+
+def test_big_int_2_64_boundary_converts() -> None:
+    """2**64, one past u64::MAX, converts and compares equal to itself (empty diff)."""
+    assert DeepDiff(2**64, 2**64).to_dict() == {}
+
+
+def test_big_int_matches_real_deepdiff_across_the_value_model() -> None:
+    """A spread of big-int shapes matches real DeepDiff (values, type change, dict key, set)."""
+    for a, b in [
+        (2**100, 2**100 + 1),
+        (-(2**100), 2**100),
+        (10**20, 1e20),  # int-vs-float type change even though Python-equal
+        ({"k": 2**80}, {"k": 2**80 + 7}),
+        ({2**70: "a"}, {2**70: "b"}),  # big int as a dict key
+        ([1, 2**100, 3], [3, 2**100, 1]),  # ignore_order shuffle (below)
+    ]:
+        assert _normalize_types(DeepDiff(a, b).to_dict()) == _normalize_types(
+            RealDeepDiff(a, b, verbose_level=2).to_dict()
+        ), f"mismatch for {a!r} vs {b!r}"
+
+
+def test_big_int_under_ignore_order_matches_real_deepdiff() -> None:
+    """Big ints pair by hash and by numeric distance under ignore_order, like real DeepDiff."""
+    for a, b in [
+        ([1, 2**100, 3], [3, 2**100, 1]),
+        ([2**100], [2**100 + 1]),
+        ([2**100], [1e100]),
+    ]:
+        assert _normalize_types(DeepDiff(a, b, ignore_order=True).to_dict()) == _normalize_types(
+            RealDeepDiff(a, b, ignore_order=True, verbose_level=2).to_dict()
+        ), f"mismatch for {a!r} vs {b!r}"
+
+
+def test_big_int_to_json_emits_full_digits_and_reads_back() -> None:
+    """to_json() writes a big int's full decimal digits, which json.loads parses back exactly."""
+    diff = DeepDiff(2**100, 2**100 + 1)
+    text = diff.to_json()
+    # Full digits present verbatim (not a truncated/exponential float).
+    assert str(2**100) in text
+    assert str(2**100 + 1) in text
+    # Python's own json reader recovers the exact integers.
+    parsed = json.loads(text)
+    assert parsed["values_changed"]["root"] == {
+        "old_value": 2**100,
+        "new_value": 2**100 + 1,
+    }
+
+
+def test_big_int_in_set_matches_real_deepdiff() -> None:
+    """A big int inside a set diffs like real DeepDiff (add/remove by exact value)."""
+    a, b = {1, 2**70}, {1, 2**71}
+    assert _normalize_types(DeepDiff(a, b).to_dict()) == _normalize_types(
+        RealDeepDiff(a, b, verbose_level=2).to_dict()
+    )
+
+
+# A big int's exact value is read from PyLong through `int`'s own *unbound*
+# `bit_length`/`to_bytes` (see `exact_big_int` in crates/onix-py/src/convert.rs),
+# so an `int` subclass cannot make onix compare a value other than the one it
+# actually holds — no matter which method it overrides (`__str__`, `__index__`,
+# `bit_length`, or `to_bytes` itself), because onix never calls the instance's
+# own method. Each subclass below overrides a different one to a wrong answer
+# and the true value must still survive.
+
+
+class _LyingStr(int):
+    """An `int` subclass whose `__str__` reports a value it does not hold."""
+
+    def __str__(self: "_LyingStr") -> str:
+        """Return a constant unrelated to the true value."""
+        return "1"
+
+
+class _MoneyInt(int):
+    """An `int` subclass whose `__str__` is a non-numeric formatted string."""
+
+    def __str__(self: "_MoneyInt") -> str:
+        """Return a currency-formatted string, not a parseable integer."""
+        return f"${int(self)}"
+
+
+class _LyingBitLength(int):
+    """An `int` subclass whose `bit_length` under-reports, which would truncate a naive read."""
+
+    def bit_length(self: "_LyingBitLength") -> int:
+        """Return 1, far below the true bit length."""
+        return 1
+
+
+class _LyingToBytes(int):
+    """An `int` subclass whose `to_bytes` returns bytes for a different value."""
+
+    def to_bytes(self: "_LyingToBytes", *_args: object, **_kwargs: object) -> bytes:
+        """Return the two's-complement bytes of 1, not of the true value."""
+        return (1).to_bytes(1, "little", signed=True)
+
+
+@pytest.mark.parametrize("cls", [_LyingStr, _LyingBitLength, _LyingToBytes, _MoneyInt])
+def test_big_int_subclass_overriding_a_read_method_compares_by_true_value(cls: type) -> None:
+    """
+    A subclass overriding any method the read might use cannot change the compared value.
+
+    onix reads through ``int``'s own unbound ``bit_length``/``to_bytes``, so an
+    override of ``__str__``, ``bit_length``, or ``to_bytes`` (and the non-numeric
+    ``Money`` ``__str__``, which a decimal read would fail to parse) is bypassed
+    and the true value survives.
+
+    :param cls: The lying ``int`` subclass under test.
+    """
+    diff = DeepDiff(cls(10**30), cls(10**31))
+    assert diff.to_dict() == {
+        "values_changed": {"root": {"new_value": 10**31, "old_value": 10**30}}
+    }
+
+
+def test_big_int_subclass_negative_value_keeps_its_sign() -> None:
+    """A negative big int under a lying subclass keeps its exact signed value."""
+    diff = DeepDiff(_LyingStr(-(10**30)), _LyingStr(-(10**31)))
+    assert diff.to_dict() == {
+        "values_changed": {"root": {"new_value": -(10**31), "old_value": -(10**30)}}
+    }
+
+
+def test_big_int_subclass_lying_str_equal_values_report_nothing() -> None:
+    """Two big ints of equal true value report nothing, even when __str__ lies about them."""
+    assert DeepDiff(_LyingStr(10**30), _LyingStr(10**30)).to_dict() == {}
+
+
+def test_big_int_subclass_lying_str_as_dict_key_still_diffs() -> None:
+    """A lying __str__ on a big-int dict key does not hide the key's change (true value used)."""
+    a, b = {_LyingStr(10**30): "a"}, {_LyingStr(10**31): "b"}
+    assert _normalize_types(DeepDiff(a, b).to_dict()) == _normalize_types(
+        RealDeepDiff(a, b, verbose_level=2).to_dict()
+    )
+
+
+def test_int_beyond_str_digit_cap_diffs_against_live_deepdiff() -> None:
+    """An int past CPython's 4,300-digit int<->str cap diffs like live DeepDiff (bytes, no cap)."""
+    old = 10**5000  # 5,001 digits, well past sys.get_int_max_str_digits()'s default 4,300
+    assert _normalize_types(DeepDiff(old, old + 1).to_dict()) == _normalize_types(
+        RealDeepDiff(old, old + 1, verbose_level=2).to_dict()
+    )
+
+
+def test_ten_thousand_digit_int_round_trips_through_to_dict() -> None:
+    """A 10,000-digit int round-trips through to_dict() as its exact value (bytes read/write)."""
+    old = 10**9999  # 10,000 digits
+    result = DeepDiff(old, old + 1).to_dict()
+    assert result["values_changed"]["root"]["old_value"] == old
+    assert result["values_changed"]["root"]["new_value"] == old + 1
 
 
 # float finiteness: non-finite floats convert; see test_non_finite.py.

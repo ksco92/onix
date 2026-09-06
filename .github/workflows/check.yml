@@ -90,5 +90,6 @@ jobs:
           export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
           uv sync --group test --python ${{ matrix.python-version }}
           uv run --group test --python ${{ matrix.python-version }} maturin develop --release
-          uv run --group test --python ${{ matrix.python-version }} pytest tests --collect-only -q
-          uv run --group test --python ${{ matrix.python-version }} pytest tests -q
+          # `--no-sync` for the reason the Makefile's `python-test` target documents.
+          uv run --no-sync --group test --python ${{ matrix.python-version }} pytest tests --collect-only -q
+          uv run --no-sync --group test --python ${{ matrix.python-version }} pytest tests -q

@@ -609,8 +609,11 @@ fn number_repr(n: &Number) -> String {
     if let Some(i) = n.as_i64() {
         return i.to_string();
     }
-    n.as_u64()
-        .expect("a non-float Number always has an i64 or u64 representation")
+    if let Some(u) = n.as_u64() {
+        return u.to_string();
+    }
+    n.as_big()
+        .expect("a non-float Number is an i64, a u64, or an arbitrary-precision integer")
         .to_string()
 }
 

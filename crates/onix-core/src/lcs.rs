@@ -58,6 +58,9 @@
 
 use std::collections::HashMap;
 
+use num_bigint::BigInt;
+use num_traits::{FromPrimitive, ToPrimitive};
+
 use crate::value::Value;
 
 /// A bucket key for grouping list elements that compare equal the way
@@ -91,6 +94,15 @@ pub(crate) enum ScalarKey {
     /// compares correctly instead of failing to compile or colliding.
     Str(Vec<u8>),
     Int(i128),
+    /// An integer-valued scalar whose magnitude exceeds `i128` and is not
+    /// exactly representable as an `f64` — a big int that shares Python `==`
+    /// with no float, so it needs its own bucket. An exactly-representable
+    /// big int takes [`ScalarKey::Float`] instead (so it collapses with the
+    /// equal float, matching Python's `10**20 == 1e20`); see
+    /// [`python_scalar_key`]. Boxed so this rare arm does not widen the enum
+    /// (a `BigInt` is far larger than the `i128`/`Vec` the other arms hold),
+    /// which would grow every key in the scalar-list matcher's hash table.
+    Big(Box<BigInt>),
     /// Bit pattern of a non-integral (or too-large-to-be-exact) float —
     /// hashed through [`mix_float_bits`]; see this type's hand-written `Hash`.
     Float(u64),
@@ -154,6 +166,7 @@ impl std::hash::Hash for ScalarKey {
             Self::Null => {}
             Self::Str(s) => s.hash(state),
             Self::Int(i) => i.hash(state),
+            Self::Big(b) => b.hash(state),
             Self::Float(bits) => mix_float_bits(*bits).hash(state),
             // A `Value` node's address is 8/16-byte-aligned like any other
             // pointer, so its low bits carry no entropy; avalanche it the
@@ -264,7 +277,23 @@ pub(crate) fn python_scalar_key(value: &Value) -> Option<ScalarKey> {
             {
                 return Some(ScalarKey::Int(i));
             }
-            let f = n.as_f64().expect("a serde_json Number is i64, u64, or f64");
+            if let Some(big) = n.as_big() {
+                // An arbitrary-precision integer collapses with a float that
+                // is exactly equal to it (Python's own `10**20 == 1e20`): if
+                // it round-trips through `f64` losslessly it shares that
+                // float's `Float` key (the same rule the `>2^53` integral
+                // float below already uses), otherwise it keeps its own `Big`
+                // key. So `10**20`/`1e20` pair but `10**23`/`1e23` do not —
+                // see `tests/golden/README.md`.
+                let as_float = big.to_f64().unwrap_or(f64::INFINITY);
+                if as_float.is_finite()
+                    && BigInt::from_f64(as_float).is_some_and(|rounded| &rounded == big)
+                {
+                    return Some(ScalarKey::Float(as_float.to_bits()));
+                }
+                return Some(ScalarKey::Big(Box::new(big.clone())));
+            }
+            let f = n.as_f64().expect("a non-integer Number is a float");
             if f.is_nan() {
                 return Some(ScalarKey::Nan(std::ptr::from_ref(value) as usize));
             }

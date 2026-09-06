@@ -189,7 +189,7 @@
 //!   risking the very overflow they guard against, and `scoped`, the shared
 //!   push/pop path-buffer helper every container loop below uses.
 //! - `scalar` — leaf-level comparison: scalar/numeric equality
-//!   (`numbers_equal`, `floats_equal`, `number_as_i128`) and the
+//!   (`numbers_equal`, `floats_equal`) and the
 //!   `type_changes`/`values_changed` finding builders (`type_change_report`,
 //!   `scalar_diff`, `numeric_diff`) `diff_at` dispatches to for a
 //!   non-container pair.

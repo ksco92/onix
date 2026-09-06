@@ -191,9 +191,10 @@ pub(crate) fn numeric_diff(
 /// An int and a float are never equal (mirroring `DeepDiff` always reporting
 /// that pairing as a `type_changes`, never a numeric comparison). Within the
 /// same kind: floats compare by exact IEEE-754 `==` (see [`floats_equal`]);
-/// ints compare by value across `i64`/`u64` representations (see
-/// [`number_as_i128`]), so `9_000_000_000_000_000_000u64` and its `i64`
-/// counterpart compare equal even though they use different representations.
+/// ints compare by value across every representation via
+/// [`Number::integer_cmp`], so `9_000_000_000_000_000_000u64` and its `i64`
+/// counterpart — or an arbitrary-precision integer and its equal — compare
+/// equal even though they use different representations.
 pub(crate) fn numbers_equal(old: &Number, new: &Number) -> bool {
     if old.is_f64() != new.is_f64() {
         return false;
@@ -208,11 +209,7 @@ pub(crate) fn numbers_equal(old: &Number, new: &Number) -> bool {
             .expect("Number::is_f64 guarantees as_f64 succeeds");
         floats_equal(old_f, new_f)
     } else {
-        let old_int =
-            number_as_i128(old).expect("non-float Number always has an i64 or u64 representation");
-        let new_int =
-            number_as_i128(new).expect("non-float Number always has an i64 or u64 representation");
-        old_int == new_int
+        old.integer_cmp(new).is_eq()
     }
 }
 /// Compares two floats for exact equality.
@@ -232,12 +229,4 @@ fn floats_equal(a: f64, b: f64) -> bool {
     {
         a == b
     }
-}
-/// Converts a non-float [`Number`] to `i128`, so ints stored as `u64` and
-/// `i64` compare equal by value regardless of which representation
-/// the compact `Number` preserves from `serde_json`'s original parse.
-pub(crate) fn number_as_i128(n: &Number) -> Option<i128> {
-    n.as_i64()
-        .map(i128::from)
-        .or_else(|| n.as_u64().map(i128::from))
 }
