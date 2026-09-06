@@ -116,7 +116,7 @@ pub(crate) fn cobj(map: &serde_json::Map<String, serde_json::Value>) -> Object {
         map.iter()
             .map(|(key, value)| {
                 (
-                    ObjectKey::Str(std::sync::Arc::from(key.as_str())),
+                    ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from(key.as_str()))),
                     cv(value),
                 )
             })

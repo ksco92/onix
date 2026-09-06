@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::datetime::{SECONDS_PER_DAY, div_rem_euclid};
-use crate::value::{Number, ObjectKey, Value};
+use crate::value::{Number, ObjectKey, Str, Value, Wtf8Char, Wtf8Chars};
 
 /// One step in a path: a dict key, a list index, or a set item.
 ///
@@ -30,8 +30,12 @@ use crate::value::{Number, ObjectKey, Value};
 /// it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PathSegment {
-    /// A dict key access, e.g. the `'a'` in `root['a']`.
-    Key(String),
+    /// A dict key access, e.g. the `'a'` in `root['a']` — a [`Str`] rather
+    /// than a plain `String` so a key containing a lone surrogate code
+    /// point still has a structural identity distinct from every other key
+    /// (see [`Str`]'s own doc for why this matters for correctness, not
+    /// just representation).
+    Key(Str),
     /// A dict key access for a non-`str` key, e.g. the `1` in `root[1]` or
     /// the `1][2` in `root[1][2]` for a `tuple` key `(1, 2)` — carrying the
     /// key **already rendered** by [`dict_key_repr`], the same
@@ -66,44 +70,67 @@ pub enum PathSegment {
 /// ```
 /// use onix_core::path::{render_path, PathSegment};
 ///
-/// assert_eq!(render_path(&[]), "root");
+/// assert_eq!(render_path(&[]).to_string(), "root");
 /// assert_eq!(
 ///     render_path(&[
-///         PathSegment::Key("a".to_string()),
+///         PathSegment::Key("a".into()),
 ///         PathSegment::Index(3),
-///         PathSegment::Key("b c".to_string()),
-///     ]),
+///         PathSegment::Key("b c".into()),
+///     ])
+///     .to_string(),
 ///     "root['a'][3]['b c']"
 /// );
 /// ```
+///
+/// Returns a [`Str`] rather than a plain `String` because a key segment can
+/// hold a lone surrogate code point (see [`Str`]'s own doc): embedding it
+/// raw here — the same "never escapes anything" rule [`quote_key`]
+/// otherwise follows — is what lets the byte-exact JSON writer (the Python
+/// bindings' `to_json()`) and `to_dict()`'s reconstructed key both recover
+/// it exactly, rather than a pre-flattened `String` losing the distinction
+/// between "a literal backslash" and "this came from a surrogate" that a
+/// correct JSON escape depends on.
 #[must_use]
-pub fn render_path(segments: &[PathSegment]) -> String {
-    let mut rendered = String::from("root");
+pub fn render_path(segments: &[PathSegment]) -> Str {
+    let mut rendered: Vec<u8> = b"root".to_vec();
     for segment in segments {
         match segment {
             PathSegment::Key(key) => {
-                rendered.push('[');
-                rendered.push_str(&quote_key(key));
-                rendered.push(']');
+                rendered.push(b'[');
+                rendered.extend_from_slice(quote_key(key).as_bytes());
+                rendered.push(b']');
             }
             PathSegment::KeyRepr(key) => {
-                rendered.push('[');
-                rendered.push_str(key);
-                rendered.push(']');
+                rendered.push(b'[');
+                rendered.extend_from_slice(key.as_bytes());
+                rendered.push(b']');
             }
             PathSegment::Index(index) => {
-                rendered.push('[');
-                rendered.push_str(&index.to_string());
-                rendered.push(']');
+                rendered.push(b'[');
+                rendered.extend_from_slice(index.to_string().as_bytes());
+                rendered.push(b']');
             }
             PathSegment::SetItem(item) => {
-                rendered.push('[');
-                rendered.push_str(item);
-                rendered.push(']');
+                rendered.push(b'[');
+                rendered.extend_from_slice(item.as_bytes());
+                rendered.push(b']');
             }
         }
     }
-    rendered
+    bytes_to_str(rendered)
+}
+
+/// Wraps `bytes` — already known to be valid WTF-8, since every writer above
+/// only ever appends plain ASCII syntax or another [`Str`]'s own bytes — as
+/// whichever [`Str`] variant it actually is: [`Str::Utf8`] for the
+/// overwhelming common case (no surrogate anywhere in the path), costing
+/// nothing beyond the one UTF-8 validation `render_path` was already going
+/// to do implicitly by building a `String`.
+fn bytes_to_str(bytes: Vec<u8>) -> Str {
+    match String::from_utf8(bytes) {
+        Ok(s) => Str::Utf8(s.into_boxed_str()),
+        Err(err) => Str::Wtf8(err.into_bytes().into_boxed_slice()),
+    }
 }
 
 /// Quotes a dict key exactly the way `DeepDiff` does when rendering
@@ -133,21 +160,54 @@ pub fn render_path(segments: &[PathSegment]) -> String {
 ///
 /// An empty string renders as `''`.
 ///
+/// A key containing a lone surrogate code point (e.g. `"\udc80"`) is
+/// embedded exactly as unescaped as every other character — the raw WTF-8
+/// bytes (see [`Str`]'s own doc), never Python's `\udcXX` escape — matching
+/// real `DeepDiff`'s own raw embedding byte-for-byte, including through the
+/// byte-exact JSON writer (the Python bindings' `to_json()`), which is the
+/// one place the surrogate's own escape is finally written, exactly as
+/// `json.dumps` writes it.
+///
 /// # Examples
 ///
 /// ```
 /// use onix_core::path::quote_key;
 ///
-/// assert_eq!(quote_key("a"), "'a'");
-/// assert_eq!(quote_key("it's"), "\"it's\"");
-/// assert_eq!(quote_key("he said \"hi\""), "'he said \"hi\"'");
+/// assert_eq!(quote_key(&"a".into()).to_string(), "'a'");
+/// assert_eq!(quote_key(&"it's".into()).to_string(), "\"it's\"");
+/// assert_eq!(quote_key(&"he said \"hi\"".into()).to_string(), "'he said \"hi\"'");
 /// ```
 #[must_use]
-pub fn quote_key(key: &str) -> String {
-    if key.contains('\'') {
-        format!("\"{key}\"")
+pub fn quote_key(key: &Str) -> Str {
+    let quote = if key.as_bytes().contains(&b'\'') {
+        b'"'
     } else {
-        format!("'{key}'")
+        b'\''
+    };
+
+    let mut out = Vec::with_capacity(key.as_bytes().len() + 2);
+    out.push(quote);
+    out.extend_from_slice(key.as_bytes());
+    out.push(quote);
+    bytes_to_str(out)
+}
+
+/// Writes `s`'s content into `out` unchanged, except a lone surrogate code
+/// point, which becomes Python's own `\udcXX`/`\uXXXX` escape (the only
+/// character this crate's value model cannot otherwise carry through a
+/// plain `String` — see [`Str`]'s doc). Used by [`set_item_repr`]'s
+/// top-level `str` case: real `DeepDiff` can never actually produce that
+/// case for a lone-surrogate member (hashing one to build the set crashes
+/// first — see `tests/golden/README.md`), so there is no byte-exact target
+/// to match and this ASCII-safe escape is the simplest correct rendering.
+fn push_wtf8_unescaped(out: &mut String, s: &Str) {
+    for c in s.chars() {
+        match c {
+            Wtf8Char::Scalar(c) => out.push(c),
+            Wtf8Char::Surrogate(cp) => {
+                let _ = write!(out, "\\u{cp:04x}");
+            }
+        }
     }
 }
 
@@ -204,7 +264,13 @@ pub fn quote_key(key: &str) -> String {
 #[must_use]
 pub fn set_item_repr(item: &Value) -> String {
     match item {
-        Value::Str(s) => format!("'{s}'"),
+        Value::Str(s) => {
+            let mut out = String::with_capacity(s.as_bytes().len() + 2);
+            out.push('\'');
+            push_wtf8_unescaped(&mut out, s);
+            out.push('\'');
+            out
+        }
         Value::DateTime(value) => value.python_str(),
         Value::Date(value) => value.python_str(),
         Value::Time(value) => value.python_str(),
@@ -245,7 +311,7 @@ pub fn dict_key_repr(key: &Value) -> String {
 #[must_use]
 pub fn object_key_path_segment(key: &ObjectKey) -> PathSegment {
     match key {
-        ObjectKey::Str(s) => PathSegment::Key(s.to_string()),
+        ObjectKey::Str(s) => PathSegment::Key(s.into()),
         ObjectKey::Other(value) => PathSegment::KeyRepr(dict_key_repr(value)),
     }
 }
@@ -297,13 +363,13 @@ enum Work<'a> {
 }
 
 /// Renders one [`ObjectKey`] the way Python's `repr()` of the whole dict
-/// would show it: a `str` key exactly as [`python_repr_str`] already did
-/// (unchanged for the common case), any other key through [`python_repr`] of
-/// its wrapped [`Value`] — `repr({1: 'x'})` is `"{1: 'x'}"`, not
-/// `"{'1': 'x'}"`.
+/// would show it: a `str` key exactly as [`python_repr_bytes`] already did
+/// (unchanged for the common case, and now also covering a lone surrogate —
+/// see [`crate::value::Key`]'s doc), any other key through [`python_repr`] of its wrapped
+/// [`Value`] — `repr({1: 'x'})` is `"{1: 'x'}"`, not `"{'1': 'x'}"`.
 fn object_key_repr(key: &ObjectKey) -> String {
     match key {
-        ObjectKey::Str(s) => python_repr_str(s),
+        ObjectKey::Str(s) => python_repr_bytes(s.as_bytes()),
         ObjectKey::Other(value) => python_repr(value),
     }
 }
@@ -315,7 +381,7 @@ fn write_repr_head<'a>(out: &mut String, stack: &mut Vec<Work<'a>>, value: &'a V
         Value::Null => out.push_str("None"),
         Value::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
         Value::Number(n) => out.push_str(&number_repr(n)),
-        Value::Str(s) => out.push_str(&python_repr_str(s)),
+        Value::Str(s) => out.push_str(&python_repr_bytes(s.as_bytes())),
         Value::DateTime(value) => out.push_str(&datetime_repr(value.value())),
         Value::Date(value) => {
             let _ = write!(
@@ -496,28 +562,34 @@ fn push_sequence<'a>(
 /// Python's `repr()` for a `str`: single quotes unless the string contains a
 /// single quote and no double quote (then double quotes), with `\`, the
 /// wrapping quote and every non-printable code point escaped as `\xXX`,
-/// `\uXXXX` or `\UXXXXXXXX` per [`escape_non_printable`].
-fn python_repr_str(s: &str) -> String {
-    let quote = if s.contains('\'') && !s.contains('"') {
+/// `\uXXXX` or `\UXXXXXXXX` per [`escape_non_printable`]. Takes WTF-8 bytes
+/// (see [`Str`]) rather than a `&str` so this covers a lone surrogate too —
+/// Python's own `repr()` escapes one exactly like any other non-printable
+/// code point (`\udcXX`).
+fn python_repr_bytes(bytes: &[u8]) -> String {
+    let quote = if bytes.contains(&b'\'') && !bytes.contains(&b'"') {
         '"'
     } else {
         '\''
     };
 
-    let mut out = String::with_capacity(s.len() + 2);
+    let mut out = String::with_capacity(bytes.len() + 2);
     out.push(quote);
-    for c in s.chars() {
+    for c in Wtf8Chars::new(bytes) {
         match c {
-            '\\' => out.push_str(r"\\"),
-            '\t' => out.push_str(r"\t"),
-            '\n' => out.push_str(r"\n"),
-            '\r' => out.push_str(r"\r"),
-            c if c == quote => {
+            Wtf8Char::Surrogate(cp) => {
+                let _ = write!(out, "\\u{cp:04x}");
+            }
+            Wtf8Char::Scalar('\\') => out.push_str(r"\\"),
+            Wtf8Char::Scalar('\t') => out.push_str(r"\t"),
+            Wtf8Char::Scalar('\n') => out.push_str(r"\n"),
+            Wtf8Char::Scalar('\r') => out.push_str(r"\r"),
+            Wtf8Char::Scalar(c) if c == quote => {
                 out.push('\\');
                 out.push(c);
             }
-            c if is_non_printable(c) => escape_non_printable(&mut out, c),
-            c => out.push(c),
+            Wtf8Char::Scalar(c) if is_non_printable(c) => escape_non_printable(&mut out, c),
+            Wtf8Char::Scalar(c) => out.push(c),
         }
     }
     out.push(quote);
@@ -682,47 +754,50 @@ mod tests {
 
     #[test]
     fn empty_path_renders_as_root() {
-        assert_eq!(render_path(&[]), "root");
+        assert_eq!(render_path(&[]).to_string(), "root");
     }
 
     #[test]
     fn single_key_segment() {
         assert_eq!(
-            render_path(&[PathSegment::Key("a".to_string())]),
+            render_path(&[PathSegment::Key("a".to_string().into())]).to_string(),
             "root['a']"
         );
     }
 
     #[test]
     fn single_index_segment() {
-        assert_eq!(render_path(&[PathSegment::Index(0)]), "root[0]");
+        assert_eq!(render_path(&[PathSegment::Index(0)]).to_string(), "root[0]");
     }
 
     #[test]
     fn mixed_nested_segments() {
         let segments = vec![
-            PathSegment::Key("a".to_string()),
+            PathSegment::Key("a".to_string().into()),
             PathSegment::Index(3),
-            PathSegment::Key("b c".to_string()),
+            PathSegment::Key("b c".to_string().into()),
         ];
-        assert_eq!(render_path(&segments), "root['a'][3]['b c']");
+        assert_eq!(render_path(&segments).to_string(), "root['a'][3]['b c']");
     }
 
     #[test]
     fn empty_string_key_renders_empty_quotes() {
-        assert_eq!(render_path(&[PathSegment::Key(String::new())]), "root['']");
+        assert_eq!(
+            render_path(&[PathSegment::Key(String::new().into())]).to_string(),
+            "root['']"
+        );
     }
 
     #[test]
     fn quote_key_default_uses_single_quotes() {
-        assert_eq!(quote_key("a"), "'a'");
+        assert_eq!(quote_key(&"a".into()).to_string(), "'a'");
     }
 
     /// A key containing a single quote wraps in double quotes, matching
     /// real `DeepDiff` (verified in the golden corpus: `key_single_quote`).
     #[test]
     fn quote_key_with_single_quote_uses_double_quotes() {
-        assert_eq!(quote_key("it's"), "\"it's\"");
+        assert_eq!(quote_key(&"it's".into()).to_string(), "\"it's\"");
     }
 
     /// A key containing only a double quote (no single quote) wraps in
@@ -730,7 +805,10 @@ mod tests {
     /// (golden: `key_double_quote`).
     #[test]
     fn quote_key_with_double_quote_only_uses_single_quotes_unescaped() {
-        assert_eq!(quote_key(r#"he said "hi""#), r#"'he said "hi"'"#);
+        assert_eq!(
+            quote_key(&r#"he said "hi""#.into()).to_string(),
+            r#"'he said "hi"'"#
+        );
     }
 
     /// A key containing both quote kinds still wraps in double quotes (the
@@ -754,24 +832,24 @@ mod tests {
         expected.push_str(&key);
         expected.push('"');
 
-        assert_eq!(quote_key(&key), expected);
+        assert_eq!(quote_key(&key.as_str().into()).to_string(), expected);
     }
 
     /// No escaping of any kind: a literal backslash passes through as one
     /// character, not two (golden: `key_backslash`).
     #[test]
     fn quote_key_does_not_escape_backslashes() {
-        assert_eq!(quote_key(r"a\b"), r"'a\b'");
+        assert_eq!(quote_key(&r"a\b".into()).to_string(), r"'a\b'");
     }
 
     #[test]
     fn quote_key_keeps_unicode_literal() {
-        assert_eq!(quote_key("héllo世界"), "'héllo世界'");
+        assert_eq!(quote_key(&"héllo世界".into()).to_string(), "'héllo世界'");
     }
 
     #[test]
     fn quote_key_empty_string() {
-        assert_eq!(quote_key(""), "''");
+        assert_eq!(quote_key(&"".into()).to_string(), "''");
     }
 
     /// A set item renders as its own path segment, with no quoting applied
@@ -780,9 +858,10 @@ mod tests {
     fn set_item_segment_renders_its_text_verbatim() {
         assert_eq!(
             render_path(&[
-                PathSegment::Key("a".to_string()),
+                PathSegment::Key("a".to_string().into()),
                 PathSegment::SetItem("(1, 2)".to_string()),
-            ]),
+            ])
+            .to_string(),
             "root['a'][(1, 2)]"
         );
     }
@@ -803,7 +882,7 @@ mod tests {
         assert_eq!(set_item_repr(&Value::Str("a\nb".into())), "'a\nb'");
         assert_ne!(
             set_item_repr(&Value::Str("it's".into())),
-            quote_key("it's"),
+            quote_key(&"it's".into()).to_string(),
             "the set-item rule and the dict-key rule genuinely differ"
         );
     }
@@ -907,7 +986,10 @@ mod tests {
             ("a".to_string(), Value::Null),
         ]);
         assert_eq!(python_repr(&object), "{'a': None, 'b': 2}");
-        assert_eq!(python_repr(&builder.object(vec![])), "{}");
+        assert_eq!(
+            python_repr(&builder.object(Vec::<(String, Value)>::new())),
+            "{}"
+        );
     }
 
     /// A container nested several levels deep still renders element by
@@ -1184,6 +1266,6 @@ mod tests {
         expected.push('b');
         expected.push('\'');
 
-        assert_eq!(quote_key(&key), expected);
+        assert_eq!(quote_key(&key.as_str().into()).to_string(), expected);
     }
 }

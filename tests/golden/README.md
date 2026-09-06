@@ -799,43 +799,47 @@ never becomes a false equality in the distance memo.
   `ignore_order_time_offset_only_difference_hash_matches` golden cases. A
   `timedelta` has no analogous quirk: `_prep_number` hashes it exactly.
 
-- **A `str` containing a lone (unpaired) surrogate code point raises
-  `ValueError` at conversion, on either side, before either value is
-  compared.** A Python `str` can legally hold an unpaired surrogate (e.g.
-  `"\udc80"`), but such a code point has no UTF-8 encoding, which onix's
-  value model requires; both inputs are validated at extraction, so the
-  rejection happens unconditionally rather than depending on what the other
-  side turns out to be. Silently mapping the code point to `U+FFFD` (Rust's
-  own lossy conversion, the pre-#27 behavior) was rejected because it is a
-  correctness hazard for a diffing tool: two distinct strings differing only
-  in their lone surrogate would convert to the same Rust string and compare
-  equal. Rejecting at the boundary is deterministic and independent of the
-  other side, at the cost of three distinct outcomes relative to real
-  `DeepDiff` (all confirmed against `deepdiff==9.1.0`):
-  - Two *different* lone-surrogate strings: `DeepDiff("\udc80",
-    "\udc81").to_dict()` is `{"values_changed": {"root": {"new_value":
-    "\udc81", "old_value": "\udc80"}}}` (`to_json()` escapes the same way
-    `json.dumps` does); onix now raises instead of the pre-#27 false
-    negative (the two converted to the same string and compared equal).
-  - Two *equal* lone-surrogate strings: `DeepDiff("\udc80",
-    "\udc80").to_dict()` is `{}` — scalar equality is plain Python `==` and
-    never hashes, so real `DeepDiff` never encounters the encoding problem
-    at all. onix still raises here, because conversion validates each side
-    before any comparison exists to short-circuit; this is the one case
-    where onix reports an error where `DeepDiff` correctly finds no
-    difference — a documented nuance, not a strict improvement, and it is
-    still preferred over threading the raw Python object past conversion
-    just to special-case equality.
-  - Hashing one (a `set`/`frozenset` member, always hashed regardless of
-    equality): real `DeepDiff` crashes outright with an unhandled
-    `UnicodeEncodeError` from `deephash.py`; onix raises `ValueError`
-    instead — strictly safer than a crash.
+- **A `str` (or a `dict` key) containing a lone (unpaired) surrogate code
+  point is accepted and compared like any other `str`, matching real
+  `DeepDiff`'s plain Python `==`.** A Python `str` can legally hold an
+  unpaired surrogate (e.g. `"\udc80"`), a code point with no UTF-8 encoding.
+  `crates/onix-py/src/convert.rs`'s `pystring_to_cstr` reads the fast,
+  zero-copy UTF-8 path first and, only on that borrow's failure, falls back
+  to `str.encode('utf-8', 'surrogatepass')` — the CPython idiom that yields
+  WTF-8 bytes (`onix_core::value::Str`): valid UTF-8 with each surrogate
+  direct-encoded in the three-byte form strict UTF-8 forbids for that range.
+  Equality, ordering, path rendering (`root['\udc80']`, byte-identical to
+  `DeepDiff`'s own, including through `to_json()`'s escape — see
+  `onix_core::value::write_json_str_content`'s doc) and `to_dict()`'s
+  reconstructed value/key (`bytes.decode('utf-8', 'surrogatepass')`, the exact
+  inverse) all follow from that split.
 
-  None of the three needs a golden case: the corpus records reports, not
-  exceptions or crashes. `crates/onix-py/tests/test_conversions.py` pins the
-  differing-pair, equal-pair, dict-key, set-member and tuple-member cases,
-  and that a genuine non-BMP character (one valid UTF-8-encodable `str`
-  character, not an unpaired surrogate) still converts normally.
+  The one accepted divergence is **hashing** one — a `set`/`frozenset`
+  member (always hashed, regardless of equality), or *any* value at all once
+  `ignore_order=True` (`DeepHash` hashes every value on that path to build
+  its pairing hashtables, not only a set's members): real `DeepDiff`
+  crashes outright with an unhandled `UnicodeEncodeError` from
+  `deephash.py`; onix hashes by code point and
+  reports deterministically instead — strictly safer than a crash, and the
+  same "pick the deterministic behavior" call this project makes for every
+  other real-`DeepDiff` crash (see this file's naive-datetime-under-
+  `ignore_order` bullet above for the identical shape of trade-off).
+
+  None of this needs a file-based golden case: the golden corpus's `a.json`/
+  `b.json` are plain JSON text, and JSON's own grammar permits a lone
+  surrogate escape (`json.loads` decodes `"\udc80"` leniently) but writing it
+  back out through this corpus's `ensure_ascii=False` writer would raise the
+  same `UnicodeEncodeError` real `DeepDiff` does hashing one — so a fixture
+  literally cannot hold this content. Coverage instead comes from live
+  differential comparison against real `deepdiff==9.1.0`, the same
+  incumbent-comparison principle the corpus itself embodies:
+  `crates/onix-py/tests/test_conversions.py` pins the directed cases above
+  (plus the broader `ignore_order` crash, and that a genuine non-BMP
+  character — one valid UTF-8-encodable `str` character, not an unpaired
+  surrogate — still converts normally, unaffected), and
+  `crates/onix-py/tests/test_differential_fuzz.py`'s surrogate batch runs
+  `SEED_COUNT` generated cases (ordered only, for the reason above) through
+  both engines.
 
 `crate::diff::object_diff` (the ordinary dict-vs-dict diff, used
 identically whether or not `ignore_order` is set) implements `DeepDiff`'s
@@ -914,11 +918,11 @@ set-iteration-order differences, the list-LCS `2^53` limitation, the
 naive-datetime pairing timezone above, the `time` seconds-of-day hashing
 quirk under `ignore_order` above, the non-finite-float object-identity
 divergence documented under "Non-finite floats" above, the lone-surrogate
-`ValueError`, the empty-tuple-key, non-finite-float-key and subclass-key
-repr bugs just described, the overridden-`__eq__`/`__hash__` key-subclass
-nuance in "Subclasses" above, and the Unicode-version `str`-repr divergence
-documented under "Pinned versions" above are the only accepted, documented
-exceptions —
+hashing divergence just described, the empty-tuple-key, non-finite-float-key
+and subclass-key repr bugs just described, the overridden-`__eq__`/`__hash__`
+key-subclass nuance in "Subclasses" above, and the Unicode-version
+`str`-repr divergence documented under "Pinned versions" above are the only
+accepted, documented exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
 `scripts/differential_fuzz.py`) found zero *other* unexplained

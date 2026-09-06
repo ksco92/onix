@@ -1235,20 +1235,23 @@ fn threshold_collapse_rejects_a_deep_side_on_a_constrained_stack_instead_of_cras
             };
             let a = CValue::Object(CObject::from_pairs(vec![
                 (
-                    ObjectKey::Str(std::sync::Arc::from("p")),
+                    ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("p"))),
                     CValue::from(json!(1)),
                 ),
                 (
-                    ObjectKey::Str(std::sync::Arc::from("q")),
+                    ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("q"))),
                     CValue::from(json!(2)),
                 ),
             ]));
             let b = CValue::Object(CObject::from_pairs(vec![
                 (
-                    ObjectKey::Str(std::sync::Arc::from("r")),
+                    ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("r"))),
                     CValue::from(json!(3)),
                 ),
-                (ObjectKey::Str(std::sync::Arc::from("deep")), deep),
+                (
+                    ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("deep"))),
+                    deep,
+                ),
             ]));
 
             let err = super::diff_with_max_depth(&a, &b, 1).unwrap_err();
@@ -1992,7 +1995,7 @@ fn list_vs_tuple_nested_in_a_dict_is_a_type_change() {
     let mut a = Map::new();
     a.insert("a".to_string(), json!([1, 2]));
     let b = CValue::Object(CObject::from_pairs(vec![(
-        ObjectKey::Str(std::sync::Arc::from("a")),
+        ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("a"))),
         ctup(&[json!(1), json!(2)]),
     )]));
     let report = super::diff(&cv(&Value::Object(a)), &b).unwrap();
@@ -2127,7 +2130,7 @@ fn a_dict_value_that_is_a_too_deep_tuple_errors_instead_of_being_cloned() {
         deep = ctuple(vec![deep]);
     }
     let b = CValue::Object(CObject::from_pairs(vec![(
-        ObjectKey::Str(std::sync::Arc::from("a")),
+        ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("a"))),
         deep,
     )]));
     let error = super::diff_with_max_depth(&cv(&json!({})), &b, 4).unwrap_err();
@@ -2711,7 +2714,10 @@ fn two_set_subclasses_of_the_same_class_diff_by_membership() {
 
 #[test]
 fn an_object_subclass_versus_the_base_type_is_a_type_change_at_equal_value() {
-    let entries = vec![(ObjectKey::Str(std::sync::Arc::from("a")), cv(&json!(1)))];
+    let entries = vec![(
+        ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("a"))),
+        cv(&json!(1)),
+    )];
     let base = CValue::Object(CObject::from_pairs(entries.clone()));
     let subclass = CValue::Object(
         CObject::from_pairs(entries).with_type_name(Some(std::sync::Arc::from("MyDict"))),

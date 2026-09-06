@@ -87,7 +87,9 @@ use crate::value::Value;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ScalarKey {
     Null,
-    Str(String),
+    /// WTF-8 bytes (see `crate::value::Str`), so a lone surrogate still
+    /// compares correctly instead of failing to compile or colliding.
+    Str(Vec<u8>),
     Int(i128),
     /// Bit pattern of a non-integral (or too-large-to-be-exact) float —
     /// hashed through [`mix_float_bits`]; see this type's hand-written `Hash`.
@@ -252,7 +254,7 @@ fn scalar_key(value: &Value) -> ScalarKey {
 pub(crate) fn python_scalar_key(value: &Value) -> Option<ScalarKey> {
     Some(match value {
         Value::Null => ScalarKey::Null,
-        Value::Str(s) => ScalarKey::Str(s.to_string()),
+        Value::Str(s) => ScalarKey::Str(s.as_bytes().to_vec()),
         Value::Bool(b) => ScalarKey::Int(i128::from(*b)),
         Value::Number(n) => {
             if let Some(i) = n

@@ -159,7 +159,7 @@ pub(crate) fn normalized_pair(
     new: DateTime,
 ) -> Result<(DateTime, DateTime), Error> {
     let out_of_range = || Error::DateTimeOutOfRange {
-        path: render_path(path),
+        path: render_path(path).to_string(),
     };
 
     Ok((

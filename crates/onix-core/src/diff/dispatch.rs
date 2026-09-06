@@ -222,7 +222,7 @@ pub(crate) fn check_value_depth(
 ) -> Result<(), Error> {
     if deeper_than(value, max_depth.saturating_sub(depth)) {
         return Err(Error::MaxDepthExceeded {
-            path: render_path(path),
+            path: render_path(path).to_string(),
             max_depth,
         });
     }
@@ -266,7 +266,7 @@ pub(crate) fn check_map_depth(
 ) -> Result<(), Error> {
     if map_deeper_than(map, max_depth.saturating_sub(depth)) {
         return Err(Error::MaxDepthExceeded {
-            path: render_path(path),
+            path: render_path(path).to_string(),
             max_depth,
         });
     }
@@ -294,7 +294,7 @@ pub(crate) fn check_traversal_depth(
 ) -> Result<(), Error> {
     if depth > max_depth {
         return Err(Error::MaxDepthExceeded {
-            path: render_path(path),
+            path: render_path(path).to_string(),
             max_depth,
         });
     }

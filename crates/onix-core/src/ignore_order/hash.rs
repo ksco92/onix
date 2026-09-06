@@ -195,7 +195,10 @@ pub(crate) enum ItemKey {
     /// fixed representative for *every* `NaN` regardless of its bits, since
     /// `DeepHash` digests any `NaN` the same way (see that function's doc).
     Float(u64),
-    Str(String),
+    /// WTF-8 bytes (see `crate::value::Str`) rather than `String`, so a
+    /// lone surrogate still has a distinct, correct content key instead of
+    /// failing to compile or silently colliding with a different string.
+    Str(Vec<u8>),
     /// A `datetime`, keyed by its instant with a naive value read as UTC —
     /// `DeepHash._prep_datetime` runs `datetime_normalize` before formatting
     /// its digest string, so a naive and an aware value at the same moment
@@ -257,7 +260,8 @@ pub(crate) enum ItemKey {
     /// keyed too — a plain `String` cannot represent a non-`str` dict key
     /// (`ItemKey` already covers every key kind this crate's dicts allow,
     /// scalar or a `tuple` of scalars, via the same recursion [`item_key`]
-    /// runs on a value).
+    /// runs on a value) and, via [`ItemKey::Str`]'s own WTF-8 bytes, a
+    /// `str` key holding a lone surrogate code point too.
     Dict(BTreeMap<ItemKey, ItemKey>),
 }
 
@@ -667,7 +671,7 @@ fn scalar_content_key(value: &Value) -> ItemKey {
         Value::Null => ItemKey::Null,
         Value::Bool(b) => ItemKey::Bool(*b),
         Value::Number(n) => number_key(n),
-        Value::Str(s) => ItemKey::Str(s.to_string()),
+        Value::Str(s) => ItemKey::Str(s.as_bytes().to_vec()),
         Value::DateTime(dt) => ItemKey::DateTime(dt.instant()),
         Value::Date(date) => ItemKey::Date(date.ordinal()),
         Value::Time(time) => ItemKey::Time(time.hash_seconds_of_day()),
@@ -763,7 +767,7 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
     match value {
         Value::Null => (ItemKey::Null, part()),
         Value::Bool(b) => (ItemKey::Bool(*b), part()),
-        Value::Str(s) => (ItemKey::Str(s.to_string()), part()),
+        Value::Str(s) => (ItemKey::Str(s.as_bytes().to_vec()), part()),
         Value::DateTime(value) => (ItemKey::DateTime(value.instant()), part()),
         Value::Date(value) => (ItemKey::Date(value.ordinal()), part()),
         Value::Time(value) => (ItemKey::Time(value.hash_seconds_of_day()), part()),
@@ -833,7 +837,7 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
 /// inline match, for the unkeyed `DistKey` case) instead.
 fn object_key_item_key(key: &crate::value::ObjectKey, memo: &IgnoreOrderMemo) -> ItemKey {
     match key {
-        crate::value::ObjectKey::Str(s) => ItemKey::Str(s.to_string()),
+        crate::value::ObjectKey::Str(s) => ItemKey::Str(s.as_bytes().to_vec()),
         crate::value::ObjectKey::Other(value) => item_key(value, memo),
     }
 }

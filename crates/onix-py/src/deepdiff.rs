@@ -24,19 +24,22 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 /// `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`:
 ///
 /// - `t1`/`t2`: any of `None`, `bool`, `int`, `float` (`NaN`/`Infinity`/
-///   `-Infinity` included), `str`, `dict` (a key may be `str`, `None`,
-///   `bool`, `int`, `float`, `datetime.datetime`, `datetime.date`, or a
-///   `tuple` of those, never nested), `list`, `tuple`, `set`, `frozenset`,
-///   `datetime.datetime`, `datetime.date`, `datetime.time`, or
-///   `datetime.timedelta`, arbitrarily nested, and a *subclass* of the last
-///   nine (a `namedtuple`, a `set` subclass, a pandas `Timestamp`), which
-///   converts and compares as its base type but carries its own class name
-///   into a `type_changes` entry — because `DeepDiff` reports every value
-///   under its own type name — with one divergence: a `namedtuple` diffs
-///   positionally, not by field (see `crate::convert`'s module doc). A
-///   `set`/`frozenset` member is restricted further, to whichever of the
-///   above are hashable in Python — every type except `list`, `dict` and
-///   `set` — plus a `datetime`/`date`/`time`/`timedelta` subclass, but not a
+///   `-Infinity` included), `str` (a lone, unpaired surrogate code point —
+///   legal in Python, not encodable as UTF-8 — is accepted and compared like
+///   any other `str`; see `crate::convert`'s module doc), `dict` (a key may
+///   be `str`, `None`, `bool`, `int`, `float`, `datetime.datetime`,
+///   `datetime.date`, or a `tuple` of those, never nested), `list`, `tuple`,
+///   `set`, `frozenset`, `datetime.datetime`, `datetime.date`,
+///   `datetime.time`, or `datetime.timedelta`, arbitrarily nested, and a
+///   *subclass* of the last nine (a `namedtuple`, a `set` subclass, a
+///   pandas `Timestamp`), which converts and compares as its base type but
+///   carries its own class name into a `type_changes` entry — because
+///   `DeepDiff` reports every value under its own type name — with one
+///   divergence: a `namedtuple` diffs positionally, not by field (see
+///   `crate::convert`'s module doc). A `set`/`frozenset` member is
+///   restricted further, to whichever of the above are hashable in Python —
+///   every type except `list`, `dict` and `set` — plus a
+///   `datetime`/`date`/`time`/`timedelta` subclass, but not a
 ///   `tuple`/`frozenset` subclass or a `namedtuple`; the restriction is
 ///   transitive: a `list`, `dict` or `set` anywhere inside a set member is
 ///   refused. Converted to `onix_core`'s value model exactly once, up
@@ -70,6 +73,11 @@ pub(crate) struct DeepDiff {
     /// calling thread. Computed once in `new`, so repeated `to_json` calls do
     /// not each re-walk the report. See `crate::guard::is_deep`.
     report_is_deep: bool,
+    /// Whether either input held a lone surrogate code point — a byproduct
+    /// of `crate::convert::to_value`'s own walk (see its doc), never a
+    /// second pass. Lets `to_json` skip `onix_core::value::contains_wtf8`'s
+    /// own tree walk when this is `false`, the overwhelming common case.
+    may_have_wtf8: bool,
 }
 
 #[pymethods]
@@ -91,18 +99,24 @@ impl DeepDiff {
         // deep) legal value, the `?` drops `a` here on the early return — its
         // iterative `Drop` cannot overflow the calling thread, so no
         // sized-worker hand-off is needed for it.
-        let a = to_value(t1, opts.max_depth)?;
-        let b = to_value(t2, opts.max_depth)?;
+        let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth)?;
+        let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth)?;
         // The diff is natively recursive: it runs inline when both inputs are
         // shallow, else on the stack-sized worker (GIL released). The report
         // comes back in the same compact value model the inputs use, so it can
         // carry a tuple all the way out to `to_dict`.
         let report_value = diff_to_value(py, a, b, opts)?;
         let report_is_deep = is_deep(&report_value);
+        // A conservative upper bound: the report only ever carries values
+        // (or coerced copies, which coercion always renders as plain UTF-8
+        // — see `crate::guard`) that already existed in `t1`/`t2`, so
+        // neither input holding one guarantees the report holds none.
+        let may_have_wtf8 = a_may_have_wtf8 || b_may_have_wtf8;
 
         Ok(Self {
             report_value,
             report_is_deep,
+            may_have_wtf8,
         })
     }
 
@@ -125,7 +139,12 @@ impl DeepDiff {
     /// (the overwhelmingly common case) renders inline. See
     /// `crate::guard::serialize_value`.
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
-        serialize_value(py, &self.report_value, self.report_is_deep)
+        serialize_value(
+            py,
+            &self.report_value,
+            self.report_is_deep,
+            self.may_have_wtf8,
+        )
     }
 
     /// The report as a native Python `dict` — [`Self::to_json`]'s content

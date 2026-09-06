@@ -48,8 +48,11 @@ pub(crate) fn diff_json(
     // Runs the diff inline or on the sized worker depending on input depth.
     let report_value = diff_to_value(py, a_value, b_value, opts)?;
     // Renders to JSON on the worker if the report is deep. The report itself
-    // drops here iteratively, at any depth, on the calling thread.
-    serialize_value(py, &report_value, is_deep(&report_value))
+    // drops here iteratively, at any depth, on the calling thread. `false`:
+    // this path parses JSON text (`serde_json`'s own parser, via `parse_json`
+    // above), which rejects a lone surrogate escape outright — see `Str`'s
+    // own doc — so `report_value` can never hold one.
+    serialize_value(py, &report_value, is_deep(&report_value), false)
 }
 
 fn parse_json(text: &str, argument_name: &str) -> PyResult<onix_core::Value> {
