@@ -126,6 +126,45 @@ re-read cost is the serial remainder). At 2, 1,000, and 10,000 rows the default 
 rows, shrinking toward parity as the row count rose, with the crossover near 30,000-50,000 rows —
 so the 50,000-row threshold runs the workers only where they win.
 
+## Per-pass profile
+
+The row diff's wall time, broken down by pass, from the committed `row_diff_profile` example (built
+with the `profile` feature; see `perf/arrow/README.md`'s "Profiling" section and the example's module
+docstring). The example spools each generated side to an anonymous Arrow IPC file first, so every
+pass re-reads its spool exactly as the Python bindings' input spool does. Two shapes at 1M rows per
+side, default 18 threads: `linear` (id + int64 value, ~2% of rows changed — the narrow fixture's
+shape) and `manycols` (id + 34 64-byte string columns, every row changed but one cell each — the
+wide fixture's shape, where the spill carries all value columns).
+
+| Pass | `linear` 1M (s) | `manycols` 1M (s) |
+| --- | --- | --- |
+| set-up (input spool already written) | 0.000 | 0.000 |
+| hash and classify (re-read + hash both sides) | 0.015 | 0.514 |
+| materialize (re-read both sides, filter added/removed) | 0.027 | 0.352 |
+| cell: spill (re-read + hash + route + write both sides) | 0.022 | 1.424 |
+| — of which spill write | 0.001 | 0.356 |
+| cell: partition read-back and render | 0.005 | 0.591 |
+| — of which partition read-back | 0.000 | 0.352 |
+| — of which compare and render | 0.004 | 0.193 |
+| cell: sort and interleave | 0.002 | 0.080 |
+| **total wall** | **0.090** | **3.068** |
+
+The re-read passes dominate the wide-shape residual: the hash pass, the materialize pass, and the
+cell pass's spill each open and re-decode both spooled sides and re-hash their key columns. On
+`manycols` 1M those three re-read rounds are 0.514 + 0.352 + (1.424 − 0.356) = 1.93 s of the 3.07 s
+total (63%); the spill write (0.356 s), partition read-back (0.352 s), compare-and-render (0.193 s),
+and reorder (0.080 s) are the remainder. Decode is a large part of the re-read cost but not the whole
+of it — re-hashing the key columns is a comparable share — so a design that writes one spool per
+key-hash partition during the first read (so later passes read only their partition and reuse the
+already-computed key hashes) removes the re-read term without being blocked by decode alone (issue
+#90). This matches the shape of the real wide 1M cell-pass profile recorded in issue #90 (re-read +
+key hashing for the two spill passes the largest single bucket).
+
+For contrast, `manycols` 1M single-threaded (`threads 1`) totals 9.58 s: hash and classify 1.71 s,
+materialize 0.39 s, and the non-streaming cell pass (which holds both sides' changed rows at once)
+7.46 s at 7.4 GB peak RSS — the pass the streaming cell path of issue #87 replaced on the parallel
+path.
+
 ## Memory
 
 `row_diff_rss` (the example, `ROW_DIFF_THREADS` sets the worker count) peak resident set, the row
