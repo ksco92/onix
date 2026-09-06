@@ -1411,16 +1411,12 @@ fn utf8_sequence_width_boundary_at_the_ascii_continuation_split() {
 
 #[test]
 fn wtf8_chars_decode_time_scales_linearly_not_quadratically() {
-    // Guards `Wtf8Chars::next` against the O(n^2) regression an earlier
-    // revision had: that version called `str::from_utf8` on the *entire*
-    // remaining slice on every step (O(n) per call), so a full decode cost
-    // O(n^2) total. Quadrupling the input should then roughly 16x the time;
-    // a working O(1)-per-call decoder keeps it near 4x. Bounded generously
-    // at 8x (well under the quadratic case, well over a linear one) to
-    // absorb machine noise without masking a real regression. Run for both
-    // a plain-ASCII string and one ending in a lone surrogate, since the
-    // two decode paths (`Ok`/`Err` in `Wtf8Chars::next`) have independent
-    // per-call costs.
+    // Quadrupling the input should roughly 4x the decode time; bounded
+    // generously at 8x to absorb machine noise without masking a real
+    // regression. Run for both a plain-ASCII string and one ending in a
+    // lone surrogate, since the two decode paths (`Ok`/`Err` in
+    // `Wtf8Chars::next`) have independent per-call costs. See `Wtf8Chars`'s
+    // own doc for why the decode must stay linear.
     fn decode_all(bytes: &[u8]) -> usize {
         Wtf8Chars::new(bytes).count()
     }
