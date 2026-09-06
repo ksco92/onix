@@ -351,7 +351,10 @@ fn push_set_category(
         .into_iter()
         .map(|path| Value::Str(path.into_boxed_str()))
         .collect::<Vec<_>>();
-    root.push((name.to_string(), Value::Array(entries.into_boxed_slice())));
+    root.push((
+        name.to_string(),
+        Value::Array(entries.into_boxed_slice().into()),
+    ));
 }
 
 /// [`push_set_category`]'s [`Report::to_json_value`] twin.

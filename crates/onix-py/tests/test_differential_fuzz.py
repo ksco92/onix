@@ -4,7 +4,7 @@ Runs through the actual `deepdiff_rs.DeepDiff` class (not the fast JSON-string
 path), so this exercises the Python-object-to-`Value` conversion layer itself,
 not just the diff engine underneath it.
 
-Nine batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
+Ten batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
 and `ignore_order=True`): the JSON-shaped types; the same plus tuples, as
 containers in their own right and as elements of lists, dicts and other
 tuples; the same plus sets and frozensets, likewise; the same plus naive and
@@ -17,9 +17,13 @@ cases, the full alphabet drawn together in one generator run — tuples, sets,
 frozensets, datetimes and dates all able to appear at any depth, including a
 calendar value as a bare or nested set item (issue #21's own combination);
 multi-line strings, whose str->str changes reach DeepDiff's `_diff_str`
-and the `diff` field it adds at `verbose_level=2` (issue #28); and dicts whose
+and the `diff` field it adds at `verbose_level=2` (issue #28); dicts whose
 keys may be `int`/`bool`/`float`/`None`/`datetime`/`date`/a `tuple` of those,
-alongside tuples and calendar values as ordinary leaves too (issue #62).
+alongside tuples and calendar values as ordinary leaves too (issue #62); and,
+at `SUBCLASS_KEY_SEED_COUNT` cases, a dict keyed by a `namedtuple`, a `tuple`
+subclass, or a `datetime`/`date` subclass against its base-type twin, half
+matching by value and half not (issue #64's dict-key follow-up: `DeepDiff`'s
+key matching is class-agnostic).
 Every batch compares `to_json()` (canonically, i.e. parsed, since neither
 tool promises a key order) *and* `to_dict()` by `==`, the comparison that can
 see a tuple, a set, a `datetime` or a `date` where the JSON one cannot.
@@ -71,11 +75,12 @@ value, where onix serializes it as an array; such a case is compared through
 `to_dict()` alone.
 """
 
+import collections
 import datetime
 import json
 import random
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Final
 
 import pytest
@@ -153,6 +158,11 @@ MULTILINE_ALPHABET: Final[list[JsonValue]] = [
 # The non-str dict key batch (issue #62): its own seed range, independent of
 # every batch above.
 DICT_KEY_SEED_BASE: Final[int] = 8_000_000
+
+# The subclass dict key batch (issue #64's dict-key follow-up): its own seed
+# range, independent of every batch above.
+SUBCLASS_KEY_SEED_BASE: Final[int] = 9_000_000
+SUBCLASS_KEY_SEED_COUNT: Final[int] = 150
 
 # How often a generated dict key is drawn from the non-str alphabet below
 # rather than the pre-existing `DICT_KEYS` strings, when the `dict_keys` flag
@@ -642,21 +652,33 @@ def _diverges(a: JsonValue, b: JsonValue, ignore_order: bool) -> tuple[JsonValue
 
 
 def _run_batch(
-    seeds: range, tuples: bool, calendar: bool = False, dict_keys: bool = False
+    seeds: range,
+    tuples: bool = False,
+    calendar: bool = False,
+    dict_keys: bool = False,
+    case_fn: Callable[[int], tuple[JsonValue, JsonValue]] | None = None,
 ) -> list[tuple[int, bool, JsonValue, JsonValue, JsonValue, JsonValue]]:
     """
     Run one batch of seeded cases through both engines, ordered and ignore_order.
 
     :param seeds: The seeds to generate cases from.
-    :param tuples: Whether the generated cases may contain tuples.
-    :param calendar: Whether the generated cases may contain datetimes and dates.
-    :param dict_keys: Whether a dict's keys may be non-`str` (issue #62).
+    :param tuples: Whether the generated cases may contain tuples. Ignored when `case_fn` is set.
+    :param calendar: Whether the generated cases may contain datetimes and dates. Ignored when
+        `case_fn` is set.
+    :param dict_keys: Whether a dict's keys may be non-`str` (issue #62). Ignored when `case_fn`
+        is set.
+    :param case_fn: Builds one `(a, b)` case from a seed directly, for a batch with its own
+        generator (bypassing `_generate_case`/`tuples`/`calendar`/`dict_keys` entirely). Defaults
+        to `_generate_case` called with this batch's own `tuples`/`calendar`/`dict_keys`.
     :return: One entry per diverging (seed, ignore_order) combination.
     """
+    build_case = case_fn or (
+        lambda seed: _generate_case(seed, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
+    )
     mismatches = []
 
     for seed in seeds:
-        a, b = _generate_case(seed, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
+        a, b = build_case(seed)
 
         for ignore_order in (False, True):
             divergence = _diverges(a, b, ignore_order)
@@ -1563,4 +1585,118 @@ def test_differential_fuzz_with_non_str_dict_keys_matches_real_deepdiff() -> Non
     assert not mismatches, (
         f"{len(mismatches)} of {SEED_COUNT * 2} dict-key fuzz cases diverged from real DeepDiff "
         f"(showing up to 3): {mismatches[:3]}"
+    )
+
+
+_NamedPoint = collections.namedtuple("_NamedPoint", "x y")
+
+
+class _TupleSub(tuple):
+    """A plain `tuple` subclass, not a `namedtuple`, for the subclass dict-key batch below."""
+
+
+class _DateTimeSub(datetime.datetime):
+    """A plain `datetime` subclass, e.g. pandas' `Timestamp`, for the batch below."""
+
+
+class _DateSub(datetime.date):
+    """A plain `date` subclass, for the batch below."""
+
+
+def _gen_subclass_key(rng: random.Random) -> object:
+    """
+    Pick a random subclass dict key: a `namedtuple`, a `tuple` subclass, or a
+    `datetime`/`date` subclass -- the key-matching follow-up to issue #64's
+    value-level subclass support. `DeepDiff`'s dict-key matching is plain
+    Python `==`/`hash`, which never consults `type(obj)`, so this key must
+    match (or not) its base-type twin purely by value.
+
+    :param rng: Seeded RNG.
+    :return: A subclass dict key.
+    """
+    kind = rng.random()
+
+    if kind < 0.25:
+        return _NamedPoint(rng.randint(-5, 5), rng.randint(-5, 5))
+
+    if kind < 0.5:
+        return _TupleSub((rng.randint(-5, 5), rng.randint(-5, 5)))
+
+    value = CALENDAR_EPOCH + datetime.timedelta(seconds=rng.randrange(CALENDAR_SPAN_SECONDS))
+
+    if kind < 0.75:
+        return _DateTimeSub(
+            value.year, value.month, value.day, value.hour, value.minute, value.second
+        )
+
+    return _DateSub(value.year, value.month, value.day)
+
+
+def _base_twin(key: object) -> object:
+    """The plain-base-type twin of a subclass key `_gen_subclass_key` produced, same value."""
+    if isinstance(key, datetime.datetime):
+        return datetime.datetime(
+            key.year, key.month, key.day, key.hour, key.minute, key.second
+        )
+    if isinstance(key, datetime.date):
+        return datetime.date(key.year, key.month, key.day)
+    return tuple(key)
+
+
+def _mutated_twin(key: object, rng: random.Random) -> object:
+    """A plain-base-type twin of a subclass key with a *different* value."""
+    if isinstance(key, datetime.datetime):
+        return datetime.datetime(
+            key.year, key.month, key.day, key.hour, key.minute, (key.second + 1) % 60
+        )
+    if isinstance(key, datetime.date):
+        return key + datetime.timedelta(days=1)
+    return (*key[:-1], key[-1] + 1)
+
+
+def _generate_subclass_key_case(seed: int) -> tuple[dict[object, JsonValue], dict[object, JsonValue]]:
+    """
+    Build one `(a, b)` dict pair keyed by a subclass instance and its
+    matching-or-not base-type twin.
+
+    Deliberately a single-key dict on each side, sharing the same *value*
+    when the keys match: for a `datetime`/`date` subclass key specifically,
+    real `DeepDiff` hits its own narrow bug (`stringify_param`'s
+    `literal_eval_extended` cannot parse a subclass's `Call`-shaped `repr()`
+    back as a literal) whenever it must render such a key as part of any
+    path segment (see `tests/golden/README.md`'s "Known DeepDiff quirks"
+    section for both the ways this can happen). This case sidesteps every
+    route to it at once, not by avoiding a shared key specifically: the
+    matching half builds two genuinely identical dicts (no diff to report,
+    so no path is ever built), and the mismatching half builds two dicts
+    with disjoint keys (`DeepDiff` compares them as one whole changed value
+    instead of decomposing to a per-key path). A `namedtuple`/`tuple`
+    subclass key is unaffected regardless of any of this (`DeepDiff`
+    renders any tuple-shaped key positionally, never through `repr()`), but
+    the single-key shape is kept uniform across every generated key kind.
+
+    :param seed: The seed for this case.
+    :return: A dict pair, each holding one subclass-or-base key.
+    """
+    rng = random.Random(seed)
+    key_a = _gen_subclass_key(rng)
+    key_b = _base_twin(key_a) if rng.random() < 0.5 else _mutated_twin(key_a, rng)
+    value = rng.choice(["x", "y", 1, 2.5, None, True])
+
+    return {key_a: value}, {key_b: value}
+
+
+def test_differential_fuzz_with_subclass_dict_keys_matches_real_deepdiff() -> None:
+    """
+    Run a tenth batch whose dicts carry a `namedtuple`, `tuple`, `datetime`,
+    or `date` *subclass* key against its base-type twin -- issue #64's
+    dict-key follow-up. Half the cases match by value (a subclass key is
+    the same key as its base-type twin); half do not.
+    """
+    seeds = range(SUBCLASS_KEY_SEED_BASE, SUBCLASS_KEY_SEED_BASE + SUBCLASS_KEY_SEED_COUNT)
+    mismatches = _run_batch(seeds, case_fn=_generate_subclass_key_case)
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SUBCLASS_KEY_SEED_COUNT * 2} subclass dict-key fuzz cases "
+        f"diverged from real DeepDiff (showing up to 3): {mismatches[:3]}"
     )

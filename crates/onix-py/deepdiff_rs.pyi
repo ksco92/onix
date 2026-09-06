@@ -51,7 +51,10 @@ class DeepDiff:
             ``datetime.date``, or a ``tuple`` of those, never nested),
             ``list``, ``tuple``, ``set``, ``frozenset``,
             ``datetime.datetime``, ``datetime.date``, ``datetime.time``, or
-            ``datetime.timedelta``, arbitrarily nested.
+            ``datetime.timedelta``, arbitrarily nested, or a subclass of the
+            last nine (a ``namedtuple``, a ``set`` subclass, a pandas
+            ``Timestamp``), which converts and compares as its base type but
+            reports its own class name in a ``type_changes`` entry.
         :param t2: The right value to compare, of the same supported types.
         :param ignore_order: Mirrors ``DeepDiff(..., ignore_order=True)``.
         :param max_depth: Recursion-depth bound; defaults to 512. Raises

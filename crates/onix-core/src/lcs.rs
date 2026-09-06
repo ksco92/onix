@@ -290,7 +290,7 @@ pub(crate) fn python_scalar_key(value: &Value) -> Option<ScalarKey> {
             aware: value.utc_offset_seconds().is_some(),
             instant: value.sort_instant(),
         },
-        Value::TimeDelta(value) => ScalarKey::TimeDelta(*value),
+        Value::TimeDelta(value) => ScalarKey::TimeDelta(value.value()),
         Value::Array(_)
         | Value::Tuple(_)
         | Value::Set(_)

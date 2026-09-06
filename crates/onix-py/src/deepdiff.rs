@@ -24,22 +24,26 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 /// `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`:
 ///
 /// - `t1`/`t2`: any of `None`, `bool`, `int`, `float` (`NaN`/`Infinity`/
-///   `-Infinity` included), `str`, `dict` (a key
-///   may be `str`, `None`, `bool`, `int`, `float`, `datetime.datetime`,
-///   `datetime.date`, or a `tuple` of those, never nested), `list`, `tuple`,
-///   `set`, `frozenset`, `datetime.datetime`, `datetime.date`,
-///   `datetime.time`, or `datetime.timedelta`, arbitrarily nested. A
-///   *subclass* of any of these is
-///   not supported (a `namedtuple`, a `set` subclass, a pandas
-///   `Timestamp`), because `DeepDiff` reports every value under its own type
-///   name. A `set`/`frozenset` member is restricted further, to whichever of
-///   the above are hashable in Python — every type except `list`, `dict` and
-///   `set` — and the restriction is transitive: a `list`, `dict` or `set`
-///   anywhere inside a set member is refused. Converted to `onix_core`'s
-///   value model exactly once, up front — see `crate::convert`'s module doc
-///   for the full conversion table and every unsupported-type error this can
-///   raise (`TypeError` for an unsupported type, `ValueError` for an
-///   out-of-range int or a sub-second UTC offset).
+///   `-Infinity` included), `str`, `dict` (a key may be `str`, `None`,
+///   `bool`, `int`, `float`, `datetime.datetime`, `datetime.date`, or a
+///   `tuple` of those, never nested), `list`, `tuple`, `set`, `frozenset`,
+///   `datetime.datetime`, `datetime.date`, `datetime.time`, or
+///   `datetime.timedelta`, arbitrarily nested, and a *subclass* of the last
+///   nine (a `namedtuple`, a `set` subclass, a pandas `Timestamp`), which
+///   converts and compares as its base type but carries its own class name
+///   into a `type_changes` entry — because `DeepDiff` reports every value
+///   under its own type name — with one divergence: a `namedtuple` diffs
+///   positionally, not by field (see `crate::convert`'s module doc). A
+///   `set`/`frozenset` member is restricted further, to whichever of the
+///   above are hashable in Python — every type except `list`, `dict` and
+///   `set` — plus a `datetime`/`date`/`time`/`timedelta` subclass, but not a
+///   `tuple`/`frozenset` subclass or a `namedtuple`; the restriction is
+///   transitive: a `list`, `dict` or `set` anywhere inside a set member is
+///   refused. Converted to `onix_core`'s value model exactly once, up
+///   front — see `crate::convert`'s module doc for the full conversion table
+///   and every unsupported-type error this can raise (`TypeError` for an
+///   unsupported type, `ValueError` for an out-of-range int, a non-finite
+///   float, or a sub-second UTC offset).
 /// - `ignore_order`: mirrors `DeepDiff(..., ignore_order=True)`.
 /// - `max_depth`: caller-chosen recursion-depth bound; defaults to
 ///   `onix_core::DEFAULT_MAX_DEPTH` (512) when omitted. Exceeding it —

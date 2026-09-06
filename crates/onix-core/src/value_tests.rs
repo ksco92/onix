@@ -19,7 +19,9 @@ use serde::de::value::{
 use serde_json::json;
 
 use super::{Builder, Number, Object, ObjectKey, SetItems, Value};
-use crate::test_support::{cdate, cdt, cdt_at, cfrozen, cset, ctime, ctimedelta, ctup, cv};
+use crate::test_support::{
+    carr, cdate, cdt, cdt_at, cfrozen, cset, ctime, ctimedelta, ctup, ctuple, cv,
+};
 
 /// The convenience alias for `serde`'s in-memory deserializer error type.
 type DeError = serde::de::value::Error;
@@ -28,9 +30,14 @@ type DeError = serde::de::value::Error;
 
 #[test]
 fn value_is_compact() {
+    // Grew from 32 to 40 bytes with subclass-name tracking (`Typed<T>` on
+    // `DateTime`/`Date`/`Time`/`TimeDelta`/`Array`/`Tuple` adds one
+    // `Option<Arc<str>>`, niche-optimized to 16 bytes) — the cost of
+    // carrying a subclass's own class name (e.g. pandas `Timestamp`)
+    // through the value model; see `crate::value::Typed`'s doc.
     let size = std::mem::size_of::<Value>();
     println!("size_of::<Value>() = {size} bytes");
-    assert!(size <= 32, "Value must be <= 32 bytes, got {size}");
+    assert!(size <= 40, "Value must be <= 40 bytes, got {size}");
 }
 
 // --- number distinction edges -------------------------------------------
@@ -443,7 +450,7 @@ fn deep_equality_does_not_overflow_native_stack() {
             let build = |leaf: Value| {
                 let mut value = leaf;
                 for _ in 0..DEPTH {
-                    value = Value::Array(vec![value].into_boxed_slice());
+                    value = carr(vec![value]);
                 }
                 value
             };
@@ -478,7 +485,7 @@ fn deeply_nested_values_drop_without_native_recursion() {
 
             let mut nested_arrays = Value::Null;
             for _ in 0..DEPTH {
-                nested_arrays = Value::Array(vec![nested_arrays].into_boxed_slice());
+                nested_arrays = carr(vec![nested_arrays]);
             }
             drop(nested_arrays);
 
@@ -534,19 +541,18 @@ fn builder_default_matches_new() {
 
 #[test]
 fn a_tuple_renders_as_a_json_array_but_is_never_equal_to_one() {
-    let tuple =
-        Value::Tuple(vec![Value::from(serde_json::json!(1)), Value::Null].into_boxed_slice());
+    let tuple = ctup(&[serde_json::json!(1), serde_json::Value::Null]);
 
     assert_eq!(tuple.to_serde_json(), serde_json::json!([1, null]));
     assert_ne!(tuple, cv(&serde_json::json!([1, null])));
     assert_eq!(
         tuple,
-        Value::Tuple(vec![Value::from(serde_json::json!(1)), Value::Null].into_boxed_slice())
+        ctup(&[serde_json::json!(1), serde_json::Value::Null])
     );
     // Same length, different item: the tuple arm's own inequality path.
     assert_ne!(
         tuple,
-        Value::Tuple(vec![Value::from(serde_json::json!(1)), Value::Bool(true)].into_boxed_slice())
+        ctup(&[serde_json::json!(1), serde_json::json!(true)])
     );
     assert!(format!("{tuple:?}").contains("Tuple"));
 }
@@ -579,7 +585,7 @@ fn deeply_nested_tuples_compare_and_drop_without_native_recursion() {
             let build = |leaf: Value| {
                 let mut value = leaf;
                 for _ in 0..DEPTH {
-                    value = Value::Tuple(vec![value].into_boxed_slice());
+                    value = ctuple(vec![value]);
                 }
                 value
             };
@@ -711,7 +717,7 @@ fn calendar_values_nested_in_deep_containers_drop_without_native_recursion() {
             const DEPTH: usize = 100_000;
             let mut value = cdt(2024, 1, 1, Some(0));
             for _ in 0..DEPTH {
-                value = Value::Array(vec![value, cdate(2024, 1, 1)].into_boxed_slice());
+                value = carr(vec![value, cdate(2024, 1, 1)]);
             }
             drop(value);
         })
@@ -863,7 +869,7 @@ fn to_serde_json_renders_a_non_finite_number_as_null() {
     }
 
     // Nested inside a container, too — not just the bare top-level case.
-    let nested = Value::Array(vec![Value::Number(Number::from_f64(f64::NAN))].into_boxed_slice());
+    let nested = carr(vec![Value::Number(Number::from_f64(f64::NAN))]);
     assert_eq!(nested.to_serde_json(), serde_json::json!([null]));
 }
 

@@ -4,7 +4,7 @@
 //! arrays.
 
 use crate::datetime::DateTime;
-use crate::value::{Number, Value};
+use crate::value::{Number, Value, class_name};
 
 use crate::error::Error;
 use crate::path::{PathSegment, render_path};
@@ -12,7 +12,9 @@ use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
 
 use super::check_value_depth;
 
-/// The Python type name `DeepDiff` would report for a given [`Value`].
+/// The base-type name for a given [`Value`], ignoring any subclass name it
+/// carries; see [`effective_type_name`] for the name `DeepDiff` actually
+/// reports.
 ///
 /// Numbers are split into `"int"` and `"float"` by the compact [`Number`]'s
 /// preserved representation (which carries `serde_json`'s original parse: a
@@ -37,6 +39,14 @@ pub(crate) fn python_type_name(value: &Value) -> &'static str {
         Value::Object(_) => "dict",
     }
 }
+
+/// [`python_type_name`], overridden by [`class_name`] when `value` carries a
+/// subclass name — the name `DeepDiff` actually reports for `old_type`/
+/// `new_type` (`type(obj).__name__`, not the base type it structurally
+/// compares as). See [`crate::value::Typed`]'s doc.
+pub(crate) fn effective_type_name(value: &Value) -> String {
+    class_name(value).map_or_else(|| python_type_name(value).to_string(), str::to_string)
+}
 /// Builds a single-entry `type_changes` report at `path`, `depth` levels
 /// deep.
 ///
@@ -60,8 +70,8 @@ pub(crate) fn type_change_report(
     report.insert_type_change(
         path.to_vec(),
         TypeChangeEntry {
-            old_type: python_type_name(a).to_string(),
-            new_type: python_type_name(b).to_string(),
+            old_type: effective_type_name(a),
+            new_type: effective_type_name(b),
             old_value: a.clone(),
             new_value: b.clone(),
             new_path: None,
@@ -128,8 +138,8 @@ pub(crate) fn datetime_diff(
     scalar_diff(
         path,
         old == new,
-        &Value::DateTime(old),
-        &Value::DateTime(new),
+        &Value::DateTime(old.into()),
+        &Value::DateTime(new.into()),
         depth,
         max_depth,
     )

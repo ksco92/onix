@@ -678,20 +678,55 @@ never becomes a false equality in the distance memo.
   `set_tuple_item_python_equality` and `set_frozenset_item_python_equality`
   cases.
 
-- **Tuple, set and frozenset subclasses, including namedtuples, are refused.** `DeepDiff` reports
-  every value under its own `type(obj).__name__`, so a subclass is never a plain
-  `tuple` there: `DeepDiff(Pair((1, 2)), (1, 2))` is a `type_changes` from `Pair`
-  to `tuple`, and a `namedtuple` diverges further still (`DeepDiff` walks its
-  *fields*, reporting `root[0].x` with the class name as the type). This MVP has
-  neither a per-class type name nor a field-walking conversion, and diffing a
-  subclass as a plain tuple would silently report *no* difference where `DeepDiff`
-  reports one — so the conversion raises `TypeError` naming the class, like any
-  other unsupported type. The same rule and the same reason apply to a `set` or
-  `frozenset` subclass. `crates/onix-py/tests/test_tuples.py` and
-  `crates/onix-py/tests/test_sets.py` assert both the refusal and the real tool's
-  own output. No golden case uses one: the corpus's
-  fixtures are JSON files, and the tagged encoding above deliberately has no tag
-  for "an arbitrary class".
+- **A `namedtuple` is diffed positionally, not by field.** `DeepDiff` reports
+  every value under its own `type(obj).__name__`, and for a `namedtuple`
+  specifically it also walks the value's *fields* (`deephash.py`'s
+  `_prep_tuple`), reporting `root[0].x` rather than `root[0][0]`. `onix`
+  accepts a `namedtuple` as an ordinary `tuple` subclass — carrying its own
+  class name into a `type_changes` entry exactly like any other tuple
+  subclass — but diffs its contents positionally, the same way it diffs
+  every other tuple. Reproducing the field-walking shape would need a
+  second, name-keyed diffing path threaded through the whole engine for one
+  single-source special case; this is a documented, permanent divergence,
+  not an approximation of it. `crates/onix-py/tests/test_tuples.py` asserts
+  both onix's positional output and the real tool's field-walking one side
+  by side. No golden case uses a `namedtuple`: the corpus's fixtures are
+  JSON files, and the tagged encoding above deliberately has no tag for one.
+
+- **Every other subclass — `list`/`tuple`/`set`/`frozenset`/`dict`, and a
+  `datetime`/`date`/`time`/`timedelta` subclass such as pandas' `Timestamp` —
+  is accepted and compares exactly as its base type**, carrying its own class name into a
+  `type_changes` entry: a subclass instance is never a plain instance of
+  the base type to `DeepDiff` (`type(obj).__name__` decides), even when
+  every field matches, matching real `DeepDiff`'s behavior exactly — see
+  `crates/onix-core/src/value.rs`'s `Typed` doc for the full mechanism and
+  `crates/onix-py/src/convert.rs`'s module doc for the conversion rules
+  (including the one restriction that remains: a `tuple`/`frozenset`
+  subclass, including a `namedtuple`, is not accepted as a `set` member).
+  `crates/onix-py/tests/test_tuples.py`, `test_sets.py`,
+  `test_datetimes.py` and `test_conversions.py` assert this against the
+  real tool. No golden case uses a subclass, for the same tagged-encoding
+  reason as above.
+
+- **A dict *key* that is a `tuple`/`datetime`/`date` subclass, including a
+  `namedtuple`, is accepted and matches a base-type key with the same
+  value, unlike a value's own class-name-carrying comparison above.**
+  `DeepDiff`'s dict-key matching is plain Python `==`/`hash`, which never
+  consults `type(obj)`, so `onix`'s `ObjectKey` tracks no class name for a
+  key at all — see `crates/onix-py/src/convert.rs`'s `classify_dict_key`
+  doc. One documented nuance, not a bug: a key subclass with an *overridden*
+  `__eq__`/`__hash__` (custom-object territory, out of this MVP's scope) is
+  matched by its base type's structural value here, where real `DeepDiff`
+  uses the overridden equality — confirmed live: a `tuple` subclass whose
+  `__eq__` always returns `True` and `__hash__` is always `0` makes
+  `{K((1, 2)): "v1"}` vs `{K((3, 4)): "v2"}` a `values_changed` at
+  `root[3][4]` for `DeepDiff`, where `onix` sees two structurally different
+  keys and reports the whole dict changed at `root` instead. See
+  `crates/onix-py/tests/test_conversions.py`'s
+  `test_a_key_subclass_with_overridden_equality_matches_structurally_not_by_python_eq`
+  and the differential fuzz batch
+  (`test_differential_fuzz_with_subclass_dict_keys_matches_real_deepdiff`).
+  No golden case uses one, for the same tagged-encoding reason as above.
 
 - **`to_dict()` reports a `type_changes` entry's types as names, not classes.**
   Real `DeepDiff` puts the type objects themselves (`<class 'tuple'>`) in
@@ -849,6 +884,29 @@ carried JSON object — per the same compatibility-policy choice. See
 `crates/onix-py/tests/test_non_finite.py`'s
 `test_non_finite_dict_key_renders_without_crashing`.
 
+**A `datetime`/`date` subclass dict key that `DeepDiff` must render as
+part of any path segment is the same `stringify_param` bug again, not
+reproduced.** A subclass's `repr()` looks like a constructor call (e.g.
+`_DateTimeSub(2023, 5, 23, 1, 18, 56)`), which `literal_eval_extended`
+cannot parse back as a literal either, so the path collapses to `None`/
+`"null"` the same way the two cases above do — not only for an
+*added*/*removed* key, but for the same subclass key on *both* sides
+holding a container (`set`/`list`/`dict`) value with its own internal
+change, since that also needs a path built past the key: confirmed live,
+`{MyDT(...): {1, 2, 3}}` vs `{MyDT(...): {1, 2, 4}}` (an identical key
+both sides) gives `{'set_item_removed': ['None[3]'], 'set_item_added':
+['None[4]']}`. `onix` renders the real key path deterministically either
+way, matching the two bugs above's resolution (a `tuple`/`namedtuple` key
+is unaffected — `stringify_param` renders any tuple-shaped key
+positionally, never through `repr()`). The differential fuzz batch for
+this sidesteps every route at once by construction, not by avoiding a
+shared key specifically: each case is a single-key dict pair that is
+either fully identical (no diff to report) or has two entirely disjoint
+keys (`DeepDiff` compares the two dicts as one whole changed value
+instead of decomposing to a per-key path); see
+`crates/onix-py/tests/test_differential_fuzz.py`'s
+`_generate_subclass_key_case`.
+
 Every other divergence found while building the corpus was fixed in `onix-core` to match
 `DeepDiff` exactly. The path-rendering collision exception, the multi-member
 nested-`frozenset`-rendering exception (both above), the three
@@ -856,9 +914,11 @@ set-iteration-order differences, the list-LCS `2^53` limitation, the
 naive-datetime pairing timezone above, the `time` seconds-of-day hashing
 quirk under `ignore_order` above, the non-finite-float object-identity
 divergence documented under "Non-finite floats" above, the lone-surrogate
-`ValueError`, the empty-tuple-key and non-finite-float-key bugs just
-described, and the Unicode-version `str`-repr divergence documented under
-"Pinned versions" above are the only accepted, documented exceptions —
+`ValueError`, the empty-tuple-key, non-finite-float-key and subclass-key
+repr bugs just described, the overridden-`__eq__`/`__hash__` key-subclass
+nuance in "Subclasses" above, and the Unicode-version `str`-repr divergence
+documented under "Pinned versions" above are the only accepted, documented
+exceptions —
 `ignore_order`'s own differential-fuzz testing (thousands of cases across
 both a general-purpose and a nested-low-overlap-dict-biased generator, see
 `scripts/differential_fuzz.py`) found zero *other* unexplained

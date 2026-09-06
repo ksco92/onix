@@ -22,7 +22,21 @@ pub(crate) fn cvec(items: &[serde_json::Value]) -> Vec<Value> {
 /// Compact tuple value from a slice of `serde_json` values — the one shape
 /// a JSON literal cannot express, so tests that need a tuple build it here.
 pub(crate) fn ctup(items: &[serde_json::Value]) -> Value {
-    Value::Tuple(cvec(items).into_boxed_slice())
+    Value::Tuple(cvec(items).into_boxed_slice().into())
+}
+
+/// Compact array value from already-converted [`Value`] items — [`ctup`]'s
+/// twin for a `list`, used where the items aren't representable as a
+/// `serde_json` literal (already a compact [`Value`], e.g. a nested tuple, a
+/// date, or another array).
+pub(crate) fn carr(items: Vec<Value>) -> Value {
+    Value::Array(items.into_boxed_slice().into())
+}
+
+/// [`carr`]'s twin for a `tuple`, used where the items aren't representable
+/// as a `serde_json` literal — [`ctup`] covers the literal case.
+pub(crate) fn ctuple(items: Vec<Value>) -> Value {
+    Value::Tuple(items.into_boxed_slice().into())
 }
 
 /// Compact set value from a slice of `serde_json` values, in the order
@@ -38,7 +52,11 @@ pub(crate) fn cfrozen(items: &[serde_json::Value]) -> Value {
 
 /// Compact `date` value — the other shape a JSON literal cannot express.
 pub(crate) fn cdate(year: i32, month: u8, day: u8) -> Value {
-    Value::Date(Date::new(year, month, day).expect("test date is a real calendar date"))
+    Value::Date(
+        Date::new(year, month, day)
+            .expect("test date is a real calendar date")
+            .into(),
+    )
 }
 
 /// Compact `datetime` value at midnight, naive unless `offset` is given.
@@ -61,7 +79,8 @@ pub(crate) fn cdt_at(
     let date = Date::new(year, month, day).expect("test date is a real calendar date");
     Value::DateTime(
         DateTime::new(date, hour, minute, second, microsecond, offset)
-            .expect("test datetime fields are in range"),
+            .expect("test datetime fields are in range")
+            .into(),
     )
 }
 
@@ -75,7 +94,8 @@ pub(crate) fn ctime(
 ) -> Value {
     Value::Time(
         Time::new(hour, minute, second, microsecond, offset)
-            .expect("test time fields are in range"),
+            .expect("test time fields are in range")
+            .into(),
     )
 }
 
@@ -83,7 +103,9 @@ pub(crate) fn ctime(
 /// microseconds)` triple.
 pub(crate) fn ctimedelta(days: i64, seconds: i64, microseconds: i64) -> Value {
     Value::TimeDelta(
-        TimeDelta::new(days, seconds, microseconds).expect("test timedelta fields are in range"),
+        TimeDelta::new(days, seconds, microseconds)
+            .expect("test timedelta fields are in range")
+            .into(),
     )
 }
 
