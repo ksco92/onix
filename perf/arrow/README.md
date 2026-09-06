@@ -33,9 +33,9 @@ manifest.json:    f06a7af894294833a40a03e36c9f5a3fa981d9934d526663369f1147cc765a
 `--kind wide` is byte-identical the same way (SHA-256 over two consecutive 100k-row `wide` runs):
 
 ```
-a.parquet:        096ac23d871be47357cae5f7f52649acbe31652ec8fba79a3e88f89ea58704a9
-b.parquet:        6633c5bff24a0f3680e177a552b802e263bbbfc51a6166bd56b90453c32b6e2a
-manifest.json:    af4727a712467b42563b50d93cc59d2709a5d842a2033ad7b380a15ff56f63f7
+a.parquet:        04c2568a8e866dd1abfbd8e99c34fcb81a73dc890be3c7c6fc74c6a0d88f134e
+b.parquet:        e91cf31ce42c9c79285d95bf112930a9629d99490e02901c1d725dbb4b69e05c
+manifest.json:    f02af4a562b91f8fc1c515abed64923c0d23ce56e9fbbd57acee16bcac5ca73c
 ```
 
 ## Sizes
@@ -66,12 +66,14 @@ own module docstring. Wider rows mean far fewer of them at the same size:
 
 | Rows | `a.parquet` | `b.parquet` | Generation time |
 | --- | --- | --- | --- |
-| 200,000 | 44.9 MB | 45.0 MB | 3.0 s |
-| 2,000,000 | 449.1 MB | 450.1 MB | 30.7 s |
-| 22,261,000 (default) | see `RESULTS.md` | see `RESULTS.md` | see `RESULTS.md` |
+| 200,000 | 59.3 MB | 59.4 MB | 4.1 s |
+| 2,000,000 | 592.8 MB | 593.8 MB | 43.1 s |
+| 16,875,000 (default) | 5,001.5 MB | 5,009.9 MB | 7 min 47 s |
 
-Row density (≈225 bytes/row for `a.parquet`) is linear over the same range,
-so `WIDE_DEFAULT_ROWS` was solved the same way as `DEFAULT_ROWS` above.
+Row density (≈296 bytes/row for `a.parquet`, after adding the
+float16/decimal32/decimal64/view/fixed-size-binary columns) is linear over
+the same range, so `WIDE_DEFAULT_ROWS` was solved the same way as
+`DEFAULT_ROWS` above.
 
 ## Mutation mix
 
@@ -144,4 +146,6 @@ uv run --group perf pytest tests -q -m slow      # also regenerates and checks t
 `bench_tables.py` times `diff_tables` against a DuckDB SQL diff and a polars join-based diff on
 the narrow and wide fixture pairs (`--kind narrow`/`--kind wide`), at 1M rows and full size each;
 its own module docstring is the single home for the methodology, correctness check, and fairness
-rules. Results for both kinds: [`RESULTS.md`](RESULTS.md).
+rules. Results for both kinds, and both fixture pairs' disk usage (about 20.8 GB for all four
+sizes at once), are in [`RESULTS.md`](RESULTS.md). The full-size `wide` run peaks at about 67 GB
+of resident memory for `onix` alone; size the runner accordingly before starting it.
