@@ -42,15 +42,19 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 ///   `datetime`/`date`/`time`/`timedelta` subclass, but not a
 ///   `tuple`/`frozenset` subclass or a `namedtuple`; the restriction is
 ///   transitive: a `list`, `dict` or `set` anywhere inside a set member is
-///   refused. Any other object is diffed as a **custom object**, by its
-///   attributes, matching `DeepDiff`'s `_diff_obj` (`attribute_added`/
-///   `attribute_removed`, `root.attr` paths, `type_changes` between classes;
-///   see `crate::convert`'s module doc for the enumeration and its documented
-///   divergences). Converted to `onix_core`'s value model exactly once, up
-///   front — see `crate::convert`'s module doc for the full conversion table
-///   and every error this can raise (`TypeError` only for a `dict` key or
-///   `set` member of an unsupported type, `ValueError` for an out-of-range
-///   int, a non-finite float, or a sub-second UTC offset).
+///   refused. A user-defined class instance (and an `Enum` member) is diffed as
+///   a **custom object**, by its attributes, matching `DeepDiff`'s `_diff_obj`
+///   (`attribute_added`/`attribute_removed`, `root.attr` paths, `type_changes`
+///   between classes; see `crate::convert`'s module doc for the enumeration and
+///   its documented divergences). Converted to `onix_core`'s value model
+///   exactly once, up front — see `crate::convert`'s module doc for the full
+///   conversion table and every error this can raise: `TypeError` for a value
+///   `DeepDiff` routes to a handler onix lacks (a number such as
+///   `complex`/`Decimal`, `bytes`/`bytearray` or any other iterable, `uuid`,
+///   `ipaddress`, a class object, a module, or a bare attribute-less object),
+///   for a `dict` key or `set` member of an unsupported type, or for a
+///   `tuple`/`frozenset` subclass as a set member; `ValueError` for an
+///   out-of-range int, a non-finite float, or a sub-second UTC offset.
 /// - `ignore_order`: mirrors `DeepDiff(..., ignore_order=True)`.
 /// - `max_depth`: caller-chosen recursion-depth bound; defaults to
 ///   `onix_core::DEFAULT_MAX_DEPTH` (512) when omitted. Exceeding it —

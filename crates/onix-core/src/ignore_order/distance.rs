@@ -347,25 +347,17 @@ pub(crate) fn count_diff_leaves(
         (Value::Set(x), Value::Set(y)) | (Value::FrozenSet(x), Value::FrozenSet(y)) => {
             count_set_diff_leaves(x, y, memo)
         }
-        // Two objects of the *same* class diff by their entries; a `dict` and
-        // a custom object, or two different classes, are a `type_changes`
-        // here exactly as `diff_at` treats them (see `objects_same_class`) —
-        // so a candidate pair's distance reflects the whole-value change
-        // `DeepDiff` would report, not a spurious near-zero attribute diff.
-        (Value::Object(x), Value::Object(y)) if objects_same_class(x, y) => {
+        // Two objects of the *same* class ([`Object::same_class`], qualified
+        // identity plus kind) diff by their entries; a `dict` and a custom
+        // object, or two different classes, are a `type_changes` here exactly
+        // as `diff_at` treats them — so a candidate pair's distance reflects
+        // the whole-value change `DeepDiff` would report, not a spurious
+        // near-zero attribute diff.
+        (Value::Object(x), Value::Object(y)) if x.same_class(y) => {
             count_object_diff_leaves(x, y, depth, opts, memo)
         }
         _ => type_change_leaf_length(a, b),
     }
-}
-
-/// Whether two objects are the same Python class — the pairing/distance use of
-/// [`Object::same_class`] (qualified identity plus kind), so a `dict` subclass
-/// and a custom object sharing a `__name__`, or two same-named classes from
-/// different modules, are never compared attribute-by-attribute here (they are
-/// a `type_changes` instead), exactly as `crate::diff::dispatch` treats them.
-fn objects_same_class(x: &Object, y: &Object) -> bool {
-    x.same_class(y)
 }
 
 /// [`count_diff_leaves`]'s type-mismatch contribution: `DeepDiff`'s own

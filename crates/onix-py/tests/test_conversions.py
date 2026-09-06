@@ -985,3 +985,126 @@ def test_enum_member_matches_deepdiff_via_name_and_value() -> None:
             "root.value": {"new_value": 2, "old_value": 1},
         }
     }
+
+
+# --- Accept-list: concrete-type predicates and the getmembers strategy (issue #66) ---
+
+
+def test_numbers_number_registered_class_diffs_by_attributes_like_deepdiff() -> None:
+    """
+    A class registered with numbers.Number is not in DeepDiff's concrete number
+    tuple, so it is diffed by attributes, not refused as a number (issue #66).
+
+    A *direct* numbers.Number subclass is a separate matter: ABCMeta gives its
+    instances an `_abc_impl` attribute of an unsupported C type, so onix refuses
+    it under the general "an object with an unsupported-typed attribute is
+    refused" rule (documented in tests/golden/README.md) -- unrelated to the
+    number predicate, which no longer refuses it.
+    """
+    import numbers
+
+    class Registered:
+        def __init__(self, amount: int) -> None:
+            self.amount = amount
+
+    numbers.Number.register(Registered)
+    assert json.loads(DeepDiff(Registered(1), Registered(2)).to_json()) == json.loads(
+        RealDeepDiff(Registered(1), Registered(2), verbose_level=2).to_json()
+    )
+
+
+def test_c_type_with_getmembers_attributes_diffs_like_deepdiff() -> None:
+    """A C-implemented type with no __dict__/__slots__ (re.Pattern) diffs by its getmembers attributes."""
+    import re
+
+    a, b = re.compile("a"), re.compile("b")
+    assert json.loads(DeepDiff(a, b).to_json()) == json.loads(
+        RealDeepDiff(a, b, verbose_level=2).to_json()
+    )
+
+
+def test_two_classes_same_qualname_distinct_type_objects_are_a_type_change() -> None:
+    """Two classes created under one qualified name are distinct type objects -> type_changes (issue #66)."""
+    e1 = type("E", (), {})
+    e2 = type("E", (), {})
+    a = e1()
+    a.v = 1
+    b = e2()
+    b.v = 1
+    assert "type_changes" in json.loads(DeepDiff(a, b).to_json())
+    assert json.loads(DeepDiff(a, b).to_json()) == json.loads(
+        RealDeepDiff(a, b, verbose_level=2).to_json()
+    )
+    # Distinct type objects never pair under ignore_order either.
+    assert json.loads(DeepDiff([e1()], [e2()], ignore_order=True).to_json()) == json.loads(
+        RealDeepDiff([e1()], [e2()], ignore_order=True, verbose_level=2).to_json()
+    )
+
+
+def test_local_classes_of_the_same_name_are_a_type_change() -> None:
+    """A class defined in a function body is a fresh type object each call -> type_changes (issue #66)."""
+
+    def make(v: int) -> object:
+        class Local:
+            def __init__(self, x: int) -> None:
+                self.x = x
+
+        return Local(v)
+
+    for a, b in ((make(1), make(1)), (make(1), make(2))):
+        assert "type_changes" in json.loads(DeepDiff(a, b).to_json())
+        assert json.loads(DeepDiff(a, b).to_json()) == json.loads(
+            RealDeepDiff(a, b, verbose_level=2).to_json()
+        )
+
+
+def test_a_property_mutating_the_containing_dict_does_not_panic() -> None:
+    """A getter that inserts into the dict being converted must not panic pyo3's iterator (issue #66)."""
+    holder: dict = {}
+
+    class MutHolder:
+        def __init__(self, v: int) -> None:
+            self.v = v
+
+        @property
+        def p(self) -> int:
+            holder[f"injected{len(holder)}"] = 1
+            return 1
+
+    holder.update({"a": MutHolder(1), "b": 2, "c": 3, "d": 4})
+    other = {"a": MutHolder(2), "b": 2, "c": 3, "d": 4}
+    assert json.loads(DeepDiff(holder, other).to_json()) == {
+        "values_changed": {"root['a'].v": {"new_value": 2, "old_value": 1}}
+    }
+
+
+def test_a_property_mutating_a_dict_two_levels_up_does_not_panic() -> None:
+    """The snapshot holds at every dict level: a getter mutating an outer dict still cannot panic (issue #66)."""
+    outer: dict = {}
+
+    class Mut:
+        def __init__(self, v: int) -> None:
+            self.v = v
+
+        @property
+        def p(self) -> int:
+            outer[f"x{len(outer)}"] = 1
+            return 1
+
+    outer.update({"lvl": {"a": Mut(1), "b": 2, "c": 3, "d": 4}, "k": 5})
+    other = {"lvl": {"a": Mut(2), "b": 2, "c": 3, "d": 4}, "k": 5}
+    assert json.loads(DeepDiff(outer, other).to_json()) == {
+        "values_changed": {"root['lvl']['a'].v": {"new_value": 2, "old_value": 1}}
+    }
+
+
+def test_a_dict_property_returning_a_non_dict_raises_with_the_path() -> None:
+    """An object whose __dict__ is not a mapping raises the typed, path-naming error (issue #66)."""
+
+    class BadDict:
+        @property
+        def __dict__(self) -> object:  # type: ignore[override]
+            return [1, 2]
+
+    with pytest.raises(TypeError, match=r"BadDict at root\['k'\]"):
+        DeepDiff({"k": BadDict()}, {"k": BadDict()})

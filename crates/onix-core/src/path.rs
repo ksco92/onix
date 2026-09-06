@@ -774,10 +774,11 @@ pub(crate) fn python_float_repr(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        PathSegment, escape_non_printable, python_repr, quote_key, render_path, set_item_repr,
+        PathSegment, attribute_path_segment, escape_non_printable, python_repr, quote_key,
+        render_path, set_item_repr,
     };
     use crate::test_support::{cdate, cdt_at, ctime, ctimedelta};
-    use crate::value::{Builder, Number, SetItems, Value};
+    use crate::value::{Builder, Number, ObjectKey, SetItems, Value};
 
     #[test]
     fn empty_path_renders_as_root() {
@@ -1294,5 +1295,25 @@ mod tests {
         expected.push('\'');
 
         assert_eq!(quote_key(&key.as_str().into()).to_string(), expected);
+    }
+
+    #[test]
+    fn attribute_path_segment_str_key_is_a_dotted_attribute() {
+        let key = ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x")));
+        assert_eq!(
+            render_path(&[attribute_path_segment(&key)]).to_string(),
+            "root.x"
+        );
+    }
+
+    #[test]
+    fn attribute_path_segment_non_str_key_falls_back_to_the_subscript_form() {
+        // A custom object never has a non-`str` attribute key; the defensive
+        // `Other` arm mirrors `object_key_path_segment` so it stays total.
+        let key = ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1))));
+        assert_eq!(
+            render_path(&[attribute_path_segment(&key)]).to_string(),
+            "root[1]"
+        );
     }
 }
