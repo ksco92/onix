@@ -86,10 +86,10 @@ from collections.abc import Callable, Iterator
 from typing import Final, Union
 
 import pytest
+from conftest import _normalize_types, require_deepdiff
 
-pytest.importorskip("deepdiff", reason="deepdiff requires Python >= 3.10")
+require_deepdiff()
 
-from conftest import _normalize_types
 from deepdiff import DeepDiff as RealDeepDiff
 from golden_tags import JSON_DEFAULT_MAPPING, canonical_set_order
 

@@ -318,13 +318,11 @@ def _write_cells_changed(
         """
         for column in compare_columns
     )
-    # The long-format rows are ordered from inside a derived table (`changed`),
-    # never directly after `matched`/`vb`: with exactly one compare column
-    # `per_column_selects` is a single SELECT rather than a real UNION ALL, and
-    # an ORDER BY placed right after it resolves an unqualified key column
-    # against both `matched`'s and `vb`'s same-named column instead of the
-    # output list alone -- ambiguous per DuckDB's binder (observed on 1.4.5;
-    # 1.5.5 does not raise it, but the query must not depend on that).
+    # `changed` gives the ORDER BY its own relation to bind the key column
+    # against: with one compare column, `per_column_selects` is a plain
+    # SELECT rather than a real UNION ALL, so an ORDER BY placed directly
+    # after it resolves the unqualified key column against both `matched`
+    # and `vb` instead of the output list alone.
     con.execute(
         f"""
         COPY (

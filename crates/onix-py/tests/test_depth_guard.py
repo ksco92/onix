@@ -7,8 +7,6 @@ prove `deepdiff_rs` itself stays safe on deep input, independent of how the
 fixture is constructed.
 """
 
-from __future__ import annotations
-
 import json
 import statistics
 import subprocess

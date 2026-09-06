@@ -48,8 +48,9 @@ import time
 from typing import Final
 
 import pytest
+from conftest import require_deepdiff
 
-pytest.importorskip("deepdiff", reason="deepdiff requires Python >= 3.10")
+require_deepdiff()
 
 from deepdiff import DeepDiff as RealDeepDiff
 

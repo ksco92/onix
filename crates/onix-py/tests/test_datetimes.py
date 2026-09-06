@@ -15,10 +15,10 @@ import zoneinfo
 
 import pandas as pd
 import pytest
+from conftest import _normalize_types, require_deepdiff
 
-pytest.importorskip("deepdiff", reason="deepdiff requires Python >= 3.10")
+require_deepdiff()
 
-from conftest import _normalize_types
 from deepdiff import DeepDiff as RealDeepDiff
 
 from deepdiff_rs import DeepDiff as OnixDeepDiff

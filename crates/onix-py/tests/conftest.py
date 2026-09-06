@@ -1,5 +1,12 @@
 """Shared test-only helpers for this suite, imported by the test modules that need them."""
 
+import pytest
+
+
+def require_deepdiff() -> None:
+    """Skip the importing module if real ``deepdiff`` (Python >= 3.10) is unavailable."""
+    pytest.importorskip("deepdiff", reason="deepdiff requires Python >= 3.10")
+
 
 def _normalize_types(value: object) -> object:
     """
