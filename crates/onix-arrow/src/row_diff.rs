@@ -48,11 +48,8 @@
 //! the single-threaded path — so the parallel path's structural addition is the
 //! in-flight batches, one batch's rows buffered per worker between flushes plus
 //! a few decoded batches held over the bounded channels (worker count times
-//! batch size, not the row count), on top of the shared buffers' reallocation
-//! slack. Measured, that adds about 0.2 GB at 8M rows/side and 0.7 GB at 37M at
-//! 18 threads — under one extra copy of the 32-byte-per-row hash vectors, whose
-//! own slack varies the single-threaded peak by a comparable amount (see the
-//! README's Known-limitations bullet for the growth law). The duplicate-key report
+//! batch size), on top of the shared buffers' reallocation slack; the README's
+//! Known-limitations bullet states the measured figures. The duplicate-key report
 //! holds the actual key values of every *distinct duplicated* key, so a
 //! duplicate-heavy input adds a term proportional to the number of distinct
 //! duplicated keys times the key width; the cell pass holds both sides' changed
@@ -1055,18 +1052,9 @@ fn partition_of(key_hash: u128, partitions: usize) -> usize {
     (key_hash % partitions as u128) as usize
 }
 
-/// Runs the hash and classify passes: single-threaded at `threads == 1` (the
-/// original path) and partitioned across workers above it. Both paths return
-/// the same null-key set and the same [`Classified`], so the diff is
-/// byte-identical.
-/// Row count below which the diff runs single-threaded regardless of the
-/// requested `threads`. The parallel path's setup — spawning one worker per
-/// thread and wiring the channels — is a flat cost that scales with the worker
-/// count, not the input, so it only pays off past this size. Measured on the
-/// Python wheel at 18 threads: a 2-row diff took about 1.31 ms parallel versus
-/// 0.24 ms single-threaded (5.4x), 1,000 rows 2.5x, 10,000 rows 1.15x, with the
-/// crossover near 30,000-50,000 rows (`perf/arrow/RESULTS.md`). The threshold is
-/// the top of that range so the parallel path runs only where it wins.
+/// Row count below which the diff runs single-threaded whatever `threads` is,
+/// because the parallel setup cost outweighs the work; see the thread-count
+/// scaling table in `perf/arrow/RESULTS.md` for the measured crossover.
 const MIN_PARALLEL_ROWS: usize = 50_000;
 
 // Per-thread count of parallel hash passes run on this thread, so a test can
@@ -1496,15 +1484,6 @@ where
     }
 }
 
-/// The forward and reordering machinery of [`drive_key_hashes`]'s parallel
-/// path: a reader thread feeds batches in order to a pool of `threads` key-
-/// hashing workers over a bounded channel; results flow back over a second
-/// bounded channel and are reordered here by batch index so `visit` runs in
-/// batch order. Both channels are bounded by `threads`, so at most a few
-/// batches per worker are ever in flight (the parallel path's added memory
-/// term). A read error, a `visit` error, or a worker panic aborts the scan:
-/// the `stop` flag and the drain below release every blocked thread so the
-/// scope can join without deadlocking.
 /// One hashed batch flowing back from a worker: its input index, the batch, and
 /// its per-row key hashes.
 type OrderedPayload = (usize, RecordBatch, Vec<u128>);
@@ -1544,6 +1523,15 @@ where
     outcome
 }
 
+/// The forward and reordering machinery of [`drive_key_hashes`]'s parallel
+/// path: a reader thread feeds batches in order to a pool of `threads` key-
+/// hashing workers over a bounded channel; results flow back over a second
+/// bounded channel and are reordered by batch index so `visit` runs in batch
+/// order. Both channels are bounded by `threads`, so at most a few batches per
+/// worker are ever in flight (the parallel path's added memory term). A read
+/// error, a `visit` error, or a worker panic aborts the scan: the `stop` flag
+/// and the drain release every blocked thread so the scope can join without
+/// deadlocking.
 fn for_each_batch_key_hashed_parallel<F>(
     source: &impl TableInput,
     key_columns: &[usize],

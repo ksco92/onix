@@ -99,18 +99,23 @@ at either size, so no tool's number is a "did not fit" result.
 
 ## Thread-count scaling
 
-`diff_tables` wall time (median) as the `threads` knob varies, with the two parquet tables
-preloaded so the figure isolates the row diff. A small table is included to show the size gate:
-below 50,000 rows the diff runs single-threaded whatever `threads` is, so the knob has no effect.
+`diff_tables` wall time (median) as the `threads` knob varies, with the tables preloaded so the
+figure isolates the row diff. The small tables (in-memory, `threads=1` vs the default all-cores) show
+the size gate: below 50,000 rows the diff runs single-threaded whatever `threads` is, so the default
+is never slower than `threads=1` — it is if anything faster, because no workers are spawned.
 
-| Rows | threads=1 | threads=2 | threads=4 | threads=8 | threads=18 |
+| Rows | threads=1 | threads=2 | threads=4 | threads=8 | threads=18 (default) |
 | --- | --- | --- | --- | --- | --- |
 | 2 (in-memory) | 0.28 ms | — | — | — | 0.22 ms |
+| 1,000 (in-memory) | 0.59 ms | — | — | — | 0.58 ms |
+| 10,000 (in-memory) | 3.56 ms | — | — | — | 3.63 ms |
 | 1,000,000 | 418.6 ms | 227.1 ms | 170.6 ms | 149.7 ms | 146.6 ms |
 
 At 1M rows the row diff scales 2.85x from 1 to 18 threads, flattening past ~8 (the fixed spool and
-re-read cost is the serial remainder). At 2 rows the default (all cores) is if anything faster than
-threads=1 — no workers are spawned — where the pre-gate parallel path cost about 5.4x more.
+re-read cost is the serial remainder). At 2, 1,000, and 10,000 rows the default matches `threads=1`
+(the gate keeps them single-threaded); before the gate the parallel path cost about 5.4x more at 2
+rows, shrinking toward parity as the row count rose, with the crossover near 30,000-50,000 rows —
+so the 50,000-row threshold runs the workers only where they win.
 
 ## Memory
 

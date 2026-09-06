@@ -546,9 +546,7 @@ def test_threads_below_one_raises(threads: int) -> None:
 
 
 def test_threads_over_the_ceiling_raises_without_spawning() -> None:
-    """An enormous thread count is rejected before any thread is spawned or
-    memory allocated -- the regression for the 2**31 crash. Assert no worker
-    thread appears and the call returns near-instantly."""
+    """A thread count over the ceiling is rejected before any thread spawns."""
     left = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([1], pa.int64())})
     before = threading.active_count()
     start = time_module.perf_counter()
