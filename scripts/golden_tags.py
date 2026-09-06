@@ -41,10 +41,12 @@ The Rust reader (``crates/onix-core/tests/golden.rs``) implements the identical 
 against the same fixtures.
 """
 
+from __future__ import annotations
+
 import datetime
 import json
 from collections.abc import Callable
-from typing import Final, Protocol
+from typing import Final, Protocol, Union
 
 TUPLE_TAG: Final[str] = "$tuple"
 SET_TAG: Final[str] = "$set"
@@ -74,16 +76,16 @@ RESERVED_TAGS: Final[frozenset[str]] = frozenset(
 # The key kinds a dict may hold (mirrors `onix_core::value::ObjectKey`'s
 # non-`str` case, plus `str` itself, and only a `tuple` *of* these — never a
 # nested `tuple`).
-type DictKey = (
-    str
-    | int
-    | float
-    | bool
-    | None
-    | datetime.datetime
-    | datetime.date
-    | tuple[str | int | float | bool | None | datetime.datetime | datetime.date, ...]
-)
+DictKey = Union[
+    str,
+    int,
+    float,
+    bool,
+    None,
+    datetime.datetime,
+    datetime.date,
+    tuple[Union[str, int, float, bool, None, datetime.datetime, datetime.date], ...],
+]
 
 # DeepDiff's own `to_json()` cannot serialize a `date`, `time` or `timedelta` at all:
 # `serialization.JSON_CONVERTOR` has an entry for `datetime.datetime` (`isoformat()`) and none
@@ -92,7 +94,7 @@ type DictKey = (
 # tests/golden/README.md) — and passing this mapping to DeepDiff's own
 # `to_json(default_mapping=...)` makes it produce exactly the same bytes, so a golden case
 # holding any of the three still has real DeepDiff output as its spec.
-type _Renderable = datetime.date | datetime.time | datetime.timedelta
+_Renderable = Union[datetime.date, datetime.time, datetime.timedelta]
 
 JSON_DEFAULT_MAPPING: Final[dict[type, Callable[[_Renderable], str]]] = {
     datetime.date: datetime.date.isoformat,
@@ -102,37 +104,37 @@ JSON_DEFAULT_MAPPING: Final[dict[type, Callable[[_Renderable], str]]] = {
 
 # A JSON-shaped value, plus the Python types the tags decode to. Named instead of
 # `typing.Any` per the python-coding-guide's ban on `Any`.
-type TaggedValue = (
-    dict[DictKey, "TaggedValue"]
-    | list["TaggedValue"]
-    | tuple["TaggedValue", ...]
-    | set["SetMember"]
-    | frozenset["SetMember"]
-    | datetime.datetime
-    | datetime.date
-    | datetime.time
-    | datetime.timedelta
-    | str
-    | int
-    | float
-    | bool
-    | None
-)
+TaggedValue = Union[
+    dict[DictKey, "TaggedValue"],
+    list["TaggedValue"],
+    tuple["TaggedValue", ...],
+    set["SetMember"],
+    frozenset["SetMember"],
+    datetime.datetime,
+    datetime.date,
+    datetime.time,
+    datetime.timedelta,
+    str,
+    int,
+    float,
+    bool,
+    None,
+]
 
 # What a Python set can hold: hashable values only, so no dict, list or set.
-type SetMember = (
-    tuple["SetMember", ...]
-    | frozenset["SetMember"]
-    | datetime.datetime
-    | datetime.date
-    | datetime.time
-    | datetime.timedelta
-    | str
-    | int
-    | float
-    | bool
-    | None
-)
+SetMember = Union[
+    tuple["SetMember", ...],
+    frozenset["SetMember"],
+    datetime.datetime,
+    datetime.date,
+    datetime.time,
+    datetime.timedelta,
+    str,
+    int,
+    float,
+    bool,
+    None,
+]
 
 
 def _sole_tag(value: dict[str, TaggedValue]) -> str | None:

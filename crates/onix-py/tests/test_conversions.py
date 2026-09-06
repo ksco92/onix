@@ -12,7 +12,10 @@ import json
 import math
 
 import pytest
-from conftest import _normalize_types
+from conftest import _normalize_types, require_deepdiff
+
+require_deepdiff()
+
 from deepdiff import DeepDiff as RealDeepDiff
 
 from deepdiff_rs import DeepDiff, diff_json

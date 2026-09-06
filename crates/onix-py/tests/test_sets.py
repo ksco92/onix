@@ -23,6 +23,10 @@ import unicodedata
 from typing import Final
 
 import pytest
+from conftest import require_deepdiff
+
+require_deepdiff()
+
 from deepdiff import DeepDiff as RealDeepDiff
 
 from deepdiff_rs import DeepDiff, diff_json
@@ -266,10 +270,15 @@ def test_bmp_printability_table_matches_the_running_interpreter_on_3_14() -> Non
     assert unicodedata.unidata_version == "16.0.0"
 
 
-def test_str_inside_tuple_matches_python_repr_over_the_full_bmp() -> None:
-    """Every BMP code point escapes exactly like Python `repr()`, against Unicode 16.0.0."""
+def _skip_unless_unicode_16() -> None:
+    """Skip the calling test outside Unicode 16.0.0, the golden corpus's own pin."""
     if unicodedata.unidata_version != "16.0.0":
         pytest.skip("valid only against Unicode 16.0.0 (Python 3.14); see tests/golden/README.md")
+
+
+def test_str_inside_tuple_matches_python_repr_over_the_full_bmp() -> None:
+    """Every BMP code point escapes exactly like Python `repr()`, against Unicode 16.0.0."""
+    _skip_unless_unicode_16()
 
     code_points = [cp for cp in range(0x10000) if not 0xD800 <= cp <= 0xDFFF]
     for start in range(0, len(code_points), BMP_BATCH_SIZE):
@@ -278,6 +287,8 @@ def test_str_inside_tuple_matches_python_repr_over_the_full_bmp() -> None:
 
 def test_str_inside_tuple_matches_python_repr_beyond_the_bmp() -> None:
     """The `\\UXXXXXXXX` escape width, and printable astral text left bare."""
+    _skip_unless_unicode_16()
+
     _assert_batch_matches_python_repr(SUPPLEMENTARY_SAMPLE)
 
 

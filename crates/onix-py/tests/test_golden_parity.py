@@ -21,9 +21,17 @@ categories are sorted.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
+
+if sys.version_info < (3, 14):
+    pytest.skip(
+        "golden fixtures are generated on Python 3.14 (Unicode 16)",
+        allow_module_level=True,
+    )
+
 from deepdiff import DeepDiff as RealDeepDiff
 from golden_tags import TaggedValue, canonical_report, decode_tags, sorted_set_categories
 

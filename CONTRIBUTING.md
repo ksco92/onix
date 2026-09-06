@@ -218,6 +218,28 @@ uv run --group test pytest tests/test_table_diff.py -q
 The pure-Rust schema logic lives in `crates/onix-arrow` and is covered by
 `cargo test` / `make check` like the other Rust crates.
 
+### Interpreter coverage
+
+`pyproject.toml` declares `requires-python = ">=3.9"`, and CI runs the suite
+on both ends of that range (`python-test`'s `3.9`/`3.14` matrix legs), so a
+construct that only resolves on one of them cannot merge unnoticed. The
+largest skip class follows `deepdiff` itself, which requires Python >=3.10:
+`test_conversions.py`, `test_datetimes.py`, `test_differential_fuzz.py`,
+`test_non_finite.py`, `test_sets.py`, `test_signed_zero.py`,
+`test_timedeltas.py`, `test_times.py`, and `test_tuples.py` each call
+`conftest.py`'s `require_deepdiff()` before importing it, so they skip
+wholesale on 3.9 and run their real comparisons against it from 3.10 up.
+Two narrower classes stay skipped below 3.14: the
+golden-corpus parity suite (`test_golden_parity.py`) and the BMP/beyond-BMP
+`str`-repr sweeps in `test_sets.py`, because the corpus and those sweeps are
+generated against Python 3.14's Unicode 16.0.0 table (see
+`tests/golden/README.md`, "Pinned versions") and compare byte-for-byte
+against it; and, below 3.10 only, `test_stub_signatures.py`'s
+`DeepDiff.__init__` check, because CPython 3.9 leaves a PyO3 extension
+class's own `__text_signature__` unset, so `inspect.signature()` cannot
+recover it there. Every test outside these three classes must pass on every
+interpreter the matrix runs.
+
 ### Type stub
 
 [`crates/onix-py/deepdiff_rs.pyi`](crates/onix-py/deepdiff_rs.pyi) is the

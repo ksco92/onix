@@ -95,6 +95,8 @@ Writes `<out>/schema_diff.parquet`, `<out>/rows_added.parquet`,
 stdout (comparable against `generate_fixtures.py`'s sidecar `manifest.json`).
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 from pathlib import Path
@@ -316,15 +318,22 @@ def _write_cells_changed(
         """
         for column in compare_columns
     )
+    # `changed` gives the ORDER BY its own relation to bind the key column
+    # against: with one compare column, `per_column_selects` is a plain
+    # SELECT rather than a real UNION ALL, so an ORDER BY placed directly
+    # after it resolves the unqualified key column against both `matched`
+    # and `vb` instead of the output list alone.
     con.execute(
         f"""
         COPY (
-            WITH matched AS (
-                SELECT a.* FROM va a
-                INNER JOIN (SELECT {key_list} FROM key_summary WHERE left_count = 1 AND right_count = 1) k
-                    ON {matched_join}
-            )
-            {per_column_selects}
+            SELECT * FROM (
+                WITH matched AS (
+                    SELECT a.* FROM va a
+                    INNER JOIN (SELECT {key_list} FROM key_summary WHERE left_count = 1 AND right_count = 1) k
+                        ON {matched_join}
+                )
+                {per_column_selects}
+            ) changed
             ORDER BY {key_list}, "column"
         ) TO {_quote_literal(str(out_path))} (FORMAT PARQUET)
         """,

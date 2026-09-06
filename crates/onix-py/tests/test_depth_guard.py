@@ -13,12 +13,13 @@ import subprocess
 import sys
 import textwrap
 import time
+from typing import Union
 
 import pytest
 
 from deepdiff_rs import MAX_DEPTH_CEILING, DeepDiff, MaxDepthError, diff_json
 
-type JsonValue = dict[str, "JsonValue"] | list["JsonValue"] | str | int | float | bool | None
+JsonValue = Union[dict[str, "JsonValue"], list["JsonValue"], str, int, float, bool, None]
 
 # onix_core::DEFAULT_MAX_DEPTH -- see crates/onix-core/src/diff/options.rs.
 DEFAULT_MAX_DEPTH = 512

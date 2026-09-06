@@ -14,6 +14,10 @@ import collections
 import json
 
 import pytest
+from conftest import require_deepdiff
+
+require_deepdiff()
+
 from deepdiff import DeepDiff as RealDeepDiff
 
 from deepdiff_rs import DeepDiff, diff_json

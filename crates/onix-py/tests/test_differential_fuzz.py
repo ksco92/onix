@@ -75,33 +75,38 @@ value, where onix serializes it as an array; such a case is compared through
 `to_dict()` alone.
 """
 
+from __future__ import annotations
+
 import collections
 import datetime
 import json
 import random
 import time
 from collections.abc import Callable, Iterator
-from typing import Final
+from typing import Final, Union
 
 import pytest
-from conftest import _normalize_types
+from conftest import _normalize_types, require_deepdiff
+
+require_deepdiff()
+
 from deepdiff import DeepDiff as RealDeepDiff
 from golden_tags import JSON_DEFAULT_MAPPING, canonical_set_order
 
 from deepdiff_rs import DeepDiff as OnixDeepDiff
 
-type JsonValue = (
-    dict[str, "JsonValue"]
-    | list["JsonValue"]
-    | tuple["JsonValue", ...]
-    | datetime.datetime
-    | datetime.date
-    | str
-    | int
-    | float
-    | bool
-    | None
-)
+JsonValue = Union[
+    dict[str, "JsonValue"],
+    list["JsonValue"],
+    tuple["JsonValue", ...],
+    datetime.datetime,
+    datetime.date,
+    str,
+    int,
+    float,
+    bool,
+    None,
+]
 
 DICT_KEYS: Final[list[str]] = ["a", "b", "c", "d", "e"]
 SCALARS: Final[list[JsonValue]] = [

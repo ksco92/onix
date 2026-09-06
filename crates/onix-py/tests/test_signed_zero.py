@@ -25,6 +25,10 @@ import json
 import random
 from typing import Final
 
+from conftest import require_deepdiff
+
+require_deepdiff()
+
 from deepdiff_rs import DeepDiff as OnixDeepDiff
 
 from test_differential_fuzz import (

@@ -1,5 +1,7 @@
 """Tests for the Arrow table diff: schema diff, ingestion, export, and safety."""
 
+from __future__ import annotations
+
 import ctypes
 import decimal
 import json
