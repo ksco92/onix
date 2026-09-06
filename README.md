@@ -106,22 +106,19 @@ It reports the **schema** diff (which columns were added, removed, or changed ty
 import pyarrow as pa
 from deepdiff_rs import diff_tables
 
-left = pa.table({
-    "id": pa.array([1, 2, 3, 9, 9], pa.int64()),  # 9 is a duplicate key
-    "amount": pa.array([10, 20, 30, 90, 91], pa.int32()),
-})
-right = pa.table({
-    "id": pa.array([2, 3, 4], pa.int64()),
-    "amount": pa.array([20, 31, 40], pa.int64()),
-    "note": pa.array(["a", "b", "c"], pa.string()),
-})
+# 9 is a duplicate key
+left = pa.table({"id": pa.array([1, 2, 3, 9, 9], pa.int64()), "amount": pa.array([10, 20, 30, 90, 91], pa.int32())})
+right = pa.table({"id": pa.array([2, 3, 4], pa.int64()), "amount": pa.array([20, 31, 40], pa.int64()),
+                   "note": pa.array(["a", "b", "c"], pa.string())})
 
 diff = diff_tables(left, right, key=["id"])
-print(diff.summary(), "added ids:", pa.table(diff.rows_added()).column("id").to_pylist(), "removed ids:", pa.table(diff.rows_removed()).column("id").to_pylist(), "cells changed:", pa.table(diff.cells_changed()).to_pylist(), "duplicate keys:", pa.table(diff.duplicate_keys()).to_pylist())
+print(diff.summary(), "added ids:", pa.table(diff.rows_added()).column("id").to_pylist(), "removed ids:", pa.table(diff.rows_removed()).column("id").to_pylist())
+print("cells changed:", pa.table(diff.cells_changed()).to_pylist(), "duplicate keys:", pa.table(diff.duplicate_keys()).to_pylist())
 ```
 
 ```
-{'columns_added': 1, 'columns_removed': 0, 'columns_type_changed': 1, 'rows_added': 1, 'rows_removed': 1, 'rows_changed': 1, 'duplicate_keys': 1, 'null_keys': 0, 'cells_changed': 1} added ids: [4] removed ids: [1] cells changed: [{'id': 3, 'column': 'amount', 'old_value': '30', 'new_value': '31', 'change': 'value_changed'}] duplicate keys: [{'id': 9, 'left_count': 2, 'right_count': 0}]
+{'columns_added': 1, 'columns_removed': 0, 'columns_type_changed': 1, 'rows_added': 1, 'rows_removed': 1, 'rows_changed': 1, 'duplicate_keys': 1, 'null_keys': 0, 'cells_changed': 1} added ids: [4] removed ids: [1]
+cells changed: [{'id': 3, 'column': 'amount', 'old_value': '30', 'new_value': '31', 'change': 'value_changed'}] duplicate keys: [{'id': 9, 'left_count': 2, 'right_count': 0}]
 ```
 
 A key appearing more than once on either side is reported in `duplicate_keys` (`left_count`/`right_count`) and excluded from added/removed/changed; a null key matches its counterpart and is counted in `null_keys`. Rows are compared by the non-key columns present on *both* sides, with onix's value semantics (integers and integral floats fold together, all NaNs compare equal, `1.00` equals `1.0000`, a timestamp compares by its instant and a time or duration by its value across units, dictionary-encoded values equal their plain form, and null equals null); a nested non-key column is skipped rather than compared. The exact rules are on the hashing functions in [`crates/onix-arrow/src/row_diff.rs`](crates/onix-arrow/src/row_diff.rs).
