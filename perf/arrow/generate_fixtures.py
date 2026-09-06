@@ -55,6 +55,8 @@ import argparse
 import json
 import random
 import string
+from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Final, Self
@@ -367,7 +369,7 @@ def _schema_b() -> pa.Schema:
     )
 
 
-def generate(rows: int, seed: int, out_dir: Path) -> dict[str, object]:
+def generate_narrow(rows: int, seed: int, out_dir: Path) -> dict[str, object]:
     """
     Stream the fixture pair to `out_dir/a.parquet` and `out_dir/b.parquet`,
     write `out_dir/manifest.json`, and return the manifest document.
@@ -432,18 +434,545 @@ def generate(rows: int, seed: int, out_dir: Path) -> dict[str, object]:
     return manifest
 
 
+##############################################
+##############################################
+##############################################
+##############################################
+# Wide-kind fixture (#84): full cell-type surface
+
+# `wide` trades the narrow fixture's five columns for one of every scalar
+# type `onix-arrow`'s row diff hashes, cast-normalizes, or renders (see
+# `crates/onix-arrow/src/row_diff.rs`'s "Value semantics"/"Per-cell changes"
+# and `schema.rs`'s normalization rules), at the same 5 GB-per-side target,
+# so fewer, much wider rows. Nested types are out (the row diff skips a
+# nested non-key column entirely -- see row_diff.rs's "Which column types
+# are hashed, refused, or skipped").
+#
+# Two Arrow types that `row_diff.rs` supports have no Parquet representation
+# at all, verified empirically against this repo's pinned pyarrow: writing a
+# `month_day_nano_interval` column raises `ArrowNotImplementedError`, and a
+# `date64` column is silently downcast to `date32` on write (Parquet's DATE
+# logical type is a 32-bit day count; there is no 64-bit date annotation).
+# Both are therefore stored as their raw integer components -- `interval`
+# as `interval_months`/`interval_days`/`interval_nanos` (int32/int32/int64),
+# `date64` as `date64_millis` (int64, whole-day-aligned per Arrow's Date64
+# contract) -- and every tool, `onix` included, reads them as plain integers
+# rather than paying to rebuild the real type (`bench_tables.py`'s module
+# docstring measures that rebuild's own cost as prohibitive at this size).
+# Both columns are never mutated between `a` and `b`, so every tool's
+# cells-changed count for them is zero regardless of which type it reads.
+#
+# `decimal256` above precision 38 is a second, more severe baseline gap:
+# DuckDB's parquet reader silently decodes it to the wrong number instead of
+# erroring, and polars' parquet and IPC readers both fail outright (the IPC
+# path panics, verified empirically) rather than raise a catchable error.
+# `dec256` is therefore kept at precision 38 -- distinct from `decimal128`
+# at the Arrow-type level, which is what the row diff's `Decimal256` hashing
+# arm needs, but numerically representable by both baselines -- and is
+# never mutated, so this gap costs no correctness signal.
+#
+# The `ts_cast` column is `wide`'s "one unit cast": nanosecond, zone-aware on
+# `a`; microsecond, zone-naive on `b`. Dropping the zone alongside the unit
+# is deliberate -- per row_diff.rs, a zone-aware/naive pair is always
+# `type_changed` regardless of whether the instant value differs, so this
+# column gives every surviving row a `type_changed` cell with an exact,
+# derived count (`rows - rows_deleted`), the only way to get that change
+# kind at all (the other three schema changes -- dictionary retype, decimal
+# scale, and this column's unit half -- are lossless normalizations that
+# `row_diff.rs` reports as `value_changed` only when the value genuinely
+# differs, never `type_changed`).
+#
+# Every other non-key column is independently nullable at `WIDE_NULL_RATE`.
+# Two columns (`i16`, `large_utf8_col`) carry both null-to-value and
+# value-to-null transitions with their own manifest counts, covering
+# `became_non_null`/`became_null`; a further set of columns carries a
+# `value_changed` mutation, each with its own manifest count, covering
+# `value_changed` at a representative type per domain (int, uint, float,
+# decimal, string, binary, boolean, date, time, duration). A changed value
+# is always drawn from a range disjoint from the original's, the same
+# guaranteed-different convention as the narrow fixture's `amount`/`payload`;
+# a float's replacement is always a plain finite number, never NaN or
+# signed zero, so a `value_changed` float record's rendering is never
+# ambiguous with the unmutated NaN/-0.0 cells this fixture also carries.
+
+WIDE_DEFAULT_SEED: Final[int] = 20260905
+# Row density (~225 bytes/row for `a.parquet`, measured at 200,000 rows) is
+# linear, the same convention `DEFAULT_ROWS` above was tuned with -- see
+# README.md's "Sizes" section for the measurement this constant solves for.
+WIDE_DEFAULT_ROWS: Final[int] = 22_261_000
+
+WIDE_DELETE_RATE: Final[float] = 0.01
+WIDE_ADD_RATE: Final[float] = 0.01
+WIDE_MODIFY_RATE: Final[float] = 0.01
+WIDE_NULL_RATE: Final[float] = 0.03
+WIDE_BECOME_NON_NULL_RATE: Final[float] = 0.3  # fraction of a column's null rows
+WIDE_BECOME_NULL_RATE: Final[float] = 0.01  # fraction of a column's non-null rows
+
+WIDE_ROW_GROUP_SIZE: Final[int] = 50_000
+WIDE_ADDED_COLUMN: Final[str] = "extra"
+WIDE_CATEGORY_VALUES: Final[tuple[str, ...]] = tuple(f"wcat_{i:02d}" for i in range(20))
+
+_WIDE_STR_ALPHABET: Final[str] = string.ascii_lowercase + string.digits
+_WIDE_CHANGED_PREFIX: Final[str] = "chg_"
+_WIDE_NONNULL_PREFIX: Final[str] = "fromnull_"
+
+
+def _wide_random_str(rng: random.Random, min_len: int, max_len: int, prefix: str = "") -> str:
+    """
+    Draw a random string of `min_len`-`max_len` chars, optionally marker-prefixed.
+
+    :param rng: Seeded random source.
+    :param min_len: Minimum total length, prefix included.
+    :param max_len: Maximum total length, prefix included.
+    :param prefix: Prepended marker; must not reuse `_WIDE_STR_ALPHABET`'s characters.
+    :return: The generated string.
+    """
+    length = rng.randint(min_len, max_len)
+    body_len = max(0, length - len(prefix))
+    return prefix + "".join(rng.choices(_WIDE_STR_ALPHABET, k=body_len))
+
+
+@dataclass(frozen=True)
+class _ColumnSpec:
+    """
+    One `wide` non-key column: its on-disk type(s), value generation, and
+    which per-cell mutations it participates in.
+
+    :param name: Column name.
+    :param a_type: The Arrow type written to `a.parquet`.
+    :param b_type: The Arrow type written to `b.parquet` (a schema change
+        from `a_type` for the three retyped/rescaled/cast columns; equal to
+        `a_type` for every other column).
+    :param generate: Draws one fresh, non-null raw value.
+    :param nullable: Whether this column carries `WIDE_NULL_RATE` nulls.
+    :param changed: Draws a replacement value guaranteed different from the
+        original, for the `WIDE_MODIFY_RATE` subset of rows tracked as this
+        column's `value_changed` count. `None` if this column is never
+        independently modified.
+    :param non_null: Draws a fresh non-null value for the subset of
+        originally-null rows tracked as this column's `became_non_null`
+        count. `None` if this column carries no null-transition mutation.
+    """
+
+    name: str
+    a_type: pa.DataType
+    b_type: pa.DataType
+    generate: Callable[[random.Random], object]
+    nullable: bool
+    changed: Callable[[random.Random, object], object] | None = None
+    non_null: Callable[[random.Random], object] | None = None
+
+
+def _wide_column_specs() -> list[_ColumnSpec]:
+    """:return: Every `wide` non-key column, in schema order."""
+    return [
+        _ColumnSpec(
+            "i8", pa.int8(), pa.int8(),
+            lambda r: r.randint(-100, 100), True,
+            changed=lambda r, _v: r.randint(101, 127),
+        ),
+        _ColumnSpec(
+            "i16", pa.int16(), pa.int16(),
+            lambda r: r.randint(-30_000, 30_000), True,
+            non_null=lambda r: r.randint(-30_000, 30_000),
+        ),
+        _ColumnSpec(
+            "i32", pa.int32(), pa.int32(),
+            lambda r: r.randint(-2_000_000_000, 2_000_000_000), True,
+            changed=lambda r, _v: r.randint(2_000_000_001, 2_147_483_647),
+        ),
+        _ColumnSpec(
+            "i64", pa.int64(), pa.int64(),
+            lambda r: r.randint(-(2**62), 2**62), True,
+            changed=lambda r, _v: r.randint(2**62 + 1, 2**63 - 1),
+        ),
+        _ColumnSpec(
+            "u8", pa.uint8(), pa.uint8(),
+            lambda r: r.randint(0, 200), True,
+            changed=lambda r, _v: r.randint(201, 255),
+        ),
+        _ColumnSpec("u16", pa.uint16(), pa.uint16(), lambda r: r.randint(0, 65_535), True),
+        _ColumnSpec(
+            "u32", pa.uint32(), pa.uint32(),
+            lambda r: r.randint(0, 4_000_000_000), True,
+            changed=lambda r, _v: r.randint(4_000_000_001, 4_294_967_295),
+        ),
+        _ColumnSpec("u64", pa.uint64(), pa.uint64(), lambda r: r.randint(0, 2**63 - 1), True),
+        _ColumnSpec(
+            "f32", pa.float32(), pa.float32(),
+            lambda r: _wide_special_float(r), True,
+            changed=lambda r, _v: r.uniform(2_000.0, 3_000.0),
+        ),
+        _ColumnSpec(
+            "f64", pa.float64(), pa.float64(),
+            lambda r: _wide_special_float(r), True,
+            changed=lambda r, _v: r.uniform(2_000.0, 3_000.0),
+        ),
+        _ColumnSpec(
+            "dec_scale4", pa.decimal128(18, 4), pa.decimal128(18, 6),
+            lambda r: Decimal(r.randint(0, 1_000_000_000)).scaleb(-4), True,
+            changed=lambda r, _v: Decimal(r.randint(2_000_000_000, 3_000_000_000)).scaleb(-4),
+        ),
+        _ColumnSpec("dec_scale10", pa.decimal128(38, 10), pa.decimal128(38, 10),
+                    lambda r: Decimal(r.randint(0, 1_000_000_000)).scaleb(-10), True),
+        _ColumnSpec("dec256", pa.decimal256(38, 10), pa.decimal256(38, 10),
+                    lambda r: Decimal(r.randint(0, 1_000_000_000)).scaleb(-10), True),
+        _ColumnSpec(
+            "utf8_col", pa.string(), pa.string(),
+            lambda r: _wide_random_str(r, 5, 40), True,
+            changed=lambda r, _v: _wide_random_str(r, 5, 40, prefix=_WIDE_CHANGED_PREFIX),
+        ),
+        _ColumnSpec(
+            "large_utf8_col", pa.large_string(), pa.large_string(),
+            lambda r: _wide_random_str(r, 5, 40), True,
+            non_null=lambda r: _wide_random_str(r, 5, 40, prefix=_WIDE_NONNULL_PREFIX),
+        ),
+        _ColumnSpec(
+            "binary_col", pa.binary(), pa.binary(),
+            lambda r: _wide_random_str(r, 5, 40).encode("ascii"), True,
+            changed=lambda r, _v: _wide_random_str(r, 5, 40, prefix=_WIDE_CHANGED_PREFIX).encode("ascii"),
+        ),
+        _ColumnSpec(
+            "bool_col", pa.bool_(), pa.bool_(),
+            lambda r: r.random() < 0.5, True,
+            changed=lambda _r, v: not v,
+        ),
+        _ColumnSpec(
+            "date32_col", pa.date32(), pa.date32(),
+            lambda r: r.randint(0, 10_000), True,
+            changed=lambda r, _v: r.randint(20_000, 30_000),
+        ),
+        _ColumnSpec("date64_millis", pa.int64(), pa.int64(),
+                    lambda r: r.randint(0, 10_000) * 86_400_000, True),
+        _ColumnSpec("time32_col", pa.time32("ms"), pa.time32("ms"),
+                    lambda r: r.randint(0, 86_399_999), True),
+        _ColumnSpec(
+            "time64_col", pa.time64("us"), pa.time64("us"),
+            lambda r: r.randint(0, 40_000_000_000), True,
+            changed=lambda r, _v: r.randint(50_000_000_000, 86_399_999_999),
+        ),
+        _ColumnSpec("dur_a", pa.duration("s"), pa.duration("s"), lambda r: r.randint(0, 100_000), True),
+        _ColumnSpec(
+            "dur_b", pa.duration("ns"), pa.duration("ns"),
+            lambda r: r.randint(0, 1_000_000_000), True,
+            changed=lambda r, _v: r.randint(2_000_000_000, 3_000_000_000),
+        ),
+        _ColumnSpec("interval_months", pa.int32(), pa.int32(), lambda r: r.randint(0, 24), False),
+        _ColumnSpec("interval_days", pa.int32(), pa.int32(), lambda r: r.randint(0, 28), False),
+        _ColumnSpec("interval_nanos", pa.int64(), pa.int64(), lambda r: r.randint(0, 86_400_000_000_000), False),
+        _ColumnSpec("category", pa.string(), pa.dictionary(pa.int32(), pa.string()),
+                    lambda r: WIDE_CATEGORY_VALUES[r.randrange(len(WIDE_CATEGORY_VALUES))], True),
+        _ColumnSpec(
+            "ts_cast",
+            pa.timestamp("ns", tz="UTC"),
+            pa.timestamp("us"),
+            lambda r: r.randint(1_700_000_000, 1_800_000_000) * 1_000_000_000,
+            False,
+        ),
+    ]
+
+
+def _wide_special_float(rng: random.Random) -> float:
+    """
+    Draw a plain float in `[-1000, 1000)`, occasionally replaced by NaN or
+    signed zero -- see the module docstring's "wide" section.
+
+    :param rng: Seeded random source.
+    :return: The drawn value.
+    """
+    draw = rng.random()
+    if draw < 0.02:
+        return float("nan")
+    if draw < 0.04:
+        return -0.0
+    return rng.uniform(-1000.0, 1000.0)
+
+
+# Interval's three raw components (see the module docstring) are one
+# logical value: their null status must move together, which is why they
+# are not three independent `_ColumnSpec`s.
+_INTERVAL_COLUMNS: Final[tuple[str, ...]] = ("interval_months", "interval_days", "interval_nanos")
+_NULL_TRANSITION_COLUMNS: Final[tuple[str, ...]] = ("i16", "large_utf8_col")
+
+
+class _WideRowPlan:
+    """
+    Every row-position index set the `wide` generator needs, sampled once
+    from the shared RNG in a fixed, documented order so a re-run with the
+    same seed reproduces the same plan.
+    """
+
+    def __init__(self: Self, rows: int, rng: random.Random, specs: list[_ColumnSpec]) -> None:
+        """
+        :param rows: Row count in `a.parquet`.
+        :param rng: Seeded random source (mutated in place).
+        :param specs: Every non-key column spec, in schema order.
+        """
+        delete_n = round(rows * WIDE_DELETE_RATE)
+        self.delete_indices: set[int] = set(rng.sample(range(rows), delete_n))
+        self.modify_indices: dict[str, set[int]] = {}
+        self.null_indices: dict[str, set[int]] = {}
+        self.null_to_value_indices: dict[str, set[int]] = {}
+        self.value_to_null_indices: dict[str, set[int]] = {}
+
+        for spec in specs:
+            if spec.nullable:
+                null_n = round(rows * WIDE_NULL_RATE)
+                self.null_indices[spec.name] = set(rng.sample(range(rows), null_n))
+            if spec.changed is not None:
+                modify_n = round(rows * WIDE_MODIFY_RATE)
+                self.modify_indices[spec.name] = set(rng.sample(range(rows), modify_n))
+            if spec.non_null is not None:
+                null_pool = sorted(self.null_indices[spec.name])
+                become_non_null_n = round(len(null_pool) * WIDE_BECOME_NON_NULL_RATE)
+                self.null_to_value_indices[spec.name] = set(rng.sample(null_pool, become_non_null_n))
+                become_null_n = round(rows * WIDE_BECOME_NULL_RATE)
+                self.value_to_null_indices[spec.name] = set(rng.sample(range(rows), become_null_n))
+
+        # Interval's three components share one null mask, sampled after
+        # every per-spec draw above so the fixed draw order stays stable
+        # regardless of `specs`' contents.
+        interval_null_n = round(rows * WIDE_NULL_RATE)
+        interval_null = set(rng.sample(range(rows), interval_null_n))
+        for name in _INTERVAL_COLUMNS:
+            self.null_indices[name] = interval_null
+
+
+class _WideCounters:
+    """Running exact per-column mutation counts for the `wide` sidecar manifest."""
+
+    def __init__(self: Self, specs: list[_ColumnSpec]) -> None:
+        """:param specs: Every non-key column spec, used to zero-initialize its counters."""
+        self.deleted = 0
+        self.added = 0
+        self.value_changed: dict[str, int] = {s.name: 0 for s in specs if s.changed is not None}
+        self.became_non_null: dict[str, int] = {s.name: 0 for s in specs if s.non_null is not None}
+        self.became_null: dict[str, int] = {s.name: 0 for s in specs if s.non_null is not None}
+
+
+def _wide_row_values(
+    start: int,
+    end: int,
+    specs: list[_ColumnSpec],
+    plan: _WideRowPlan,
+    counters: _WideCounters,
+    rng: random.Random,
+) -> tuple[dict[str, list[object]], dict[str, list[object]]]:
+    """
+    Build one row-group's raw per-column values for both sides, updating
+    `counters` in place.
+
+    :param start: First row position in this chunk (inclusive).
+    :param end: Last row position in this chunk (exclusive).
+    :param specs: Every non-key column spec, in schema order.
+    :param plan: The precomputed index sets driving every row's outcome.
+    :param counters: Running sidecar counters, updated in place.
+    :param rng: Seeded random source, shared with every other chunk.
+    :return: `(a_values, b_values)`, each column name mapped to its list of
+        raw values (`b_values` has one entry per surviving row only).
+    """
+    a_values: dict[str, list[object]] = {s.name: [] for s in specs}
+    b_values: dict[str, list[object]] = {s.name: [] for s in specs}
+
+    for i in range(start, end):
+        row_a: dict[str, object] = {}
+        for spec in specs:
+            null_set = plan.null_indices.get(spec.name)
+            value = None if null_set is not None and i in null_set else spec.generate(rng)
+            row_a[spec.name] = value
+            a_values[spec.name].append(value)
+
+        if i in plan.delete_indices:
+            counters.deleted += 1
+            continue
+
+        for spec in specs:
+            a_val = row_a[spec.name]
+            if spec.name == "ts_cast":
+                b_val = a_val
+            elif a_val is None:
+                if spec.name in plan.null_to_value_indices and i in plan.null_to_value_indices[spec.name]:
+                    b_val = spec.non_null(rng)  # type: ignore[misc]
+                    counters.became_non_null[spec.name] += 1
+                else:
+                    b_val = None
+            elif spec.changed is not None and i in plan.modify_indices.get(spec.name, ()):
+                b_val = spec.changed(rng, a_val)
+                counters.value_changed[spec.name] += 1
+            elif spec.name in plan.value_to_null_indices and i in plan.value_to_null_indices[spec.name]:
+                b_val = None
+                counters.became_null[spec.name] += 1
+            else:
+                b_val = a_val
+            b_values[spec.name].append(b_val)
+
+    return a_values, b_values
+
+
+def _wide_build_array(spec: _ColumnSpec, values: list[object], target_type: pa.DataType) -> pa.Array:
+    """
+    Build `values` as `spec.a_type`, casting to `target_type` when it differs
+    (a schema-level retype/rescale/unit-and-zone change applies to the whole
+    column, never per value -- see the module docstring).
+
+    :param spec: The column spec `values` belongs to.
+    :param values: Raw per-row values, `spec.a_type`-shaped.
+    :param target_type: `spec.a_type` (the `a.parquet` array) or `spec.b_type`
+        (the `b.parquet` array).
+    :return: The built (and possibly cast) array.
+    """
+    array = pa.array(values, type=spec.a_type)
+    if target_type != spec.a_type:
+        array = array.cast(target_type)
+    return array
+
+
+def _wide_schema(specs: list[_ColumnSpec], side: str) -> pa.Schema:
+    """
+    :param specs: Every non-key column spec.
+    :param side: `"a"` or `"b"`.
+    :return: The side's schema (key column first, `extra` last on `"b"`).
+    """
+    fields = [("id", pa.int64())]
+    fields += [(s.name, s.a_type if side == "a" else s.b_type) for s in specs]
+    if side == "b":
+        fields.append((WIDE_ADDED_COLUMN, pa.string()))
+    return pa.schema(fields)
+
+
+def _wide_added_chunk(specs: list[_ColumnSpec], start_id: int, count: int, rng: random.Random) -> pa.RecordBatch:
+    """
+    Build one `b.parquet`-only row-group of brand-new rows: fresh values for
+    every column (never null, never a tracked mutation), `extra="added"`.
+
+    :param specs: Every non-key column spec.
+    :param start_id: First id to assign.
+    :param count: Number of new rows in this chunk.
+    :param rng: Seeded random source, shared with every other chunk.
+    :return: The batch, using `b.parquet`'s schema.
+    """
+    columns: list[pa.Array] = [pa.array(range(start_id, start_id + count), type=pa.int64())]
+    for spec in specs:
+        values = [spec.generate(rng) for _ in range(count)]
+        columns.append(_wide_build_array(spec, values, spec.b_type))
+    columns.append(pa.array(["added"] * count, type=pa.string()))
+    return pa.record_batch(columns, schema=_wide_schema(specs, "b"))
+
+
+def generate_wide(rows: int, seed: int, out_dir: Path) -> dict[str, object]:
+    """
+    Stream the `wide`-kind fixture pair to `out_dir`, the same contract as
+    `generate` (streaming, seeded, byte-identical on re-run) -- see the
+    module docstring's "wide" section for the column set and mutation mix.
+
+    :param rows: Number of rows in `a.parquet` before any mutation.
+    :param seed: RNG seed.
+    :param out_dir: Directory to write into (created if missing).
+    :return: The manifest document (also written to `manifest.json`).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rng = random.Random(seed)
+    specs = _wide_column_specs()
+    plan = _WideRowPlan(rows, rng, specs)
+    counters = _WideCounters(specs)
+
+    writer_a = pq.ParquetWriter(out_dir / "a.parquet", _wide_schema(specs, "a"))
+    writer_b = pq.ParquetWriter(out_dir / "b.parquet", _wide_schema(specs, "b"))
+    try:
+        for start in range(0, rows, WIDE_ROW_GROUP_SIZE):
+            end = min(start + WIDE_ROW_GROUP_SIZE, rows)
+            a_values, b_values = _wide_row_values(start, end, specs, plan, counters, rng)
+
+            a_columns = [pa.array(range(start, end), type=pa.int64())]
+            a_columns += [_wide_build_array(s, a_values[s.name], s.a_type) for s in specs]
+            writer_a.write_batch(pa.record_batch(a_columns, schema=_wide_schema(specs, "a")))
+
+            surviving_ids = [i for i in range(start, end) if i not in plan.delete_indices]
+            b_columns = [pa.array(surviving_ids, type=pa.int64())]
+            b_columns += [_wide_build_array(s, b_values[s.name], s.b_type) for s in specs]
+            b_columns.append(pa.array([None] * len(surviving_ids), type=pa.string()))
+            writer_b.write_batch(pa.record_batch(b_columns, schema=_wide_schema(specs, "b")))
+
+        added_n = round(rows * WIDE_ADD_RATE)
+        counters.added = added_n
+        for start in range(0, added_n, WIDE_ROW_GROUP_SIZE):
+            count = min(WIDE_ROW_GROUP_SIZE, added_n - start)
+            writer_b.write_batch(_wide_added_chunk(specs, rows + start, count, rng))
+    finally:
+        writer_a.close()
+        writer_b.close()
+
+    manifest = _wide_manifest(rows, seed, specs, counters)
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    return manifest
+
+
+def _wide_manifest(rows: int, seed: int, specs: list[_ColumnSpec], counters: _WideCounters) -> dict[str, object]:
+    """
+    :param rows: Row count in `a.parquet`.
+    :param seed: RNG seed.
+    :param specs: Every non-key column spec.
+    :param counters: The run's realized mutation counts.
+    :return: The manifest document.
+    """
+    schema_changes = [
+        {"column": "category", "change": "type_changed", "left_type": "string", "right_type": "dictionary<int32, string>"},
+        {"column": "dec_scale4", "change": "type_changed", "left_type": "decimal128(18, 4)", "right_type": "decimal128(18, 6)"},
+        {"column": "ts_cast", "change": "type_changed", "left_type": "timestamp[ns, UTC]", "right_type": "timestamp[us]"},
+        {"column": WIDE_ADDED_COLUMN, "change": "added", "left_type": None, "right_type": "string"},
+    ]
+    return {
+        "kind": "wide",
+        "seed": seed,
+        "rows": rows,
+        "rows_deleted": counters.deleted,
+        "rows_added": counters.added,
+        "duplicate_keys": 0,
+        "value_changed_per_column": dict(sorted(counters.value_changed.items())),
+        "became_non_null_per_column": dict(sorted(counters.became_non_null.items())),
+        "became_null_per_column": dict(sorted(counters.became_null.items())),
+        "cells_value_changed": sum(counters.value_changed.values()),
+        "cells_became_non_null": sum(counters.became_non_null.values()),
+        "cells_became_null": sum(counters.became_null.values()),
+        "cells_type_changed": rows - counters.deleted,
+        "schema_changes": schema_changes,
+    }
+
+
+def generate(rows: int, seed: int, out_dir: Path, kind: str = "narrow") -> dict[str, object]:
+    """
+    Dispatch to `generate_narrow` or `generate_wide` by `kind`.
+
+    :param rows: Number of rows in `a.parquet` before any mutation.
+    :param seed: RNG seed; the same seed always produces byte-identical output.
+    :param out_dir: Directory to write into (created if missing).
+    :param kind: `"narrow"` (the original five-column fixture) or `"wide"`
+        (#84's full cell-type-surface fixture).
+    :return: The manifest document (also written to `manifest.json`).
+    """
+    if kind == "wide":
+        return generate_wide(rows, seed, out_dir)
+    return generate_narrow(rows, seed, out_dir)
+
+
 def main() -> None:
     """Parse CLI arguments and generate one fixture pair."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--rows", type=int, default=DEFAULT_ROWS, help="Row count for a.parquet.")
+    parser.add_argument("--kind", choices=("narrow", "wide"), default="narrow", help="Fixture kind.")
+    parser.add_argument("--rows", type=int, default=None, help="Row count for a.parquet (defaults per --kind).")
     parser.add_argument("--out", type=Path, required=True, help="Output directory.")
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="RNG seed.")
+    parser.add_argument("--seed", type=int, default=None, help="RNG seed (defaults per --kind).")
     args = parser.parse_args()
 
-    manifest = generate(args.rows, args.seed, args.out)
+    default_rows = WIDE_DEFAULT_ROWS if args.kind == "wide" else DEFAULT_ROWS
+    default_seed = WIDE_DEFAULT_SEED if args.kind == "wide" else DEFAULT_SEED
+    rows = args.rows if args.rows is not None else default_rows
+    seed = args.seed if args.seed is not None else default_seed
+
+    manifest = generate(rows, seed, args.out, kind=args.kind)
     a_bytes = (args.out / "a.parquet").stat().st_size
     b_bytes = (args.out / "b.parquet").stat().st_size
-    print(f"Wrote {args.rows:,} base rows to {args.out} (a={a_bytes / 1_000_000:.1f} MB, b={b_bytes / 1_000_000:.1f} MB)")
+    print(f"Wrote {rows:,} base rows to {args.out} (a={a_bytes / 1_000_000:.1f} MB, b={b_bytes / 1_000_000:.1f} MB)")
     print(json.dumps(manifest, indent=2))
 
 
