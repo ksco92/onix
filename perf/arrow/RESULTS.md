@@ -16,7 +16,7 @@ rules).
 | Memory | 137438.95 MB |
 | rustc / cargo | 1.98.0 |
 | Python | 3.14.6 (uv-managed, pinned by `crates/onix-py/.python-version`) |
-| deepdiff-rs | 0.11.1 |
+| deepdiff-rs | 0.11.2 (behaviour identical to 0.11.1; the profiler feature is off in the timed builds) |
 | pyarrow | 25.0.1 |
 | polars | 1.44.1 |
 | duckdb | 1.5.5 |
@@ -125,6 +125,73 @@ re-read cost is the serial remainder). At 2, 1,000, and 10,000 rows the default 
 (the gate keeps them single-threaded); before the gate the parallel path cost about 5.4x more at 2
 rows, shrinking toward parity as the row count rose, with the crossover near 30,000-50,000 rows —
 so the 50,000-row threshold runs the workers only where they win.
+
+## Per-pass profile
+
+Measured on `deepdiff-rs` 0.11.2 (2026-09-06T20:30Z), same machine as the Environment table above,
+with no other `cargo`/`maturin`/`pytest`/`row_diff_profile` process running (`ps` checked before and
+after each sweep). The row diff's wall time broken down by pass, from the committed
+`row_diff_profile` example (built with the `profile` feature; see `perf/arrow/README.md`'s
+"Profiling" section and the example's module docstring, which is the single home for the method).
+Each cell is `wall s (peak RSS MB)`, the median of independent runs (**11 at 1M, 5 at full**, the
+file's convention); wall is the example's uninstrumented run (no `ps` forks), RSS the median of the
+instrumented run's per-pass peaks. The `decode` and spill sub-rows are additive accums (no RSS).
+
+### Real fixtures (file mode, default 18 threads)
+
+Both parquet fixture pairs (`narrow`/`wide`, 1M and full) converted once to uncompressed Arrow IPC
+and read in file mode, so each pass re-reads and re-decodes its side exactly as the Python bindings'
+input spool does. Full sizes are 37M rows (`narrow`) and 16.875M rows (`wide`).
+
+| Pass | narrow 1M | wide 1M | narrow full | wide full |
+| --- | --- | --- | --- | --- |
+| set-up | 0.000 (260) | 0.000 (1498) | 0.000 (962) | 0.000 (10578) |
+| hash and classify | 0.044 (321) | 0.153 (1540) | 1.292 (4023) | 1.941 (10946) |
+| materialize | 0.035 (324) | 0.078 (1480) | 1.721 (3728) | 1.523 (16083) |
+| cell: spill | 0.031 (324) | 0.408 (1809) | 1.550 (1781) | 8.728 (18018) |
+| — spill route (take + cast) | 0.002 | 0.218 | 0.102 | 4.089 |
+| — spill write | 0.002 | 0.053 | 0.015 | 0.968 |
+| cell: render sort keys | 0.000 (324) | 0.020 (1809) | 0.015 (1658) | 0.373 (17212) |
+| cell: read-back and render | 0.010 (324) | 0.300 (1879) | 0.149 (1782) | 6.005 (19044) |
+| — partition read-back | 0.001 | 0.053 | 0.020 | 0.837 |
+| — compare and render | 0.008 | 0.193 | 0.071 | 4.237 |
+| cell: sort and interleave | 0.003 (324) | 0.172 (1949) | 0.101 (1644) | 3.535 (19727) |
+| decode (across all re-read passes) | 0.072 | 0.244 | 2.691 | 4.588 |
+| **total wall** | **0.132** | **1.194** | **4.870** | **22.041** |
+
+The re-read is decode-bound. Each of the three re-read rounds (hash, materialize, and the cell
+spill's re-read) opens and re-decodes both sides and re-hashes their key columns, but the `decode`
+accum — the wall spent in the spool reader's `next()` — is 60–66% of the combined re-read wall
+across every size, and `materialize` (which re-reads with an empty select, so it does almost no work
+beyond decoding and key-hashing) is essentially all decode: scanning every key value adds only a few
+ms over the read. So the re-read term is removable by **decoding each side once instead of three
+times**, not by avoiding the key re-hash (issue #90). The decomposition closes: the top-level passes
+sum to within 1% of the total wall at every size (the residual is the changed-key `HashSet` build
+and the between-pass setup).
+
+On `narrow full` the three re-read rounds (1.292 + 1.721 + (1.550 − 0.102 − 0.015) = 4.45 s) are 91%
+of the 4.87 s total — the row diff there is almost entirely re-reading. On `wide full` they are
+7.14 s of 22.04 s (32%); the rest is the cell pass's own route (4.089 s), compare-and-render
+(4.237 s), and reorder (3.535 s). Peak RSS is 19.7 GB on `wide full` (file mode holds no resident
+input spool, so below the ~33 GB the Python bench's whole-process peak reaches).
+
+### Proxy shapes (generated mode, 1M rows, 18 threads)
+
+Dependency-free proxies for a quick check without a fixture on disk. They are **proxies, not the
+fixtures**: `linear` is two int64 columns (the narrow fixture has five typed columns:
+`id`/`ts`/`category`-dictionary/`amount`-decimal/`payload`), and `manycols` is 34 identical 64-byte
+`Utf8` columns with every row changed (the wide fixture has 34 distinct scalar types — decimals,
+timestamps, intervals, binary — with ~2% of rows modified plus a zone-awareness retype), so the
+proxy walls do not match the real-fixture walls above.
+
+| Pass | `linear` 1M | `manycols` 1M |
+| --- | --- | --- |
+| hash and classify | 0.044 (321) | 0.543 (1172) |
+| materialize | 0.035 (324) | 0.370 (1173) |
+| cell: spill | 0.031 (324) | 1.481 (4804) |
+| cell: read-back and render | 0.010 (324) | 0.684 (1620) |
+| cell: sort and interleave | 0.003 (324) | 0.090 (1741) |
+| **total wall** | **0.094** | **3.255** |
 
 ## Memory
 

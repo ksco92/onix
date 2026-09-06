@@ -104,6 +104,8 @@
 mod error;
 mod json_rows;
 mod options;
+#[cfg(feature = "profile")]
+pub mod profile;
 mod row_diff;
 mod schema;
 pub mod spool;

@@ -210,6 +210,47 @@ use arrow_buffer::i256;
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use arrow_schema::{ArrowError, DataType, Field, IntervalUnit, Schema, SchemaRef, TimeUnit};
 
+/// Runs `$body` as a profiled pass named `$label` under the `profile` feature,
+/// where the pass boundary is where the profiler reads wall time and peak RSS;
+/// expands to `$body` unchanged otherwise, so the un-instrumented build adds no
+/// lines.
+#[cfg(feature = "profile")]
+macro_rules! pass {
+    ($label:expr, $body:expr) => {{
+        let __guard = $crate::profile::enter($label);
+        let __result = $body;
+        drop(__guard);
+        __result
+    }};
+}
+
+#[cfg(not(feature = "profile"))]
+macro_rules! pass {
+    ($label:expr, $body:expr) => {
+        $body
+    };
+}
+
+/// Adds `$body`'s wall time to the additive profile sub-cost named `$label`
+/// under the `profile` feature (for a cost that interleaves with others inside
+/// one pass, so it cannot be its own [`pass!`]); expands to `$body` otherwise.
+#[cfg(feature = "profile")]
+macro_rules! accum {
+    ($label:expr, $body:expr) => {{
+        let __start = std::time::Instant::now();
+        let __result = $body;
+        $crate::profile::accumulate($label, __start.elapsed());
+        __result
+    }};
+}
+
+#[cfg(not(feature = "profile"))]
+macro_rules! accum {
+    ($label:expr, $body:expr) => {
+        $body
+    };
+}
+
 /// A re-openable source of one table's record batches.
 ///
 /// The row diff reads each side more than once — to hash every row, to
@@ -1232,7 +1273,7 @@ fn peek_side(mut reader: Box<dyn RecordBatchReader + Send>) -> Result<PeekedSide
         if rows >= max_rows || bytes >= MAX_PEEK_BYTES {
             return Ok((buffered, reader, false));
         }
-        match reader.next() {
+        match accum!("spool decode (reader.next)", reader.next()) {
             Some(Ok(batch)) => {
                 rows += batch.num_rows();
                 bytes += batch.get_array_memory_size();
@@ -1373,7 +1414,11 @@ fn hash_side_parallel(
                     break 'feed;
                 }
             }
-            for batch in reader {
+            let mut reader = reader;
+            loop {
+                let Some(batch) = accum!("spool decode (reader.next)", reader.next()) else {
+                    break;
+                };
                 match batch {
                     Ok(b) => {
                         if tx.send(b).is_err() {
@@ -1613,7 +1658,14 @@ where
             let stop = Arc::clone(&stop);
             let back_tx = back_tx.clone();
             scope.spawn(move || {
-                for (idx, batch) in reader.enumerate() {
+                let mut reader = reader.enumerate();
+                // The reader thread decodes the spool serially while the workers
+                // hash in parallel, so the decode wall is the re-read cost.
+                loop {
+                    let Some((idx, batch)) = accum!("spool decode (reader.next)", reader.next())
+                    else {
+                        break;
+                    };
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
@@ -1749,6 +1801,68 @@ struct Materialize<'a> {
     /// duplicate-key row.
     key_only_schema: &'a SchemaRef,
     key_output_types: &'a [DataType],
+}
+
+/// The borrowed inputs the materialize pass shares across both sides.
+struct MemberPass<'a> {
+    left_columns: &'a SideColumns,
+    right_columns: &'a SideColumns,
+    key_names: &'a [&'a str],
+    hasher: &'a RowHasher,
+    dup_schema: &'a SchemaRef,
+    key_output_types: &'a [DataType],
+}
+
+/// Materializes the removed and added row batches and the duplicate-key report,
+/// re-reading each side once. The duplicate-key report holds one captured key
+/// row per distinct duplicated key across both sides.
+fn materialize_row_members<L: TableInput, R: TableInput>(
+    left: &L,
+    right: &R,
+    ctx: &MemberPass<'_>,
+    classified: &Classified,
+    scan_threads: usize,
+) -> Result<(RecordBatch, RecordBatch, RecordBatch), TableDiffError> {
+    let key_field_count = ctx.dup_schema.fields().len() - 2;
+    let key_only_schema = SchemaRef::new(Schema::new(
+        ctx.dup_schema.fields()[..key_field_count].to_vec(),
+    ));
+    let mut pending_dups: HashSet<u128> = classified.duplicates.keys().copied().collect();
+
+    let left_ctx = Materialize {
+        columns: ctx.left_columns,
+        key_names: ctx.key_names,
+        hasher: ctx.hasher,
+        key_only_schema: &key_only_schema,
+        key_output_types: ctx.key_output_types,
+    };
+    let right_ctx = Materialize {
+        columns: ctx.right_columns,
+        ..left_ctx
+    };
+
+    let (rows_removed, left_dup_capture) = materialize_side(
+        left,
+        &left_ctx,
+        &classified.removed,
+        &mut pending_dups,
+        scan_threads,
+    )?;
+    let (rows_added, right_dup_capture) = materialize_side(
+        right,
+        &right_ctx,
+        &classified.added,
+        &mut pending_dups,
+        scan_threads,
+    )?;
+
+    let duplicate_keys = build_duplicate_keys(
+        ctx.dup_schema,
+        left_dup_capture,
+        right_dup_capture,
+        &classified.duplicates,
+    )?;
+    Ok((rows_removed, rows_added, duplicate_keys))
 }
 
 /// Re-reads one side and, in a single scan, filters it to the rows whose key is
@@ -2705,11 +2819,13 @@ impl PartitionWriters {
             perm.extend_from_slice(rows);
         }
         let indices = UInt32Array::from(perm);
-        let taken = arrow_select::take::take_record_batch(value_batch, &indices)
-            .map_err(|e| read_error(&e))?;
-        // Compact byte-view columns so a spilled partition holds only its rows'
-        // view data, not the whole side's retained variadic buffers.
-        let reordered = cast_batch_to(&taken, &self.value_schema)?;
+        let reordered = accum!("cell: spill route (take + cast)", {
+            let taken = arrow_select::take::take_record_batch(value_batch, &indices)
+                .map_err(|e| read_error(&e))?;
+            // Compact byte-view columns so a spilled partition holds only its
+            // rows' view data, not the whole side's retained variadic buffers.
+            cast_batch_to(&taken, &self.value_schema)?
+        });
         let mut offset = 0;
         for (partition, rows) in part_rows.iter().enumerate() {
             if rows.is_empty() {
@@ -2733,8 +2849,14 @@ impl PartitionWriters {
         }
         let batches = std::mem::take(&mut self.buffers[partition]);
         self.buffered_rows[partition] = 0;
-        let coalesced = concat_or_empty(&self.value_schema, &batches)?;
-        let outcome = self.writers[partition].write(&coalesced);
+        let coalesced = accum!(
+            "cell: spill route (take + cast)",
+            concat_or_empty(&self.value_schema, &batches)?
+        );
+        let outcome = accum!(
+            "cell: spill write (of spill pass)",
+            self.writers[partition].write(&coalesced)
+        );
         #[cfg(test)]
         let outcome = inject_spill_write_failure(outcome);
         outcome.map_err(|e| crate::spool::error("write to", &e))
@@ -3202,8 +3324,11 @@ fn diff_cells_streaming(
         value_schema: &right_value_schema,
         ..left_plan
     };
-    let left_spill = spill_left(left, &left_plan, &key_schema)?;
-    let right_spill = spill_right(right, &right_plan)?;
+    let (left_spill, right_spill) = pass!("cell: spill (re-read, hash, route, write)", {
+        let left_spill = spill_left(left, &left_plan, &key_schema)?;
+        let right_spill = spill_right(right, &right_plan)?;
+        (left_spill, right_spill)
+    });
 
     // Compared columns in left-schema order (common_values is name-sorted).
     let mut ranks = Vec::with_capacity(ctx.common_values.len());
@@ -3213,7 +3338,11 @@ fn diff_cells_streaming(
     let mut order: Vec<usize> = (0..ctx.common_values.len()).collect();
     order.sort_by_key(|&j| ranks[j]);
 
-    let key_renders = render_key_arrays(&left_spill.left_keys, key_count)?;
+    // Render every changed left row's key columns for the output's sort key.
+    let key_renders = pass!(
+        "cell: render sort keys",
+        render_key_arrays(&left_spill.left_keys, key_count)?
+    );
 
     // Each partition emits its changed cells into its own output arrays; the
     // per-partition arrays together are exactly one copy of the output. Holding
@@ -3230,30 +3359,38 @@ fn diff_cells_streaming(
         threads: ctx.threads,
     };
     let mut cell_columns = CellColumns::with_partitions(partitions);
-    for partition in 0..partitions {
-        let left_batches = read_partition_batches(&left_spill.spill.files[partition])?;
-        let right_batches = read_partition_batches(&right_spill.files[partition])?;
-        let data = PartitionData {
-            left_batches: &left_batches,
-            left_key_hashes: &left_spill.spill.key_hashes[partition],
-            left_global_index: &left_spill.global_index[partition],
-            right_batches: &right_batches,
-            right_key_hashes: &right_spill.key_hashes[partition],
-        };
-        let records = emit_partition(&data, &emit_plan)?;
-        let mut part = CellColumnBuilders::with_capacity(records.len());
-        for record in records {
-            gidx.push(record.left_row);
-            crank.push(record.column_rank as u32);
-            part.push(&record);
+    pass!("cell: partition read-back and render", {
+        for partition in 0..partitions {
+            let (left_batches, right_batches) = accum!("cell: partition read-back", {
+                let left_batches = read_partition_batches(&left_spill.spill.files[partition])?;
+                let right_batches = read_partition_batches(&right_spill.files[partition])?;
+                (left_batches, right_batches)
+            });
+            let data = PartitionData {
+                left_batches: &left_batches,
+                left_key_hashes: &left_spill.spill.key_hashes[partition],
+                left_global_index: &left_spill.global_index[partition],
+                right_batches: &right_batches,
+                right_key_hashes: &right_spill.key_hashes[partition],
+            };
+            let records = accum!(
+                "cell: compare and render",
+                emit_partition(&data, &emit_plan)?
+            );
+            let mut part = CellColumnBuilders::with_capacity(records.len());
+            for record in records {
+                gidx.push(record.left_row);
+                crank.push(record.column_rank as u32);
+                part.push(&record);
+            }
+            // The total cell count must also fit the `u32` output positions.
+            if gidx.len() > u32::MAX as usize {
+                return Err(TableDiffError::TooManyChangedRows { rows: gidx.len() });
+            }
+            cell_columns.push_partition(part);
+            bounds.push(gidx.len() as u32);
         }
-        // The total cell count must also fit the `u32` output positions.
-        if gidx.len() > u32::MAX as usize {
-            return Err(TableDiffError::TooManyChangedRows { rows: gidx.len() });
-        }
-        cell_columns.push_partition(part);
-        bounds.push(gidx.len() as u32);
-    }
+    });
     // The spilled value rows and their key hashes are no longer needed; freeing
     // them before the reorder keeps the peak to the output plus its reorder.
     drop(right_spill);
@@ -3265,7 +3402,10 @@ fn diff_cells_streaming(
         cell_columns,
         left_keys: left_spill.left_keys,
     };
-    reorder_output(reorder, ctx.key_output_types, &out_schema)
+    pass!(
+        "cell: sort and interleave",
+        reorder_output(reorder, ctx.key_output_types, &out_schema)
+    )
 }
 
 /// The output columns and the keys the final reorder needs, moved out of
@@ -3432,6 +3572,11 @@ pub(crate) fn diff_rows(
             max: crate::MAX_THREADS,
         });
     }
+    // The set-up span is bracketed by an explicit guard rather than `pass!`
+    // because it spans several `?`-returning statements whose bindings outlive
+    // it, which a single-expression `pass!` block cannot hold.
+    #[cfg(feature = "profile")]
+    let setup_guard = crate::profile::enter("set-up");
     let hasher = RowHasher::new()?;
 
     // Refuse unhashable columns of either full schema up front (see the fn doc).
@@ -3454,50 +3599,27 @@ pub(crate) fn diff_rows(
     // `scan_threads` is the requested threads for a large diff and 1 for a small
     // one; the materialize and cell passes, which re-scan the full table, follow
     // the same size gate as the hash pass.
-    let (null_keys, classified, scan_threads) =
-        hash_and_classify(left, right, &left_columns, &right_columns, &config)?;
+    #[cfg(feature = "profile")]
+    drop(setup_guard);
+    let (null_keys, classified, scan_threads) = pass!(
+        "hash and classify",
+        hash_and_classify(left, right, &left_columns, &right_columns, &config)?
+    );
     let null_key_count = null_keys.len();
 
     let (dup_schema, key_output_types) = dup_key_schema(left_schema, key);
-    let key_only_schema = SchemaRef::new(Schema::new(dup_schema.fields()[..key.len()].to_vec()));
-    let mut pending_dups: HashSet<u128> = classified.duplicates.keys().copied().collect();
-
-    let left_ctx = Materialize {
-        columns: &left_columns,
+    let member_ctx = MemberPass {
+        left_columns: &left_columns,
+        right_columns: &right_columns,
         key_names: &key_names,
         hasher: &hasher,
-        key_only_schema: &key_only_schema,
+        dup_schema: &dup_schema,
         key_output_types: &key_output_types,
     };
-    let right_ctx = Materialize {
-        columns: &right_columns,
-        key_names: &key_names,
-        hasher: &hasher,
-        key_only_schema: &key_only_schema,
-        key_output_types: &key_output_types,
-    };
-
-    let (rows_removed, left_dup_capture) = materialize_side(
-        left,
-        &left_ctx,
-        &classified.removed,
-        &mut pending_dups,
-        scan_threads,
-    )?;
-    let (rows_added, right_dup_capture) = materialize_side(
-        right,
-        &right_ctx,
-        &classified.added,
-        &mut pending_dups,
-        scan_threads,
-    )?;
-
-    let duplicate_keys = build_duplicate_keys(
-        &dup_schema,
-        left_dup_capture,
-        right_dup_capture,
-        &classified.duplicates,
-    )?;
+    let (rows_removed, rows_added, duplicate_keys) = pass!(
+        "materialize",
+        materialize_row_members(left, right, &member_ctx, &classified, scan_threads)?
+    );
 
     let changed_set: HashSet<u128> = classified.changed.into_iter().collect();
     let cell_ctx = CellDiff {
@@ -3524,7 +3646,10 @@ pub(crate) fn diff_rows(
             partition_count(scan_threads),
         )?
     } else {
-        diff_cells(left, right, &cell_ctx, &changed_set)?
+        pass!(
+            "cell (sequential)",
+            diff_cells(left, right, &cell_ctx, &changed_set)?
+        )
     };
 
     let counts = RowCounts {
@@ -3757,6 +3882,36 @@ mod tests {
         assert_eq!(diff.counts.duplicate_keys, 0);
         assert_eq!(ids(&diff.rows_added), BTreeSet::from([Some(4)]));
         assert_eq!(ids(&diff.rows_removed), BTreeSet::from([Some(1)]));
+    }
+
+    #[test]
+    fn materialize_reads_each_side_through_its_own_column_order() {
+        // left is [id, v]; right is [v, id] — the key and value columns sit at
+        // different positions on each side. Materializing the right side through
+        // the left's column indices would hash the wrong column as the key and
+        // misclassify every row (all removed, all added), so the added/removed
+        // sets pin that each side uses its own `SideColumns`.
+        let left_sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
+        let right_sch = schema(vec![Field::new("v", DataType::Int64, false), id_field()]);
+        let left = reader(
+            &left_sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1), Some(2), Some(3)])),
+                Arc::new(Int64Array::from(vec![10, 20, 30])),
+            ],
+        );
+        let right = reader(
+            &right_sch,
+            vec![
+                Arc::new(Int64Array::from(vec![20, 30, 40])),
+                Arc::new(Int64Array::from(vec![Some(2), Some(3), Some(4)])),
+            ],
+        );
+        let diff = diff_rows(&left, &right, &left_sch, &right_sch, &key()).unwrap();
+        assert_eq!(diff.counts.rows_removed, 1);
+        assert_eq!(diff.counts.rows_added, 1);
+        assert_eq!(ids(&diff.rows_removed), BTreeSet::from([Some(1)]));
+        assert_eq!(ids(&diff.rows_added), BTreeSet::from([Some(4)]));
     }
 
     #[test]
