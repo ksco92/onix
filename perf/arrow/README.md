@@ -141,6 +141,29 @@ uv run --group perf pytest tests -q             # fast: 1k-row fixtures + synthe
 uv run --group perf pytest tests -q -m slow      # also regenerates and checks the 100k and 1M pairs
 ```
 
+## Profiling the row diff's passes
+
+The row diff's per-pass wall time and peak RSS come from the committed
+`row_diff_profile` example (`crates/onix-arrow/examples/row_diff_profile.rs`),
+built with the `profile` feature that compiles the pass boundaries into
+`onix-arrow` (off by default, absent from the release wheel). Its own module
+docstring is the single home for the method and the shapes; the command is:
+
+```sh
+cargo build -p onix-arrow --release --features profile --example row_diff_profile
+# narrow-fixture proxy (few changed rows) and wide-fixture proxy (all rows
+# changed, every value column spilled), 1M rows per side, default 18 threads:
+target/release/examples/row_diff_profile 1000000 linear 18
+target/release/examples/row_diff_profile 1000000 manycols 18 34 64
+```
+
+Every row-diff performance change posts its before/after per-pass table from this
+command in its PR body, and updates the per-pass section of
+[`RESULTS.md`](RESULTS.md). The example spools its generated sides to anonymous
+Arrow IPC files first, so the re-read of each spool per pass — the cost the
+per-pass table exposes — is measured exactly as the Python bindings' input spool
+incurs it.
+
 ## Benchmark against hand-rolled baselines
 
 `bench_tables.py` times `diff_tables` against a DuckDB SQL diff and a polars join-based diff on
