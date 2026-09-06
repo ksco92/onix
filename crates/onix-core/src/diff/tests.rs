@@ -3063,7 +3063,7 @@ fn different_classes_forced_paired_under_ignore_order_become_values_changed() {
     );
 }
 
-// --- Class identity: kind and qualified name (issues #66 items 4, 9) --------
+// --- Class identity: kind and qualified name (issue #66) -------------------
 
 #[test]
 fn a_dict_subclass_and_a_custom_object_with_the_same_name_are_a_type_change() {

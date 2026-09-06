@@ -649,8 +649,8 @@ Divergences, all deterministic. The first three (a whole object's serialized val
    cycle.
 
 5. **Types DeepDiff routes to a handler onix lacks are refused, never
-   mis-diffed** (the `.claude/rules/fallback-accept-list.md` accept-list, derived
-   from `_diff`'s isinstance ladder). DeepDiff sends a **number** (`complex`,
+   mis-diffed** (the accept-list, derived from `_diff`'s isinstance ladder).
+   DeepDiff sends a **number** (`complex`,
    `Decimal`, `Fraction` — `_diff_numbers`), an **iterable** (`bytes`, `bytearray`,
    `memoryview`, `range`, a generator, `deque`, `array.array`, any
    `__iter__`-defining object — `_diff_str`/`_diff_iterable`), a **`uuid`**

@@ -894,7 +894,7 @@ def test_a_property_mutating_the_instance_dict_does_not_panic() -> None:
     assert "values_changed" in json.loads(DeepDiff(SelfMutating(1), SelfMutating(2)).to_json())
 
 
-# --- Object attribute enumeration strategies match DeepDiff (issue #66 item 19) ---
+# --- Object attribute enumeration strategies match DeepDiff (issue #66) ---
 
 
 def _canonical(a: object, b: object) -> tuple[object, object]:
