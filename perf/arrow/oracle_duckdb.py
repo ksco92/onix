@@ -76,6 +76,13 @@ two speed baselines a data engineer would otherwise reach for (#43).
   oracle, not a bug -- `perf/arrow/README.md`'s "Oracle semantics" section
   restates it, and the dictionary retype is instead verified directly via
   `pyarrow` in `tests/test_oracle_duckdb.py`.
+* **Timestamp zone-awareness.** DuckDB normalizes both sides to one instant
+  type before comparing, so `wide`'s `ts_cast` zone drop (#84) is invisible
+  at the value level here (onix reports `type_changed` instead);
+  `parquet_schema()` still sees it at the schema level.
+* **`decimal256` above precision 38.** This DuckDB version silently decodes
+  it wrong; polars' parquet/IPC readers reject it outright. `wide` keeps
+  `dec256` at precision 38 and never mutates it.
 
 Usage::
 
