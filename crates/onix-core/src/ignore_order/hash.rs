@@ -132,6 +132,13 @@ fn hash_value<H: Hasher>(root: &Value, state: &mut H) {
             }
             Value::Object(map) => {
                 map.len().hash(state);
+                // A custom object and a `dict` (and two different classes)
+                // are distinct structural identities — `diff_at` reports
+                // `type_changes` between them — so this `DistKey` hash tags
+                // both, matching `ItemKey`'s own class-tagged bucket and
+                // keeping the distance memo from ever conflating them.
+                map.is_custom_object().hash(state);
+                map.type_name().hash(state);
                 // A `str` key carries the association and is hashed here
                 // directly, in sorted order; a non-`str` key's own `Value`
                 // is pushed onto the same work-stack the values use below,
@@ -273,6 +280,16 @@ pub(crate) enum ItemKey {
     /// runs on a value) and, via [`ItemKey::Str`]'s own WTF-8 bytes, a
     /// `str` key holding a lone surrogate code point too.
     Dict(BTreeMap<ItemKey, ItemKey>),
+    /// A custom object diffed by its attributes: keyed like [`ItemKey::Dict`]
+    /// (key-sorted, recursively keyed attribute values) but in its own bucket
+    /// tagged by the object's class name, so a custom object never
+    /// hash-matches a plain `dict`, a `dict` subclass, or an instance of a
+    /// different class — mirroring `DeepHash._prep_obj`, which prefixes an
+    /// object's digest with `obj` and tags `_prep_dict` with the class name
+    /// where a `dict` gets the bare word `dict`. Per-lookup cost is
+    /// [`ItemKey::Dict`]'s (a full attribute-tree walk to hash and to compare)
+    /// plus the one class-name string comparison.
+    Object(Box<str>, BTreeMap<ItemKey, ItemKey>),
 }
 
 /// Hand-written to run the `Float` arm through [`mix_float_bits`] before
@@ -299,6 +316,10 @@ impl std::hash::Hash for ItemKey {
             Self::List(items) | Self::Set(items) | Self::FrozenSet(items) => items.hash(state),
             Self::Tuple(items) => items.hash(state),
             Self::Dict(map) => map.hash(state),
+            Self::Object(class, map) => {
+                class.hash(state);
+                map.hash(state);
+            }
         }
     }
 }
@@ -807,14 +828,22 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
             ItemKey::FrozenSet(items.iter().map(|i| item_key(i, memo)).collect()),
             None,
         ),
-        Value::Object(map) => (
-            ItemKey::Dict(
-                map.iter()
-                    .map(|(k, v)| (object_key_item_key(k, memo), item_key(v, memo)))
-                    .collect(),
-            ),
-            None,
-        ),
+        Value::Object(map) => {
+            let attrs = map
+                .iter()
+                .map(|(k, v)| (object_key_item_key(k, memo), item_key(v, memo)))
+                .collect();
+            // A custom object keys into its own class-tagged bucket so it
+            // never hash-matches a `dict` or an instance of another class
+            // (see `ItemKey::Object`); a `dict` (or a `dict` subclass, which
+            // `DeepHash` also digests as a bare `dict`) stays `ItemKey::Dict`.
+            let key = if map.is_custom_object() {
+                ItemKey::Object(Box::from(map.type_name().unwrap_or_default()), attrs)
+            } else {
+                ItemKey::Dict(attrs)
+            };
+            (key, None)
+        }
     }
 }
 

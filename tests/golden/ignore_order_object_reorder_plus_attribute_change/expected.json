@@ -1,0 +1,9 @@
+{
+  "values_changed": {
+    "root[0].y": {
+      "new_path": "root[1].y",
+      "new_value": 9,
+      "old_value": 1
+    }
+  }
+}

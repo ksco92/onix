@@ -342,7 +342,7 @@ def test_cross_arg_error_drops_deep_first_arg_without_crashing() -> None:
             return v
         t1 = deep({MAX_DEPTH_CEILING} - 1)
         try:
-            DeepDiff(t1, {{"x": 1j}}, max_depth={MAX_DEPTH_CEILING})
+            DeepDiff(t1, {{"x": {{1j}}}}, max_depth={MAX_DEPTH_CEILING})
         except TypeError:
             print("OK")
         else:
@@ -362,7 +362,7 @@ def test_intra_arg_error_after_deep_sibling_does_not_crash() -> None:
             for _ in range(d):
                 v = {{"a": v, "b": 2}}
             return v
-        t1 = {{"deep": deep({MAX_DEPTH_CEILING} - 1), "bad": 1j}}
+        t1 = {{"deep": deep({MAX_DEPTH_CEILING} - 1), "bad": {{1j}}}}
         try:
             DeepDiff(t1, {{}}, max_depth={MAX_DEPTH_CEILING})
         except TypeError:
@@ -392,7 +392,7 @@ def test_cross_arg_error_from_small_stack_thread_does_not_crash() -> None:
         # run ONLY the DeepDiff call and its exception handling, so t1 is passed
         # in by reference and kept alive here until after the thread joins.
         t1 = deep({MAX_DEPTH_CEILING} - 1)
-        bad = {{"x": 1j}}
+        bad = {{"x": {{1j}}}}
         outcome = []
         def work():
             try:
@@ -614,3 +614,64 @@ def test_diff_json_past_parser_recursion_limit_raises_value_error() -> None:
 def test_diff_json_reference_parses_with_standard_json_module() -> None:
     """Sanity check: the fixture builder produces genuinely valid JSON."""
     assert json.loads(_nested_json_array(5, leaf=1)) == [[[[[1]]]]]
+
+
+class _Node:
+    """A plain attribute-only class, for building a deep custom-object chain."""
+
+    def __init__(self, child: object) -> None:
+        self.child = child
+
+
+def _nested_object(depth: int, leaf: object) -> object:
+    """
+    Wrap `leaf` in `depth` nested custom objects, iteratively (issue #66).
+
+    :param depth: How many object layers to wrap `leaf` in.
+    :param leaf: The innermost value.
+    :return: `leaf` behind `depth` `.child` attributes.
+    """
+    value: object = leaf
+
+    for _ in range(depth):
+        value = _Node(value)
+
+    return value
+
+
+def test_deep_custom_object_nesting_raises_max_depth_error_not_a_crash() -> None:
+    """An adversarially deep custom-object chain raises MaxDepthError, never crashes."""
+    a = _nested_object(DEFAULT_MAX_DEPTH + 50, 1)
+    b = _nested_object(DEFAULT_MAX_DEPTH + 50, 2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b)
+
+
+def test_deep_custom_object_nesting_past_a_raised_max_depth_raises_at_conversion_time() -> None:
+    """A custom-object chain nested past an in-ceiling max_depth raises MaxDepthError at conversion."""
+    a = _nested_object(MAX_DEPTH_CEILING + 10, 1)
+    b = _nested_object(MAX_DEPTH_CEILING + 10, 2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b, max_depth=MAX_DEPTH_CEILING)
+
+
+def test_a_recursive_object_raises_max_depth_error_rather_than_looping() -> None:
+    """
+    A self-referential object is a cycle onix bounds by depth rather than by
+    identity: where DeepDiff's `parents_ids` cycle detection returns an empty
+    diff, onix raises MaxDepthError deterministically instead of following the
+    cycle forever or crashing (documented in tests/golden/README.md).
+    """
+
+    class _Recursive:
+        pass
+
+    a = _Recursive()
+    a.self_ref = a
+    b = _Recursive()
+    b.self_ref = b
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b)

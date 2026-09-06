@@ -2,7 +2,9 @@ use super::DEFAULT_MAX_DEPTH;
 use crate::error::Error;
 use crate::path::PathSegment;
 use crate::report::Report;
-use crate::test_support::{carr, cdate, cdt, cdt_at, cfrozen, cnum, cobj, cset, ctup, ctuple, cv};
+use crate::test_support::{
+    carr, ccustom, cdate, cdt, cdt_at, cfrozen, cnum, cobj, cset, ctup, ctuple, cv,
+};
 use crate::value::{Object as CObject, ObjectKey, SetItems, Typed, Value as CValue};
 use serde_json::{Map, Number, Value, json};
 
@@ -2843,4 +2845,217 @@ fn a_too_deep_set_item_reports_max_depth_exceeded() {
         super::diff_with_max_depth(&deep(3), &cset(&[json!(9)]), 3),
         Err(Error::MaxDepthExceeded { .. })
     ));
+}
+
+// --- Custom objects (issue #66) --------------------------------------------
+
+#[test]
+fn a_changed_attribute_reports_values_changed_with_a_dotted_path() {
+    let a = ccustom("A", json!({"x": 1, "y": 2}).as_object().unwrap());
+    let b = ccustom("A", json!({"x": 1, "y": 3}).as_object().unwrap());
+
+    assert_eq!(
+        diff_compact(&a, &b)
+            .expect("shallow objects diff cleanly")
+            .to_json_value(),
+        json!({"values_changed": {"root.y": {"new_value": 3, "old_value": 2}}})
+    );
+}
+
+#[test]
+fn an_added_and_a_removed_attribute_report_their_own_categories() {
+    let a = ccustom("A", json!({"x": 1, "y": 2}).as_object().unwrap());
+    let b = ccustom("A", json!({"x": 1, "z": 9}).as_object().unwrap());
+
+    assert_eq!(
+        diff_compact(&a, &b)
+            .expect("shallow objects diff cleanly")
+            .to_json_value(),
+        json!({
+            "attribute_added": {"root.z": 9},
+            "attribute_removed": {"root.y": 2},
+        })
+    );
+}
+
+#[test]
+fn two_different_classes_report_type_changes_with_class_names() {
+    let a = ccustom("A", json!({"x": 1}).as_object().unwrap());
+    let b = ccustom("B", json!({"x": 1}).as_object().unwrap());
+
+    assert_eq!(
+        diff_compact(&a, &b)
+            .expect("shallow objects diff cleanly")
+            .to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "A",
+            "new_type": "B",
+            "old_value": {"x": 1},
+            "new_value": {"x": 1},
+        }}})
+    );
+}
+
+#[test]
+fn a_custom_object_against_a_plain_dict_is_a_type_change() {
+    let a = ccustom("A", json!({"x": 1}).as_object().unwrap());
+    let b = cv(&json!({"x": 1}));
+
+    assert_eq!(
+        diff_compact(&a, &b)
+            .expect("shallow diff is clean")
+            .to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "A",
+            "new_type": "dict",
+            "old_value": {"x": 1},
+            "new_value": {"x": 1},
+        }}})
+    );
+}
+
+#[test]
+fn a_nested_object_attribute_reports_a_deep_dotted_path() {
+    let a = {
+        let mut builder = crate::value::Builder::new();
+        let inner = ccustom("Inner", json!({"v": 1}).as_object().unwrap());
+        builder.custom_object(
+            vec![(
+                ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("inner"))),
+                inner,
+            )],
+            std::sync::Arc::from("Outer"),
+        )
+    };
+    let b = {
+        let mut builder = crate::value::Builder::new();
+        let inner = ccustom("Inner", json!({"v": 2}).as_object().unwrap());
+        builder.custom_object(
+            vec![(
+                ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("inner"))),
+                inner,
+            )],
+            std::sync::Arc::from("Outer"),
+        )
+    };
+
+    assert_eq!(
+        diff_compact(&a, &b)
+            .expect("shallow objects diff cleanly")
+            .to_json_value(),
+        json!({"values_changed": {"root.inner.v": {"new_value": 2, "old_value": 1}}})
+    );
+}
+
+#[test]
+fn a_custom_object_inside_a_list_and_a_dict_keeps_the_attribute_suffix() {
+    let a_list = carr(vec![ccustom("A", json!({"x": 1}).as_object().unwrap())]);
+    let b_list = carr(vec![ccustom("A", json!({"x": 2}).as_object().unwrap())]);
+    assert_eq!(
+        diff_compact(&a_list, &b_list)
+            .expect("shallow diff is clean")
+            .to_json_value(),
+        json!({"values_changed": {"root[0].x": {"new_value": 2, "old_value": 1}}})
+    );
+
+    let mut builder = crate::value::Builder::new();
+    let a_dict = builder.object(vec![(
+        "k".to_string(),
+        ccustom("A", json!({"x": 1}).as_object().unwrap()),
+    )]);
+    let b_dict = builder.object(vec![(
+        "k".to_string(),
+        ccustom("A", json!({"x": 2}).as_object().unwrap()),
+    )]);
+    assert_eq!(
+        diff_compact(&a_dict, &b_dict)
+            .expect("shallow diff is clean")
+            .to_json_value(),
+        json!({"values_changed": {"root['k'].x": {"new_value": 2, "old_value": 1}}})
+    );
+}
+
+#[test]
+fn two_equal_custom_objects_report_nothing() {
+    let a = ccustom("A", json!({"x": 1, "y": 2}).as_object().unwrap());
+    let b = ccustom("A", json!({"x": 1, "y": 2}).as_object().unwrap());
+
+    assert!(
+        diff_compact(&a, &b)
+            .expect("shallow objects diff cleanly")
+            .is_empty()
+    );
+}
+
+#[test]
+fn custom_objects_pair_by_class_under_ignore_order() {
+    // A(1) reordered plus an attribute change pairs across positions and
+    // reports the change at the removed side's index with a `new_path`; a
+    // different class never pairs into a spurious attribute diff.
+    let a = carr(vec![
+        ccustom("A", json!({"x": 1, "y": 1}).as_object().unwrap()),
+        ccustom("A", json!({"x": 2, "y": 2}).as_object().unwrap()),
+    ]);
+    let b = carr(vec![
+        ccustom("A", json!({"x": 2, "y": 2}).as_object().unwrap()),
+        ccustom("A", json!({"x": 1, "y": 9}).as_object().unwrap()),
+    ]);
+
+    let opts = super::DiffOptions {
+        ignore_order: true,
+        ..super::DiffOptions::default()
+    };
+    assert_eq!(
+        super::diff_with_options(&a, &b, &opts)
+            .expect("shallow objects diff cleanly")
+            .to_json_value(),
+        json!({"values_changed": {"root[0].y": {
+            "new_value": 9,
+            "old_value": 1,
+            "new_path": "root[1].y",
+        }}})
+    );
+}
+
+#[test]
+fn a_whole_custom_object_added_under_ignore_order_serializes_as_its_attributes() {
+    let a = carr(vec![ccustom(
+        "A",
+        json!({"x": 1, "y": 0}).as_object().unwrap(),
+    )]);
+    let b = carr(vec![
+        ccustom("A", json!({"x": 1, "y": 0}).as_object().unwrap()),
+        ccustom("A", json!({"x": 2, "y": 0}).as_object().unwrap()),
+    ]);
+
+    let opts = super::DiffOptions {
+        ignore_order: true,
+        ..super::DiffOptions::default()
+    };
+    assert_eq!(
+        super::diff_with_options(&a, &b, &opts)
+            .expect("shallow objects diff cleanly")
+            .to_json_value(),
+        json!({"iterable_item_added": {"root[1]": {"x": 2, "y": 0}}})
+    );
+}
+
+#[test]
+fn different_classes_forced_paired_under_ignore_order_become_values_changed() {
+    let a = carr(vec![ccustom("A", json!({"x": 1}).as_object().unwrap())]);
+    let b = carr(vec![ccustom("B", json!({"x": 1}).as_object().unwrap())]);
+
+    let opts = super::DiffOptions {
+        ignore_order: true,
+        ..super::DiffOptions::default()
+    };
+    assert_eq!(
+        super::diff_with_options(&a, &b, &opts)
+            .expect("shallow objects diff cleanly")
+            .to_json_value(),
+        json!({"values_changed": {"root[0]": {
+            "old_value": {"x": 1},
+            "new_value": {"x": 1},
+        }}})
+    );
 }

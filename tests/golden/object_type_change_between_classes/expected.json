@@ -1,0 +1,16 @@
+{
+  "type_changes": {
+    "root": {
+      "new_type": "B",
+      "new_value": {
+        "x": 1,
+        "y": 2
+      },
+      "old_type": "A",
+      "old_value": {
+        "x": 1,
+        "y": 2
+      }
+    }
+  }
+}

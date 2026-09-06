@@ -46,6 +46,14 @@ pub enum PathSegment {
     /// that splits it into several bracket groups, so [`render_path`] wraps
     /// it in exactly one outer pair, same as any other key).
     KeyRepr(String),
+    /// A custom object's attribute access, e.g. the `x` in `root.x` — a
+    /// [`Str`] for the same reason [`PathSegment::Key`] is (a distinct
+    /// structural identity per name). Rendered `.name` with no brackets and
+    /// no quoting, matching `DeepDiff`'s `AttributeRelationship`
+    /// (`param_repr_format=".{}"`, no `quote_str`); an attribute name read
+    /// from an object's `__dict__`/`__slots__` is a Python identifier, so
+    /// nothing it can hold needs escaping.
+    Attribute(Str),
     /// A list index access, e.g. the `3` in `root[3]`.
     Index(usize),
     /// A set item, e.g. the `1` in `root[1]` for the set `{1}` — carrying
@@ -104,6 +112,10 @@ pub fn render_path(segments: &[PathSegment]) -> Str {
                 rendered.push(b'[');
                 rendered.extend_from_slice(key.as_bytes());
                 rendered.push(b']');
+            }
+            PathSegment::Attribute(name) => {
+                rendered.push(b'.');
+                rendered.extend_from_slice(name.as_bytes());
             }
             PathSegment::Index(index) => {
                 rendered.push(b'[');
@@ -313,6 +325,18 @@ pub fn object_key_path_segment(key: &ObjectKey) -> PathSegment {
     match key {
         ObjectKey::Str(s) => PathSegment::Key(s.into()),
         ObjectKey::Other(value) => PathSegment::KeyRepr(dict_key_repr(value)),
+    }
+}
+
+/// The [`PathSegment::Attribute`] a custom object's attribute key
+/// contributes — `root.name`. A custom object's keys are always `str`
+/// attribute names ([`ObjectKey::Str`]); a non-`str` key is impossible for
+/// one and falls back to the ordinary key segment so this stays total.
+#[must_use]
+pub fn attribute_path_segment(key: &ObjectKey) -> PathSegment {
+    match key {
+        ObjectKey::Str(s) => PathSegment::Attribute(s.into()),
+        ObjectKey::Other(_) => object_key_path_segment(key),
     }
 }
 

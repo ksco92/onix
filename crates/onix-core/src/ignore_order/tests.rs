@@ -1,7 +1,8 @@
 use super::IgnoreOrderMemo;
 use crate::diff::DiffOptions;
 use crate::test_support::{
-    carr, cdate, cdt, cdt_at, cfrozen, cobj, cset, ctime, ctimedelta, ctup, ctuple, cv, cvec,
+    carr, ccustom, cdate, cdt, cdt_at, cfrozen, cobj, cset, ctime, ctimedelta, ctup, ctuple, cv,
+    cvec,
 };
 use crate::value::{ObjectKey, SetItems, Value as CValue};
 use serde_json::json;
@@ -3356,4 +3357,20 @@ proptest! {
         prop_assert_eq!(&s1, &s2);
         prop_assert_eq!(dist_hash(&s1), dist_hash(&s2));
     }
+}
+
+#[test]
+fn item_length_of_a_custom_object_is_its_attribute_count_not_its_values() {
+    // `_get_item_length`'s `else`/`__dict__` branch counts an object's
+    // attribute *names* (one each), never recursing into the values, unlike a
+    // `dict` (the `Mapping` branch). This object has two attributes whose
+    // values sum to four leaves as a dict would count them, so the two rules
+    // give different answers and this pins the object rule.
+    let object = ccustom("A", json!({"x": [1, 2, 3], "y": 5}).as_object().unwrap());
+    assert_eq!(super::distance::item_length(&object), 2);
+
+    // The same entries as a plain `dict` are counted the other way: the
+    // `Mapping` branch sums the values (three list items plus one scalar).
+    let dict = cv(&json!({"x": [1, 2, 3], "y": 5}));
+    assert_eq!(super::distance::item_length(&dict), 4);
 }

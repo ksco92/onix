@@ -1716,6 +1716,28 @@ impl Key {
     }
 }
 
+/// What an [`Object`]'s entries represent: a Python `dict` (mapping) or a
+/// custom object's attributes.
+///
+/// Both share [`Object`]'s key-sorted storage — a custom object's attributes
+/// are `str`-keyed entries exactly like a `dict`'s `str` keys — but they
+/// render two different ways, matching `DeepDiff`: a `dict` entry is a
+/// subscript (`root['key']`, `dictionary_item_added`/`removed`), a custom
+/// object's attribute is a dotted access (`root.attr`,
+/// `attribute_added`/`removed`). `crate::diff::object_diff` reads this to
+/// choose the path segment and report category; `crate::ignore_order`'s
+/// hashing and distance read it to keep a custom object from ever
+/// hash-matching or pairing with a plain `dict` (`DeepDiff`'s own `DeepHash`
+/// tags an object with its class name and a `dict` with the bare word
+/// `dict`, so the two never share a bucket).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectKind {
+    /// A Python `dict` (or a `dict` subclass), rendered with subscript paths.
+    Dict,
+    /// A custom object diffed by its attributes, rendered with dotted paths.
+    CustomObject,
+}
+
 /// A JSON object: key-sorted, exactly-sized entries backed by a single
 /// `Box<[(ObjectKey, Value)]>`, with binary-search lookup
 /// ([`get`](Object::get)/[`contains_key`](Object::contains_key)) and
@@ -1724,7 +1746,9 @@ impl Key {
 /// See the [module documentation](self) for why entries are sorted and
 /// `str` keys interned (byte-identical rendering and small-map footprint),
 /// and [`ObjectKey`]'s own doc for why every other key kind is a second,
-/// additive case rather than a change to that representation.
+/// additive case rather than a change to that representation. A custom
+/// object's attributes reuse this same storage, distinguished only by
+/// [`Object::kind`] — see [`ObjectKind`].
 #[derive(Debug, Clone)]
 pub struct Object {
     /// Key-sorted, duplicate-free entries. Invariant: strictly ascending by
@@ -1732,10 +1756,27 @@ pub struct Object {
     /// every [`ObjectKey::Str`] entry before every [`ObjectKey::Other`] one,
     /// so [`Object::has_non_str_keys`] can check the last entry alone.
     entries: Box<[(ObjectKey, Value)]>,
-    /// The `dict` subclass name this value came from, or `None` for the
-    /// exact base type — see [`SetItems`]'s own `type_name` field doc; the
-    /// same reasoning applies here.
-    type_name: Option<Arc<str>>,
+    /// The subclass name and kind, or `None` for a plain `dict` (the
+    /// overwhelming common case, so it costs one null pointer, not an inline
+    /// name-plus-kind). Boxed rather than an inline
+    /// `Option<Arc<str>>`-plus-kind so [`Value`] stays within its
+    /// frame-budget size cap (`value_is_compact`): a plain `dict` pays a
+    /// single pointer here, and only a `dict` subclass or a custom object —
+    /// both rare — pays the one small heap allocation. See [`ObjectClass`].
+    class: Option<Box<ObjectClass>>,
+}
+
+/// A non-plain-`dict` [`Object`]'s class: the subclass/class name plus whether
+/// the entries are a `dict`'s items or a custom object's attributes. Held
+/// behind [`Object::class`]'s `Box` so a plain `dict` carries none of it.
+#[derive(Debug, Clone)]
+struct ObjectClass {
+    /// The Python class name: a `dict` subclass's name, or a custom object's
+    /// class (the name `DeepDiff` reports as `old_type`/`new_type`).
+    name: Arc<str>,
+    /// Whether these entries are a `dict`'s items or a custom object's
+    /// attributes.
+    kind: ObjectKind,
 }
 
 impl Object {
@@ -1760,7 +1801,7 @@ impl Object {
         }
         Self {
             entries: entries.into_boxed_slice(),
-            type_name: None,
+            class: None,
         }
     }
 
@@ -1769,7 +1810,25 @@ impl Object {
     /// and knows which concrete class it came from.
     #[must_use]
     pub fn with_type_name(mut self, type_name: Option<Arc<str>>) -> Self {
-        self.type_name = type_name;
+        self.class = type_name.map(|name| {
+            Box::new(ObjectClass {
+                name,
+                kind: ObjectKind::Dict,
+            })
+        });
+        self
+    }
+
+    /// Marks these entries as a custom object's attributes (rather than a
+    /// `dict`'s items) under `class_name`, the object's class — see
+    /// [`ObjectKind`]. The name is always present for a custom object, unlike
+    /// a `dict` subclass's optional name.
+    #[must_use]
+    pub fn into_custom_object(mut self, class_name: Arc<str>) -> Self {
+        self.class = Some(Box::new(ObjectClass {
+            name: class_name,
+            kind: ObjectKind::CustomObject,
+        }));
         self
     }
 
@@ -1777,7 +1836,23 @@ impl Object {
     /// type.
     #[must_use]
     pub fn type_name(&self) -> Option<&str> {
-        self.type_name.as_deref()
+        self.class.as_ref().map(|class| class.name.as_ref())
+    }
+
+    /// Whether these entries are a `dict`'s items or a custom object's
+    /// attributes — see [`ObjectKind`]. A plain `dict` (no class) is
+    /// [`ObjectKind::Dict`].
+    #[must_use]
+    pub fn kind(&self) -> ObjectKind {
+        self.class
+            .as_ref()
+            .map_or(ObjectKind::Dict, |class| class.kind)
+    }
+
+    /// Whether these entries are a custom object's attributes.
+    #[must_use]
+    pub fn is_custom_object(&self) -> bool {
+        matches!(self.kind(), ObjectKind::CustomObject)
     }
 
     /// Returns the value for `key`, or `None` if the object has no such key.
@@ -2040,6 +2115,19 @@ impl Builder {
         type_name: Option<Arc<str>>,
     ) -> Value {
         Value::Object(Object::from_pairs(entries).with_type_name(type_name))
+    }
+
+    /// Builds a custom object [`Value`] from its attribute `entries` (all
+    /// `str`-keyed) under `class_name` — the entry point `onix-py`'s
+    /// converter uses for an instance of a user-defined class, diffed by its
+    /// attributes rather than as a `dict`. See [`ObjectKind::CustomObject`].
+    #[must_use]
+    pub fn custom_object(
+        &mut self,
+        entries: Vec<(ObjectKey, Value)>,
+        class_name: Arc<str>,
+    ) -> Value {
+        Value::Object(Object::from_pairs(entries).into_custom_object(class_name))
     }
 }
 
