@@ -21,7 +21,8 @@
 //! * **Numbers** preserve [`serde_json`]'s exact three-way `i64`/`u64`/`f64`
 //!   distinction (see [`Number`]), which is load-bearing for byte-compatible
 //!   output: `1` and `1.0` must render differently, and a `u64` above
-//!   [`i64::MAX`] must survive as an integer.
+//!   [`i64::MAX`] must survive as an integer. A Python `int` beyond that
+//!   range keeps its exact value in a fourth, arbitrary-precision arm.
 //!
 //! Conversions in both directions ([`From`]`<`[`serde_json::Value`]`>` and
 //! [`Value::to_serde_json`]) and a direct streaming
@@ -85,6 +86,8 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
 use crate::datetime::{Date, DateTime, Time, TimeDelta, times_equal};
@@ -760,7 +763,8 @@ pub fn object_key_json_string(key: &ObjectKey) -> String {
                 .as_i64()
                 .map(|i| i.to_string())
                 .or_else(|| n.as_u64().map(|u| u.to_string()))
-                .expect("a non-float Number always has an i64 or u64 representation"),
+                .or_else(|| n.as_big().map(ToString::to_string))
+                .expect("a non-float Number is an i64, a u64, or an arbitrary-precision integer"),
             other => crate::path::python_repr(other),
         },
     }
@@ -1041,16 +1045,18 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
     true
 }
 
-/// A JSON number preserving [`serde_json`]'s exact three-way representation:
-/// a non-negative integer (`u64`), a negative integer (`i64`), or a float
-/// (`f64`). A float built from JSON (via `Number::from_serde` or the
-/// streaming [`Deserialize`]) is always finite — JSON itself has no
-/// `NaN`/`Infinity` literal — but [`Number::from_f64`] is not limited to
-/// that boundary: it also builds the [`Number`] a Python `float` converts
-/// to, and Python's `float` can be non-finite, so a stored float need not
-/// round-trip through [`serde_json::Number`] ([`Value::to_serde_json`]
-/// falls back to `null` for one that can't, the same collapse the streaming
-/// parse path already used for a non-finite value arriving some other way).
+/// A number preserving [`serde_json`]'s exact three-way representation for
+/// the values that fit — a non-negative integer (`u64`), a negative integer
+/// (`i64`), or a float (`f64`) — plus a fourth arm for a Python `int` whose
+/// magnitude exceeds `i64`/`u64`. A float built from
+/// JSON (via `Number::from_serde` or the streaming [`Deserialize`]) is
+/// always finite — JSON itself has no `NaN`/`Infinity` literal — but
+/// [`Number::from_f64`] is not limited to that boundary: it also builds the
+/// [`Number`] a Python `float` converts to, and Python's `float` can be
+/// non-finite, so a stored float need not round-trip through
+/// [`serde_json::Number`] ([`Value::to_serde_json`] falls back to `null` for
+/// one that can't, the same collapse the streaming parse path already used
+/// for a non-finite value arriving some other way).
 ///
 /// See the [module documentation](self) for why this int/float distinction
 /// is load-bearing for byte-compatible output.
@@ -1059,9 +1065,12 @@ pub struct Number {
     repr: NumberRepr,
 }
 
-/// The three concrete number representations, mirroring [`serde_json`]'s
-/// internal `N` enum so classification and reconstruction match exactly.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A non-negative integer, a negative integer, a float, or an
+/// arbitrary-precision integer. The first three mirror [`serde_json`]'s
+/// internal `N` enum so classification and reconstruction match exactly;
+/// [`NumberRepr::Big`] is boxed so this arm keeps the enum pointer-sized (see
+/// [`Number::from_bigint`] for the one-representation-per-value invariant).
+#[derive(Debug, Clone, PartialEq)]
 enum NumberRepr {
     /// A non-negative integer (covers the whole `u64` range, including
     /// values above [`i64::MAX`]).
@@ -1071,6 +1080,9 @@ enum NumberRepr {
     /// A float — finite, or (via [`Number::from_f64`] only; a
     /// `serde_json::Number` is always finite) `NaN`/`Infinity`/`-Infinity`.
     Float(f64),
+    /// An arbitrary-precision integer outside `i64::MIN..=u64::MAX` — a
+    /// Python `int` too large for the fast arms above.
+    Big(Box<BigInt>),
 }
 
 impl Number {
@@ -1112,37 +1124,55 @@ impl Number {
         }
     }
 
+    /// Builds a number from an arbitrary-precision integer, narrowing to the
+    /// `u64`/`i64` fast arms when it fits so every integer value keeps a
+    /// single canonical representation — the entry point for a Python `int`
+    /// (`crate::convert::int_to_value` in `onix-py`) of any magnitude.
+    #[must_use]
+    pub fn from_bigint(value: BigInt) -> Self {
+        if let Some(u) = value.to_u64() {
+            return Self::from_u64(u);
+        }
+        if let Some(i) = value.to_i64() {
+            return Self::from_i64(i);
+        }
+        Self {
+            repr: NumberRepr::Big(Box::new(value)),
+        }
+    }
+
     /// Returns `true` if this number was parsed/stored as a float.
     #[must_use]
     pub fn is_f64(&self) -> bool {
         matches!(self.repr, NumberRepr::Float(_))
     }
 
-    /// Returns this number as an `i64` if it fits, else `None` (floats and
-    /// `u64` values above [`i64::MAX`] return `None`). Mirrors
-    /// [`serde_json::Number::as_i64`].
+    /// Returns this number as an `i64` if it fits, else `None` (floats,
+    /// `u64` values above [`i64::MAX`], and arbitrary-precision integers
+    /// return `None`). Mirrors [`serde_json::Number::as_i64`].
     #[must_use]
     pub fn as_i64(&self) -> Option<i64> {
-        match self.repr {
-            NumberRepr::PosInt(u) => i64::try_from(u).ok(),
-            NumberRepr::NegInt(i) => Some(i),
-            NumberRepr::Float(_) => None,
+        match &self.repr {
+            NumberRepr::PosInt(u) => i64::try_from(*u).ok(),
+            NumberRepr::NegInt(i) => Some(*i),
+            NumberRepr::Float(_) | NumberRepr::Big(_) => None,
         }
     }
 
-    /// Returns this number as a `u64` if it is a non-negative integer, else
-    /// `None`. Mirrors [`serde_json::Number::as_u64`].
+    /// Returns this number as a `u64` if it is a non-negative integer that
+    /// fits, else `None`. Mirrors [`serde_json::Number::as_u64`].
     #[must_use]
     pub fn as_u64(&self) -> Option<u64> {
-        match self.repr {
-            NumberRepr::PosInt(u) => Some(u),
-            NumberRepr::NegInt(_) | NumberRepr::Float(_) => None,
+        match &self.repr {
+            NumberRepr::PosInt(u) => Some(*u),
+            NumberRepr::NegInt(_) | NumberRepr::Float(_) | NumberRepr::Big(_) => None,
         }
     }
 
     /// Returns this number as an `f64` (always `Some`, matching
     /// [`serde_json::Number::as_f64`]; integer values are converted, which
-    /// may lose precision for magnitudes beyond `2^53`).
+    /// may lose precision for magnitudes beyond `2^53` and saturate to an
+    /// infinity beyond `f64::MAX`, matching Python's own `float(int)`).
     #[must_use]
     #[allow(
         clippy::cast_precision_loss,
@@ -1150,16 +1180,73 @@ impl Number {
                   large integers to the nearest f64"
     )]
     pub fn as_f64(&self) -> Option<f64> {
-        Some(match self.repr {
-            NumberRepr::PosInt(u) => u as f64,
-            NumberRepr::NegInt(i) => i as f64,
-            NumberRepr::Float(f) => f,
+        Some(match &self.repr {
+            NumberRepr::PosInt(u) => *u as f64,
+            NumberRepr::NegInt(i) => *i as f64,
+            NumberRepr::Float(f) => *f,
+            // num-bigint's `ToPrimitive::to_f64` is total — it saturates to an
+            // infinity beyond `f64::MAX`, never `None` — so the default is
+            // unreachable.
+            NumberRepr::Big(b) => b.to_f64().unwrap_or(f64::INFINITY),
         })
+    }
+
+    /// This integer's value as an `i128` when it fits, else `None` (a float,
+    /// or an integer whose magnitude exceeds `i128`). Every `u64`/`i64` value
+    /// fits, so this is `Some` for every non-`Big` integer.
+    #[must_use]
+    pub(crate) fn as_i128(&self) -> Option<i128> {
+        match &self.repr {
+            NumberRepr::PosInt(u) => Some(i128::from(*u)),
+            NumberRepr::NegInt(i) => Some(i128::from(*i)),
+            NumberRepr::Big(b) => b.to_i128(),
+            NumberRepr::Float(_) => None,
+        }
+    }
+
+    /// The arbitrary-precision payload, or `None` for a value that fits a
+    /// fast arm (a `u64`/`i64` integer or a float) — the accessor the Python
+    /// bindings and the byte-exact JSON writer read a big integer's exact
+    /// digits through.
+    #[must_use]
+    pub fn as_big(&self) -> Option<&BigInt> {
+        match &self.repr {
+            NumberRepr::Big(b) => Some(b),
+            NumberRepr::PosInt(_) | NumberRepr::NegInt(_) | NumberRepr::Float(_) => None,
+        }
+    }
+
+    /// This integer's exact value as a [`BigInt`] — a `Big`'s payload, or a
+    /// fast-arm integer's `i128` value. [`Number::integer_cmp`]'s slow path.
+    fn to_bigint(&self) -> BigInt {
+        self.as_big().cloned().unwrap_or_else(|| {
+            BigInt::from(
+                self.as_i128()
+                    .expect("a non-Big integer fits i128; integer_cmp never passes a float"),
+            )
+        })
+    }
+
+    /// Orders two integers by value across every representation. The
+    /// `i128` fast path covers every pair that does not involve a `Big`
+    /// beyond `i128` (so `u64::MAX` and `-1` order correctly without
+    /// allocating); only a genuinely huge operand falls back to a [`BigInt`]
+    /// comparison. Callers establish that both numbers are integers, never a
+    /// float.
+    #[must_use]
+    pub(crate) fn integer_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self.as_i128(), other.as_i128()) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            _ => self.to_bigint().cmp(&other.to_bigint()),
+        }
     }
 
     /// Classifies a [`serde_json::Number`] into the compact representation,
     /// preserving exactly which of the three kinds [`serde_json`] chose so
-    /// reconstruction is byte-identical.
+    /// reconstruction is byte-identical. `serde_json`'s own parser never
+    /// yields an integer beyond `u64`/`i64` (it renders one as an `f64`
+    /// instead), so this never produces a [`NumberRepr::Big`] — that arm is
+    /// reached only from the Python-object boundary.
     fn from_serde(number: &serde_json::Number) -> Self {
         if let Some(u) = number.as_u64() {
             Self::from_u64(u)
@@ -1184,11 +1271,22 @@ impl Number {
     /// ([`Value::to_serde_json`]) falls back to `null`, matching how the
     /// streaming parse path already collapses a non-finite value reaching it
     /// some other way (see [`ValueVisitor::visit_f64`]).
+    ///
+    /// A [`NumberRepr::Big`] has no exact [`serde_json::Number`] form either
+    /// (`serde_json`'s number type, absent the `arbitrary_precision` feature,
+    /// tops out at `u64`/`i64`/`f64`), so it renders as its nearest `f64` —
+    /// the identical value `serde_json` would itself parse the same digits
+    /// back into. The byte-exact digits survive through the Python bindings'
+    /// own hand-written JSON writer (`crate::guard` in `onix-py`) and
+    /// [`Value::to_serde_json`]'s callers that need them; this
+    /// `serde_json::Value` bridge is only the CLI/report path, where an
+    /// integer beyond `u64` cannot enter from JSON text in the first place.
     fn to_serde_number(&self) -> Option<serde_json::Number> {
-        match self.repr {
-            NumberRepr::PosInt(u) => Some(serde_json::Number::from(u)),
-            NumberRepr::NegInt(i) => Some(serde_json::Number::from(i)),
-            NumberRepr::Float(f) => serde_json::Number::from_f64(f),
+        match &self.repr {
+            NumberRepr::PosInt(u) => Some(serde_json::Number::from(*u)),
+            NumberRepr::NegInt(i) => Some(serde_json::Number::from(*i)),
+            NumberRepr::Float(f) => serde_json::Number::from_f64(*f),
+            NumberRepr::Big(_) => self.as_f64().and_then(serde_json::Number::from_f64),
         }
     }
 }
@@ -1529,16 +1627,10 @@ fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
         return af.total_cmp(&bf);
     }
 
-    match (a.as_i64(), b.as_i64()) {
-        (Some(x), Some(y)) => x.cmp(&y),
-        // A `u64` above `i64::MAX` has no `i64` form, and is greater than
-        // every value that does.
-        (x, y) => x.is_some().cmp(&y.is_some()).reverse().then_with(|| {
-            a.as_u64()
-                .unwrap_or_default()
-                .cmp(&b.as_u64().unwrap_or_default())
-        }),
-    }
+    // Both are integers (an int and a float rank apart, so this arm never
+    // mixes them): compare by value across every representation, including a
+    // `u64` above `i64::MAX` and an arbitrary-precision `Big`.
+    a.integer_cmp(b)
 }
 
 /// An [`Object`]'s key: an interned `Arc<str>` for the common (valid UTF-8)

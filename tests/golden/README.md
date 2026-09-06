@@ -40,6 +40,7 @@ literal. A case that needs one writes it as a **tagged object**: a JSON object w
 | `$time` | `datetime.time` | supported (ISO 8601 string, offset optional) |
 | `$timedelta` | `datetime.timedelta` | supported (`{"days": D, "seconds": S, "microseconds": U}`) |
 | `$dict` | `dict` with a non-`str` key | supported (list of `[key, value]` pairs) |
+| `$bigint` | `int` beyond `i64`/`u64` | supported (exact decimal digits as a string) |
 
 So `{"$tuple": [1, 2]}` is the tuple `(1, 2)`, `{"$set": [1, 2]}` is the set
 `{1, 2}`, `[{"$tuple": []}]` is a list holding the empty tuple,
@@ -66,6 +67,32 @@ reserved key alongside others (`{"$tuple": [1], "x": 2}` is a two-key dict). The
 reserved names are claimed all at once, before their types are supported, so a
 fixture can never use one as an ordinary dict key and then change meaning later; a
 decoder that meets a tag it cannot decode yet fails loudly.
+
+`$bigint` is the one tag for a value JSON *can* express: `{"$bigint":
+"1267650600228229401496703205376"}` is `2**100`. An arbitrary-precision integer
+has a perfectly good JSON number literal, but this corpus's Rust reader parses a
+number back through `serde_json` without its `arbitrary_precision` feature, which
+collapses any integer beyond `i64`/`u64` to the nearest `f64` — so an untagged
+big integer in an input file would decode to a float, not the integer the case
+means. Tagging it as its exact decimal digits keeps the input a real integer for
+both readers. An in-range integer stays a plain JSON number, unchanged. This is
+the same representation gap onix's own value model closes (`onix_core::value::
+Number`'s arbitrary-precision arm); the JSON *text* readers (`diff_json`, the
+CLI) share `serde_json`'s limitation and parse such an integer as a float, so
+two documents whose integers differ only past `i64`/`u64` compare equal and
+diff to `{}` there — stated in the README's Known limitations and tracked in
+issue #92.
+
+Because a big integer in a **report value** (a `values_changed`/`type_changes`
+`old_value`/`new_value`) has the same `serde_json` gap, the golden test collapses
+both onix's output and the `expected.json` to that nearest-`f64` resolution
+before comparing (`collapse_bigint_tags` in `crates/onix-core/tests/golden.rs`).
+The diff *structure* — which category, which path, the int-versus-float type
+split — is still checked exactly; only a big integer's rendered *value* is
+compared at `f64` resolution there. onix's exact-digit rendering is pinned
+directly instead by the crate's own JSON-writer/`Number` unit tests and the
+Python bindings' `to_dict()`/`to_json()` round-trip tests, which do not go
+through `serde_json`.
 
 The one cost of the encoding is that a dict whose *only* key is a reserved name
 cannot be a fixture value. `scripts/golden_tags.py`'s `encode_tags` refuses to write
@@ -777,10 +804,38 @@ never becomes a false equality in the distance memo.
   normalization noted above), so real DeepDiff raises even for a value that is
   merely added, removed, or shuffled; onix hashes by instant and reports it
   raw. Keeping the deterministic report is this project's compatibility
-  policy: a crash is not a semantic worth reproducing. No golden case can hold
-  such a value either way, since the corpus records reports rather than
-  exceptions; `an_unnormalizable_datetime_under_ignore_order_is_reported_raw`
-  in `crates/onix-core/src/diff/tests.rs` pins onix's side.
+  policy: a crash is not a semantic worth reproducing.
+  `an_unnormalizable_datetime_under_ignore_order_is_reported_raw` in
+  `crates/onix-core/src/diff/tests.rs` pins onix's side (this case predates the
+  `deepdiff_raises` golden-marker mechanism the big-int bullet below uses, and
+  keeps its Rust-test pin).
+
+- **An integer beyond `f64::MAX` (about `2**1024`) crashes DeepDiff under
+  `ignore_order`; onix reports the change.** `distance.py::_get_numbers_distance`
+  runs `float(num1)` *outside* its `try`, and `float(2**1024)` raises
+  `OverflowError: int too large to convert to float`, so under `ignore_order`
+  (which reaches the numeric distance to pair unmatched candidates) real
+  DeepDiff raises rather than returning a diff — confirmed against
+  `deepdiff==9.1.0`. onix reads such an integer as a saturated `f64` infinity
+  (`num-bigint`'s `to_f64`), so the pair's distance short-circuits and it
+  reports `values_changed`, per the compatibility policy (a crash is not a
+  semantic to reproduce).
+
+  A crash-class case is a *rule*, not a one-off. Its directory holds the usual
+  `a.json`/`b.json`/`options.json`, and an `expected.json` that is not a report
+  but a two-key object: `deepdiff_raises` (the exception type name the generator
+  asserts real DeepDiff raises) and `onix` (onix's own exact report, with big
+  integers `$bigint`-tagged). Both readers detect a crash case by the presence
+  of the `deepdiff_raises` key. onix's result is pinned at two sites, because
+  the two harnesses render a beyond-`f64` integer differently: `golden.rs`'s
+  `crates/onix-core` path renders it through the `serde_json` bridge, which has
+  no exact big-int form, so it pins the null-valued shape inline
+  (`ignore_order_big_int_beyond_f64_pairs_without_panicking`); the bindings'
+  byte-exact writer keeps the full digits, so `test_golden_parity.py` asserts
+  onix's `to_dict()` equals `decode_tags(expected["onix"])`. `golden.rs`'s
+  `every_deepdiff_crash_case_is_pinned` test asserts every case carrying the
+  marker is registered in its pin list, so a new crash-class case cannot be
+  added without a pin.
 
 - **A `time` hashes by whole seconds-of-day under `ignore_order`, dropping
   the microsecond and any offset entirely.** `DeepHash._prep_datetime`

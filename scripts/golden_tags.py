@@ -18,10 +18,14 @@ for an aware value. ``$timedelta`` carries Python's own already-normalized ``{"d
 "seconds": S, "microseconds": U}`` triple instead of a single number: a flattened total-
 microsecond count overflows even a 64-bit integer at Python's own extreme
 ``days=999_999_999`` (see ``onix_core::datetime::TimeDelta``'s own doc), where the three
-components never do. The cost of the encoding is that a dict whose only
-key is literally one of the reserved names cannot be written as a golden fixture;
-:func:`encode_tags` refuses such a value rather than writing a file that would decode
-back into something else.
+components never do. ``$bigint`` carries an integer's exact decimal digits as a string:
+JSON *can* express an arbitrary-precision integer as a bare number literal, but onix's
+Rust golden reader parses one beyond ``i64``/``u64`` back to a lossy ``f64`` (serde_json
+without arbitrary precision), so an out-of-range ``int`` is tagged to survive that reader
+intact; an in-range ``int`` stays a plain number. The cost of the encoding is that a dict
+whose only key is literally one of the reserved names cannot be written as a golden
+fixture; :func:`encode_tags` refuses such a value rather than writing a file that would
+decode back into something else.
 
 A **plain JSON object can only ever have ``str`` keys**, so a dict with any other key kind
 (``int``, ``bool``, ``float``, ``None``, ``datetime``, ``date``, or a ``tuple`` of those) needs
@@ -56,8 +60,9 @@ DATE_TAG: Final[str] = "$date"
 TIME_TAG: Final[str] = "$time"
 TIMEDELTA_TAG: Final[str] = "$timedelta"
 DICT_TAG: Final[str] = "$dict"
+BIGINT_TAG: Final[str] = "$bigint"
 
-# Every tag name the encoding reserves. All eight are implemented; the list is still
+# Every tag name the encoding reserves. All nine are implemented; the list is still
 # fixed here so a fixture can never use one as an ordinary dict key, and so all three
 # readers agree on the full set.
 RESERVED_TAGS: Final[frozenset[str]] = frozenset(
@@ -70,8 +75,18 @@ RESERVED_TAGS: Final[frozenset[str]] = frozenset(
         TIME_TAG,
         TIMEDELTA_TAG,
         DICT_TAG,
+        BIGINT_TAG,
     }
 )
+
+# The inclusive `int` range JSON (and onix's own serde_json parse path) round-trips
+# without loss. An `int` outside it is written as a `$bigint` tag carrying its exact
+# decimal digits, because a plain JSON number literal beyond this range parses back to
+# a lossy `f64` in onix's Rust golden reader (serde_json without arbitrary precision) —
+# exactly the representation gap onix's own value model closes with its arbitrary-
+# precision arm. An in-range `int` stays a plain JSON number, unchanged.
+_I64_MIN: Final[int] = -(2**63)
+_U64_MAX: Final[int] = 2**64 - 1
 
 # The key kinds a dict may hold (mirrors `onix_core::value::ObjectKey`'s
 # non-`str` case, plus `str` itself, and only a `tuple` *of* these — never a
@@ -165,6 +180,11 @@ def encode_tags(value: TaggedValue) -> TaggedValue:
     if isinstance(value, tuple):
         return {TUPLE_TAG: [encode_tags(item) for item in value]}
 
+    # `bool` is an `int` subclass but has its own JSON literal, so it must be
+    # excluded before the out-of-range `int` check below.
+    if isinstance(value, int) and not isinstance(value, bool) and not (_I64_MIN <= value <= _U64_MAX):
+        return {BIGINT_TAG: str(value)}
+
     # `datetime` is a `date` subclass, so it must be tested first.
     if isinstance(value, datetime.datetime):
         return {DATETIME_TAG: value.isoformat()}
@@ -233,6 +253,9 @@ def decode_tags(value: TaggedValue) -> TaggedValue:
 
         if tag == TUPLE_TAG:
             return tuple(decode_tags(item) for item in value[tag])
+
+        if tag == BIGINT_TAG:
+            return int(str(value[tag]))
 
         if tag == SET_TAG:
             return {decode_tags(item) for item in value[tag]}

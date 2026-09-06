@@ -13,6 +13,11 @@ workspace = true
 serde = "1"
 serde_json = "1"
 unicode-general-category = "1.1"
+# Arbitrary-precision integers (a Python `int` outside i64/u64 range). Pinned
+# to the same 0.5 line arrow-buffer already resolves in this workspace, so no
+# second copy enters the tree.
+num-bigint = "0.5"
+num-traits = "0.2"
 
 [dev-dependencies]
 proptest = "1"

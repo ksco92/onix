@@ -1,0 +1,12 @@
+{
+  "type_changes": {
+    "root[0]": {
+      "new_type": "float",
+      "new_value": 1e+23,
+      "old_type": "int",
+      "old_value": {
+        "$bigint": "100000000000000000000000"
+      }
+    }
+  }
+}

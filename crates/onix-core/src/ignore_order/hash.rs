@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
+use num_bigint::BigInt;
+
 use crate::lcs::{ScalarKey, mix_float_bits, python_scalar_key};
 use crate::value::Value;
 
@@ -84,8 +86,9 @@ impl Hash for DistKey {
 
 /// Hashes a value consistently with its structural `PartialEq` (equal values
 /// hash equal): a per-variant discriminant, then the fields that equality
-/// compares — numbers through [`number_key`] (so `-0.0`/`0.0` agree and an
-/// int and an equal-valued float stay distinct), a datetime by its instant, a
+/// compares — numbers through [`number_key`] (so `-0.0`/`0.0` agree, an
+/// int and an equal-valued float stay distinct, and an integer beyond `i128`
+/// hashes by its digits at `O(digits)`), a datetime by its instant, a
 /// date by its ordinal, a list/tuple by its length and elements (order and
 /// repetition preserving), a set/frozenset by its canonical members, a dict by
 /// its sorted keys and their values. The exact byte sequence is unspecified;
@@ -183,12 +186,19 @@ pub(crate) enum ItemKey {
     /// `true`/`false` — tagged distinctly from any integer of the same
     /// value (never collides with `Int`).
     Bool(bool),
-    /// A JSON value `serde_json` parsed as an integer (no decimal point or
-    /// exponent) — see [`mod@crate::diff`]'s `python_type_name` for the same
-    /// int/float split used throughout this crate. Always exact: a
-    /// `serde_json::Number`'s non-float representation is always an `i64`
-    /// or `u64`, both of which fit losslessly in `i128`.
+    /// An integer whose value fits `i128` — see [`mod@crate::diff`]'s
+    /// `python_type_name` for the same int/float split used throughout this
+    /// crate. Covers every `i64`/`u64` value (both fit losslessly) and any
+    /// arbitrary-precision integer that happens to fit `i128`; a value equal
+    /// across those representations shares one key.
     Int(i128),
+    /// An arbitrary-precision integer whose magnitude exceeds `i128`, in its
+    /// own bucket — never collides with [`ItemKey::Int`] because that arm
+    /// only ever holds a value `i128` can represent (see [`number_key`],
+    /// which sends every fitting value there first). Boxed so this rare arm
+    /// does not widen the enum (a `BigInt` dwarfs the other arms' payloads),
+    /// which would grow every key in the `ignore_order` hash tables.
+    BigInt(Box<BigInt>),
     /// A float, keyed by [`deephash_float_bits`] — its exact bit pattern for
     /// any finite value (kept as its own bucket even when whole-numbered:
     /// `5.0` never collides with `Int(5)`; see this type's own doc), but one
@@ -279,6 +289,7 @@ impl std::hash::Hash for ItemKey {
             Self::Null => {}
             Self::Bool(b) => b.hash(state),
             Self::Int(i) => i.hash(state),
+            Self::BigInt(b) => b.hash(state),
             Self::Float(bits) => mix_float_bits(*bits).hash(state),
             Self::Str(s) => s.hash(state),
             Self::DateTime(instant) => instant.hash(state),
@@ -723,12 +734,13 @@ fn number_key(n: &crate::value::Number) -> ItemKey {
             .expect("Number::is_f64 guarantees as_f64 succeeds");
         return ItemKey::Float(deephash_float_bits(f));
     }
-    if let Some(i) = n.as_i64() {
-        return ItemKey::Int(i128::from(i));
+    if let Some(i) = n.as_i128() {
+        return ItemKey::Int(i);
     }
-    ItemKey::Int(i128::from(
-        n.as_u64()
-            .expect("a non-f64 Number always has an i64 or u64 repr"),
+    ItemKey::BigInt(Box::new(
+        n.as_big()
+            .expect("a non-float Number that overflows i128 is an arbitrary-precision integer")
+            .clone(),
     ))
 }
 
@@ -772,29 +784,13 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
         Value::Date(value) => (ItemKey::Date(value.ordinal()), part()),
         Value::Time(value) => (ItemKey::Time(value.hash_seconds_of_day()), part()),
         Value::TimeDelta(value) => (ItemKey::TimeDelta(value.value()), part()),
-        Value::Number(n) => {
-            let number = if n.is_f64() {
-                let f = n
-                    .as_f64()
-                    .expect("Number::is_f64 guarantees as_f64 succeeds");
-                // See `deephash_float_bits`: it is the identity on every
-                // finite float but `-0.0`, so an integral float like `2.0`
-                // keeps a distinct `Float` key from the integer `2` (this
-                // deliberately does NOT take the ordered path's `ScalarKey`
-                // integral-to-`Int` canonicalization — the two paths have
-                // genuinely different number semantics), and it collapses
-                // every `NaN` onto one shared key regardless of bits.
-                ItemKey::Float(deephash_float_bits(f))
-            } else if let Some(i) = n.as_i64() {
-                ItemKey::Int(i128::from(i))
-            } else {
-                let u = n
-                    .as_u64()
-                    .expect("a non-f64 serde_json::Number always has an i64 or u64 repr");
-                ItemKey::Int(i128::from(u))
-            };
-            (number, part())
-        }
+        // See `number_key` (and `deephash_float_bits`): an integral float
+        // like `2.0` keeps a distinct `Float` key from the integer `2` (this
+        // deliberately does NOT take the ordered path's `ScalarKey`
+        // integral-to-`Int` canonicalization — the two paths have genuinely
+        // different number semantics), every `NaN` collapses onto one shared
+        // key, and an integer keys by value regardless of magnitude.
+        Value::Number(n) => (number_key(n), part()),
         Value::Array(items) => (
             ItemKey::List(items.iter().map(|i| item_key(i, memo)).collect()),
             None,

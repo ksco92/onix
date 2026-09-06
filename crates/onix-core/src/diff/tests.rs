@@ -37,7 +37,7 @@ fn map_deeper_than(map: &Map<String, Value>, limit: usize) -> bool {
     super::dispatch::map_deeper_than(&cobj(map), limit)
 }
 fn number_as_i128(n: &Number) -> Option<i128> {
-    super::scalar::number_as_i128(&cnum(n))
+    cnum(n).as_i128()
 }
 
 /// Wraps `leaf` in `depth` single-key (`"k"`) nested dicts, so `leaf`

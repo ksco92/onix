@@ -11,7 +11,7 @@
 //! | --- | --- | --- |
 //! | `None` | `Null` | |
 //! | `bool` | `Bool` | checked before `int` — `bool` is a Python `int` subclass |
-//! | `int` | `Number` | must fit in `i64` or `u64`; see below |
+//! | `int` | `Number` | any magnitude — `i64`/`u64` fast path, arbitrary precision beyond it |
 //! | `float` | `Number` | `NaN`/`Infinity`/`-Infinity` included |
 //! | `str` | `Str` | UTF-8 the fast, common way; a lone surrogate code point survives too, see below |
 //! | `dict` (keys below), or a subclass | `Object` | a `str` key (including a surrogate one) interned across the whole walk |
@@ -31,11 +31,14 @@
 //! `tuple`/`frozenset` subclass including a `namedtuple`, reaching a set
 //! member is refused the same way any other unsupported type is).
 //!
+//! An `int` of any magnitude converts: a value in `i64::MIN..=u64::MAX` takes
+//! the compact fast arm, and a larger one keeps its exact arbitrary-precision
+//! value (read through `int`'s own unbound `to_bytes`, never a subclass's own
+//! methods — see [`exact_big_int`]), matching real `DeepDiff`, which compares
+//! Python `int`s natively.
+//!
 //! Every other type raises a Python exception instead of converting:
 //!
-//! - An `int` outside `i64::MIN..=u64::MAX` raises [`PyValueError`]:
-//!   arbitrary-precision integers are not supported in this MVP (real
-//!   `DeepDiff` supports them natively).
 //! - A `dict` key may be `str` (including one holding a lone surrogate code
 //!   point — see below), `None`, `bool`, `int`, `float`, `datetime`,
 //!   `date`, or a `tuple` of those (never a nested `tuple`), or a
@@ -185,6 +188,7 @@
 //! because equality can't be known yet at conversion time.
 use std::sync::Arc;
 
+use num_bigint::BigInt;
 use onix_core::datetime::{
     Date as CDate, DateTime as CDateTime, Time as CTime, TimeDelta as CTimeDelta,
 };
@@ -199,8 +203,8 @@ use pyo3::types::iter::{
     BoundTupleIterator,
 };
 use pyo3::types::{
-    PyBool, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyFrozenSet, PyInt, PyList,
-    PySet, PyString, PyTime, PyTuple, PyTzInfo,
+    IntoPyDict, PyBool, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyFrozenSet, PyInt,
+    PyList, PySet, PyString, PyTime, PyTuple, PyType, PyTzInfo,
 };
 
 use crate::errors::MaxDepthError;
@@ -421,7 +425,7 @@ fn classify<'py>(
     }
 
     if let Ok(i) = current.cast::<PyInt>() {
-        return Ok(Step::Done(int_to_value(i)?));
+        return Ok(Step::Done(int_to_value(i, path)?));
     }
 
     if let Ok(f) = current.cast::<PyFloat>() {
@@ -841,7 +845,7 @@ fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyR
     }
 
     if let Ok(i) = obj.cast::<PyInt>() {
-        return int_to_value(i);
+        return int_to_value(i, dict_path);
     }
 
     if let Ok(f) = obj.cast::<PyFloat>() {
@@ -1032,7 +1036,7 @@ fn out_of_range_error(type_name: &str, path: &[PathSegment]) -> PyErr {
     ))
 }
 
-fn int_to_value(i: &Bound<'_, PyInt>) -> PyResult<CValue> {
+fn int_to_value(i: &Bound<'_, PyInt>, path: &[PathSegment]) -> PyResult<CValue> {
     if let Ok(v) = i.extract::<i64>() {
         return Ok(CValue::Number(CNumber::from_i64(v)));
     }
@@ -1041,10 +1045,52 @@ fn int_to_value(i: &Bound<'_, PyInt>) -> PyResult<CValue> {
         return Ok(CValue::Number(CNumber::from_u64(v)));
     }
 
-    Err(PyValueError::new_err(
-        "integer is out of range for onix's internal value model (must fit in i64 or u64); \
-         arbitrary-precision integers are not supported in this MVP, unlike real DeepDiff",
-    ))
+    // Beyond i64/u64: read the exact value (see `exact_big_int`).
+    // `CNumber::from_bigint` narrows it back to a fast arm if it turns out to
+    // fit one, so only a genuinely large integer keeps the arbitrary-precision
+    // representation.
+    let big = exact_big_int(i).map_err(|err| {
+        PyValueError::new_err(format!(
+            "could not read a large integer at {}: {err}",
+            render_path(path),
+        ))
+    })?;
+
+    Ok(CValue::Number(CNumber::from_bigint(big)))
+}
+
+/// Reads a Python `int`'s exact value as a [`BigInt`] through `int`'s own
+/// **unbound** `bit_length`/`to_bytes`, never the object's own methods.
+///
+/// The fast `i64`/`u64` path above reads the value straight from `PyLong`'s
+/// storage; a subclass instance keeps that true value there, but can override
+/// `__str__`/`__index__`/`to_bytes` to report a *different* one, so reading a
+/// large value through any of those (as an earlier `str(int)` version did)
+/// would let a subclass control what onix compares — a false match, a
+/// fabricated value, or a flipped sign. Calling the base `int` type's own
+/// slots on the instance bypasses every override and reads the same value the
+/// fast path and `DeepDiff` do. It also sidesteps `CPython`'s `int`->`str`
+/// digit cap (`sys.set_int_max_str_digits`), so an integer of any length
+/// converts.
+fn exact_big_int(i: &Bound<'_, PyInt>) -> PyResult<BigInt> {
+    let (int_type, kwargs) = int_type_and_signed_kwargs(i.py())?;
+    let bit_length: usize = int_type.getattr("bit_length")?.call1((i,))?.extract()?;
+    // One extra byte so the two's-complement sign bit always has room.
+    let byte_len = bit_length / 8 + 1;
+    let bytes: Vec<u8> = int_type
+        .getattr("to_bytes")?
+        .call((i, byte_len, "little"), Some(&kwargs))?
+        .extract()?;
+
+    Ok(BigInt::from_signed_bytes_le(&bytes))
+}
+
+/// The base `int` type object and a `{"signed": True}` kwargs dict — the shared
+/// pieces of the byte-based big-int read ([`exact_big_int`]) and write
+/// ([`number_to_pyobject`]), which both call `int.to_bytes`/`int.from_bytes`
+/// **unbound** on the base type so a subclass override cannot intercept them.
+fn int_type_and_signed_kwargs(py: Python<'_>) -> PyResult<(Bound<'_, PyType>, Bound<'_, PyDict>)> {
+    Ok((py.get_type::<PyInt>(), [("signed", true)].into_py_dict(py)?))
 }
 
 /// Every `float` converts, including `NaN`/`Infinity`/`-Infinity`: unlike
@@ -1390,14 +1436,26 @@ fn number_to_pyobject(py: Python<'_>, n: &CNumber) -> PyResult<Py<PyAny>> {
             return v.into_py_any(py);
         }
 
-        // A non-float that does not fit an i64 is by construction a u64
-        // above i64::MAX.
         if let Some(v) = n.as_u64() {
             return v.into_py_any(py);
+        }
+
+        // A non-float that fits neither is an arbitrary-precision integer;
+        // rebuild a Python `int` from its exact two's-complement bytes via
+        // `int.from_bytes`, the inverse of `exact_big_int`'s read. Bytes, not
+        // decimal text, so this never trips `CPython`'s `int`<->`str` digit
+        // cap that a several-thousand-digit integer would otherwise hit.
+        if let Some(big) = n.as_big() {
+            let (int_type, kwargs) = int_type_and_signed_kwargs(py)?;
+            let bytes = big.to_signed_bytes_le();
+            return int_type
+                .getattr("from_bytes")?
+                .call((PyBytes::new(py, &bytes), "little"), Some(&kwargs))?
+                .into_py_any(py);
         }
     }
 
     n.as_f64()
-        .expect("a Number is always an i64, a u64, or an f64")
+        .expect("a non-integer Number is always an f64")
         .into_py_any(py)
 }

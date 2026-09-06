@@ -142,7 +142,10 @@ use super::hash::{
 /// and the `A * R` entries one pairing records just share those [`Rc`](std::rc::Rc)s. The
 /// *lookup* cost is not constant, though — every probe hashes both keys (a
 /// full walk of each value) and, on a bucket match, compares them structurally
-/// — so per-pair work is proportional to record size (see [`super::hash::DistKey`]).
+/// — so per-pair work is proportional to record size (see [`super::hash::DistKey`]),
+/// and a leaf that is an integer beyond `i128` (an [`ItemKey::BigInt`], via
+/// `number_key`) additionally costs its own *digit length* per hash and per
+/// comparison, which the element-count cap does not bound.
 type DistanceKey = (DistKey, DistKey);
 
 /// The per-top-level-diff caches described in this module's doc: container-pair
@@ -154,14 +157,22 @@ type DistanceKey = (DistKey, DistKey);
 /// recursive diff, and dropped when it returns. No eviction and no tuning
 /// knobs: each is bounded by the number of distinct queries one diff makes.
 /// `member_content`'s own key can itself carry a nested dict's keys (see its
-/// own field doc), so a lookup there is not always a flat comparison.
+/// own field doc), so a lookup there is not always a flat comparison. A leaf
+/// that is an integer beyond `i128` is keyed by an [`ItemKey::BigInt`] (in the
+/// `cache`'s `DistKey`s and, when a set member, in `member_content`), hashed
+/// and compared by its magnitude at `O(digit length)` — a per-lookup cost the
+/// element-count bounds above do not cap (see `super::fxhash`'s doc).
 ///
 /// [`rough_distance`]: super::distance::rough_distance
 pub(crate) struct IgnoreOrderMemo {
     cache: RefCell<HashMap<DistanceKey, f64>>,
     /// Interns each distinct hashable-tuple identity to its place in
     /// `tuple_digests`, so a nested tuple can be named by one [`TupleId`]
-    /// inside its parent's identity instead of by a copy of its own.
+    /// inside its parent's identity instead of by a copy of its own. A tuple
+    /// member that is an integer beyond `i128` reaches this `FxHash` key as a
+    /// [`ScalarKey::Big`](crate::lcs::ScalarKey) (via `PyHashPart::Scalar`),
+    /// hashed and compared by its magnitude digits at `O(digit length)` — the
+    /// same per-lookup cost `super::fxhash`'s doc notes for `ItemKey::BigInt`.
     tuple_ids: RefCell<HashMap<PyHashKey, TupleId>>,
     /// The digest assigned to each interned identity, indexed by
     /// [`TupleId::index`].

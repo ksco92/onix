@@ -68,6 +68,17 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// changes which values these tables treat as the same item, not their
 /// per-lookup cost.
 ///
+/// An integer beyond `i128` is carried as `ItemKey::BigInt` (hence a
+/// `DistKey` leaf, via `number_key`) and, inside a hashable tuple, as
+/// [`ScalarKey::Big`](crate::lcs::ScalarKey) reaching the `tuple_ids` memo key
+/// through `PyHashPart::Scalar`; both hash and compare by its magnitude digits,
+/// which carry ample entropy and so need no `mix_float_bits` treatment, but at
+/// `O(digits)` rather than `O(1)` per lookup — a cost proportional to that one
+/// operand's *digit length* (the number of machine words in its magnitude),
+/// which the `ignore_order` element-count cap does not bound: a single
+/// astronomically large integer costs its own digit length per hash and per
+/// comparison regardless of how few elements the diff holds.
+///
 /// For those remaining `ignore_order`-only tables the trade is deliberate and
 /// measured. Re-keying them to `SipHash` (`RandomState`) added a material,
 /// measured double-digit-percentage per-call cost on the pairing-heavy

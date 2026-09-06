@@ -4,7 +4,7 @@ Runs through the actual `deepdiff_rs.DeepDiff` class (not the fast JSON-string
 path), so this exercises the Python-object-to-`Value` conversion layer itself,
 not just the diff engine underneath it.
 
-Ten batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
+Eleven batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
 and `ignore_order=True`): the JSON-shaped types; the same plus tuples, as
 containers in their own right and as elements of lists, dicts and other
 tuples; the same plus sets and frozensets, likewise; the same plus naive and
@@ -23,7 +23,11 @@ alongside tuples and calendar values as ordinary leaves too (issue #62); and,
 at `SUBCLASS_KEY_SEED_COUNT` cases, a dict keyed by a `namedtuple`, a `tuple`
 subclass, or a `datetime`/`date` subclass against its base-type twin, half
 matching by value and half not (issue #64's dict-key follow-up: `DeepDiff`'s
-key matching is class-agnostic).
+key matching is class-agnostic); and, at `SEED_COUNT` cases, JSON-shaped values
+whose leaves may be arbitrary-precision `int`s beyond `i64`/`u64` in both signs
+(issue #65) — as bare scalars only (no tuples/sets), so the batch stays on the
+big-int property rather than the pre-existing container-hashing one a biased
+alphabet inside a hashable container would surface.
 Every batch compares `to_json()` (canonically, i.e. parsed, since neither
 tool promises a key order) *and* `to_dict()` by `==`, the comparison that can
 see a tuple, a set, a `datetime` or a `date` where the JSON one cannot.
@@ -111,6 +115,21 @@ JsonValue = Union[
 DICT_KEYS: Final[list[str]] = ["a", "b", "c", "d", "e"]
 SCALARS: Final[list[JsonValue]] = [
     None, True, False, 0, 1, -1, 2, 3, 0.0, 1.5, -2.25, "x", "y", "z", "",
+]
+
+# The big-integer batch's own seed range and leaf alphabet (issue #65): the
+# base scalars plus Python `int`s beyond `i64`/`u64` in both signs, including
+# one past `i128` (`2**200`) and the just-past-`u64::MAX` boundary (`2**64`).
+# Big ints appear only as *bare* scalars here (this batch never enables
+# tuples/sets/calendar, so a big int is never a member of a hashable
+# container): a biased alphabet inside a hashable container would surface the
+# pre-existing container-hashing divergence instead of the arbitrary-precision
+# property under test.
+BIG_INT_SEED_BASE: Final[int] = 11_000_000
+BIG_INT_SCALARS: Final[list[JsonValue]] = [
+    *SCALARS,
+    2**64, 2**64 + 1, -(2**64), 2**70, -(2**70),
+    2**100, 2**100 + 1, -(2**100), 10**30, 2**200, -(2**200),
 ]
 
 # Comfortably over the >=500-case target; each case also runs twice (once
@@ -456,6 +475,7 @@ def _mutate(
     tuples: bool = False,
     calendar: bool = False,
     dict_keys: bool = False,
+    scalars: list[JsonValue] | None = None,
 ) -> JsonValue:
     """
     Build a related-but-different copy of `value` (shuffle + selective mutation).
@@ -472,6 +492,8 @@ def _mutate(
         #62). Unset means the exact `rng.choice(DICT_KEYS)` every
         pre-existing corpus used, so those stay bit-for-bit the ones they
         were.
+    :param scalars: Scalar alphabet for replacement leaves; `None` uses the
+        module `SCALARS`, keeping every pre-existing corpus bit-for-bit.
     :return: A structurally related, partially mutated copy.
     """
     if isinstance(value, (list, tuple)):
@@ -481,7 +503,7 @@ def _mutate(
         for index in range(len(mutated)):
             if rng.random() < 0.3:
                 mutated[index] = _gen_value(
-                    rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys
+                    rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys, scalars=scalars
                 )
 
         return tuple(mutated) if isinstance(value, tuple) else mutated
@@ -492,22 +514,26 @@ def _mutate(
         for key in list(mutated):
             if rng.random() < 0.3:
                 mutated[key] = _gen_value(
-                    rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys
+                    rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys, scalars=scalars
                 )
 
         if rng.random() < 0.3:
             new_key = _gen_dict_key(rng, dict_keys) if dict_keys else rng.choice(DICT_KEYS)
             mutated[new_key] = _gen_value(
-                rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys
+                rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys, scalars=scalars
             )
 
         return mutated
 
-    return _gen_value(rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
+    return _gen_value(rng, 2, tuples=tuples, calendar=calendar, dict_keys=dict_keys, scalars=scalars)
 
 
 def _generate_case(
-    seed: int, tuples: bool = False, calendar: bool = False, dict_keys: bool = False
+    seed: int,
+    tuples: bool = False,
+    calendar: bool = False,
+    dict_keys: bool = False,
+    scalars: list[JsonValue] | None = None,
 ) -> tuple[JsonValue, JsonValue]:
     """
     Generate one seeded `(a, b)` pair.
@@ -516,11 +542,14 @@ def _generate_case(
     :param tuples: Whether the pair may contain tuples.
     :param calendar: Whether the pair may contain datetimes and dates.
     :param dict_keys: Whether a dict's keys may be non-`str` (issue #62).
+    :param scalars: Scalar alphabet to draw leaves from; `None` uses the module
+        `SCALARS`, so every pre-existing batch's corpus stays bit-for-bit the
+        one it was.
     :return: A related-but-different `(a, b)` pair.
     """
     rng = random.Random(seed)
-    a = _gen_value(rng, 3, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
-    b = _mutate(rng, a, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
+    a = _gen_value(rng, 3, scalars=scalars, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
+    b = _mutate(rng, a, tuples=tuples, calendar=calendar, dict_keys=dict_keys, scalars=scalars)
 
     if tuples:
         b = _tuple_edge_mutations(rng, b)
@@ -736,6 +765,17 @@ def test_differential_fuzz_with_tuples_matches_real_deepdiff() -> None:
     assert not mismatches, (
         f"{len(mismatches)} of {SEED_COUNT * 2} tuple fuzz cases diverged from real DeepDiff "
         f"(showing up to 3): {mismatches[:3]}"
+    )
+
+
+def test_differential_fuzz_with_big_integers_matches_real_deepdiff() -> None:
+    """Runs a SEED_COUNT-case batch whose leaves include arbitrary-precision ints (issue #65)."""
+    seeds = range(BIG_INT_SEED_BASE, BIG_INT_SEED_BASE + SEED_COUNT)
+    mismatches = _run_batch(seeds, case_fn=lambda seed: _generate_case(seed, scalars=BIG_INT_SCALARS))
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} big-integer fuzz cases diverged from real "
+        f"DeepDiff (showing up to 3): {mismatches[:3]}"
     )
 
 

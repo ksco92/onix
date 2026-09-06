@@ -105,6 +105,136 @@ fn number_float_specials_and_conversions() {
     assert!(!Number::from_u64(3).is_f64());
 }
 
+// --- arbitrary-precision integers ---------------------------------------
+
+/// Parses a decimal integer string into a [`BigInt`] for the tests below.
+fn big(text: &str) -> num_bigint::BigInt {
+    text.parse().expect("a decimal integer string")
+}
+
+#[test]
+fn from_bigint_narrows_to_the_fast_arms_when_it_fits() {
+    // A value that fits u64/i64 must not keep the arbitrary-precision arm, so
+    // every integer has one canonical representation and derived equality
+    // stays correct.
+    assert_eq!(Number::from_bigint(big("42")), Number::from_u64(42));
+    assert_eq!(Number::from_bigint(big("-42")), Number::from_i64(-42));
+    assert_eq!(
+        Number::from_bigint(big(&u64::MAX.to_string())),
+        Number::from_u64(u64::MAX)
+    );
+    assert_eq!(
+        Number::from_bigint(big(&i64::MIN.to_string())),
+        Number::from_i64(i64::MIN)
+    );
+    // A fitting value never reports itself as a big integer.
+    assert!(Number::from_bigint(big("42")).as_big().is_none());
+    assert!(!Number::from_bigint(big("42")).is_f64());
+}
+
+#[test]
+fn big_integer_keeps_its_exact_value() {
+    let two_pow_100 = "1267650600228229401496703205376";
+    let n = Number::from_bigint(big(two_pow_100));
+
+    // Beyond u64/i64, so it keeps the arbitrary-precision arm and reports no
+    // i64/u64 view.
+    assert_eq!(
+        n.as_big().map(ToString::to_string).as_deref(),
+        Some(two_pow_100)
+    );
+    assert_eq!(n.as_i64(), None);
+    assert_eq!(n.as_u64(), None);
+    // 2^100 fits i128; a value beyond i128 does not.
+    assert_eq!(
+        n.as_i128(),
+        Some(1_267_650_600_228_229_401_496_703_205_376_i128)
+    );
+    assert_eq!(Number::from_bigint(big(&"9".repeat(40))).as_i128(), None);
+}
+
+#[test]
+fn big_integer_equality_and_ordering_span_every_tier() {
+    let small = Number::from_u64(5);
+    let neg = Number::from_i64(-5);
+    let huge = Number::from_bigint(big("1267650600228229401496703205376")); // 2^100
+    let huge2 = Number::from_bigint(big("1267650600228229401496703205377")); // 2^100 + 1
+    let neg_huge = Number::from_bigint(big("-1267650600228229401496703205376"));
+    // Beyond i128 (as_i128() is None on both), so ordering these forces the
+    // BigInt fallback in `integer_cmp` rather than the i128 fast path.
+    let vast = Number::from_bigint(big(&("1".to_string() + &"0".repeat(40))));
+    let neg_vast = Number::from_bigint(big(&("-1".to_string() + &"0".repeat(40))));
+
+    // Equality: a big int equals only its own value, never a fast-arm value.
+    assert_eq!(
+        huge,
+        Number::from_bigint(big("1267650600228229401496703205376"))
+    );
+    assert_ne!(huge, huge2);
+    assert_ne!(huge, small);
+    assert_eq!(
+        vast,
+        Number::from_bigint(big(&("1".to_string() + &"0".repeat(40))))
+    );
+    assert_ne!(vast, huge);
+
+    // Ordering across the tiers, via the crate's canonical set order — the
+    // beyond-i128 values exercise `integer_cmp`'s BigInt fallback against a
+    // small `PosInt`/`NegInt` and against an i128-fitting `Big`.
+    let mut items: Vec<Value> = vec![
+        Value::Number(huge2.clone()),
+        Value::Number(neg_huge.clone()),
+        Value::Number(vast.clone()),
+        Value::Number(small.clone()),
+        Value::Number(neg_vast.clone()),
+        Value::Number(neg.clone()),
+        Value::Number(huge.clone()),
+    ];
+    let set = SetItems::new(items.split_off(0));
+    let ordered: Vec<&Number> = set
+        .iter()
+        .map(|v| match v {
+            Value::Number(n) => n,
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(
+        ordered,
+        [&neg_vast, &neg_huge, &neg, &small, &huge, &huge2, &vast],
+        "big ints sort by value alongside the fast arms, past i128 too"
+    );
+}
+
+#[test]
+fn big_integer_object_key_renders_full_digits_in_json() {
+    // A big-int dict *key* rendered into JSON keeps its full decimal digits,
+    // matching Python's json.dumps stringification of a non-`str` key.
+    let key = ObjectKey::Other(Box::new(Value::Number(Number::from_bigint(big(
+        "1267650600228229401496703205376",
+    )))));
+    assert_eq!(
+        super::object_key_json_string(&key),
+        "1267650600228229401496703205376"
+    );
+}
+
+#[test]
+fn big_integer_renders_full_digits_but_bridges_to_serde_json_as_f64() {
+    let digits = "1267650600228229401496703205376"; // 2^100
+    let value = Value::Number(Number::from_bigint(big(digits)));
+
+    // `crate::path`'s repr (used for dict-key/path rendering) keeps every
+    // digit.
+    assert_eq!(crate::path::python_repr(&value), digits);
+
+    // The `serde_json::Value` bridge has no exact form beyond u64/i64, so it
+    // renders the nearest f64 (the same value `serde_json` would itself parse
+    // those digits back into) — see `Number::to_serde_number`'s doc.
+    let bridged = value.to_serde_json();
+    let expected: f64 = digits.parse().expect("finite");
+    assert_eq!(bridged, serde_json::json!(expected));
+}
+
 // --- object lookup and ordering -----------------------------------------
 
 #[test]

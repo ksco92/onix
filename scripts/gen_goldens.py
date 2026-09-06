@@ -70,6 +70,31 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
     "null_vs_value": ({"a": None}, {"a": 1}),
     "float_change": ({"a": 1.5}, {"a": 2.5}),
     "large_integer_equal": ({"a": 18446744073709551615}, {"a": 18446744073709551615}),
+    # Arbitrary-precision integers (issue #65): a Python `int` beyond
+    # `i64`/`u64` compares, orders and renders by its exact value. `2**64` sits
+    # one past `u64::MAX`; `2**100` and `-(2**100)` are far beyond it. An
+    # int-vs-float pairing is a `type_changes` even when the two are Python-
+    # equal (`10**20 == 1e20`), matching DeepDiff's default int/float split.
+    "big_int_2_64_boundary_equal": ({"a": 2**64}, {"a": 2**64}),
+    "big_int_values_changed": ({"a": 2**100}, {"a": 2**100 + 1}),
+    "negative_big_int_values_changed": ({"a": -(2**100)}, {"a": -(2**100) - 1}),
+    "big_int_and_equal_float_type_change": ({"a": 10**20}, {"a": 1e20}),
+    "big_int_vs_float_type_change": ({"a": 2**100}, {"a": 1e100}),
+    "big_int_in_tuple_element_changed": ({"a": (2**100,)}, {"a": (2**100 + 1,)}),
+    # The ordered-list matcher uses Python `==`, so a big int and a float it
+    # equals pair as one element (empty diff), while a big int and the float it
+    # does *not* equal (`10**23 != 1e23` in `f64`) are a `type_changes`.
+    "list_big_int_and_equal_float_pair": ([10**20], [1e20]),
+    "list_big_int_vs_unequal_float": ([10**23], [1e23]),
+    # A big int as a (non-`str`) dict key, and a big-int key matched against
+    # the float it is Python-equal to (`10**20 == 1e20`, a value whose float
+    # form round-trips through onix's JSON reader exactly; the exact-bits
+    # collapse is pinned directly in a Rust unit test — see
+    # `crate::lcs`'s tests).
+    "dict_key_big_int_added": ({}, {2**70: "x"}),
+    "dict_key_big_int_vs_float_matches": ({10**20: "a"}, {1e20: "a"}),
+    # A big int as a set member.
+    "set_big_int_item_changed": ({1, 2**70}, {1, 2**71}),
     # Type changes between container kinds, at the root and at depth.
     "type_change_dict_vs_scalar": ({"a": {"x": 1}}, {"a": 5}),
     "type_change_list_vs_dict": ({"a": [1, 2]}, {"a": {"x": 1}}),
@@ -888,6 +913,25 @@ def _generate_time_timedelta_ignore_order_fuzz_cases() -> (
 # distinguishing it from the ordered-path CASES above.
 IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {
     "ignore_order_pure_shuffle_is_empty": ([1, 2, 3], [3, 2, 1], {"ignore_order": True}),
+    # Arbitrary-precision integers (issue #65) under ignore_order: a big int
+    # hash-matches its equal across a shuffle; a changed big int pairs by
+    # numeric distance; and a big int pairs with a float (distinct hash
+    # buckets, so paired via distance into a values_changed, not dropped).
+    "ignore_order_big_int_shuffle": (
+        [1, 2**100, 3],
+        [3, 2**100, 1],
+        {"ignore_order": True},
+    ),
+    "ignore_order_big_int_changed": (
+        [2**100],
+        [2**100 + 1],
+        {"ignore_order": True},
+    ),
+    "ignore_order_big_int_vs_float_pairs": (
+        [2**100],
+        [1e100],
+        {"ignore_order": True},
+    ),
     "ignore_order_shuffle_plus_one_changed": (
         [10, 20, 30, 40, 50],
         [50, 999, 30, 10, 20],
@@ -1350,6 +1394,38 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
     ),
 }
 
+# Cases where real DeepDiff *raises* rather than returning a diff. Per the
+# compatibility policy (a DeepDiff crash -> onix picks a deterministic behavior
+# and documents it), onix returns a report instead; DeepDiff has no output to
+# match, so `expected.json` records both the exception it raises and onix's own
+# expected report, `{"deepdiff_raises": "<Exception>", "onix": <report>}`. Each
+# entry is `(a, b, kwargs, exception_name, onix_report)`; the generator asserts
+# DeepDiff really raises `exception_name`, and both golden harnesses pin
+# `onix_report` (the bindings' byte-exact report — `crates/onix-core`'s
+# `serde_json` bridge has no integer form past `f64`, so `golden.rs` pins its
+# own null-valued rendering of the same shape inline).
+#
+# `ignore_order_big_int_beyond_f64_deepdiff_overflows`: an integer past
+# `f64::MAX` (`2**2000`). Under `ignore_order` DeepDiff's `_get_numbers_distance`
+# calls `float(num1)` outside its `try`, which raises `OverflowError` on such an
+# int; onix reads it as a saturated `f64` infinity, so the pair's distance
+# short-circuits and it reports the change instead of crashing.
+DEEPDIFF_RAISES_CASES: dict[
+    str, tuple[TaggedValue, TaggedValue, dict[str, bool], str, TaggedValue]
+] = {
+    "ignore_order_big_int_beyond_f64_deepdiff_overflows": (
+        [2**2000],
+        [2**2000 + 12345],
+        {"ignore_order": True},
+        "OverflowError",
+        {
+            "values_changed": {
+                "root[0]": {"old_value": 2**2000, "new_value": 2**2000 + 12345},
+            },
+        },
+    ),
+}
+
 # Seeded-random ignore_order fuzz cases: the ignore_order_10k fixture
 # shape (perf/generate_fixtures.py::build_ignore_order_list) at small n — a
 # shuffled copy of `a` with a slice of values overwritten from a disjoint
@@ -1405,6 +1481,35 @@ def read_case_input(path: Path) -> TaggedValue:
         return decode_tags(json.load(f))
 
 
+def write_case_inputs(name: str, a: TaggedValue, b: TaggedValue, ignore_order: bool) -> Path:
+    """
+    Write a case's ``a.json``/``b.json``/``options.json`` and verify they decode back.
+
+    The committed bytes must stand for exactly the case defined in code, so each
+    input is read back and checked before it is used as a spec. DeepDiff is then
+    run on the original objects rather than the round-tripped ones: writing sorts
+    dict keys, and one documented case (``path_rendering_collision``) has an
+    outcome that depends on a dict's own insertion order.
+
+    :param name: The case directory name under ``tests/golden/``.
+    :param a: The first input value.
+    :param b: The second input value.
+    :param ignore_order: The ``ignore_order`` option for this case.
+    :return: The case directory, for the caller's own ``expected.json`` step.
+    """
+    case_dir = GOLDEN_ROOT / name
+    case_dir.mkdir(parents=True, exist_ok=True)
+
+    write_json(case_dir / "a.json", a)
+    write_json(case_dir / "b.json", b)
+    write_json(case_dir / "options.json", {"ignore_order": ignore_order})
+
+    for path, value in ((case_dir / "a.json", a), (case_dir / "b.json", b)):
+        assert read_case_input(path) == value, f"{path} does not decode back to its case value"
+
+    return case_dir
+
+
 def main() -> None:
     """Regenerate every case directory under tests/golden/ from every case dict above."""
     # Pinned to 3.14, Unicode 16.0.0; see tests/golden/README.md, Pinned versions.
@@ -1428,28 +1533,34 @@ def main() -> None:
     }
 
     for name, (a, b, kwargs) in all_cases.items():
-        case_dir = GOLDEN_ROOT / name
-        case_dir.mkdir(parents=True, exist_ok=True)
-
-        write_json(case_dir / "a.json", a)
-        write_json(case_dir / "b.json", b)
-        write_json(case_dir / "options.json", {"ignore_order": bool(kwargs.get("ignore_order", False))})
-
-        # The committed bytes must stand for exactly the case defined above,
-        # so every fixture is read back and checked before it is used as a
-        # spec. DeepDiff is then run on the original objects rather than the
-        # round-tripped ones: writing sorts dict keys, and one documented case
-        # (path_rendering_collision) has an outcome that depends on a dict's
-        # own insertion order.
-        for path, value in ((case_dir / "a.json", a), (case_dir / "b.json", b)):
-            assert read_case_input(path) == value, f"{path} does not decode back to its case value"
+        case_dir = write_case_inputs(name, a, b, bool(kwargs.get("ignore_order", False)))
 
         write_json(
             case_dir / "expected.json",
             canonical_report(DeepDiff(a, b, verbose_level=2, **kwargs)),
         )
 
-    print(f"Wrote {len(all_cases)} golden cases to {GOLDEN_ROOT}")
+    for name, (a, b, kwargs, exception_name, onix_report) in DEEPDIFF_RAISES_CASES.items():
+        case_dir = write_case_inputs(name, a, b, bool(kwargs.get("ignore_order", False)))
+
+        try:
+            DeepDiff(a, b, verbose_level=2, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - the exact type is asserted next
+            actual = type(exc).__name__
+            assert actual == exception_name, f"{name}: expected DeepDiff to raise {exception_name}, got {actual}"
+        else:
+            raise AssertionError(f"{name}: expected DeepDiff to raise {exception_name}, but it returned")
+
+        # DeepDiff has no diff to record; `expected.json` carries the exception
+        # it raises and onix's own expected report, which both golden harnesses
+        # pin.
+        write_json(
+            case_dir / "expected.json",
+            {"deepdiff_raises": exception_name, "onix": onix_report},
+        )
+
+    total = len(all_cases) + len(DEEPDIFF_RAISES_CASES)
+    print(f"Wrote {total} golden cases to {GOLDEN_ROOT}")
 
 
 if __name__ == "__main__":
