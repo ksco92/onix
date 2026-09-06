@@ -1,11 +1,12 @@
 //! Per-pass wall-time and peak-RSS profiler for the row diff, compiled only
 //! under the `profile` feature and absent from the release wheel (which never
-//! enables it). Peak RSS is sampled from `ps` in a background thread, so the
-//! module needs no new dependency and no `unsafe`; each sample is attributed to
-//! whichever pass is active when it is taken.
+//! enables it). Peak RSS is sampled by running the macOS/Linux `ps` in a
+//! background thread, so the module needs no new dependency and no `unsafe`; each
+//! sample is attributed to whichever pass is active when it is taken.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// One profiled pass: its label, the wall time between [`enter`] and its guard's
@@ -29,6 +30,10 @@ struct State {
     passes: Vec<Pass>,
     accums: Vec<Accum>,
     sampler_running: bool,
+    /// The running sampler thread; [`finish`] joins it before returning, so a
+    /// later [`begin`] cannot spawn a second sampler while this one is still
+    /// draining its final tick.
+    sampler: Option<JoinHandle<()>>,
 }
 
 fn state() -> MutexGuard<'static, State> {
@@ -39,6 +44,7 @@ fn state() -> MutexGuard<'static, State> {
                 passes: Vec::new(),
                 accums: Vec::new(),
                 sampler_running: false,
+                sampler: None,
             })
         })
         .lock()
@@ -51,28 +57,31 @@ static ACTIVE: AtomicUsize = AtomicUsize::new(NO_PASS);
 const NO_PASS: usize = usize::MAX;
 
 /// Clears any prior run's records and starts the background RSS sampler. Call
-/// once before the diff being profiled.
+/// once before the diff being profiled; a second call while a sampler is already
+/// running is a no-op.
 pub fn begin() {
-    {
-        let mut state = state();
-        state.passes.clear();
-        state.accums.clear();
-        if state.sampler_running {
-            return;
-        }
-        state.sampler_running = true;
-    }
     ACTIVE.store(NO_PASS, Ordering::Release);
-    if std::thread::Builder::new()
+    let mut state = state();
+    state.passes.clear();
+    state.accums.clear();
+    if state.sampler.is_some() {
+        return;
+    }
+    state.sampler_running = true;
+    // Spawn while holding the lock: the sampler blocks on its first `state()`
+    // call until this returns, so the handle is stored before it can run.
+    match std::thread::Builder::new()
         .name("row-diff-profile-sampler".to_string())
         .spawn(sampler_loop)
-        .is_err()
     {
-        state().sampler_running = false;
+        Ok(handle) => state.sampler = Some(handle),
+        Err(_) => state.sampler_running = false,
     }
 }
 
 fn sampler_loop() {
+    #[cfg(test)]
+    LIVE_SAMPLERS.fetch_add(1, Ordering::AcqRel);
     let pid = std::process::id();
     loop {
         std::thread::sleep(Duration::from_millis(15));
@@ -89,17 +98,25 @@ fn sampler_loop() {
             pass.peak_rss_kib = pass.peak_rss_kib.max(rss);
         }
     }
+    #[cfg(test)]
+    LIVE_SAMPLERS.fetch_sub(1, Ordering::AcqRel);
 }
 
-/// The process's resident set size in KiB from `ps`, or `None` if `ps` is
+/// The process's resident set size in KiB from `/bin/ps` (an absolute path, so
+/// the sample never resolves a `ps` through `PATH`), or `None` if it is
 /// unavailable or its output cannot be parsed.
 fn read_rss_kib(pid: u32) -> Option<u64> {
-    let output = std::process::Command::new("ps")
+    let output = std::process::Command::new("/bin/ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()
         .ok()?;
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
+
+/// Number of live sampler threads, so a test can prove `finish` joins the
+/// sampler and back-to-back cycles never accumulate a second one.
+#[cfg(test)]
+static LIVE_SAMPLERS: AtomicUsize = AtomicUsize::new(0);
 
 /// Opens a pass named `label`; drop the returned guard to close it. Passes are
 /// sequential, not nested: opening a pass while another is open leaves the
@@ -173,13 +190,23 @@ pub struct PassReport {
     pub peak_rss_mib: Option<f64>,
 }
 
-/// Stops the sampler and returns the recorded passes in order, followed by any
-/// additive sub-costs.
+/// Stops the sampler, joins it (so no sampler outlives this call), and returns
+/// the recorded passes in order followed by any additive sub-costs.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn finish() -> Vec<PassReport> {
-    let mut state = state();
-    state.sampler_running = false;
+    // Stop the sampler and take its handle under the lock, then release the lock
+    // before joining -- the sampler takes the lock each tick, so joining while
+    // holding it would deadlock.
+    let handle = {
+        let mut state = state();
+        state.sampler_running = false;
+        state.sampler.take()
+    };
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+    let state = state();
     let mut reports: Vec<PassReport> = state
         .passes
         .iter()
@@ -195,4 +222,24 @@ pub fn finish() -> Vec<PassReport> {
         peak_rss_mib: None,
     }));
     reports
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LIVE_SAMPLERS, begin, enter, finish};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn finish_joins_the_sampler_so_cycles_never_accumulate() {
+        for _ in 0..20 {
+            begin();
+            drop(enter("pass"));
+            let _ = finish();
+            assert_eq!(
+                LIVE_SAMPLERS.load(Ordering::Acquire),
+                0,
+                "finish must join the sampler before returning"
+            );
+        }
+    }
 }
