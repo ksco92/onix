@@ -139,7 +139,7 @@ the single-threaded peak itself vary run-to-run by a comparable amount (2.9-4.2 
 
 The size gate peeks up to 64 MB (or 50,000 rows) of each side before choosing parallel or
 sequential, and the byte check runs between whole batches, so the peek holds at most 64 MB plus one
-producer batch per side. This is the peak RSS of a 49,999-row/side pair of 4096-byte `string` cells,
+producer batch per side. This is the peak RSS of a 49,999-row/side pair of 8 KB `string` cells,
 identical on both sides (zero changes, so only the peek and hash vectors are resident), generated at
 three batch sizes (`ROW_DIFF_BATCH`); the default is the example's 65,536, at which the whole side is
 one batch and the peek necessarily holds it:

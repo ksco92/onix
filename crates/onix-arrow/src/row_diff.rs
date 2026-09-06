@@ -53,7 +53,8 @@
 //! in-flight batches, one batch's rows buffered per worker between flushes plus
 //! a few decoded batches held over the bounded channels (worker count times
 //! batch size), on top of the shared buffers' reallocation slack and the size
-//! gate's peek buffer (at most [`MAX_PEEK_BYTES`] per side, at most two sides
+//! gate's peek buffer (at most [`MAX_PEEK_BYTES`] plus one producer batch per
+//! side, since the byte check runs between whole batches, and at most two sides
 //! resident); the README's Known-limitations bullet states the measured
 //! figures. The duplicate-key report holds the actual key values of every
 //! *distinct duplicated* key, so a duplicate-heavy input adds a term
