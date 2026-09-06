@@ -346,7 +346,7 @@ full for either phase, so that scan is the dominant cost and the two phases land
 each other. `diff_tables` is 2.3-3.5x phase (b)'s wall time here (narrow: 354 ms vs. 155 ms; wide:
 1.592 s vs. 461 ms), now that issue #87's streaming, parallel cell pass has closed most of the gap
 the pre-#87 cell pass left ([Results (wide)](#results-wide)'s own, otherwise-idle 0.11.0 figure was
-11.8x here at the wide size: 5.460 s against this section's 462 ms phase-(b) figure) --
+11.8x here at the wide size: 5.460 s against this section's 461 ms phase-(b) figure) --
 `diff_tables` still re-reads and re-hashes the whole table three times over per
 [`row_diff.rs`](crates/onix-arrow/src/row_diff.rs)'s module doc, against polars' single in-memory
 pass. The full ~5 GB wide pair (16.875M rows) was not measured here (see
