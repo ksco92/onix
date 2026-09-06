@@ -288,6 +288,7 @@ def test_str_inside_tuple_matches_python_repr_over_the_full_bmp() -> None:
 def test_str_inside_tuple_matches_python_repr_beyond_the_bmp() -> None:
     """The `\\UXXXXXXXX` escape width, and printable astral text left bare."""
     _skip_unless_unicode_16()
+
     _assert_batch_matches_python_repr(SUPPLEMENTARY_SAMPLE)
 
 

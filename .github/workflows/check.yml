@@ -81,7 +81,7 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
           maturin build --release --out dist
-          uv venv --python ${{ matrix.python-version }} /tmp/bare
+          uv venv --python 3.14 /tmp/bare
           uv pip install --python /tmp/bare/bin/python dist/*.whl
           /tmp/bare/bin/python -c "import deepdiff_rs; print('imported deepdiff_rs with no optional deps')"
       - name: Run the Python test suite
