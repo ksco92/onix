@@ -3,7 +3,7 @@ use crate::error::Error;
 use crate::path::PathSegment;
 use crate::report::Report;
 use crate::test_support::{
-    carr, ccustom, cdate, cdt, cdt_at, cfrozen, cnum, cobj, cset, ctup, ctuple, cv,
+    carr, ccustom, ccustom_id, cdate, cdt, cdt_at, cfrozen, cnum, cobj, cset, ctup, ctuple, cv,
 };
 use crate::value::{Object as CObject, ObjectKey, SetItems, Typed, Value as CValue};
 use serde_json::{Map, Number, Value, json};
@@ -2721,9 +2721,10 @@ fn an_object_subclass_versus_the_base_type_is_a_type_change_at_equal_value() {
         cv(&json!(1)),
     )];
     let base = CValue::Object(CObject::from_pairs(entries.clone()));
-    let subclass = CValue::Object(
-        CObject::from_pairs(entries).with_type_name(Some(std::sync::Arc::from("MyDict"))),
-    );
+    let subclass = CValue::Object(CObject::from_pairs(entries).with_dict_class(Some((
+        std::sync::Arc::from("MyDict"),
+        std::sync::Arc::from("MyDict"),
+    ))));
 
     let report = super::diff(&subclass, &base).unwrap();
 
@@ -2925,6 +2926,7 @@ fn a_nested_object_attribute_reports_a_deep_dotted_path() {
                 inner,
             )],
             std::sync::Arc::from("Outer"),
+            std::sync::Arc::from("Outer"),
         )
     };
     let b = {
@@ -2935,6 +2937,7 @@ fn a_nested_object_attribute_reports_a_deep_dotted_path() {
                 ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("inner"))),
                 inner,
             )],
+            std::sync::Arc::from("Outer"),
             std::sync::Arc::from("Outer"),
         )
     };
@@ -3057,5 +3060,146 @@ fn different_classes_forced_paired_under_ignore_order_become_values_changed() {
             "old_value": {"x": 1},
             "new_value": {"x": 1},
         }}})
+    );
+}
+
+// --- Class identity: kind and qualified name (issues #66 items 4, 9) --------
+
+#[test]
+fn a_dict_subclass_and_a_custom_object_with_the_same_name_are_a_type_change() {
+    // Same render name and even the same qualified identity, but different
+    // kind (a `dict` subclass versus an attribute-diffed object) — `DeepDiff`
+    // compares the `type` objects, so this is `type_changes`, never `{}` or a
+    // value change at a shared key.
+    let subclass_entries = vec![(
+        ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x"))),
+        cv(&json!(1)),
+    )];
+    let dict_subclass = CValue::Object(CObject::from_pairs(subclass_entries).with_dict_class(
+        Some((std::sync::Arc::from("Foo"), std::sync::Arc::from("m.Foo"))),
+    ));
+    let object_equal = ccustom_id("Foo", "m.Foo", json!({"x": 1}).as_object().unwrap());
+
+    assert!(
+        dict_subclass != object_equal,
+        "different kind is a different class"
+    );
+    assert_eq!(
+        diff_compact(&dict_subclass, &object_equal)
+            .expect("shallow diff is clean")
+            .to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "Foo",
+            "new_type": "Foo",
+            "old_value": {"x": 1},
+            "new_value": {"x": 1},
+        }}})
+    );
+}
+
+#[test]
+fn two_same_named_objects_from_different_modules_are_a_type_change() {
+    // Same render name and kind, different qualified identity (different
+    // module) — `DeepDiff`'s `type(t1) != type(t2)` makes this `type_changes`,
+    // both when the attributes match and when they differ (never a
+    // `values_changed` at `root.i`).
+    let a_equal = ccustom_id("User", "a.User", json!({"i": 1}).as_object().unwrap());
+    let b_equal = ccustom_id("User", "b.User", json!({"i": 1}).as_object().unwrap());
+    assert!(
+        a_equal != b_equal,
+        "different identity is a different class"
+    );
+    assert_eq!(
+        diff_compact(&a_equal, &b_equal)
+            .expect("shallow diff is clean")
+            .to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "User",
+            "new_type": "User",
+            "old_value": {"i": 1},
+            "new_value": {"i": 1},
+        }}})
+    );
+
+    let a_diff = ccustom_id("User", "a.User", json!({"i": 1}).as_object().unwrap());
+    let b_diff = ccustom_id("User", "b.User", json!({"i": 2}).as_object().unwrap());
+    assert_eq!(
+        diff_compact(&a_diff, &b_diff)
+            .expect("shallow diff is clean")
+            .to_json_value(),
+        json!({"type_changes": {"root": {
+            "old_type": "User",
+            "new_type": "User",
+            "old_value": {"i": 1},
+            "new_value": {"i": 2},
+        }}})
+    );
+}
+
+#[test]
+fn same_named_same_identity_objects_are_the_same_class() {
+    // The control: identical render name, identity, and kind — the same class,
+    // diffed by attributes rather than reported as a type change.
+    let a = ccustom_id("User", "a.User", json!({"i": 1}).as_object().unwrap());
+    let b = ccustom_id("User", "a.User", json!({"i": 2}).as_object().unwrap());
+    assert_eq!(
+        diff_compact(&a, &b)
+            .expect("shallow diff is clean")
+            .to_json_value(),
+        json!({"values_changed": {"root.i": {"new_value": 2, "old_value": 1}}})
+    );
+}
+
+#[test]
+fn a_nested_object_with_added_and_removed_attributes_merges_both_categories() {
+    // The object sits inside a list, so `array_diff` recurses into
+    // `object_diff` and merges its sub-report — exercising `Report::merge`'s
+    // attribute arms and the `.attr` path segment through a list index.
+    let a = carr(vec![ccustom(
+        "A",
+        json!({"x": 1, "y": 2}).as_object().unwrap(),
+    )]);
+    let b = carr(vec![ccustom(
+        "A",
+        json!({"x": 1, "z": 9}).as_object().unwrap(),
+    )]);
+
+    assert_eq!(
+        diff_compact(&a, &b)
+            .expect("shallow diff is clean")
+            .to_json_value(),
+        json!({
+            "attribute_added": {"root[0].z": 9},
+            "attribute_removed": {"root[0].y": 2},
+        })
+    );
+}
+
+#[test]
+fn ignore_order_object_with_added_and_removed_attributes_pairs_and_reports_both() {
+    // Under ignore_order the paired object's own added/removed attributes flow
+    // through `count_object_diff_leaves` (the distance probe) and the real
+    // recursive diff, reported at the removed index.
+    let a = carr(vec![
+        ccustom("A", json!({"x": 1, "y": 2}).as_object().unwrap()),
+        ccustom("A", json!({"k": 0}).as_object().unwrap()),
+    ]);
+    let b = carr(vec![
+        ccustom("A", json!({"k": 0}).as_object().unwrap()),
+        ccustom("A", json!({"x": 1, "z": 9}).as_object().unwrap()),
+    ]);
+
+    let opts = super::DiffOptions {
+        ignore_order: true,
+        ..super::DiffOptions::default()
+    };
+    assert_eq!(
+        super::diff_with_options(&a, &b, &opts)
+            .expect("shallow diff is clean")
+            .to_json_value(),
+        json!({
+            "attribute_added": {"root[0].z": 9},
+            "attribute_removed": {"root[0].y": 2},
+        })
     );
 }

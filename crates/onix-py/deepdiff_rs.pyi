@@ -71,7 +71,11 @@ class DeepDiff:
 
     def to_dict(self) -> dict[str, Any]:
         """The report as a native ``dict``, with Python types (tuples,
-        sets, datetimes) preserved rather than rendered to JSON."""
+        sets, datetimes) preserved rather than rendered to JSON. A custom
+        object, however, comes back as a plain ``dict`` of its attributes
+        (onix cannot reconstruct the instance), unlike DeepDiff's own
+        ``to_dict()`` which returns the original object -- a documented
+        divergence (see ``tests/golden/README.md``)."""
 
     def __bool__(self) -> bool: ...
     def __repr__(self) -> str: ...

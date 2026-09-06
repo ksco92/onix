@@ -731,3 +731,257 @@ def test_diff_json_valid_input_round_trips() -> None:
     """Sanity check: diff_json parses, diffs, and serializes valid JSON."""
     result = diff_json('{"a": 1}', '{"a": 2}')
     assert result == '{"values_changed":{"root[\'a\']":{"new_value":2,"old_value":1}}}'
+
+
+# --- Object fallback: types DeepDiff routes elsewhere must raise, not {} (issue #66) ---
+
+
+import array as _array  # noqa: E402
+import decimal  # noqa: E402
+import enum as _enum  # noqa: E402
+import fractions  # noqa: E402
+import io as _io  # noqa: E402
+import ipaddress  # noqa: E402
+import uuid  # noqa: E402
+
+
+class _IterOnly:
+    """An object that is iterable but carries attributes -- DeepDiff iterates it."""
+
+    def __init__(self, items: object) -> None:
+        self.items = items
+
+    def __iter__(self) -> object:
+        return iter(self.items)
+
+
+class _Color(_enum.Enum):
+    RED = 1
+    GREEN = 2
+
+
+@pytest.mark.parametrize(
+    "value_factory",
+    [
+        lambda: b"hello",
+        lambda: bytearray(b"hi"),
+        lambda: range(3),
+        lambda: 1 + 2j,
+        object,
+        lambda: memoryview(b"a"),
+        lambda: _io.BytesIO(b"a"),
+        lambda: _array.array("i", [1]),
+        lambda: collections.deque([1]),
+        lambda: decimal.Decimal("1.5"),
+        lambda: fractions.Fraction(1, 2),
+        lambda: uuid.UUID(int=1),
+        lambda: ipaddress.ip_address("1.1.1.1"),
+        lambda: _IterOnly([1, 2]),
+        lambda: int,  # a class object
+    ],
+    ids=[
+        "bytes", "bytearray", "range", "complex", "object", "memoryview",
+        "BytesIO", "array", "deque", "decimal", "fraction", "uuid",
+        "ipaddress", "iter_only", "class_object",
+    ],
+)
+def test_types_deepdiff_routes_elsewhere_raise_rather_than_reporting_empty(value_factory) -> None:
+    """
+    A value DeepDiff sends to a handler onix lacks (an iterable, an attribute-less
+    builtin, a class object) raises TypeError, never silently reports {} for two
+    unequal values -- the invariant the object fallback must keep (issue #66).
+    """
+    a, b = value_factory(), value_factory()
+    with pytest.raises(TypeError):
+        DeepDiff(a, b)
+
+
+def test_bytes_does_not_silently_compare_equal() -> None:
+    """The headline defect: two different bytes must not report {} (a false negative)."""
+    with pytest.raises(TypeError):
+        DeepDiff(b"hello", b"world")
+
+
+def test_a_dict_subclass_and_a_same_named_object_are_a_type_change_like_deepdiff() -> None:
+    """A dict subclass and a custom object sharing a __name__ are a type_changes (issue #66)."""
+    foo_dict = type("Foo", (dict,), {})
+    foo_obj = type("Foo", (), {})
+
+    for x_a, x_b in ((1, 1), (1, 2)):
+        a = foo_dict({"x": x_a})
+        b = foo_obj()
+        b.x = x_b
+        assert json.loads(DeepDiff(a, b).to_json()) == json.loads(RealDeepDiff(a, b, verbose_level=2).to_json())
+        assert "type_changes" in json.loads(DeepDiff(a, b).to_json())
+
+
+def test_same_named_classes_from_different_modules_are_a_type_change_like_deepdiff() -> None:
+    """Two objects whose classes share a __name__ but differ by module are a type_changes (issue #66)."""
+    cls_a = type("User", (), {})
+    cls_a.__module__ = "package_a.models"
+    cls_b = type("User", (), {})
+    cls_b.__module__ = "package_b.models"
+
+    for i_a, i_b in ((1, 1), (1, 2)):
+        a = cls_a()
+        a.i = i_a
+        b = cls_b()
+        b.i = i_b
+        assert json.loads(DeepDiff(a, b).to_json()) == json.loads(RealDeepDiff(a, b, verbose_level=2).to_json())
+        assert "type_changes" in json.loads(DeepDiff(a, b).to_json())
+
+
+def test_same_class_objects_diff_by_attribute_not_type_change() -> None:
+    """The control: two instances of one class diff by attribute, not type_changes (issue #66)."""
+
+    class Same:
+        def __init__(self, i: int) -> None:
+            self.i = i
+
+    assert json.loads(DeepDiff(Same(1), Same(2)).to_json()) == {
+        "values_changed": {"root.i": {"new_value": 2, "old_value": 1}}
+    }
+
+
+def test_a_property_raising_non_attribute_error_propagates_at_the_path() -> None:
+    """A @property getter raising ValueError propagates as ValueError, never swallowed (issue #66)."""
+
+    class HasBadProperty:
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+        @property
+        def bad(self) -> int:
+            raise ValueError("boom")
+
+    with pytest.raises(ValueError, match="boom"):
+        DeepDiff(HasBadProperty(1), HasBadProperty(2))
+
+
+def test_a_property_raising_attribute_error_is_skipped() -> None:
+    """
+    A @property raising AttributeError leaves that attribute out, where DeepDiff
+    marks the whole object 'unprocessed' (a category onix does not have) -- a
+    documented nuance (see tests/golden/README.md), pinned here.
+    """
+
+    class HasLazyProperty:
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+        @property
+        def lazy(self) -> int:
+            raise AttributeError("not yet")
+
+    assert json.loads(DeepDiff(HasLazyProperty(1), HasLazyProperty(2)).to_json()) == {
+        "values_changed": {"root.x": {"new_value": 2, "old_value": 1}}
+    }
+
+
+def test_a_property_mutating_the_instance_dict_does_not_panic() -> None:
+    """A @property that mutates __dict__ mid-walk must not panic pyo3's dict iterator (issue #66)."""
+
+    class SelfMutating:
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+        @property
+        def sneaky(self) -> int:
+            self.__dict__["injected"] = 99
+            return 1
+
+    # Completes without a PanicException; the snapshot copy makes the walk safe.
+    assert "values_changed" in json.loads(DeepDiff(SelfMutating(1), SelfMutating(2)).to_json())
+
+
+# --- Object attribute enumeration strategies match DeepDiff (issue #66 item 19) ---
+
+
+def _canonical(a: object, b: object) -> tuple[object, object]:
+    """Both engines' to_json, parsed, for a live-DeepDiff equality assertion."""
+    return json.loads(DeepDiff(a, b).to_json()), json.loads(RealDeepDiff(a, b, verbose_level=2).to_json())
+
+
+def test_slots_only_object_matches_deepdiff() -> None:
+    """A slots-only class is diffed by its slot values, matching `_dict_from_slots` (issue #66)."""
+
+    class Slots:
+        __slots__ = ("a", "b")
+
+        def __init__(self, a: int, b: int) -> None:
+            self.a = a
+            self.b = b
+
+    onix, real = _canonical(Slots(1, 2), Slots(1, 3))
+    assert onix == real == {"values_changed": {"root.b": {"new_value": 3, "old_value": 2}}}
+
+
+def test_mixed_dict_and_slots_object_matches_deepdiff() -> None:
+    """A class mixing __slots__ and __dict__ is diffed across both, matching DeepDiff (issue #66)."""
+
+    class Mixed:
+        __slots__ = ("a", "__dict__")
+
+        def __init__(self, a: int, b: int) -> None:
+            self.a = a  # slot
+            self.b = b  # __dict__
+
+    onix, real = _canonical(Mixed(1, 2), Mixed(1, 3))
+    assert onix == real
+
+
+def test_dataclass_with_default_factory_matches_deepdiff() -> None:
+    """A dataclass (including a default_factory list field) is diffed by its attributes (issue #66)."""
+    import dataclasses
+
+    @dataclasses.dataclass
+    class Rec:
+        x: int
+        tags: list = dataclasses.field(default_factory=list)
+
+    onix, real = _canonical(Rec(1, ["a"]), Rec(2, ["a", "b"]))
+    assert onix == real
+
+
+def test_name_mangled_private_attribute_matches_deepdiff() -> None:
+    """A name-mangled `_Cls__x` attribute is kept and diffed, matching detailed__dict__ (issue #66)."""
+
+    class Mangled:
+        def __init__(self, v: int) -> None:
+            self.__secret = v  # stored as _Mangled__secret
+
+    onix, real = _canonical(Mangled(1), Mangled(2))
+    assert onix == real
+    assert "root._Mangled__secret" in onix["values_changed"]
+
+
+def test_property_and_class_attribute_object_matches_deepdiff() -> None:
+    """An unchanged @property and class attribute stay out of the diff, matching DeepDiff (issue #66)."""
+
+    class WithComputed:
+        kls = "shared"
+
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+        @property
+        def doubled(self) -> int:
+            return self.x * 10
+
+    # x changes; the property (equal-shaped) and class attribute do not, so only
+    # `root.x` and the property's derived `root.doubled` (which tracks x) appear
+    # -- both engines agree.
+    onix, real = _canonical(WithComputed(1), WithComputed(2))
+    assert onix == real
+
+
+def test_enum_member_matches_deepdiff_via_name_and_value() -> None:
+    """An Enum member is diffed by its name/value, matching DeepDiff's _diff_enum (issue #66)."""
+    onix = json.loads(DeepDiff(_Color.RED, _Color.GREEN).to_json())
+    real = json.loads(RealDeepDiff(_Color.RED, _Color.GREEN, verbose_level=2).to_json())
+    assert onix == real == {
+        "values_changed": {
+            "root.name": {"new_value": "GREEN", "old_value": "RED"},
+            "root.value": {"new_value": 2, "old_value": 1},
+        }
+    }

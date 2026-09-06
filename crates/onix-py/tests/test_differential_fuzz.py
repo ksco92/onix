@@ -1924,31 +1924,22 @@ def test_differential_fuzz_with_surrogate_strings_matches_real_deepdiff() -> Non
 OBJECT_SEED_BASE: Final[int] = 12_000_000
 
 # A small pool of distinct plain, attribute-only classes, so a mutation can
-# swap an instance's class and produce a `type_changes`. Each is created once
-# (module load), so two instances of `_Obj1` share one `type` -- the same
-# same-class invariant `golden_tags._object_class` relies on.
+# swap an instance's class and produce a `type_changes`. Built from one shared
+# `__init__` via `type(...)` so the three bodies do not repeat; each class is
+# created once (module load), so two instances of the same one share one `type`
+# -- the same-class invariant `golden_tags._object_class` also relies on.
 _OBJECT_ATTR_NAMES: Final[list[str]] = ["p", "q", "r", "s"]
 
 
-class _Obj1:
-    def __init__(self, **attrs: object) -> None:
-        for key, value in attrs.items():
-            setattr(self, key, value)
+def _object_init(self: object, **attrs: object) -> None:
+    """Set each keyword as an instance attribute -- the shared body of the fuzz classes."""
+    for key, value in attrs.items():
+        setattr(self, key, value)
 
 
-class _Obj2:
-    def __init__(self, **attrs: object) -> None:
-        for key, value in attrs.items():
-            setattr(self, key, value)
-
-
-class _Obj3:
-    def __init__(self, **attrs: object) -> None:
-        for key, value in attrs.items():
-            setattr(self, key, value)
-
-
-_OBJECT_CLASSES: Final[list[type]] = [_Obj1, _Obj2, _Obj3]
+_OBJECT_CLASSES: Final[list[type]] = [
+    type(f"_Obj{i}", (), {"__init__": _object_init}) for i in range(1, 4)
+]
 
 
 def _gen_object_attr(rng: random.Random, depth: int) -> object:
