@@ -19,6 +19,9 @@
 //! # duplicate-heavy shape: every key duplicated, wide string key
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 dup 16
 //! /usr/bin/time -l target/release/examples/row_diff_rss 200000 dup 1024
+//! # size-gate peek: identical wide-cell sides (zero changes); ROW_DIFF_BATCH
+//! # sets the producer's batch size, ROW_DIFF_THREADS the worker count
+//! ROW_DIFF_BATCH=100 ROW_DIFF_THREADS=18 /usr/bin/time -l target/release/examples/row_diff_rss 49999 widesame 8192
 //! ```
 //!
 //! Each side is generated on the fly, batch by batch, and nothing is retained

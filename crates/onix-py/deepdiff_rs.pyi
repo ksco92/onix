@@ -122,8 +122,10 @@ def diff_tables(left: Any, right: Any, *, key: list[str], threads: int | None = 
         classifies rows with. ``None`` (the default) uses the machine's
         available parallelism; ``1`` runs single-threaded. The result is
         byte-identical at any value. Must be ``None`` or a positive integer
-        no greater than 1024 (the diff spawns one worker per thread). Ignored
-        for inputs under 50,000 rows, which always run single-threaded.
+        no greater than 1024 (the diff spawns one worker per thread). The diff
+        runs single-threaded (ignoring this) only when both sides stay under
+        50,000 rows and under 64 MB of decoded data; either bound reached first
+        uses the requested threads.
     :raises TypeError: If an input implements neither Arrow PyCapsule method,
         or ``key`` is a bare string rather than a list of column names.
     :raises ValueError: If a key column is missing, duplicated, or

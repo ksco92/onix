@@ -55,12 +55,12 @@
 //! batch size), on top of the shared buffers' reallocation slack and the size
 //! gate's peek buffer (at most [`MAX_PEEK_BYTES`] per side, at most two sides
 //! resident); the README's Known-limitations bullet states the measured
-//! figures. The duplicate-key report
-//! holds the actual key values of every *distinct duplicated* key, so a
-//! duplicate-heavy input adds a term proportional to the number of distinct
-//! duplicated keys times the key width; the cell pass holds both sides' changed
-//! rows and renders every changed cell to an owned string, so its term is the
-//! number of changed cells times the cell width (values are rendered in full).
+//! figures. The duplicate-key report holds the actual key values of every
+//! *distinct duplicated* key, so a duplicate-heavy input adds a term
+//! proportional to the number of distinct duplicated keys times the key width;
+//! the cell pass holds both sides' changed rows and renders every changed cell
+//! to an owned string, so its term is the number of changed cells times the
+//! cell width (values are rendered in full).
 //! The README's Known-limitations bullet states these with measured figures.
 //!
 //! # Hashing
@@ -1267,9 +1267,10 @@ fn hash_side_parallel(
     };
 
     std::thread::scope(|scope| -> Result<(), TableDiffError> {
-        // Bound inside the scope so a `scope.spawn` panic below drops the
-        // receiver on unwind and disconnects any already-spawned worker (which
-        // would otherwise block on `recv` forever and hang the scope join).
+        // Bind the channel inside the scope so that if a `scope.spawn` below
+        // panics (e.g. an OS thread-spawn failure), the unwind drops the
+        // receiver and disconnects any already-spawned worker, which would
+        // otherwise block on the channel forever and hang the scope's join.
         let (tx, rx) = sync_channel::<RecordBatch>(threads);
         let rx = Arc::new(Mutex::new(rx));
         let mut handles = Vec::with_capacity(threads);
@@ -1555,11 +1556,9 @@ where
     let reader = source.open()?;
 
     std::thread::scope(|scope| -> Result<(), TableDiffError> {
-        // The channels and `stop` are bound inside the scope so that if a
-        // `scope.spawn` below panics (e.g. an OS thread-spawn failure), the
-        // unwind drops the receivers and disconnects the already-spawned
-        // producers, which would otherwise block forever on the full channels
-        // and hang the scope join.
+        // Channels and `stop` are bound inside the scope for the unwind safety
+        // `hash_side_parallel` documents (a `scope.spawn` panic disconnects the
+        // producers instead of hanging the join).
         let (fwd_tx, fwd_rx) = sync_channel::<(usize, RecordBatch)>(threads);
         let fwd_rx = Arc::new(Mutex::new(fwd_rx));
         let (back_tx, back_rx) = sync_channel::<Result<OrderedPayload, TableDiffError>>(threads);

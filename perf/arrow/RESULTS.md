@@ -101,8 +101,10 @@ at either size, so no tool's number is a "did not fit" result.
 
 `diff_tables` wall time (median) as the `threads` knob varies, with the tables preloaded so the
 figure isolates the row diff. The small tables (in-memory, `threads=1` vs the default all-cores) show
-the size gate: below 50,000 rows the diff runs single-threaded whatever `threads` is, so the default
-is never slower than `threads=1` — it is if anything faster, because no workers are spawned.
+the size gate: the diff runs single-threaded only when both sides stay under 50,000 rows and under
+64 MB of decoded data (either bound reached first runs the parallel path), so for these small
+in-memory tables the default is never slower than `threads=1` — if anything faster, as no workers
+are spawned.
 
 | Rows | threads=1 | threads=2 | threads=4 | threads=8 | threads=18 (default) |
 | --- | --- | --- | --- | --- | --- |
@@ -132,6 +134,26 @@ copy of the 32-byte-per-row hash vectors, i.e. the reallocation slack of the sha
 buffers, bounded by one full copy — plus the in-flight batches (worker count times batch size, tens
 of MB). The 32-byte-per-row hash vectors dominate either path and their growable-`Vec` slack makes
 the single-threaded peak itself vary run-to-run by a comparable amount (2.9-4.2 GB at 37M).
+
+### Size-gate peek
+
+The size gate peeks up to 64 MB (or 50,000 rows) of each side before choosing parallel or
+sequential, and the byte check runs between whole batches, so the peek holds at most 64 MB plus one
+producer batch per side. This is the peak RSS of a 49,999-row/side pair of 4096-byte `string` cells,
+identical on both sides (zero changes, so only the peek and hash vectors are resident), generated at
+three batch sizes (`ROW_DIFF_BATCH`); the default is the example's 65,536, at which the whole side is
+one batch and the peek necessarily holds it:
+
+| Rows per batch | threads=1 | threads=18 |
+| --- | --- | --- |
+| 100 | 14 MB | 78 MB |
+| 1,000 | 548 MB | 610 MB |
+| 65,536 (default, whole side in one batch) | 1654 MB | 1657 MB |
+
+So a caller that streams small batches keeps the peek tiny; a caller that hands the whole side over
+as one giant batch makes the peek hold that batch. Bound the producer's batch size for untrusted
+input. Command: `ROW_DIFF_BATCH=100 ROW_DIFF_THREADS=18 cargo run -p onix-arrow --release --example
+row_diff_rss -- 49999 widesame 8192`.
 
 ## What changed: the row diff now runs on every core
 
