@@ -9,6 +9,12 @@ description = "Arrow table diffing (schema and keyed rows) built on the onix dif
 [lints]
 workspace = true
 
+[features]
+# Compiles in the per-pass wall-time and peak-RSS instrumentation the
+# `row_diff_profile` example reads. Off by default and never enabled by the
+# release wheel, so the instrumentation is absent from the shipped `.so`.
+profile = []
+
 [dependencies]
 # Pinned to an exact Arrow version so this crate and the `pyo3-arrow` bridge
 # in `onix-py` (which requires `arrow` ^59) resolve to the identical Arrow
@@ -52,3 +58,9 @@ serde_json = "1"
 proptest = "1"
 # `half::f16` builds a Float16 test column; the same version arrow-array uses.
 half = "2"
+
+# The profiling harness reads the per-pass instrumentation, so it only builds
+# with the `profile` feature (and never as part of the default build or wheel).
+[[example]]
+name = "row_diff_profile"
+required-features = ["profile"]
