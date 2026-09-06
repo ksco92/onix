@@ -38,111 +38,13 @@
 use std::fs::File;
 use std::sync::Arc;
 
-use arrow_array::{ArrayRef, Int64Array, RecordBatch, RecordBatchReader, StringArray};
-use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
+use arrow_array::RecordBatchReader;
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use onix_arrow::{TableDiffError, TableDiffOptions, TableInput, diff_tables, profile, spool};
 
-/// Rows per generated batch (the streamed batch size the spool is written in).
-const BATCH: i64 = 65_536;
-
-/// The generated table shape and its per-side parameters.
-#[derive(Clone)]
-enum Shape {
-    /// `id`/`value` int64; `id_offset` shifts the key range, `change_every`
-    /// perturbs every nth value.
-    Linear { id_offset: i64, change_every: i64 },
-    /// `id` int64 and one `width`-byte string `value` filled with `fill`.
-    Wide { width: usize, fill: u8 },
-    /// `id` int64 and `ncols` `width`-byte string columns; only the first is
-    /// filled with `first_fill` (the rest are constant across sides).
-    ManyCols {
-        ncols: usize,
-        width: usize,
-        first_fill: u8,
-    },
-}
-
-struct Generated {
-    schema: SchemaRef,
-    rows: i64,
-    shape: Shape,
-}
-
-impl TableInput for Generated {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-    fn open(&self) -> Result<Box<dyn RecordBatchReader + Send>, TableDiffError> {
-        Ok(Box::new(GenReader {
-            schema: self.schema.clone(),
-            rows: self.rows,
-            shape: self.shape.clone(),
-            next: 0,
-        }))
-    }
-}
-
-struct GenReader {
-    schema: SchemaRef,
-    rows: i64,
-    shape: Shape,
-    next: i64,
-}
-
-impl Iterator for GenReader {
-    type Item = Result<RecordBatch, ArrowError>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.next >= self.rows {
-            return None;
-        }
-        let end = (self.next + BATCH).min(self.rows);
-        let columns: Vec<ArrayRef> = match &self.shape {
-            Shape::Linear {
-                id_offset,
-                change_every,
-            } => {
-                let ids: Int64Array = (self.next..end).map(|i| Some(i + id_offset)).collect();
-                let values: Int64Array = (self.next..end)
-                    .map(|i| {
-                        let id = i + id_offset;
-                        Some(if id % change_every == 0 { id + 1 } else { id })
-                    })
-                    .collect();
-                vec![Arc::new(ids), Arc::new(values)]
-            }
-            Shape::Wide { width, fill } => {
-                let ids: Int64Array = (self.next..end).map(Some).collect();
-                let cell = String::from_utf8(vec![*fill; *width]).unwrap();
-                let values: StringArray = (self.next..end).map(|_| Some(cell.as_str())).collect();
-                vec![Arc::new(ids), Arc::new(values)]
-            }
-            Shape::ManyCols {
-                ncols,
-                width,
-                first_fill,
-            } => {
-                let ids: Int64Array = (self.next..end).map(Some).collect();
-                let mut columns: Vec<ArrayRef> = vec![Arc::new(ids)];
-                for c in 0..*ncols {
-                    let fill = if c == 0 { *first_fill } else { b'a' };
-                    let cell = String::from_utf8(vec![fill; *width]).unwrap();
-                    let values: StringArray =
-                        (self.next..end).map(|_| Some(cell.as_str())).collect();
-                    columns.push(Arc::new(values));
-                }
-                columns
-            }
-        };
-        self.next = end;
-        Some(RecordBatch::try_new(self.schema.clone(), columns))
-    }
-}
-
-impl RecordBatchReader for GenReader {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-}
+#[path = "shared/gen_shapes.rs"]
+mod gen_shapes;
+use gen_shapes::{Generated, Shape, batch_rows};
 
 /// A side spooled to an anonymous Arrow IPC file, re-read on every `open` — the
 /// same re-openable spool the Python bindings hand the row diff.
@@ -186,8 +88,14 @@ fn build_case(shape: &str, params: &[i64], rows: i64) -> (SchemaRef, Shape, Shap
             ]));
             (
                 schema,
-                Shape::Wide { width, fill: b'a' },
-                Shape::Wide { width, fill: b'b' },
+                Shape::Wide {
+                    value_width: width,
+                    fill: b'a',
+                },
+                Shape::Wide {
+                    value_width: width,
+                    fill: b'b',
+                },
             )
         }
         "manycols" => {
@@ -266,15 +174,18 @@ fn main() {
 
     let (schema, left_shape, right_shape) = build_case(shape, &params, rows);
 
+    let batch = batch_rows();
     let left = Generated {
         schema: schema.clone(),
         rows,
         shape: left_shape,
+        batch,
     };
     let right = Generated {
         schema,
         rows,
         shape: right_shape,
+        batch,
     };
 
     let left = spool_side(&left);

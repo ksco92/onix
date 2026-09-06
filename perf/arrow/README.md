@@ -159,10 +159,7 @@ target/release/examples/row_diff_profile 1000000 manycols 18 34 64
 
 Every row-diff performance change posts its before/after per-pass table from this
 command in its PR body, and updates the per-pass section of
-[`RESULTS.md`](RESULTS.md). The example spools its generated sides to anonymous
-Arrow IPC files first, so the re-read of each spool per pass — the cost the
-per-pass table exposes — is measured exactly as the Python bindings' input spool
-incurs it.
+[`RESULTS.md`](RESULTS.md).
 
 ## Benchmark against hand-rolled baselines
 
