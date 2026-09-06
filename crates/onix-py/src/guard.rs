@@ -314,9 +314,10 @@ fn write_json(value: &Value, out: &mut String) {
             }
             out.push('}');
         }
-        // An ordinary leaf below a non-finite float or a lone surrogate
-        // somewhere else in the tree: this function no longer pre-filters by
-        // containment (see this function's own doc).
+        // An ordinary leaf reached only because a non-finite float or a
+        // lone surrogate exists somewhere else in the tree: `write_json`
+        // renders every node once it is called at all (see this function's
+        // own doc), it never re-checks containment per leaf.
         Value::Null
         | Value::Bool(_)
         | Value::DateTime(_)

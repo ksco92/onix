@@ -178,10 +178,10 @@ pub enum Wtf8Char {
 /// the UTF-8 sequence width (1-4, see this module's private
 /// `utf8_sequence_width`), so each
 /// call slices at most that many bytes and asks [`str::from_utf8`] to
-/// validate only that bounded slice, not `self.remaining` as a whole — an
-/// earlier revision called `from_utf8` on the *entire* remaining slice on
-/// every step, which is `O(n)` per call and so `O(n²)` over a full decode;
-/// this is `O(1)` per call and `O(n)` total. A validation failure on that
+/// validate only that bounded slice, not `self.remaining` as a whole —
+/// validating the whole remaining slice on every call would make every
+/// walk over the string quadratic (`O(n)` per call, `O(n²)` total); this
+/// way is `O(1)` per call and `O(n)` total. A validation failure on that
 /// bounded slice can, by [`Str`]'s own invariant (every byte sequence here
 /// is WTF-8), only be the three-byte sequence WTF-8 uses to direct-encode a
 /// surrogate — the same three-byte pattern strict UTF-8 would use for a
@@ -428,10 +428,9 @@ pub enum ObjectKey {
 impl ObjectKey {
     /// This key's `str` content, or `None` for [`ObjectKey::Other`] *or* a
     /// [`Key::Wtf8`] (a lone surrogate code point, which has no valid `&str`
-    /// form — see [`Key::as_utf8`]) — the convenience every call site that
-    /// only ever handled a plain `str` key before this variant existed still
-    /// needs, now correctly falling through to the "not a match" case for
-    /// a surrogate key too.
+    /// form — see [`Key::as_utf8`]) — the convenience every call site
+    /// expecting a plain `str` key needs, correctly falling through to the
+    /// "not a match" case for a surrogate key too.
     #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -1505,9 +1504,8 @@ fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
 }
 
 /// An [`Object`]'s key: an interned `Arc<str>` for the common (valid UTF-8)
-/// case — unchanged from before this type existed — or, for a key
-/// containing a lone surrogate code point, WTF-8 bytes held in their own,
-/// un-interned allocation. Interning shares one allocation across the
+/// case, or, for a key containing a lone surrogate code point, WTF-8 bytes
+/// held in their own, un-interned allocation. Interning shares one allocation across the
 /// handful of keys a record-shaped payload repeats thousands of times (see
 /// the [module documentation](self)); a surrogate-bearing key is never that
 /// shape in practice, so it costs its own small allocation instead of
