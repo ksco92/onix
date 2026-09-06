@@ -4,7 +4,7 @@ use serde_json::json;
 
 /// A one-key structural path, e.g. `key_path("a")` for `root['a']`.
 fn key_path(name: &str) -> Vec<PathSegment> {
-    vec![PathSegment::Key(name.to_string())]
+    vec![PathSegment::Key(name.to_string().into())]
 }
 
 /// A one-index structural path, e.g. `index_path(3)` for `root[3]`.
@@ -332,7 +332,10 @@ fn multiple_paths_in_same_category_are_sorted_by_path() {
 fn retag_new_path_swaps_prefix_segment_and_keeps_suffix() {
     let mut report = Report::new();
     report.insert_values_changed(
-        vec![PathSegment::Index(0), PathSegment::Key("x".to_string())],
+        vec![
+            PathSegment::Index(0),
+            PathSegment::Key("x".to_string().into()),
+        ],
         ValuesChangedEntry {
             diff: None,
             old_value: cv(&json!(1)),
@@ -462,7 +465,7 @@ fn two_structural_paths_rendering_identically_collapse_without_panicking() {
     flat_key.push('\'');
 
     let flat = key_path(&flat_key);
-    let nested = vec![PathSegment::Key(k1), PathSegment::Key(k2)];
+    let nested = vec![PathSegment::Key(k1.into()), PathSegment::Key(k2.into())];
     assert_eq!(
         crate::path::render_path(&flat),
         crate::path::render_path(&nested),
@@ -657,7 +660,7 @@ fn set_entries_are_sorted_by_rendered_path_string() {
     for key in ["it's", "a", "b"] {
         report.insert_set_item_added(
             vec![
-                PathSegment::Key(key.to_string()),
+                PathSegment::Key(key.to_string().into()),
                 PathSegment::SetItem("1".to_string()),
             ],
             cv(&json!(1)),
@@ -689,10 +692,10 @@ fn set_entries_rendering_identically_collapse_to_one() {
     flat_key.push('\'');
 
     let item = PathSegment::SetItem("1".to_string());
-    let flat = vec![PathSegment::Key(flat_key), item.clone()];
+    let flat = vec![PathSegment::Key(flat_key.into()), item.clone()];
     let nested = vec![
-        PathSegment::Key("p'".to_string()),
-        PathSegment::Key("q'".to_string()),
+        PathSegment::Key("p'".to_string().into()),
+        PathSegment::Key("q'".to_string().into()),
         item,
     ];
     assert_eq!(

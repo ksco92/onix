@@ -179,32 +179,69 @@ pub(crate) fn diff_to_value(
 /// overflow the calling thread; inline otherwise. The caller passes the
 /// verdict in so it is computed once per value rather than re-walked here.
 ///
+/// `may_have_wtf8` is the caller's own upper-bound verdict (e.g.
+/// [`crate::deepdiff::DeepDiff`]'s `may_have_wtf8`, a byproduct of
+/// `crate::convert::to_value`'s walk) for whether `value` could hold a lone
+/// surrogate code point — passed in for the same reason `deep` is: so
+/// [`to_json_string`] never re-walks `value` just to answer a question the
+/// caller already knows the answer to.
+///
 /// # Errors
 ///
-/// `ValueError` if serialization fails (which, for a report, does not happen
-/// in practice) or the worker thread cannot be run.
-pub(crate) fn serialize_value(py: Python<'_>, value: &Value, deep: bool) -> PyResult<String> {
-    let serialized = if deep {
-        run_on_worker(py, || to_json_string(value))?
+/// `RuntimeError` if the worker thread cannot be run (see
+/// [`run_on_worker`]) — serialization itself cannot fail (see
+/// [`to_json_string`]'s doc).
+pub(crate) fn serialize_value(
+    py: Python<'_>,
+    value: &Value,
+    deep: bool,
+    may_have_wtf8: bool,
+) -> PyResult<String> {
+    Ok(if deep {
+        run_on_worker(py, || to_json_string(value, may_have_wtf8))?
     } else {
-        to_json_string(value)
-    };
-    serialized.map_err(|error| PyValueError::new_err(error.to_string()))
+        to_json_string(value, may_have_wtf8)
+    })
 }
 
 /// Renders one compact [`Value`] to JSON text, matching real `DeepDiff`'s own
-/// `to_json()`: a `NaN`, `Infinity` or `-Infinity` renders as the bare,
-/// non-standard token Python's `json.dumps` writes for one by default, which
-/// [`serde_json`] cannot represent on its own. The whole tree is checked for
-/// a non-finite float once, here; [`write_json`] then renders each leaf's
-/// token from that leaf's own `is_finite()`, never rescanning a subtree.
-fn to_json_string(value: &Value) -> Result<String, serde_json::Error> {
-    if !has_non_finite_float(value) {
-        return serde_json::to_string(&value.to_serde_json());
+/// `to_json()` in the two places `serde_json`'s ordinary path cannot
+/// represent: a `NaN`, `Infinity` or `-Infinity` float renders as the bare,
+/// non-standard token Python's `json.dumps` writes for one by default, and a
+/// lone (unpaired) surrogate code point in a string or object key renders as
+/// `json.dumps`'s own single-backslash `\uXXXX` escape (a plain Rust `str`
+/// cannot hold one at all — see [`Value::Str`]'s doc). Both checks are cheap
+/// relative to actually walking every leaf by hand, so the overwhelming
+/// common case — no non-finite float and no lone surrogate anywhere in the
+/// tree — takes the fast, unconditionally-correct `to_serde_json()` +
+/// `serde_json::to_string` path and never reaches [`write_json`].
+///
+/// `may_have_wtf8` is the caller's own upper-bound verdict (a byproduct of
+/// `crate::convert::to_value`'s walk — see [`serialize_value`]'s doc) for
+/// whether `value` could hold a lone surrogate, passed in so this never
+/// re-walks `value` with [`onix_core::value::contains_wtf8`] just to answer a
+/// question the caller already knows the answer to; whether a non-finite
+/// float is present has no such byproduct anywhere upstream, so it is still
+/// checked here, once, by [`has_non_finite_float`].
+///
+/// `may_have_wtf8` is a *whole-report* flag, not a per-leaf one: once any
+/// single `Str`/key anywhere in `value` holds a surrogate, every `Str` in
+/// the entire report is rendered through [`write_json`]'s
+/// `onix_core::value::write_json_str_content` call, including the ones that
+/// hold no surrogate at all — there is no cheaper per-leaf check to fall
+/// back to below this point, and `write_json` walks the tree once
+/// regardless. That is only acceptable because
+/// `write_json_str_content`/[`onix_core::value::Wtf8Chars`] (in `onix-core`)
+/// are themselves `O(length)`, not `O(length²)`, per string — see that
+/// type's own doc for the `O(n²)` regression this guards against.
+fn to_json_string(value: &Value, may_have_wtf8: bool) -> String {
+    if !may_have_wtf8 && !has_non_finite_float(value) {
+        return serde_json::to_string(&value.to_serde_json())
+            .expect("a compact Value's to_serde_json() output always serializes");
     }
     let mut out = String::new();
-    write_json(value, &mut out)?;
-    Ok(out)
+    write_json(value, &mut out);
+    out
 }
 
 /// Returns `true` if `value` is, or contains anywhere within it, a
@@ -225,25 +262,31 @@ fn has_non_finite_float(value: &Value) -> bool {
     }
 }
 
-/// [`to_json_string`]'s slow path, reached only once [`has_non_finite_float`]
-/// has confirmed (once, for the whole tree, by the caller) that `value`
-/// contains a non-finite float somewhere in it. Writes every node's JSON
-/// text by hand — a `Number` decides its own rendering directly from its own
-/// finiteness (the literal token, or `Value::to_serde_json` for a finite
-/// one), and every container writes its children the same way — so the walk
-/// touches each node exactly once, `O(nodes)` total, with no re-scanning of
-/// what an ancestor already covered. An object key renders through
-/// [`onix_core::value::object_key_json_string`], the same non-`str`-key
-/// rendering [`Value::to_serde_json`] uses, so the two rendering paths agree
-/// on a key regardless of which one a given report takes.
-fn write_json(value: &Value, out: &mut String) -> Result<(), serde_json::Error> {
+/// [`to_json_string`]'s slow path, reached once either [`has_non_finite_float`]
+/// or the caller's `may_have_wtf8` verdict says `value` needs hand-written
+/// rendering somewhere in it. Writes every node's JSON text by hand — a
+/// `Number` decides its own rendering directly from its own finiteness (the
+/// literal token, or `Value::to_serde_json` for a finite one), a `Str`
+/// renders its content through [`onix_core::value::write_json_str_content`]
+/// (WTF-8-aware: a lone surrogate gets its own escape, everything else is
+/// handed to `serde_json`'s own escaper — see that function's doc), and
+/// every container writes its children the same way — so the walk touches
+/// each node exactly once, `O(nodes)` total, with no re-scanning of what an
+/// ancestor already covered. An object key renders through
+/// [`write_json_object_key`] (itself WTF-8-aware for a `str` key), the same
+/// non-`str`-key rendering `Value::to_serde_json` uses, so the two rendering
+/// paths agree on a key regardless of which one a given report takes.
+fn write_json(value: &Value, out: &mut String) {
     match value {
         Value::Number(n) => {
             let f = n
                 .as_f64()
                 .expect("a Number is always an i64, a u64, or an f64");
             if f.is_finite() {
-                out.push_str(&serde_json::to_string(&value.to_serde_json())?);
+                out.push_str(
+                    &serde_json::to_string(&value.to_serde_json())
+                        .expect("a finite Number always serializes"),
+                );
             } else if f.is_nan() {
                 out.push_str("NaN");
             } else if f.is_sign_positive() {
@@ -252,54 +295,78 @@ fn write_json(value: &Value, out: &mut String) -> Result<(), serde_json::Error> 
                 out.push_str("-Infinity");
             }
         }
-        Value::Array(items) | Value::Tuple(items) => write_json_seq(items.iter(), out)?,
-        Value::Set(items) | Value::FrozenSet(items) => write_json_seq(items.iter(), out)?,
+        Value::Str(s) => {
+            out.push('"');
+            onix_core::value::write_json_str_content(s.as_bytes(), out);
+            out.push('"');
+        }
+        Value::Array(items) | Value::Tuple(items) => write_json_seq(items.iter(), out),
+        Value::Set(items) | Value::FrozenSet(items) => write_json_seq(items.iter(), out),
         Value::Object(obj) => {
             out.push('{');
             for (index, (key, child)) in obj.iter().enumerate() {
                 if index > 0 {
                     out.push(',');
                 }
-                out.push_str(&serde_json::to_string(
-                    &onix_core::value::object_key_json_string(key),
-                )?);
+                write_json_object_key(key, out);
                 out.push(':');
-                write_json(child, out)?;
+                write_json(child, out);
             }
             out.push('}');
         }
-        // An ordinary leaf below a non-finite one somewhere else in the
-        // tree (not unreachable: this function no longer pre-filters by
-        // containment, see this function's own doc).
+        // An ordinary leaf reached only because a non-finite float or a
+        // lone surrogate exists somewhere else in the tree: `write_json`
+        // renders every node once it is called at all (see this function's
+        // own doc), it never re-checks containment per leaf.
         Value::Null
         | Value::Bool(_)
-        | Value::Str(_)
         | Value::DateTime(_)
         | Value::Date(_)
         | Value::Time(_)
         | Value::TimeDelta(_) => {
-            out.push_str(&serde_json::to_string(&value.to_serde_json())?);
+            out.push_str(
+                &serde_json::to_string(&value.to_serde_json())
+                    .expect("a Null/Bool/DateTime/Date/Time/TimeDelta always serializes"),
+            );
         }
     }
-    Ok(())
+}
+
+/// Writes one [`onix_core::value::ObjectKey`] as a JSON string literal
+/// (quotes and all): a `str` key's content goes through
+/// [`onix_core::value::write_json_str_content`] directly, WTF-8-aware,
+/// exactly the way [`write_json`] renders a `Str`; any other key is already
+/// rendered as a plain (surrogate-free — see the module doc's key-type
+/// table) `String` by [`onix_core::value::object_key_json_string`], so that
+/// one only needs `serde_json` to add the quoting and escaping.
+fn write_json_object_key(key: &onix_core::value::ObjectKey, out: &mut String) {
+    match key {
+        onix_core::value::ObjectKey::Str(s) => {
+            out.push('"');
+            onix_core::value::write_json_str_content(s.as_bytes(), out);
+            out.push('"');
+        }
+        onix_core::value::ObjectKey::Other(_) => {
+            out.push_str(
+                &serde_json::to_string(&onix_core::value::object_key_json_string(key))
+                    .expect("a String always serializes to a JSON string literal"),
+            );
+        }
+    }
 }
 
 /// [`write_json`]'s array/tuple/set/frozenset case: every one of `Value`'s
 /// sequence-shaped variants renders as a JSON array (matching real
 /// `DeepDiff`'s `to_json()`; see `Value::to_serde_json`'s own doc).
-fn write_json_seq<'a>(
-    items: impl Iterator<Item = &'a Value>,
-    out: &mut String,
-) -> Result<(), serde_json::Error> {
+fn write_json_seq<'a>(items: impl Iterator<Item = &'a Value>, out: &mut String) {
     out.push('[');
     for (index, item) in items.enumerate() {
         if index > 0 {
             out.push(',');
         }
-        write_json(item, out)?;
+        write_json(item, out);
     }
     out.push(']');
-    Ok(())
 }
 
 /// Runs `f` on a dedicated worker thread whose stack is large enough for the

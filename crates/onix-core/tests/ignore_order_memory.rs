@@ -71,10 +71,10 @@ fn make_record(
     );
 
     let mut tags: Vec<Value> = (0..=(i % 4))
-        .map(|k| Value::Str(Box::from(TAG_POOL[(i + k) % TAG_POOL.len()])))
+        .map(|k| Value::Str(TAG_POOL[(i + k) % TAG_POOL.len()].into()))
         .collect();
     if let Some(tag) = extra_tag {
-        tags.push(Value::Str(Box::from(TAG_POOL[tag % TAG_POOL.len()])));
+        tags.push(Value::Str(TAG_POOL[tag % TAG_POOL.len()].into()));
     }
 
     let mut entries = vec![
@@ -84,7 +84,7 @@ fn make_record(
         ),
         (
             "name".to_owned(),
-            Value::Str(Box::from(format!("typed_{i:07}"))),
+            Value::Str(format!("typed_{i:07}").into()),
         ),
         ("created_at".to_owned(), Value::DateTime(dt.into())),
         ("coordinate".to_owned(), coordinate),
@@ -93,7 +93,7 @@ fn make_record(
     for f in 0..wide {
         entries.push((
             format!("field_{f:03}"),
-            Value::Str(Box::from(format!("value_{i:07}_{f:03}_padding_padding"))),
+            Value::Str(format!("value_{i:07}_{f:03}_padding_padding").into()),
         ));
     }
     builder.object(entries)

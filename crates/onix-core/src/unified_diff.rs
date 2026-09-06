@@ -41,9 +41,19 @@ const CONTEXT_LINES: usize = 3;
 /// `None` unless both values are strings (`DeepDiff._diff_str` only runs for
 /// a `str`→`str` change), a literal newline occurs in one of them, and the
 /// resulting unified diff is non-empty — see the module doc.
+///
+/// Also `None` when either side holds a lone surrogate code point (a
+/// `Str::Wtf8`): line-splitting needs real `&str` text, and this field is
+/// an ergonomic convenience `DeepDiff` itself only adds when both sides are
+/// already known to differ — an accepted, narrow, documented gap (the
+/// `values_changed` entry itself still reports correctly; it just carries
+/// no `diff` field for this specific, rare combination).
 pub(crate) fn str_diff_field(a: &Value, b: &Value) -> Option<String> {
     match (a, b) {
-        (Value::Str(t1), Value::Str(t2)) => str_diff(t1, t2),
+        (Value::Str(t1), Value::Str(t2)) => match (t1.as_utf8(), t2.as_utf8()) {
+            (Some(t1), Some(t2)) => str_diff(t1, t2),
+            _ => None,
+        },
         _ => None,
     }
 }

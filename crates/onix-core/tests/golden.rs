@@ -175,7 +175,17 @@ fn decode_tagged_dict(
 
             let decoded_key = decode_tagged(key, builder);
             let key = match &decoded_key {
-                onix_core::Value::Str(s) => onix_core::value::ObjectKey::Str(builder.intern(s)),
+                // A golden fixture is plain JSON text, so a `$dict` key can
+                // never hold a lone surrogate (see this file's own doc on why
+                // that content cannot round-trip through this corpus at all).
+                onix_core::Value::Str(s) => {
+                    onix_core::value::ObjectKey::Str(onix_core::value::Key::Utf8(
+                        builder.intern(
+                            s.as_utf8()
+                                .expect("a golden fixture's $dict key is always valid UTF-8"),
+                        ),
+                    ))
+                }
                 _ => onix_core::value::ObjectKey::Other(Box::new(decoded_key)),
             };
 

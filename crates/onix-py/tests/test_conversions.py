@@ -8,6 +8,7 @@ path.
 
 import collections
 import datetime
+import json
 import math
 
 import pytest
@@ -432,66 +433,118 @@ def test_unsupported_dict_key_error_reports_path_to_the_dict() -> None:
         DeepDiff({"a": {complex(1, 2): "x"}}, {"a": {complex(1, 2): "y"}})
 
 
-# lone (unpaired) surrogates: legal in a Python str, not representable as UTF-8; see
-# tests/golden/README.md for the documented divergence from real DeepDiff.
+# lone (unpaired) surrogates: legal in a Python str, not representable as UTF-8.
+# Compared and reported like any other str, matching DeepDiff's plain `==` — see
+# tests/golden/README.md for the one accepted divergence (hashing one as a set member).
+# `to_json()` is compared canonically (parsed, like test_differential_fuzz.py's own
+# comparison, since neither tool promises identical whitespace) against live
+# `deepdiff==9.1.0`, and `to_dict()` structurally — the golden-fixture corpus (plain JSON
+# files) cannot hold this content at all, see tests/golden/README.md for why.
 
 
-def test_lone_surrogate_value_raises_value_error() -> None:
-    """A lone surrogate value raises ValueError instead of silently comparing equal."""
-    with pytest.raises(ValueError, match=r"str at root contains a lone"):
-        DeepDiff("\udc80", "\udc81")
+def test_lone_surrogate_equal_pair_reports_no_change() -> None:
+    """An equal pair compares equal, matching DeepDiff's plain `==` (no hashing involved)."""
+    diff = DeepDiff("a\udc80b", "a\udc80b")
+    assert not diff
+    assert diff.to_json() == "{}"
+    real = RealDeepDiff("a\udc80b", "a\udc80b", verbose_level=2)
+    assert not real
 
 
-def test_distinct_lone_surrogates_both_raise_the_same_way() -> None:
-    """A different lone surrogate pair is refused identically, not silently equated."""
-    with pytest.raises(ValueError, match=r"str at root contains a lone"):
-        DeepDiff("\udc81", "\udc82")
+def test_lone_surrogate_differing_pair_matches_real_deepdiff() -> None:
+    """A differing pair reports a values_changed entry, matching real DeepDiff's."""
+    diff = DeepDiff("a\udc80b", "a\udc80c")
+    real = RealDeepDiff("a\udc80b", "a\udc80c", verbose_level=2)
+    assert json.loads(diff.to_json()) == json.loads(real.to_json())
+    assert diff.to_dict() == real.to_dict()
 
 
-def test_identical_lone_surrogate_value_still_raises() -> None:
-    """An identical pair still raises, even though real DeepDiff reports no change for it."""
-    with pytest.raises(ValueError, match=r"str at root contains a lone"):
-        DeepDiff("\udc80", "\udc80")
+def test_lone_surrogate_dict_key_matches_real_deepdiff() -> None:
+    """A dict key holding a surrogate is diffed and its path rendered like real DeepDiff's."""
+    diff = DeepDiff({"a\udc80b": 1}, {"a\udc80b": 2})
+    real = RealDeepDiff({"a\udc80b": 1}, {"a\udc80b": 2}, verbose_level=2)
+    assert json.loads(diff.to_json()) == json.loads(real.to_json())
+    assert diff.to_dict() == real.to_dict()
 
 
-def test_identical_lone_surrogate_dict_key_still_raises() -> None:
-    """The same holds for a dict key equal on both sides: conversion still validates it."""
-    with pytest.raises(ValueError, match=r"dict key at root\['a'\] contains a lone"):
-        DeepDiff({"a": {"\udc80": 1}}, {"a": {"\udc80": 1}})
+def test_lone_surrogate_dict_key_added_matches_real_deepdiff() -> None:
+    """A newly added dict key holding a surrogate reports dictionary_item_added correctly."""
+    diff = DeepDiff({}, {"\udc80": 1})
+    real = RealDeepDiff({}, {"\udc80": 1}, verbose_level=2)
+    assert json.loads(diff.to_json()) == json.loads(real.to_json())
+    assert diff.to_dict() == real.to_dict()
 
 
-def test_identical_lone_surrogate_set_item_still_raises() -> None:
-    """The same holds for a set member equal on both sides: real DeepDiff would still crash."""
-    with pytest.raises(ValueError, match=r"str at root\[<set member>\] contains a lone"):
-        DeepDiff({"\udc80"}, {"\udc80"})
+def test_lone_surrogate_in_list_matches_real_deepdiff() -> None:
+    """A surrogate-holding string nested in a list reports its path like real DeepDiff's."""
+    diff = DeepDiff({"a": [1, "\udc80"]}, {"a": [1, "\udc81"]})
+    real = RealDeepDiff({"a": [1, "\udc80"]}, {"a": [1, "\udc81"]}, verbose_level=2)
+    assert json.loads(diff.to_json()) == json.loads(real.to_json())
+    assert diff.to_dict() == real.to_dict()
 
 
-def test_lone_surrogate_nested_in_list_reports_its_path() -> None:
-    """The error names the exact path, like every other conversion error in this module."""
-    with pytest.raises(ValueError, match=r"str at root\['a'\]\[1\] contains a lone"):
-        DeepDiff({"a": [1, "\udc80"]}, {"a": [1, "ok"]})
+def test_lone_surrogate_in_tuple_matches_real_deepdiff() -> None:
+    """A surrogate-holding string inside a tuple reports its index like real DeepDiff's."""
+    diff = DeepDiff(("\udc80",), ("\udc81",))
+    real = RealDeepDiff(("\udc80",), ("\udc81",), verbose_level=2)
+    assert json.loads(diff.to_json()) == json.loads(real.to_json())
+    assert diff.to_dict() == real.to_dict()
 
 
-def test_lone_surrogate_dict_key_raises_value_error_naming_the_dict() -> None:
-    """A lone surrogate dict key raises ValueError naming the containing dict's path."""
-    with pytest.raises(ValueError, match=r"dict key at root\['a'\] contains a lone"):
-        DeepDiff({"a": {"\udc80": 1}}, {"a": {"ok": 1}})
+def test_lone_surrogate_set_item_added_and_removed() -> None:
+    """A set holding a surrogate member diffs deterministically; real DeepDiff crashes hashing one."""
+    diff = DeepDiff({"\udc80"}, {"\udc81"})
+    assert diff.to_dict() == {
+        "set_item_added": ["root['\\udc81']"],
+        "set_item_removed": ["root['\\udc80']"],
+    }
+    with pytest.raises(UnicodeEncodeError):
+        RealDeepDiff({"\udc80"}, {"\udc81"})
 
 
-def test_lone_surrogate_set_item_raises_value_error() -> None:
-    """A lone surrogate set member raises ValueError; real DeepDiff crashes hashing one instead."""
-    with pytest.raises(ValueError, match=r"str at root\[<set member>\] contains a lone"):
-        DeepDiff({"\udc80"}, {"ok"})
+def test_lone_surrogate_frozenset_item_matches_deterministic_behavior() -> None:
+    """The same deterministic-hashing divergence holds for a frozenset member."""
+    diff = DeepDiff(frozenset({"\udc80"}), frozenset({"\udc80", "\udc81"}))
+    assert diff.to_dict() == {"set_item_added": ["root['\\udc81']"]}
+    with pytest.raises(UnicodeEncodeError):
+        RealDeepDiff(frozenset({"\udc80"}), frozenset({"\udc80", "\udc81"}))
 
 
-def test_lone_surrogate_tuple_item_raises_value_error() -> None:
-    """A lone surrogate inside a tuple raises ValueError naming its index."""
-    with pytest.raises(ValueError, match=r"str at root\[0\] contains a lone"):
-        DeepDiff(("\udc80",), ("ok",))
+def test_lone_surrogate_under_ignore_order_diffs_deterministically_even_outside_a_set() -> None:
+    """`ignore_order=True` hashes every value (DeepHash), not just a set's members.
+
+    Real DeepDiff crashes with UnicodeEncodeError the moment a surrogate
+    appears anywhere in the tree once ignore_order=True, even in a plain
+    list with no set involved at all; onix diffs deterministically either way.
+    """
+    diff = DeepDiff({"a": ["x\udc80"]}, {"a": ["y\udc81"]}, ignore_order=True)
+    assert diff.to_dict() == {
+        "values_changed": {"root['a'][0]": {"new_value": "y\udc81", "old_value": "x\udc80"}}
+    }
+    with pytest.raises(UnicodeEncodeError):
+        RealDeepDiff({"a": ["x\udc80"]}, {"a": ["y\udc81"]}, ignore_order=True)
+
+
+def test_lone_surrogate_path_rendering_matches_real_deepdiff() -> None:
+    """A top-level dict key holding a surrogate renders its path like real DeepDiff's."""
+    diff = DeepDiff({"\udc80": 1}, {"\udc80": 2})
+    real = RealDeepDiff({"\udc80": 1}, {"\udc80": 2}, verbose_level=2)
+    assert json.loads(diff.to_json()) == json.loads(real.to_json())
+    assert list(diff.to_dict()["values_changed"]) == list(real.to_dict()["values_changed"])
+
+
+def test_lone_surrogate_high_and_low_surrogate_values() -> None:
+    """Both surrogate halves (high 0xD800-0xDBFF and low 0xDC00-0xDFFF) round-trip correctly."""
+    for code_point in (0xD800, 0xDBFF, 0xDC00, 0xDFFF):
+        s = chr(code_point)
+        diff = DeepDiff(s, s + "x")
+        real = RealDeepDiff(s, s + "x", verbose_level=2)
+        assert json.loads(diff.to_json()) == json.loads(real.to_json())
+        assert diff.to_dict() == real.to_dict()
 
 
 def test_non_bmp_character_is_accepted() -> None:
-    """A genuine non-BMP character converts fine: only an unpaired surrogate is refused."""
+    """A genuine non-BMP character converts fine; only an unpaired surrogate needed this feature."""
     diff = DeepDiff("😀", "😁")
     assert diff.to_dict()["values_changed"]["root"] == {"new_value": "😁", "old_value": "😀"}
 

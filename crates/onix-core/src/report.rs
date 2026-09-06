@@ -39,7 +39,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::value::{Builder, Value};
+use crate::value::{Builder, Str, Value};
 
 use crate::path::{PathSegment, render_path};
 
@@ -93,7 +93,7 @@ impl ValuesChangedEntry {
         if let Some(new_path) = &self.new_path {
             map.insert(
                 "new_path".to_string(),
-                serde_json::Value::String(render_path(new_path)),
+                serde_json::Value::String(render_path(new_path).to_string()),
             );
         }
         if let Some(diff) = &self.diff {
@@ -111,10 +111,7 @@ impl ValuesChangedEntry {
             entries.push(("new_path".to_string(), rendered(new_path)));
         }
         if let Some(diff) = &self.diff {
-            entries.push((
-                "diff".to_string(),
-                Value::Str(diff.clone().into_boxed_str()),
-            ));
+            entries.push(("diff".to_string(), Value::Str(diff.clone().into())));
         }
         builder.object(entries)
     }
@@ -153,7 +150,7 @@ impl TypeChangeEntry {
         if let Some(new_path) = &self.new_path {
             map.insert(
                 "new_path".to_string(),
-                serde_json::Value::String(render_path(new_path)),
+                serde_json::Value::String(render_path(new_path).to_string()),
             );
         }
         serde_json::Value::Object(map)
@@ -163,11 +160,11 @@ impl TypeChangeEntry {
         let mut entries = vec![
             (
                 "old_type".to_string(),
-                Value::Str(self.old_type.clone().into_boxed_str()),
+                Value::Str(self.old_type.clone().into()),
             ),
             (
                 "new_type".to_string(),
-                Value::Str(self.new_type.clone().into_boxed_str()),
+                Value::Str(self.new_type.clone().into()),
             ),
             ("old_value".to_string(), self.old_value.clone()),
             ("new_value".to_string(), self.new_value.clone()),
@@ -182,7 +179,7 @@ impl TypeChangeEntry {
 /// A structural path rendered into the string [`Value`] a report entry
 /// carries it as (`new_path`).
 fn rendered(path: &[PathSegment]) -> Value {
-    Value::Str(render_path(path).into_boxed_str())
+    Value::Str(render_path(path))
 }
 
 /// A DeepDiff-compatible diff result, grouped into categories.
@@ -280,7 +277,7 @@ fn serialize_raw_category(
     }
     let mut category = serde_json::Map::new();
     for (path, value) in map {
-        category.insert(render_path(path), value.to_serde_json());
+        category.insert(render_path(path).to_string(), value.to_serde_json());
     }
     root.insert(name.to_string(), serde_json::Value::Object(category));
 }
@@ -310,7 +307,7 @@ fn push_raw_category(
     if map.is_empty() {
         return;
     }
-    let entries: Vec<(String, Value)> = map
+    let entries: Vec<(Str, Value)> = map
         .iter()
         .map(|(path, value)| (render_path(path), value.clone()))
         .collect();
@@ -329,8 +326,8 @@ fn push_raw_category(
 /// follows `PYTHONHASHSEED` and is unreproducible even in principle — unlike
 /// a set *value*, which both tools render in the set's own iteration order
 /// (see [`crate::value::SetItems`]). See `tests/golden/README.md`.
-fn rendered_set_entries(map: &BTreeMap<Vec<PathSegment>, Value>) -> Vec<String> {
-    let mut rendered: Vec<String> = map.keys().map(|path| render_path(path)).collect();
+fn rendered_set_entries(map: &BTreeMap<Vec<PathSegment>, Value>) -> Vec<Str> {
+    let mut rendered: Vec<Str> = map.keys().map(|path| render_path(path)).collect();
     rendered.sort();
     rendered.dedup();
     rendered
@@ -349,7 +346,7 @@ fn push_set_category(
     }
     let entries = rendered_set_entries(map)
         .into_iter()
-        .map(|path| Value::Str(path.into_boxed_str()))
+        .map(Value::Str)
         .collect::<Vec<_>>();
     root.push((
         name.to_string(),
@@ -368,7 +365,7 @@ fn serialize_set_category(
     }
     let entries = rendered_set_entries(map)
         .into_iter()
-        .map(serde_json::Value::String)
+        .map(|path| serde_json::Value::String(path.to_string()))
         .collect();
     root.insert(name.to_string(), serde_json::Value::Array(entries));
 }
@@ -524,7 +521,7 @@ impl Report {
     /// compare *pre-merge* finding counts, exactly like `DeepDiff`'s own
     /// per-list decision happens before this whole-tree pass ever runs).
     pub(crate) fn merge_mutual_add_removes(&mut self) {
-        let removed_by_rendered: BTreeMap<String, Vec<PathSegment>> = self
+        let removed_by_rendered: BTreeMap<Str, Vec<PathSegment>> = self
             .iterable_item_removed
             .keys()
             .map(|path| (render_path(path), path.clone()))
@@ -713,7 +710,7 @@ impl Report {
         let mut root: Vec<(String, Value)> = Vec::new();
 
         if !self.type_changes.is_empty() {
-            let entries: Vec<(String, Value)> = self
+            let entries: Vec<(Str, Value)> = self
                 .type_changes
                 .iter()
                 .map(|(path, entry)| (render_path(path), entry.to_value(&mut builder)))
@@ -722,7 +719,7 @@ impl Report {
         }
 
         if !self.values_changed.is_empty() {
-            let entries: Vec<(String, Value)> = self
+            let entries: Vec<(Str, Value)> = self
                 .values_changed
                 .iter()
                 .map(|(path, entry)| (render_path(path), entry.to_value(&mut builder)))
@@ -781,7 +778,7 @@ impl Report {
         if !self.type_changes.is_empty() {
             let mut category = serde_json::Map::new();
             for (path, entry) in &self.type_changes {
-                category.insert(render_path(path), entry.to_json_value());
+                category.insert(render_path(path).to_string(), entry.to_json_value());
             }
             root.insert(
                 "type_changes".to_string(),
@@ -792,7 +789,7 @@ impl Report {
         if !self.values_changed.is_empty() {
             let mut category = serde_json::Map::new();
             for (path, entry) in &self.values_changed {
-                category.insert(render_path(path), entry.to_json_value());
+                category.insert(render_path(path).to_string(), entry.to_json_value());
             }
             root.insert(
                 "values_changed".to_string(),

@@ -18,10 +18,25 @@ use serde::de::value::{
 
 use serde_json::json;
 
-use super::{Builder, Number, Object, ObjectKey, SetItems, Value};
+use super::{
+    Builder, Key, Number, Object, ObjectKey, SetItems, Str, Value, Wtf8Char, Wtf8Chars,
+    contains_wtf8, write_json_str_content,
+};
 use crate::test_support::{
     carr, cdate, cdt, cdt_at, cfrozen, cset, ctime, ctimedelta, ctup, ctuple, cv,
 };
+
+/// The WTF-8 bytes for one lone surrogate code point, matching `CPython`'s own
+/// `str.encode('utf-8', 'surrogatepass')` — see `crates/onix-py/src/convert.rs`'s
+/// module doc. `0xDC80` throughout these tests (an arbitrary low surrogate);
+/// [`wtf8_surrogate_bytes`] covers both halves and boundary values.
+fn wtf8_surrogate_bytes(code_point: u16) -> [u8; 3] {
+    [
+        0xE0 | ((code_point >> 12) as u8),
+        0x80 | (((code_point >> 6) & 0x3F) as u8),
+        0x80 | ((code_point & 0x3F) as u8),
+    ]
+}
 
 /// The convenience alias for `serde`'s in-memory deserializer error type.
 type DeError = serde::de::value::Error;
@@ -163,7 +178,10 @@ fn duplicate_keys_keep_last_matching_serde_json() {
 
 #[test]
 fn object_key_as_str_is_none_for_a_non_str_key() {
-    assert_eq!(ObjectKey::Str(Arc::from("a")).as_str(), Some("a"));
+    assert_eq!(
+        ObjectKey::Str(Key::Utf8(Arc::from("a"))).as_str(),
+        Some("a")
+    );
     assert_eq!(
         ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1)))).as_str(),
         None
@@ -174,7 +192,7 @@ fn object_key_as_str_is_none_for_a_non_str_key() {
 fn object_key_ordering_puts_every_str_before_every_other_key() {
     // See `ObjectKey`'s own `Ord` doc: this is what keeps a `str`-only
     // object's entry order unchanged from before this variant existed.
-    let str_key = ObjectKey::Str(Arc::from("z"));
+    let str_key = ObjectKey::Str(Key::Utf8(Arc::from("z")));
     let other_key = ObjectKey::Other(Box::new(Value::Number(Number::from_i64(-1000))));
     assert!(str_key < other_key);
     assert_ne!(str_key, other_key);
@@ -185,7 +203,7 @@ fn object_get_and_contains_key_accept_a_non_str_object_key() {
     let int_key = ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1))));
     let missing_key = ObjectKey::Other(Box::new(Value::Number(Number::from_u64(2))));
     let obj = Object::from_pairs(vec![
-        (ObjectKey::Str(Arc::from("a")), Value::Bool(true)),
+        (ObjectKey::Str(Key::Utf8(Arc::from("a"))), Value::Bool(true)),
         (int_key.clone(), Value::Bool(false)),
     ]);
 
@@ -202,7 +220,7 @@ fn object_get_str_on_a_mixed_object_skips_past_the_non_str_key() {
     // mixed object's `str`-key lookup actually probes an index at or past
     // that `Other` entry, which a single-`str`-key object never does.
     let obj = Object::from_pairs(vec![
-        (ObjectKey::Str(Arc::from("a")), Value::Bool(true)),
+        (ObjectKey::Str(Key::Utf8(Arc::from("a"))), Value::Bool(true)),
         (
             ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1)))),
             Value::Bool(false),
@@ -218,7 +236,7 @@ fn object_get_str_on_a_mixed_object_skips_past_the_non_str_key() {
 #[test]
 fn object_with_non_str_keys_has_non_str_keys_is_true() {
     let obj = Object::from_pairs(vec![
-        (ObjectKey::Str(Arc::from("a")), Value::Null),
+        (ObjectKey::Str(Key::Utf8(Arc::from("a"))), Value::Null),
         (
             ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1)))),
             Value::Null,
@@ -226,7 +244,10 @@ fn object_with_non_str_keys_has_non_str_keys_is_true() {
     ]);
     assert!(obj.has_non_str_keys());
 
-    let str_only = Object::from_pairs(vec![(ObjectKey::Str(Arc::from("a")), Value::Null)]);
+    let str_only = Object::from_pairs(vec![(
+        ObjectKey::Str(Key::Utf8(Arc::from("a"))),
+        Value::Null,
+    )]);
     assert!(!str_only.has_non_str_keys());
 }
 
@@ -492,7 +513,7 @@ fn deeply_nested_values_drop_without_native_recursion() {
             let mut nested_objects = Value::Null;
             for _ in 0..DEPTH {
                 nested_objects = Value::Object(Object::from_pairs(vec![(
-                    ObjectKey::Str(Arc::from("k")),
+                    ObjectKey::Str(Key::Utf8(Arc::from("k"))),
                     nested_objects,
                 )]));
             }
@@ -1121,4 +1142,436 @@ fn canonical_order_ranks_time_and_timedelta_last_of_all() {
             "0:00:02",
         ]
     );
+}
+
+// --- Str / Key: the WTF-8 (lone surrogate) representation -----------------
+
+#[test]
+fn str_wtf8_accessors() {
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    let s = Str::Wtf8(Box::from(bytes.as_slice()));
+
+    assert_eq!(s.as_bytes(), bytes.as_slice());
+    assert_eq!(s.as_utf8(), None);
+    assert!(!s.is_empty());
+    assert_eq!(s.chars().collect::<Vec<_>>(), [Wtf8Char::Surrogate(0xDC80)]);
+}
+
+#[test]
+fn str_utf8_accessors_unaffected() {
+    let s: Str = "hello".into();
+
+    assert_eq!(s.as_bytes(), b"hello");
+    assert_eq!(s.as_utf8(), Some("hello"));
+    assert!(!s.is_empty());
+    assert!(Str::from(String::new()).is_empty());
+    assert_eq!(Str::from(Box::from("boxed")).as_utf8(), Some("boxed"));
+}
+
+#[test]
+fn str_wtf8_display_is_lossy() {
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    let s = Str::Wtf8(Box::from(bytes.as_slice()));
+
+    assert_eq!(s.to_string(), "\u{FFFD}\u{FFFD}\u{FFFD}");
+}
+
+#[test]
+fn str_eq_ord_hash_cross_variant() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let plain: Str = "a".into();
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    let surrogate = Str::Wtf8(Box::from(bytes.as_slice()));
+
+    // Byte order: 'a' (0x61) sorts before the surrogate's 3-byte WTF-8
+    // encoding (0xED..), matching code-point order.
+    assert!(plain < surrogate);
+    assert_ne!(plain, surrogate);
+    assert_eq!(surrogate, Str::Wtf8(Box::from(bytes.as_slice())));
+
+    let hash_of = |s: &Str| {
+        let mut hasher = DefaultHasher::new();
+        s.hash(&mut hasher);
+        hasher.finish()
+    };
+
+    // Equal content hashes equal...
+    assert_eq!(
+        hash_of(&surrogate),
+        hash_of(&Str::Wtf8(Box::from(bytes.as_slice())))
+    );
+    // ...and content actually reaches the hasher (a no-op `Hash` impl would
+    // make every value collide, including these two clearly distinct ones).
+    assert_ne!(hash_of(&plain), hash_of(&surrogate));
+    let other_surrogate = Str::Wtf8(Box::from(wtf8_surrogate_bytes(0xDFFF).as_slice()));
+    assert_ne!(hash_of(&surrogate), hash_of(&other_surrogate));
+}
+
+#[test]
+fn key_wtf8_accessors_and_conversions() {
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    let key = Key::Wtf8(Box::from(bytes.as_slice()));
+
+    assert_eq!(key.as_bytes(), bytes.as_slice());
+    assert_eq!(key.as_utf8(), None);
+    assert_eq!(
+        key.chars().collect::<Vec<_>>(),
+        [Wtf8Char::Surrogate(0xDC80)]
+    );
+    assert_eq!(key.to_lossy_string(), "\u{FFFD}\u{FFFD}\u{FFFD}");
+
+    // Key -> Str is lossless (used when a report path embeds a key's own
+    // content — see `crate::path::render_path`'s doc).
+    let as_str: Str = (&key).into();
+    assert_eq!(as_str, Str::Wtf8(Box::from(bytes.as_slice())));
+
+    // Str -> Key (the Wtf8 arm of `Interner::intern_key`, exercised
+    // end-to-end via `Builder::object` below, and pinned directly here).
+    let round_trip: Key = match as_str {
+        Str::Utf8(_) => unreachable!("built as Wtf8 above"),
+        Str::Wtf8(b) => Key::Wtf8(b),
+    };
+    assert_eq!(round_trip.as_bytes(), bytes.as_slice());
+}
+
+#[test]
+fn key_ord_cross_variant() {
+    let utf8_key = Key::Utf8(Arc::from("a"));
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    let wtf8_key = Key::Wtf8(Box::from(bytes.as_slice()));
+
+    assert!(utf8_key < wtf8_key);
+    assert_eq!(
+        utf8_key.partial_cmp(&wtf8_key),
+        Some(std::cmp::Ordering::Less)
+    );
+    assert_ne!(utf8_key, wtf8_key);
+}
+
+#[test]
+fn key_eq_is_true_for_equal_content_same_and_cross_variant_construction() {
+    // `key_ord_cross_variant` above only ever asserts inequality, which a
+    // `PartialEq` impl unconditionally returning `false` would also satisfy;
+    // this pins the positive case directly, for both variants and for two
+    // separately-allocated `Utf8` keys (not the same `Arc`).
+    assert_eq!(Key::Utf8(Arc::from("a")), Key::Utf8(Arc::from("a")));
+
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    assert_eq!(
+        Key::Wtf8(Box::from(bytes.as_slice())),
+        Key::Wtf8(Box::from(bytes.as_slice()))
+    );
+}
+
+#[test]
+fn key_hash_reaches_content() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let hash_of = |k: &Key| {
+        let mut hasher = DefaultHasher::new();
+        k.hash(&mut hasher);
+        hasher.finish()
+    };
+
+    let utf8_key = Key::Utf8(Arc::from("a"));
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    let wtf8_key = Key::Wtf8(Box::from(bytes.as_slice()));
+
+    // Equal content hashes equal...
+    assert_eq!(hash_of(&utf8_key), hash_of(&Key::Utf8(Arc::from("a"))));
+    // ...and content actually reaches the hasher (a no-op `Hash` impl would
+    // make every value collide, including these two clearly distinct ones).
+    assert_ne!(hash_of(&utf8_key), hash_of(&wtf8_key));
+}
+
+#[test]
+fn builder_object_carries_a_wtf8_key_through_without_interning() {
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    let key: Str = Str::Wtf8(Box::from(bytes.as_slice()));
+
+    let mut builder = Builder::new();
+    let value = builder.object(vec![(key, Value::Number(Number::from_u64(1)))]);
+
+    let Value::Object(obj) = &value else {
+        panic!("expected object");
+    };
+    assert_eq!(obj.len(), 1);
+    let (found_key, found_value) = obj.iter().next().expect("one entry");
+    let ObjectKey::Str(found_key) = found_key else {
+        panic!("expected a str key");
+    };
+    assert_eq!(found_key.as_bytes(), bytes.as_slice());
+    assert_eq!(found_value, &Value::Number(Number::from_u64(1)));
+    assert!(found_key.as_utf8().is_none());
+}
+
+#[test]
+fn builder_intern_key_interns_a_plain_str_but_not_a_wtf8_one() {
+    // `Builder::intern_key` is the public entry point `onix-py`'s
+    // conversion calls directly (for a dict key it has already classified,
+    // see `crates/onix-py/src/convert.rs`); this exercises it the same way
+    // `Builder::object`'s own `Utf8`/`Wtf8` split is exercised above, but
+    // through this standalone wrapper rather than the whole-object path.
+    let mut builder = Builder::new();
+
+    let first = builder.intern_key(Str::from("shared"));
+    let second = builder.intern_key(Str::from("shared"));
+    let Key::Utf8(first_arc) = &first else {
+        panic!("expected an interned Utf8 key");
+    };
+    let Key::Utf8(second_arc) = &second else {
+        panic!("expected an interned Utf8 key");
+    };
+    assert!(std::sync::Arc::ptr_eq(first_arc, second_arc));
+
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    let wtf8_key = builder.intern_key(Str::Wtf8(Box::from(bytes.as_slice())));
+    assert_eq!(wtf8_key.as_bytes(), bytes.as_slice());
+}
+
+// --- Wtf8Chars: the shared WTF-8 decoder -----------------------------------
+
+#[test]
+fn wtf8_chars_decodes_plain_ascii_in_one_call() {
+    let chars: Vec<Wtf8Char> = Wtf8Chars::new(b"ab").collect();
+    assert_eq!(chars, [Wtf8Char::Scalar('a'), Wtf8Char::Scalar('b')]);
+}
+
+#[test]
+fn wtf8_chars_decodes_a_valid_prefix_before_a_surrogate() {
+    // "ab" (two single-byte chars) followed by one surrogate's 3-byte WTF-8
+    // encoding: exercises both the `Ok(valid)` fast path (no invalid bytes
+    // left) and the `Err(..) if valid_up_to() > 0` partial-prefix path (a
+    // valid run sits before the surrogate).
+    let mut bytes = b"ab".to_vec();
+    bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDC80));
+
+    let chars: Vec<Wtf8Char> = Wtf8Chars::new(&bytes).collect();
+    assert_eq!(
+        chars,
+        [
+            Wtf8Char::Scalar('a'),
+            Wtf8Char::Scalar('b'),
+            Wtf8Char::Surrogate(0xDC80),
+        ]
+    );
+}
+
+#[test]
+fn wtf8_chars_decodes_a_multibyte_scalar_then_a_surrogate() {
+    // 'é' (2-byte UTF-8) immediately followed by a surrogate: the invalid
+    // byte sits at offset 0 of the *remaining* slice only after 'é' is
+    // consumed, so this also exercises the `valid_up_to() == 0` branch
+    // directly (no valid prefix at all once 'é' has been taken).
+    let mut bytes = "é".as_bytes().to_vec();
+    bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDFFF));
+
+    let chars: Vec<Wtf8Char> = Wtf8Chars::new(&bytes).collect();
+    assert_eq!(chars, [Wtf8Char::Scalar('é'), Wtf8Char::Surrogate(0xDFFF)]);
+}
+
+#[test]
+fn wtf8_chars_decodes_two_adjacent_surrogates_and_a_trailing_scalar() {
+    let mut bytes = wtf8_surrogate_bytes(0xD800).to_vec();
+    bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDFFF));
+    bytes.push(b'z');
+
+    let chars: Vec<Wtf8Char> = Wtf8Chars::new(&bytes).collect();
+    assert_eq!(
+        chars,
+        [
+            Wtf8Char::Surrogate(0xD800),
+            Wtf8Char::Surrogate(0xDFFF),
+            Wtf8Char::Scalar('z'),
+        ]
+    );
+}
+
+#[test]
+fn wtf8_chars_empty_bytes_yield_nothing() {
+    assert_eq!(Wtf8Chars::new(b"").collect::<Vec<_>>(), []);
+}
+
+#[test]
+fn utf8_sequence_width_boundary_at_the_ascii_continuation_split() {
+    // Pins the `< 0x80` boundary directly: 0x7F (the last ASCII byte) is
+    // width 1; 0x80 (a continuation byte, never a real lead byte at a
+    // WTF-8 character boundary, but a valid `u8` all the same) must NOT be
+    // read as width 1 too — it matches none of the multi-byte lead-byte
+    // patterns either, so it falls all the way to the 4-byte default,
+    // distinguishing `< 0x80` from a `<= 0x80` that would misroute it to
+    // width 1 instead. This function is never called with 0x80 through the
+    // public `Wtf8Chars` iterator, so only a direct call exercises it.
+    assert_eq!(super::utf8_sequence_width(0x7F), 1);
+    assert_eq!(super::utf8_sequence_width(0x80), 4);
+}
+
+#[test]
+fn wtf8_chars_decode_validates_at_most_a_constant_number_of_bytes_per_call_and_o_n_total() {
+    // A quadratic decoder validates the whole remaining slice on every
+    // call, so total bytes validated grows with the square of the input;
+    // a linear one validates at most `utf8_sequence_width`'s bound (4)
+    // bytes per call, so the total is bounded by the input length plus a
+    // small constant. Counted directly via `wtf8_decode_stats` rather than
+    // timed, so this cannot flake on a noisy machine. Run for both a
+    // plain-ASCII string and one ending in a lone surrogate, since the two
+    // decode paths (`Ok`/`Err` in `Wtf8Chars::next`) are exercised
+    // independently. See `Wtf8Chars`'s own doc for why the decode must
+    // stay linear.
+    fn build(chars: usize, with_surrogate: bool) -> Vec<u8> {
+        let mut bytes = "a".repeat(chars).into_bytes();
+        if with_surrogate {
+            bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDC80));
+        }
+        bytes
+    }
+
+    const MAX_BYTES_PER_CALL: usize = 4;
+    const SLACK: usize = 8;
+
+    for with_surrogate in [false, true] {
+        for chars in [25_000usize, 100_000] {
+            let bytes = build(chars, with_surrogate);
+
+            super::wtf8_decode_stats::take();
+            let char_count = Wtf8Chars::new(&bytes).count();
+            let (validated, max_call) = super::wtf8_decode_stats::take();
+
+            assert!(char_count > 0);
+            assert!(
+                max_call <= MAX_BYTES_PER_CALL,
+                "a single `Wtf8Chars::next` call validated {max_call} bytes, more than the \
+                 {MAX_BYTES_PER_CALL}-byte UTF-8/WTF-8 sequence width bound"
+            );
+            assert!(
+                validated <= bytes.len() + SLACK,
+                "decoding {} bytes (surrogate: {with_surrogate}) validated {validated} bytes \
+                 total, more than input length plus {SLACK} of slack — looks quadratic, not \
+                 linear",
+                bytes.len()
+            );
+        }
+    }
+}
+
+// --- contains_wtf8 ----------------------------------------------------------
+
+#[test]
+fn contains_wtf8_false_for_every_ordinary_shape() {
+    assert!(!contains_wtf8(&Value::Null));
+    assert!(!contains_wtf8(&cv(
+        &json!({"a": [1, "x", true, 1.5], "b": null})
+    )));
+    assert!(!contains_wtf8(&Value::Tuple(
+        Box::new([cv(&json!(1))]).into()
+    )));
+    assert!(!contains_wtf8(&Value::Set(SetItems::new(vec![cv(
+        &json!("x")
+    )]))));
+    assert!(!contains_wtf8(&Value::FrozenSet(SetItems::new(vec![cv(
+        &json!("x")
+    )]))));
+}
+
+#[test]
+fn contains_wtf8_true_for_a_bare_wtf8_string() {
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    assert!(contains_wtf8(&Value::Str(Str::Wtf8(Box::from(
+        bytes.as_slice()
+    )))));
+}
+
+#[test]
+fn contains_wtf8_true_transitively_through_every_container_kind() {
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    let leaf = Value::Str(Str::Wtf8(Box::from(bytes.as_slice())));
+
+    assert!(contains_wtf8(&Value::Array(
+        Box::new([leaf.clone()]).into()
+    )));
+    assert!(contains_wtf8(&Value::Tuple(
+        Box::new([leaf.clone()]).into()
+    )));
+    assert!(contains_wtf8(&Value::Set(SetItems::new(vec![
+        leaf.clone()
+    ]))));
+    assert!(contains_wtf8(&Value::FrozenSet(SetItems::new(vec![
+        leaf.clone()
+    ]))));
+
+    let mut builder = Builder::new();
+    let nested = builder.object(vec![("a".to_string(), leaf)]);
+    assert!(contains_wtf8(&Value::Array(Box::new([nested]).into())));
+}
+
+#[test]
+fn contains_wtf8_true_for_a_wtf8_object_key_with_an_ordinary_value() {
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    let key: Str = Str::Wtf8(Box::from(bytes.as_slice()));
+    let mut builder = Builder::new();
+    let value = builder.object(vec![(key, Value::Number(Number::from_u64(1)))]);
+
+    assert!(contains_wtf8(&value));
+}
+
+// --- write_json_str_content: the byte-exact JSON string-content writer ----
+
+fn write_json_str_content_string(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    write_json_str_content(bytes, &mut out);
+    out
+}
+
+#[test]
+fn write_json_str_content_matches_serde_json_for_ordinary_content() {
+    assert_eq!(write_json_str_content_string(b"d\"e"), r#"d\"e"#);
+}
+
+#[test]
+fn write_json_str_content_escapes_a_bare_surrogate() {
+    let bytes = wtf8_surrogate_bytes(0xDC80);
+    assert_eq!(write_json_str_content_string(&bytes), r"\udc80");
+}
+
+#[test]
+fn write_json_str_content_escapes_a_surrogate_between_two_plain_runs() {
+    // "a" + surrogate + "b" exercises the run-flush (a non-empty run pushed
+    // before the escape) and the trailing-run flush after the loop.
+    let mut bytes = b"a".to_vec();
+    bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDC80));
+    bytes.push(b'b');
+    assert_eq!(write_json_str_content_string(&bytes), r"a\udc80b");
+}
+
+#[test]
+fn write_json_str_content_escapes_a_surrogate_needing_escaped_neighbors_too() {
+    // The plain run around the surrogate itself needs ordinary JSON
+    // escaping (a literal quote), proving `push_escaped_run` — not a raw
+    // byte copy — renders it.
+    let mut bytes = b"a\"".to_vec();
+    bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDC80));
+    assert_eq!(write_json_str_content_string(&bytes), r#"a\"\udc80"#);
+}
+
+#[test]
+fn write_json_str_content_leading_surrogate_with_no_prefix_run() {
+    // A surrogate as the very first code point: `run` is empty when the
+    // `Surrogate` arm fires, exercising the `!run.is_empty()` guard's false
+    // branch.
+    let bytes = wtf8_surrogate_bytes(0xD800);
+    assert_eq!(write_json_str_content_string(&bytes), r"\ud800");
+}
+
+#[test]
+fn write_json_str_content_two_adjacent_surrogates_have_no_run_between_them() {
+    // Two surrogates back-to-back: `run` stays empty across the whole
+    // decode, so the `!run.is_empty()` flush never fires between them —
+    // only the trailing flush check after the loop (also a no-op here) is
+    // exercised on the empty-run side.
+    let mut bytes = wtf8_surrogate_bytes(0xD800).to_vec();
+    bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDFFF));
+    assert_eq!(write_json_str_content_string(&bytes), r"\ud800\udfff");
 }

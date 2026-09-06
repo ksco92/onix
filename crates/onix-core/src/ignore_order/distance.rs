@@ -256,9 +256,11 @@ pub(crate) fn item_length(value: &Value) -> usize {
 /// "new value" is a whole map, not a [`Value`]) can share it directly.
 fn item_length_of_map(map: &Object) -> usize {
     map.iter()
-        // A non-`str` key can never match the literal exclusion list below,
-        // so it is always counted — `Option::is_none_or` reads as "excluded
-        // only when this is a `str` key that matches".
+        // A non-`str` key, and a `str` key holding a lone surrogate (never
+        // equal to one of the plain-ASCII names below — see `ObjectKey::
+        // as_str`, `None` for both), can never match the literal exclusion
+        // list, so it is always counted — `Option::is_none_or` reads as
+        // "excluded only when this is a plain `str` key that matches".
         .filter(|(key, _)| key.as_str().is_none_or(|s| !is_length_excluded_key(s)))
         .map(|(_, v)| item_length(v))
         .sum()
@@ -524,7 +526,7 @@ fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value>
             coerce_to_f64(old_value).map(|f| Value::Number(Number::from_f64(f)))
         }
         Value::Number(_) => coerce_to_i64(old_value).map(|i| Value::Number(Number::from_i64(i))),
-        Value::Str(_) => coerce_to_python_str(old_value).map(|s| Value::Str(s.into_boxed_str())),
+        Value::Str(_) => coerce_to_python_str(old_value).map(|s| Value::Str(s.into())),
         Value::Null
         | Value::DateTime(_)
         | Value::Date(_)
@@ -561,6 +563,9 @@ fn is_truthy(value: &Value) -> bool {
         }
         Value::Bool(b) => *b,
         Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        // Never empty by construction for `Str::Wtf8` (see `Str::is_empty`),
+        // so this is always `true` there — matching `bool("\udc80") ==
+        // True` in real Python.
         Value::Str(s) => !s.is_empty(),
         Value::Array(items) | Value::Tuple(items) => !items.is_empty(),
         Value::Set(items) | Value::FrozenSet(items) => !items.is_empty(),
@@ -587,7 +592,9 @@ fn coerce_to_f64(value: &Value) -> Option<f64> {
         | Value::Object(_) => None,
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         Value::Number(n) => n.as_f64(),
-        Value::Str(s) => s.trim().parse::<f64>().ok(),
+        // A `Str::Wtf8` (a lone surrogate present) is never a valid float
+        // literal, matching `float("\udc80")` raising in real Python.
+        Value::Str(s) => s.as_utf8().and_then(|s| s.trim().parse::<f64>().ok()),
     }
 }
 
@@ -642,7 +649,8 @@ fn coerce_to_i64(value: &Value) -> Option<i64> {
                     .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok()))
             }
         }
-        Value::Str(s) => s.trim().parse::<i64>().ok(),
+        // See `coerce_to_f64`'s doc for the `Str::Wtf8` case.
+        Value::Str(s) => s.as_utf8().and_then(|s| s.trim().parse::<i64>().ok()),
     }
 }
 
@@ -690,7 +698,13 @@ fn coerce_to_python_str(value: &Value) -> Option<String> {
                 n.as_u64().map(|u| u.to_string())
             }
         }
-        Value::Str(s) => Some(s.to_string()),
+        // `str(x)` is the identity for a value already a `str`, including
+        // one holding a lone surrogate — but this coercion only ever needs
+        // to build a `String`, which cannot hold one, so a `Str::Wtf8`
+        // falls through to `None` here (an accepted, narrow gap: it only
+        // costs an unnecessary type-change inclusion, never a wrong one —
+        // see this function's own doc).
+        Value::Str(s) => s.as_utf8().map(ToString::to_string),
     }
 }
 
@@ -731,7 +745,7 @@ enum DictKeyIdentity {
 fn dict_key_identity(key: &ObjectKey) -> Option<DictKeyIdentity> {
     match key {
         ObjectKey::Str(s) => Some(DictKeyIdentity::Scalar(crate::lcs::ScalarKey::Str(
-            s.to_string(),
+            s.as_bytes().to_vec(),
         ))),
         ObjectKey::Other(value) => match value.as_ref() {
             Value::Tuple(items) => items
@@ -831,20 +845,27 @@ pub(crate) fn is_below_threshold_to_diff_deeper(a: &Object, b: &Object) -> bool 
             matched.shared.len(),
         )
     } else {
-        // Unchanged from before `ObjectKey` existed: every key here is a
-        // `Str`, so structural and python-equality matching coincide, and
-        // `as_str` never filters anything out.
+        // Every key here is an `ObjectKey::Str`, so structural and
+        // python-equality matching coincide. Counted by WTF-8 bytes, not
+        // `ObjectKey::as_str` (which is `None` for a lone-surrogate key —
+        // `ObjectKey` has no `Hash` impl at all, see its own doc, so this
+        // is also the only way to put one in a `HashSet` here), so a
+        // surrogate key is counted correctly instead of silently dropped.
+        fn key_bytes(key: &ObjectKey) -> &[u8] {
+            match key {
+                ObjectKey::Str(s) => s.as_bytes(),
+                ObjectKey::Other(_) => {
+                    unreachable!("has_non_str_keys() is false on both sides in this branch")
+                }
+            }
+        }
         let union_len = a
             .keys()
-            .filter_map(ObjectKey::as_str)
-            .chain(b.keys().filter_map(ObjectKey::as_str))
+            .map(key_bytes)
+            .chain(b.keys().map(key_bytes))
             .collect::<HashSet<_>>()
             .len();
-        let intersect_len = a
-            .keys()
-            .filter_map(ObjectKey::as_str)
-            .filter(|key| b.contains_key_str(key))
-            .count();
+        let intersect_len = a.keys().filter(|key| b.contains_key(key)).count();
         (union_len, intersect_len)
     };
     #[allow(
@@ -890,13 +911,13 @@ pub(crate) fn count_object_diff_leaves(
     let mut total = 0;
 
     for (key, old_value) in a {
-        total += match key.as_str().and_then(|s| b.get_str(s)) {
+        total += match b.get(key) {
             None => item_length(old_value),
             Some(new_value) => count_diff_leaves(old_value, new_value, depth + 1, opts, memo),
         };
     }
     for (key, new_value) in b {
-        if key.as_str().is_none_or(|s| !a.contains_key_str(s)) {
+        if !a.contains_key(key) {
             total += item_length(new_value);
         }
     }

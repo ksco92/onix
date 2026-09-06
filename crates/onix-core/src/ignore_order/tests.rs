@@ -1865,7 +1865,7 @@ fn tuple_and_list_leaf_lengths_follow_python_equality() {
 /// `serde_json` literal cannot express.
 fn cobj_of(key: &str, value: CValue) -> CValue {
     CValue::Object(crate::value::Object::from_pairs(vec![(
-        ObjectKey::Str(std::sync::Arc::from(key)),
+        ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from(key))),
         value,
     )]))
 }
@@ -3166,7 +3166,7 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
         any::<bool>().prop_map(CValue::Bool),
         any::<i64>().prop_map(|i| CValue::Number(crate::value::Number::from_i64(i))),
         arb_float,
-        "[a-z]{0,3}".prop_map(|s| CValue::Str(s.into_boxed_str())),
+        "[a-z]{0,3}".prop_map(|s| CValue::Str(s.into())),
         arb_datetime,
         arb_date,
     ];

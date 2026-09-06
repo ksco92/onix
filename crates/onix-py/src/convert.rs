@@ -13,8 +13,8 @@
 //! | `bool` | `Bool` | checked before `int` — `bool` is a Python `int` subclass |
 //! | `int` | `Number` | must fit in `i64` or `u64`; see below |
 //! | `float` | `Number` | `NaN`/`Infinity`/`-Infinity` included |
-//! | `str` | `Str` | must be encodable as UTF-8; see below |
-//! | `dict` (keys below), or a subclass | `Object` | `str` keys interned across the whole walk |
+//! | `str` | `Str` | UTF-8 the fast, common way; a lone surrogate code point survives too, see below |
+//! | `dict` (keys below), or a subclass | `Object` | a `str` key (including a surrogate one) interned across the whole walk |
 //! | `list`, or a subclass | `Array` | |
 //! | `tuple`, or a subclass (including a `namedtuple`) | `Tuple` | diffed positionally even for a `namedtuple`, see below |
 //! | `set`, or a subclass | `Set` | members restricted, see below |
@@ -36,11 +36,8 @@
 //! - An `int` outside `i64::MIN..=u64::MAX` raises [`PyValueError`]:
 //!   arbitrary-precision integers are not supported in this MVP (real
 //!   `DeepDiff` supports them natively).
-//! - A `str` containing a lone (unpaired) surrogate code point (e.g.
-//!   `"\udc80"`) raises [`PyValueError`] naming the exact path: it has no
-//!   UTF-8 encoding. See `tests/golden/README.md` for why this diverges from
-//!   real `DeepDiff`.
-//! - A `dict` key may be `str`, `None`, `bool`, `int`, `float`, `datetime`,
+//! - A `dict` key may be `str` (including one holding a lone surrogate code
+//!   point — see below), `None`, `bool`, `int`, `float`, `datetime`,
 //!   `date`, or a `tuple` of those (never a nested `tuple`), or a
 //!   `tuple`/`datetime`/`date` subclass (including a `namedtuple`) — unlike
 //!   a `tuple` *value*, which keeps the exactness rule, since `DeepDiff`'s
@@ -50,12 +47,9 @@
 //!   field). A key of any other type — including `time`/`timedelta`,
 //!   a custom object, or a `tuple` that nests another `tuple` — raises
 //!   [`PyTypeError`] naming the key's type and the path to the dict
-//!   containing it; a `str` key (bare, or nested inside a `tuple` key) with
-//!   a lone surrogate raises [`PyValueError`] the same way, naming the
-//!   dict's path (the key itself has no path segment of its own). Path
-//!   rendering for a non-`str` key follows `DeepDiff`'s own rule
-//!   ([`onix_core::path::dict_key_repr`]): `repr()` for every kind but
-//!   `tuple`, which instead splits into one bracket group per element
+//!   containing it. Path rendering for a non-`str` key follows `DeepDiff`'s
+//!   own rule ([`onix_core::path::dict_key_repr`]): `repr()` for every kind
+//!   but `tuple`, which instead splits into one bracket group per element
 //!   (`root[1][2]`, never `root[(1, 2)]`). Two keys that are Python-equal
 //!   but not the same type (`1`/`1.0`/`True`) are matched as *one* key
 //!   between two dicts being diffed — real Python `dict`/`set` semantics —
@@ -134,13 +128,33 @@
 //! [`onix_core::value::SetItems`], and `tests/golden/README.md`'s "Set
 //! iteration order" section for where that leaves `DeepDiff` behind.
 //!
+//! # Lone surrogate code points
+//!
+//! A Python `str` can legally hold an unpaired surrogate code point (e.g.
+//! `"\udc80"`), the one code point UTF-8 cannot encode. [`pystring_to_cstr`]
+//! reads every `str` through [`Bound::to_cow`] first — a zero-copy borrow
+//! that succeeds for the overwhelming common case and costs nothing beyond
+//! it — and only on that borrow's failure falls back to
+//! `str.encode('utf-8', 'surrogatepass')`, the `CPython` idiom that yields
+//! [WTF-8](https://simonsapin.github.io/wtf-8/) bytes: valid UTF-8 with each
+//! surrogate direct-encoded in the three-byte form strict UTF-8 forbids for
+//! that range. [`onix_core::value::Str`] stores exactly that split, so
+//! equality and ordering both follow Python code-point comparison, and
+//! [`wtf8_to_pyobject`] reverses the encoding (`bytes.decode('utf-8',
+//! 'surrogatepass')`) when rendering a report value or a dict key back to a
+//! live Python object. See `tests/golden/README.md` for the small,
+//! documented set of nuances this leaves relative to real `DeepDiff` (all in
+//! `to_dict()`'s structural key/path rendering, never in a reported value).
+//!
 //! # Key interning
 //!
-//! Object keys are interned across the whole conversion via a single
+//! An object key that is plain UTF-8 (the overwhelming common case) is
+//! interned across the whole conversion via a single
 //! [`onix_core::value::Builder`] threaded through the walk: record-shaped
 //! data repeats a handful of keys across tens of thousands of objects, so
 //! each distinct key costs a single shared allocation rather than one per
-//! occurrence.
+//! occurrence. A key holding a lone surrogate is never interned — see
+//! `onix_core::value::Key`'s own doc for why that shape isn't worth sharing.
 //!
 //! # Depth guard, and why this walk is iterative
 //!
@@ -175,7 +189,7 @@ use onix_core::datetime::{
     Date as CDate, DateTime as CDateTime, Time as CTime, TimeDelta as CTimeDelta,
 };
 use onix_core::path::{PathSegment, object_key_path_segment as key_path_segment, render_path};
-use onix_core::value::{Builder, Entries, ObjectKey, SetItems, Typed};
+use onix_core::value::{Builder, Entries, Key as CKey, ObjectKey, SetItems, Str as CStr, Typed};
 use onix_core::{Number as CNumber, Value as CValue};
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -185,8 +199,8 @@ use pyo3::types::iter::{
     BoundTupleIterator,
 };
 use pyo3::types::{
-    PyBool, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet,
-    PyString, PyTime, PyTuple, PyTzInfo,
+    PyBool, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyFrozenSet, PyInt, PyList,
+    PySet, PyString, PyTime, PyTuple, PyTzInfo,
 };
 
 use crate::errors::MaxDepthError;
@@ -415,8 +429,7 @@ fn classify<'py>(
     }
 
     if let Ok(s) = current.cast::<PyString>() {
-        let s = s.to_cow().map_err(|_| lone_surrogate_error(path, false))?;
-        return Ok(Step::Done(CValue::Str(s.into_owned().into_boxed_str())));
+        return Ok(Step::Done(CValue::Str(pystring_to_cstr(s)?)));
     }
 
     if let Some(value) = classify_temporal(current, path)? {
@@ -608,16 +621,28 @@ fn advance_frame<'py>(
 /// `max_depth` levels deep — see the module doc for the full conversion table
 /// and why this walk uses an explicit stack instead of native recursion.
 ///
+/// The second return value is whether this walk ever built a `Str::Wtf8`/
+/// `Key`-with-a-surrogate (see the module doc's "Lone surrogate code
+/// points" section) — a byproduct of this walk's own string handling, not a
+/// second pass over the result: [`crate::deepdiff::DeepDiff::new`] ORs the
+/// two sides' flags together and caches the result so
+/// [`crate::guard::serialize_value`] can skip
+/// [`onix_core::value::contains_wtf8`]'s own tree walk for the overwhelming
+/// common case (no surrogate anywhere), which otherwise doubles that
+/// function's cost on every `to_json()` call regardless of whether this
+/// feature is in use.
+///
 /// # Errors
 ///
 /// Returns a Python `ValueError`/[`MaxDepthError`] or `TypeError` per the
 /// module doc's conversion table.
-pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CValue> {
+pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<(CValue, bool)> {
     let mut builder = Builder::new();
     let mut stack: Vec<Frame<'_>> = Vec::new();
     let mut path: Vec<PathSegment> = Vec::new();
     let mut pending: Option<Pending<'_>> = Some((obj.clone(), 0, false));
     let mut finished: Option<CValue> = None;
+    let mut saw_wtf8 = false;
 
     // On any error break, `stack` (and its parked, possibly deep entries)
     // drops here at function return. Every `CValue` has an iterative `Drop`,
@@ -630,7 +655,12 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
             }
 
             match classify(&current, &path, &mut builder, set_member)? {
-                Step::Done(value) => finished = Some(value),
+                Step::Done(value) => {
+                    if matches!(&value, CValue::Str(CStr::Wtf8(_))) {
+                        saw_wtf8 = true;
+                    }
+                    finished = Some(value);
+                }
                 Step::Seq {
                     iter,
                     first,
@@ -662,6 +692,9 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
                     class_name,
                 } => {
                     let child_depth = depth + 1;
+                    if matches!(first_key, ObjectKey::Str(CKey::Wtf8(_))) {
+                        saw_wtf8 = true;
+                    }
                     path.push(key_path_segment(&first_key));
                     let capacity = iter.len().saturating_add(1);
                     stack.push(Frame::Dict {
@@ -681,7 +714,7 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
         );
 
         match stack.pop() {
-            None => return Ok(value),
+            None => return Ok((value, saw_wtf8)),
             Some(frame) => {
                 path.pop();
 
@@ -690,6 +723,11 @@ pub(crate) fn to_value(obj: &Bound<'_, PyAny>, max_depth: usize) -> PyResult<CVa
                         pending: next_pending,
                         frame,
                     } => {
+                        if let Frame::Dict { current_key, .. } = &frame
+                            && matches!(current_key, ObjectKey::Str(CKey::Wtf8(_)))
+                        {
+                            saw_wtf8 = true;
+                        }
                         stack.push(frame);
                         pending = Some(next_pending);
                     }
@@ -743,7 +781,8 @@ fn next_dict_entry<'py>(
 }
 
 /// Classifies one Python dict key into an [`ObjectKey`] — the `str` case
-/// (interned, as always) plus every other key `DeepDiff` also accepts:
+/// (interned, as always — including a lone-surrogate one, see
+/// [`pystring_to_cstr`]) plus every other key `DeepDiff` also accepts:
 /// `None`, `bool`, `int`, `float`, `datetime`, `date`, or a `tuple` of those
 /// (never a nested `tuple` — see the module doc's key-type table and
 /// [`classify_key_scalar`], which this delegates every non-`tuple` case to),
@@ -764,10 +803,8 @@ fn classify_dict_key(
     builder: &mut Builder,
 ) -> PyResult<ObjectKey> {
     if let Ok(s) = key.cast::<PyString>() {
-        let s = s
-            .to_cow()
-            .map_err(|_| lone_surrogate_error(dict_path, true))?;
-        return Ok(ObjectKey::Str(builder.intern(&s)));
+        let s = pystring_to_cstr(s)?;
+        return Ok(ObjectKey::Str(builder.intern_key(s)));
     }
 
     // Non-exact (`cast`, not `cast_exact`): a `tuple` subclass key,
@@ -812,10 +849,7 @@ fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyR
     }
 
     if let Ok(s) = obj.cast::<PyString>() {
-        let s = s
-            .to_cow()
-            .map_err(|_| lone_surrogate_error(dict_path, true))?;
-        return Ok(CValue::Str(s.into_owned().into_boxed_str()));
+        return Ok(CValue::Str(pystring_to_cstr(s)?));
     }
 
     // Non-exact, and `datetime` before `date` (every `datetime` is also a
@@ -837,6 +871,43 @@ fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyR
         type_name(obj),
         render_path(dict_path),
     )))
+}
+
+/// Converts a Python `str` into the crate's compact [`CStr`]: the fast,
+/// zero-copy UTF-8 path for the overwhelming common case, falling back only
+/// when the string contains a lone (unpaired) surrogate code point — legal
+/// in Python, not encodable as UTF-8 — to `str.encode('utf-8',
+/// 'surrogatepass')`, the `CPython` idiom for round-tripping exactly that
+/// content: WTF-8 bytes (see [`CStr`]'s own doc), with each surrogate in
+/// the same three-byte form that encoding produces. Shared by a scalar
+/// `str` value and a dict key, the two places a Python `str` enters the
+/// value model.
+fn pystring_to_cstr(s: &Bound<'_, PyString>) -> PyResult<CStr> {
+    if let Ok(cow) = s.to_cow() {
+        return Ok(CStr::Utf8(cow.into_owned().into_boxed_str()));
+    }
+
+    let bytes: Vec<u8> = s
+        .call_method1("encode", ("utf-8", "surrogatepass"))?
+        .extract()?;
+    Ok(CStr::Wtf8(bytes.into_boxed_slice()))
+}
+
+/// [`pystring_to_cstr`]'s inverse: rebuilds a Python `str` from WTF-8 bytes
+/// (a [`CStr`] or a [`CKey`]'s content — either offers `.as_bytes()`). The
+/// fast path is the overwhelming common case, valid UTF-8, built directly;
+/// only a `Str::Wtf8`/`Key::Wtf8` (bytes that fail `str::from_utf8`, holding
+/// a lone surrogate) takes the slower `bytes.decode('utf-8',
+/// 'surrogatepass')` round trip, the exact `CPython` idiom that reverses
+/// `pystring_to_cstr`'s `encode`.
+fn wtf8_to_pyobject(py: Python<'_>, bytes: &[u8]) -> PyResult<Py<PyAny>> {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.into_py_any(py);
+    }
+
+    PyBytes::new(py, bytes)
+        .call_method1("decode", ("utf-8", "surrogatepass"))?
+        .into_py_any(py)
 }
 
 /// Reads a `date`'s (or a `datetime`'s) `year`/`month`/`day` attributes.
@@ -958,26 +1029,6 @@ fn out_of_range_error(type_name: &str, path: &[PathSegment]) -> PyErr {
     PyValueError::new_err(format!(
         "{type_name} at {} is out of range for onix's internal value model",
         render_path(path),
-    ))
-}
-
-/// `to_cow`'s own `UnicodeEncodeError` is discarded in favor of this, so the
-/// message names the exact path the way every other conversion error in this
-/// module does; see the module doc and `tests/golden/README.md` for why this
-/// diverges from real `DeepDiff`.
-///
-/// `is_key` distinguishes the two call sites' wording: a dict key that fails
-/// this check has no path segment of its own yet (like a non-`str` key, see
-/// [`next_dict_entry`]), so `path` there is the path to the *dict*, not the
-/// entry, and the message says so explicitly to avoid implying otherwise.
-fn lone_surrogate_error(path: &[PathSegment], is_key: bool) -> PyErr {
-    let subject = if is_key { "dict key" } else { "str" };
-    let path = render_path(path);
-
-    PyValueError::new_err(format!(
-        "{subject} at {path} contains a lone (unpaired) surrogate code point, which has no \
-         UTF-8 representation; onix's internal value model is UTF-8 and cannot represent it, \
-         unlike Python's str"
     ))
 }
 
@@ -1117,7 +1168,7 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                 CValue::Null => RenderStep::Done(py.None()),
                 CValue::Bool(b) => RenderStep::Done(b.into_py_any(py)?),
                 CValue::Number(n) => RenderStep::Done(number_to_pyobject(py, n)?),
-                CValue::Str(s) => RenderStep::Done(s.as_ref().into_py_any(py)?),
+                CValue::Str(s) => RenderStep::Done(wtf8_to_pyobject(py, s.as_bytes())?),
                 // Renders back as the plain base type, never the original
                 // subclass instance (there is nothing left to reconstruct
                 // one from once the value has passed through the compact
@@ -1217,7 +1268,8 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
 }
 
 /// Rebuilds one [`ObjectKey`] as the Python object [`value_to_pyobject`]
-/// hands back as a dict key: a `str` key directly, any other key by
+/// hands back as a dict key: a `str` key via [`wtf8_to_pyobject`] (WTF-8-aware,
+/// so a lone surrogate in the key round-trips exactly), any other key by
 /// recursively rendering its wrapped [`CValue`] the same way any other
 /// value in the tree renders. That recursive call is a bounded native-stack
 /// use, not the deep-nesting hazard [`value_to_pyobject`]'s own iterative
@@ -1227,7 +1279,7 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
 /// containing report is.
 fn object_key_to_pyobject(py: Python<'_>, key: &ObjectKey) -> PyResult<Py<PyAny>> {
     match key {
-        ObjectKey::Str(s) => s.as_ref().into_py_any(py),
+        ObjectKey::Str(s) => wtf8_to_pyobject(py, s.as_bytes()),
         ObjectKey::Other(value) => value_to_pyobject(py, value),
     }
 }

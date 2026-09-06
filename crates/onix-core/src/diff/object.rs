@@ -113,7 +113,7 @@ pub(crate) fn object_diff(
     // own path sits at), not the *parent* dict's `depth`.
     for (key, old_value) in a {
         scoped(path, key_segment(key), |path| -> Result<(), Error> {
-            match key.as_str().and_then(|s| b.get_str(s)) {
+            match b.get(key) {
                 None => check_value_depth(path, old_value, depth + 1, opts.max_depth).map(|()| {
                     report.insert_dictionary_item_removed(path.clone(), old_value.clone());
                 }),
@@ -124,7 +124,7 @@ pub(crate) fn object_diff(
     }
 
     for (key, new_value) in b {
-        if key.as_str().is_none_or(|s| !a.contains_key_str(s)) {
+        if !a.contains_key(key) {
             scoped(path, key_segment(key), |path| {
                 check_value_depth(path, new_value, depth + 1, opts.max_depth).map(|()| {
                     report.insert_dictionary_item_added(path.clone(), new_value.clone());

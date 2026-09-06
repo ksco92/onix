@@ -176,6 +176,29 @@ NON_STR_KEY_PROBABILITY: Final[float] = 0.4
 # `crates/onix-py/src/convert.rs`'s module doc).
 NON_STR_KEY_TUPLE_LEAVES: Final[list[JsonValue]] = [1, "x", True, None, 2.5]
 
+# The surrogate batch (issue #59): values whose leaves are often strings
+# carrying a lone (unpaired) surrogate code point — legal in Python, not
+# encodable as UTF-8. Its own seed range keeps it independent of the batches
+# above. Never generates a set/frozenset: real DeepDiff crashes with
+# UnicodeEncodeError hashing a lone surrogate (see tests/golden/README.md),
+# and this batch's own comparison would have no way to tell that expected
+# crash apart from a real divergence, so it stays out of scope here entirely.
+SURROGATE_SEED_BASE: Final[int] = 10_000_000
+
+# The leaf alphabet the surrogate batch draws from: a lone surrogate alone, at
+# the start/end/middle of a string, doubled, adjacent to a plain non-ASCII
+# character, both surrogate halves (high 0xD800-0xDBFF and low 0xDC00-0xDFFF),
+# plus a few plain scalars so type_changes and ordinary no-diff cases appear
+# too.
+SURROGATE_STRINGS: Final[list[str]] = [
+    "\udc80", "\udc81", "\ud800", "\udbff", "\udfff",
+    "a\udc80", "\udc80b", "a\udc80b", "x\udc80y\udc81z",
+    "\udc80\udc81", "café\udc80", "", "plain", "another",
+]
+SURROGATE_ALPHABET: Final[list[JsonValue]] = [
+    *SURROGATE_STRINGS, None, True, False, 0, 1, 1.5,
+]
+
 # The calendar batch's leaves: naive and aware datetimes across a bounded range,
 # plus bare dates. The offsets deliberately include one that is not a whole
 # number of minutes (which widens `isoformat()`'s suffix to `+HH:MM:SS`) and the
@@ -1699,4 +1722,140 @@ def test_differential_fuzz_with_subclass_dict_keys_matches_real_deepdiff() -> No
     assert not mismatches, (
         f"{len(mismatches)} of {SUBCLASS_KEY_SEED_COUNT * 2} subclass dict-key fuzz cases "
         f"diverged from real DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+def _gen_surrogate_leaf(rng: random.Random) -> JsonValue:
+    """
+    Pick a leaf from the surrogate alphabet.
+
+    :param rng: Seeded RNG.
+    :return: A string (often holding a lone surrogate) or a plain scalar.
+    """
+    return rng.choice(SURROGATE_ALPHABET)
+
+
+def _gen_surrogate_value(rng: random.Random, depth: int) -> JsonValue:
+    """
+    Generate a random value whose leaves are drawn from the surrogate alphabet.
+
+    Only lists and dicts nest a leaf — never a set/frozenset, which real
+    DeepDiff cannot hash a lone surrogate member into at all (see the module
+    alphabet's own doc).
+
+    :param rng: Seeded RNG.
+    :param depth: Remaining nesting budget.
+    :return: A random value built from lists, dicts and surrogate-string leaves.
+    """
+    if depth <= 0:
+        return _gen_surrogate_leaf(rng)
+
+    kind = rng.random()
+
+    if kind < 0.5:
+        return _gen_surrogate_leaf(rng)
+
+    if kind < 0.8:
+        length = rng.randint(0, 4)
+
+        return [_gen_surrogate_value(rng, depth - 1) for _ in range(length)]
+
+    keys = rng.sample(DICT_KEYS, rng.randint(0, len(DICT_KEYS)))
+
+    return {key: _gen_surrogate_value(rng, depth - 1) for key in keys}
+
+
+def _mutate_surrogate_value(rng: random.Random, value: JsonValue) -> JsonValue:
+    """
+    Build a related-but-different copy, replacing leaves from the same alphabet.
+
+    :param rng: Seeded RNG.
+    :param value: The value to derive a mutated copy from.
+    :return: A structurally related, partially mutated copy.
+    """
+    if isinstance(value, list):
+        mutated = list(value)
+        rng.shuffle(mutated)
+
+        for index in range(len(mutated)):
+            if rng.random() < 0.4:
+                mutated[index] = _gen_surrogate_value(rng, 2)
+
+        return mutated
+
+    if isinstance(value, dict):
+        mutated = dict(value)
+
+        for key in list(mutated):
+            if rng.random() < 0.4:
+                mutated[key] = _gen_surrogate_value(rng, 2)
+
+        if rng.random() < 0.3:
+            mutated[rng.choice(DICT_KEYS)] = _gen_surrogate_value(rng, 2)
+
+        return mutated
+
+    return _gen_surrogate_value(rng, 2)
+
+
+def _mutate_surrogate_keys(rng: random.Random, value: JsonValue) -> JsonValue:
+    """
+    Additionally replace some dict *keys* with a surrogate-bearing string.
+
+    The generator/mutator pair above only ever puts a surrogate in a leaf
+    *value* (`dict.keys()` always draws from the plain `DICT_KEYS` pool); this
+    walks the same structure afterward and randomly retags a subset of keys
+    with a surrogate string too, so the batch also exercises a surrogate
+    *key* (issue #59's own acceptance case), not only a surrogate value.
+
+    :param rng: Seeded RNG.
+    :param value: The value to retag keys in.
+    :return: The same structure with some dict keys replaced.
+    """
+    if isinstance(value, dict):
+        retagged: dict[str, JsonValue] = {}
+
+        for key, item in value.items():
+            new_key = rng.choice(SURROGATE_STRINGS) if rng.random() < 0.2 else key
+            retagged[new_key] = _mutate_surrogate_keys(rng, item)
+
+        return retagged
+
+    if isinstance(value, list):
+        return [_mutate_surrogate_keys(rng, item) for item in value]
+
+    return value
+
+
+def test_differential_fuzz_with_surrogate_strings_matches_real_deepdiff() -> None:
+    """
+    Run an eleventh SEED_COUNT-case batch whose leaves and dict keys often hold a
+    lone (unpaired) surrogate code point.
+
+    This is issue #59's own corpus: a `str` (or dict key) holding a code
+    point with no UTF-8 encoding, compared and reported exactly like any
+    other `str`. Ordered only: `ignore_order=True` hashes every value in the
+    tree (`DeepHash`, not just a set's members), so real DeepDiff crashes
+    with `UnicodeEncodeError` the moment a surrogate appears *anywhere*
+    under it; there is nothing for this batch's ordered-vs-ignore_order
+    comparison to check there.
+    """
+    mismatches = []
+
+    for seed in range(SURROGATE_SEED_BASE, SURROGATE_SEED_BASE + SEED_COUNT):
+        rng = random.Random(seed)
+        a = _gen_surrogate_value(rng, 3)
+        a = _mutate_surrogate_keys(rng, a)
+        b = _mutate_surrogate_value(rng, a)
+        b = _mutate_surrogate_keys(rng, b)
+
+        divergence = _diverges(a, b, ignore_order=False)
+
+        if divergence is not None:
+            expected, actual = divergence
+            mismatches.append((seed, a, b, expected, actual))
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT} surrogate-string fuzz cases diverged from "
+        f"real DeepDiff (showing up to 3): {mismatches[:3]}"
     )
