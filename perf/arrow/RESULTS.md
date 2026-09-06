@@ -9,14 +9,14 @@ rules).
 
 | | |
 |---|---|
-| Date (UTC) | 2026-09-06T02:35Z |
+| Date (UTC) | 2026-09-06T10:30Z |
 | OS | macOS 26.5.1 (build 25F80) |
 | CPU | Apple M5 Max |
 | Cores | 18 |
 | Memory | 137438.95 MB |
 | rustc / cargo | 1.98.0 |
 | Python | 3.14.6 (uv-managed, pinned by `crates/onix-py/.python-version`) |
-| deepdiff-rs | 0.10.0 |
+| deepdiff-rs | 0.10.1 |
 | pyarrow | 25.0.1 |
 | polars | 1.44.1 |
 | duckdb | 1.5.5 |
@@ -97,6 +97,13 @@ structural addition is the in-flight batches, worker count times batch size).
 Both fixture pairs fit comfortably in this machine's 137 GB of RAM; no tool was memory-constrained
 at either size, so no tool's number is a "did not fit" result.
 
+On 0.10.1 (the streaming cell pass, issue #87) the narrow full pair measures **6.080 s** wall /
+29.996 CPU s / **22730.9 MB** peak RSS and the 1M pair 336.84 ms / 1196.2 MB -- within run-to-run
+noise of the 0.10.0 figures above (6.992 s / 22671.2 MB; 324.44 ms / 1228.2 MB). Narrow changes only
+~2% of rows, so its cell pass spills and renders a small fraction and the streaming path neither
+helps nor hurts it measurably; the wide fixture (nearly every row changed) is where the change shows
+(see the wide section's before/after tables).
+
 ## Thread-count scaling
 
 `diff_tables` wall time (median) as the `threads` knob varies, with the tables preloaded so the
@@ -134,6 +141,28 @@ copy of the 32-byte-per-row hash vectors, i.e. the reallocation slack of the sha
 buffers, bounded by one full copy — plus the in-flight batches (worker count times batch size, tens
 of MB). The 32-byte-per-row hash vectors dominate either path and their growable-`Vec` slack makes
 the single-threaded peak itself vary run-to-run by a comparable amount (2.9-4.2 GB at 37M).
+
+### Cell-pass memory (streaming, issue #87)
+
+The per-cell diff is the term that scales with the changed-cell width. 0.10.0 held both sides' full
+changed rows and rendered on one thread; 0.10.1 spills each side's changed value rows by key-hash
+partition and holds one partition at a time, so its resident peak is bounded by about twice the
+`cells_changed` output (the output plus its one out-of-place reorder) plus the per-row hash vectors,
+not by the changed-row count times the row width. `row_diff_rss`'s `wide` shape (an `id` and one
+`value_width`-byte string that differs on every row -- the wide-cell worst case) at 18 threads:
+
+| Rows/side x cell | 0.10.0 (sequential) | 0.10.1 (streaming) |
+| --- | --- | --- |
+| 100,000 x 1 KB | 1.18 GB | 0.92 GB |
+| 200,000 x 1 KB | 2.34 GB | 1.33 GB |
+| 1,000,000 x 1 KB | 11.6 GB (est.) | 4.81 GB |
+
+At 1,000,000 x 1 KB the output's Arrow size is about 2.09 GB, so twice it plus the 64 MB hash
+vectors is about 4.24 GB; the measured 4.81 GB is 1.13x that (the reorder is out-of-place, plus the
+changed-key set and render slack). The single-threaded path (which still holds both sides) measures
+8.30 GB at the same shape, so the streaming path roughly halves it. The `allchange` shape (narrow
+`int64` cells, every row changed) measures 0.38 GB at 1M rows/side. The spilled partitions live on
+the temp filesystem, not in the resident set (see Disk usage).
 
 ### Size-gate peek
 
@@ -184,8 +213,9 @@ script's module docstring for the full column set, mutation mix, and the Parquet
 | 1M | 1,000,000 | 296.4 MB | 296.9 MB | `5d98151a933c53e460841aef0df75232d96a55a47ce94df123b800faaa61b397` | `6d9156ae2fe8f335cc59e328f9914362ab4d79bca775543695a0d0ee721421c7` |
 | full | 16,875,000 | 5,001.5 MB | 5,009.9 MB | `0a1b5740fa507f5a02ca8ea5568f1adc9274ccc06dd418927aacc05782e58fca` | `4eb08d472f0328258d5c9f1bfc9e6ce00044dfa130c58d602b717aedf726f477` |
 
-Measured 2026-09-06T06:07Z, same machine as the narrow section's table above, against
-`deepdiff-rs` 0.10.0 (the parallel row diff, issue #81/#85).
+Measured 2026-09-06T10:24Z, same machine as the narrow section's table above. The `## Results (wide)`
+tables below compare `deepdiff-rs` 0.10.0 (the parallel row diff, issues #81/#85) with 0.10.1 (the
+streaming cell pass, issue #87).
 
 ### Wide correctness precheck
 
@@ -200,39 +230,47 @@ three tools against their own expected total: 1M reports 10,000 added, 10,000 re
 
 ### Results (wide)
 
+Both sizes were re-measured on the merged head (`deepdiff-rs` 0.10.1, the streaming cell pass of
+issue #87) against 0.10.0 (the previous run of this harness). The output is byte-identical between
+the two versions — the same `cells_changed`/`rows_added`/`rows_removed`/`duplicate_keys` streams at
+every thread count — so only wall clock, CPU, and RSS change. DuckDB and polars are unchanged code,
+shown at this run for comparison.
+
 #### 1M rows
 
-| Tool | Wall clock (median) | CPU seconds (median) | Peak RSS (median) |
-| --- | --- | --- | --- |
-| onix (`diff_tables`) | 5.460 s | 7.837 s | 4341.7 MB |
-| DuckDB (oracle SQL) | 444.07 ms | 4.527 s | 3296.1 MB |
-| polars (anti-join/inner-join) | 172.00 ms | 1.374 s | 1961.7 MB |
+| Tool | Wall (0.10.0) | Wall (0.10.1) | Speedup | RSS (0.10.0) | RSS (0.10.1) | CPU (0.10.1) |
+| --- | --- | --- | --- | --- | --- | --- |
+| onix (`diff_tables`) | 5.460 s | **1.712 s** | 3.19x | 4341.7 MB | 3250.4 MB | 5.867 s |
+| DuckDB (oracle SQL) | 444.07 ms | 550.96 ms | — | 3296.1 MB | 3365.2 MB | 4.547 s |
+| polars (anti-join/inner-join) | 172.00 ms | 173.76 ms | — | 1961.7 MB | 1968.1 MB | 1.373 s |
+
+At 1M rows onix's wall drops 3.19x; it now trails DuckDB by 3.1x (was 12.3x).
 
 #### Full pair (16.875M rows, ~5 GB + ~5 GB)
 
-| Tool | Wall clock (median) | CPU seconds (median) | Peak RSS (median) |
-| --- | --- | --- | --- |
-| onix (`diff_tables`) | 149.674 s | 191.481 s | 66895.7 MB |
-| DuckDB (oracle SQL) | 5.137 s | 68.488 s | 11799.8 MB |
-| polars (anti-join/inner-join) | 3.208 s | 27.849 s | 29818.8 MB |
+| Tool | Wall (0.10.0) | Wall (0.10.1) | Speedup | RSS (0.10.0) | RSS (0.10.1) | CPU (0.10.1) |
+| --- | --- | --- | --- | --- | --- | --- |
+| onix (`diff_tables`) | 149.674 s | **28.716 s** | 5.21x | 66895.7 MB | 33779.1 MB | 99.579 s |
+| DuckDB (oracle SQL) | 5.137 s | 5.222 s | — | 11799.8 MB | 11862.5 MB | 67.340 s |
+| polars (anti-join/inner-join) | 3.208 s | 3.298 s | — | 29818.8 MB | 29814.0 MB | 27.031 s |
 
-Both wide runs were timed after `ps` showed no other `cargo`/`maturin`/`pytest` process actively
-using CPU on this machine (one unrelated worktree's `cargo test` process was present but idle at
-0% CPU throughout, per the same convention the narrow environment note above uses); all 5 full-size
-`onix` runs were checked individually for consistency (149-159 s wall, 44-67 GB RSS) to rule out
-contention from an unrelated process on the shared machine.
+At the full 16.875M-row size onix's wall clock drops 5.21x (149.674 -> 28.716 s), its peak RSS 1.98x
+(66.9 -> 33.8 GB), and its CPU seconds 192 -> 100 s. The cell pass is the cause: 0.10.0 compared and
+rendered all 34 non-key columns of ~16.7M changed rows on a single thread while holding both sides'
+changed rows in memory at once (about 139 s of the 150 s wall, and the bulk of the 67 GB); 0.10.1
+spills each side's changed value rows to anonymous per-key-hash-partition Arrow IPC files and
+compares and renders one partition at a time across the 18 workers, so the render runs on every
+core and only one partition's rows are resident. onix now trails DuckDB by 5.5x (was 29.1x) and
+polars by 8.7x (was 46.7x) in wall clock -- past the 4x-of-DuckDB target (about 20.9 s). The
+cell-pass target of this change is met (its compare-and-render is now parallel); the remaining wall
+gap is the serial spool re-read passes -- onix re-reads each spooled input several times where the
+SQL and join baselines read the parquet once -- the same cost the narrow fixture shows (6.08 s vs
+2.39 s), tracked in issue #90. Peak RSS is bounded by the reordered `cells_changed` output plus the
+per-row hash vectors, not by both sides' full changed rows; the Memory section states the measured
+per-cell term.
 
-`onix`'s wide wall time (149.7 s) is still far past its narrow one (6.99 s at 0.10.0), because
-`ts_cast`'s zone-awareness change makes nearly every surviving row "changed" (see the generator's
-module docstring): the cell-diff pass compares all 34 non-key columns for essentially all 16.9M
-rows, not the small mutated fraction narrow's fixture produces. This is the fixture doing its job —
-"every rendering rule on the hot path" — not a regression. `onix`'s CPU seconds (191.5 s) exceeding
-its wall time (149.7 s) shows the parallel row diff (#81/#85) is doing some of that work across
-cores here too, but DuckDB's and polars' CPU-to-wall ratios are still far higher (13.3x and 8.7x
-vs. `onix`'s 1.3x), so both still finish faster in wall clock at this size. Peak RSS also grows
-with the compared-column count: `onix`'s materialize-and-render pass holds the changed rows' cells
-as owned strings (`row_diff.rs`'s module doc), and here that is nearly the whole table's non-key
-columns at once.
+This run was taken after `ps` showed no other `cargo`, `maturin`, or `pytest` process using CPU, and
+none appeared during it (the same convention as the narrow section).
 
 ## Disk usage
 
@@ -240,6 +278,15 @@ Both fixture pairs (narrow and wide) at both sizes, all resident at once, from t
 pair" tables above: narrow 1M (269.4 MB) + narrow full (9,970.9 MB) + wide 1M (593.3 MB) + wide
 full (10,011.4 MB) — about 20.8 GB, plus `bench_raw/`'s per-run JSON files (under 1 MB total,
 measured at 192 KB for the wide runs alone). Nothing under `perf/arrow/fixtures/` or
-`perf/arrow/bench_raw/` is committed. The full-size `wide` run's peak resident memory for `onix`
-alone is about 67 GB (see the wide results table below); size the runner accordingly before
-starting it.
+`perf/arrow/bench_raw/` is committed. On 0.10.1 the full-size `wide` run's peak resident memory for
+`onix` alone is about 33.8 GB (was about 67 GB on 0.10.0; see the wide results table); size the
+runner accordingly.
+
+`onix` 0.10.1 also uses temporary disk (an anonymous `tempfile`, unlinked at creation, so nothing is
+left on disk on abnormal exit; on Linux this is typically a RAM-backed `tmpfs`): the two input spools
+(both inputs' decoded Arrow IPC, resident for the whole diff so each side can be re-read) plus, during
+the cell pass, both sides' changed value rows spilled by key-hash partition. For the full-size `wide`
+pair that peaks at roughly 22 GB of temp disk (about 10 GB of input spool plus about 12 GB of
+partition spill, all resident at once); the partition spill scales with the changed value data, so
+bound the changed fraction and column widths for untrusted input. A full temp filesystem raises
+`ValueError` naming `TMPDIR`.

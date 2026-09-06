@@ -1,5 +1,7 @@
 """Tests for the keyed row diff: added/removed/changed/duplicate/null rows, oracle parity, and a property test."""
 
+from __future__ import annotations
+
 import decimal
 import random
 import time as time_module
@@ -15,6 +17,24 @@ import pytest
 from deepdiff_rs import diff_tables
 from generate_fixtures import generate
 from oracle_duckdb import run as oracle_run
+
+
+def _wide_fixture_writable() -> bool:
+    """Whether this pyarrow can write the wide fixture's `decimal32` column to
+    parquet. The oldest supported interpreters resolve an older pyarrow that has
+    the type but no Parquet writer for it, so the wide-fixture test skips there;
+    the narrow fixture and the in-crate Rust tests cover the streaming cell path
+    on every interpreter."""
+    import io
+
+    try:
+        pq.write_table(pa.table({"d": pa.array([1], pa.decimal32(5, 2))}), io.BytesIO())
+    except Exception:
+        return False
+    return True
+
+
+_WIDE_FIXTURE_WRITABLE = _wide_fixture_writable()
 
 # Helpers
 
@@ -498,20 +518,105 @@ def _members_equal(a: object, b: object) -> bool:
     )
 
 
+def _member_ipc(diff: object, member: str) -> bytes:
+    """One diff member serialized to an Arrow IPC stream, for a byte comparison
+    that (unlike Table.equals) treats two NaN cells as equal, since the wide
+    fixture carries NaN floats and byte-identity is what is under test."""
+    table = _table(getattr(diff, member)())
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    return sink.getvalue().to_pybytes()
+
+
+def _members_byte_identical(a: object, b: object) -> bool:
+    """Every Arrow-table member of two diffs serializes to identical IPC bytes."""
+    return all(
+        _member_ipc(a, member) == _member_ipc(b, member)
+        for member in ("rows_added", "rows_removed", "cells_changed", "duplicate_keys")
+    )
+
+
 def test_thread_count_does_not_change_the_result(tmp_path: Path) -> None:
-    """The diff is identical single-threaded, multi-threaded, and at the default:
-    same Arrow batches, same summary, same to_json()."""
+    """The narrow diff is byte-identical single-threaded, at 2, 18, and the
+    default: same Arrow batches, same summary, same to_json(). At 60,000 rows
+    both sides clear the 50,000-row size gate, so threads 2/18/default take the
+    parallel, spilled, partitioned cell pass while threads=1 stays sequential."""
     fixture_dir = tmp_path / "fixture"
-    generate(50_000, 4242, fixture_dir)
+    generate(60_000, 4242, fixture_dir)
     left = pq.read_table(fixture_dir / "a.parquet")
     right = pq.read_table(fixture_dir / "b.parquet")
 
     single = diff_tables(left, right, key=["id"], threads=1)
-    for threads in (None, 4, 8):
+    for threads in (2, 18, None):
         other = diff_tables(left, right, key=["id"], threads=threads)
         assert other.summary() == single.summary(), f"summary at threads={threads}"
         assert other.to_json() == single.to_json(), f"to_json at threads={threads}"
         assert _members_equal(other, single), f"batches at threads={threads}"
+
+
+@pytest.mark.skipif(
+    not _WIDE_FIXTURE_WRITABLE,
+    reason="pyarrow on this interpreter cannot write the wide fixture's decimal32 column to parquet",
+)
+def test_wide_fixture_thread_count_does_not_change_the_result(tmp_path: Path) -> None:
+    """The wide fixture (one column per scalar type the cell pass renders) is
+    byte-identical across threads 1/2/18/default, exercising every renderer on
+    the spilled, partitioned cell path. Its ts-cast makes nearly every row
+    change, so its cells_changed exceeds to_json()'s row cap; the four Arrow
+    streams and the summary are compared instead."""
+    fixture_dir = tmp_path / "fixture"
+    generate(60_000, 909, fixture_dir, kind="wide")
+    left = pq.read_table(fixture_dir / "a.parquet")
+    right = pq.read_table(fixture_dir / "b.parquet")
+
+    single = diff_tables(left, right, key=["id"], threads=1)
+    for threads in (2, 18, None):
+        other = diff_tables(left, right, key=["id"], threads=threads)
+        assert other.summary() == single.summary(), f"summary at threads={threads}"
+        assert _members_byte_identical(other, single), f"batches at threads={threads}"
+
+
+def _stack(base: pa.Table, copies: int) -> pa.Table:
+    """Repeats a small table into a >50,000-row one (fresh ascending ids) so the
+    diff clears the size gate and takes the parallel cell path."""
+    ids = base.column("id").to_pylist()
+    tables = []
+    for c in range(copies):
+        offset = c * (max(i for i in ids if i is not None) + 1)
+        new_id = pa.array(
+            [None if i is None else i + offset for i in ids], base.schema.field("id").type
+        )
+        tables.append(base.set_column(base.schema.get_field_index("id"), "id", new_id))
+    return pa.concat_tables(tables).combine_chunks()
+
+
+@pytest.mark.parametrize("threads", [2, 18, None])
+def test_thread_invariance_boundary_shapes(threads: int | None) -> None:
+    """Boundary shapes diff byte-identically at threads=1 (sequential) and at
+    2/18/default (streaming): every cell changed, asymmetric sides, one changed
+    row in the last batch, and duplicate keys straddling batches. Each shape is
+    stacked past the 50,000-row gate so the parallel cell path runs."""
+    unit = pa.table(
+        {
+            "id": pa.array([1, 2, 3, 4, 4, 5], pa.int64()),
+            "a": pa.array([10, 20, 30, 40, 41, 50], pa.int64()),
+            "b": pa.array(["p", "q", "r", "s", "s2", "t"], pa.string()),
+        }
+    )
+    right_unit = pa.table(
+        {
+            "id": pa.array([2, 3, 4, 4, 5, 6], pa.int64()),
+            "a": pa.array([20, 33, 40, 41, 55, 60], pa.int64()),
+            "b": pa.array(["q", "R", "s", "s2", "t", "u"], pa.string()),
+        }
+    )
+    left = _stack(unit, 10_001)
+    right = _stack(right_unit, 10_001)
+    single = diff_tables(left, right, key=["id"], threads=1)
+    other = diff_tables(left, right, key=["id"], threads=threads)
+    assert other.summary() == single.summary()
+    assert _members_equal(other, single)
 
 
 def test_thread_count_preserves_duplicate_and_null_key_output() -> None:
