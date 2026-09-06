@@ -324,12 +324,16 @@ left on disk on abnormal exit; on Linux this is typically a RAM-backed `tmpfs`):
 the cell pass, both sides' changed value rows spilled by key-hash partition. The partition spill is
 compact: the two Arrow types whose `take` retains data beyond the selected rows are decoded first --
 byte-view columns (`Utf8View`/`BinaryView`, whose `take` keeps the source's whole variadic buffers)
-are cast to their non-view type, and dictionaries (what polars and DuckDB emit for strings, whose
+are cast to their large i64-offset non-view type (`LargeUtf8`/`LargeBinary`, not the i32-offset
+`Utf8`/`Binary`, whose ~2 GiB offset ceiling a single input batch's retained view buffers can
+exceed), and dictionaries (what polars and DuckDB emit for strings, whose
 `take` keeps the whole values array) are decoded to their value type. Without these a spilled
 partition would carry the entire side's view data or dictionary and the spill would grow with the
 partition count; measured with a 40,000-row all-distinct dictionary string column, the total spill is
-6.6 / 57.7 / 204.6 MB at 2 / 18 / 64 partitions before the decode versus 3.19 / 3.20 / 3.22 MB after
-(the same flat shape a `Utf8View` column shows). `LargeUtf8`, `LargeBinary`, and `FixedSizeBinary`
+6.6 / 57.7 / 204.6 MB at 2 / 18 / 64 partitions before the decode versus 3.19 / 3.20 / 3.22 MB after.
+A `Utf8View` column shows the same flat shape (3.36 / 3.36 / 3.38 MB at 2 / 18 / 64, casting to
+`LargeUtf8`), as does a dictionary whose value type is itself a `Utf8View` (3.36 / 3.36 / 3.38 MB,
+the dictionary decode composing with the view cast). `LargeUtf8`, `LargeBinary`, and `FixedSizeBinary`
 already compact on `take` and spill as themselves (measured flat, 3.35 MB at 2 vs 64 for `LargeUtf8`).
 With the decode the spill is `changed rows x total value-column width`, independent of the
 thread/partition count: the full-size `wide` pair's whole-process peak RSS (input spool + partition

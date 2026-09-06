@@ -2581,12 +2581,14 @@ fn indices_schema(schema: &Schema, indices: &[usize]) -> SchemaRef {
 
 /// The type a value column is spilled as. [`decoded_type`] unwraps a dictionary
 /// to its value type first, since `take` keeps the whole values array; a byte-view
-/// type then casts to its non-view type, since `take` keeps the variadic buffers;
-/// everything else spills as itself (its `take` copies only the selected rows).
+/// type then casts to the *large* non-view type (`i64` offsets), since `take`
+/// keeps the variadic buffers and a view column can hold more than the 2 GiB an
+/// `i32`-offset `Utf8`/`Binary` array caps at; everything else spills as itself
+/// (its `take` copies only the selected rows).
 fn spill_field_type(data_type: &DataType) -> DataType {
     match decoded_type(data_type) {
-        DataType::Utf8View => DataType::Utf8,
-        DataType::BinaryView => DataType::Binary,
+        DataType::Utf8View => DataType::LargeUtf8,
+        DataType::BinaryView => DataType::LargeBinary,
         other => other,
     }
 }
@@ -2808,8 +2810,8 @@ impl SpillState {
     /// routed row's key hash and (into `mask`) every row's changed flag, calls
     /// `on_changed(partition)` per changed row in scan order for the left pass's
     /// global-index bookkeeping, and writes the routed value columns.
-    // `row as u32` is a batch-local index bounded by the changed-row count
-    // `diff_cells_streaming` has checked fits `u32`; `take` indices are `u32`.
+    // `row as u32` is a batch-local index; the guard below rejects a batch with
+    // more than `u32::MAX` rows, so the cast (and the `u32` `take` indices) fit.
     #[allow(clippy::cast_possible_truncation)]
     fn route_batch<F: FnMut(usize)>(
         &mut self,
@@ -2819,6 +2821,11 @@ impl SpillState {
         mask: &mut Vec<bool>,
         mut on_changed: F,
     ) -> Result<(), TableDiffError> {
+        if batch.num_rows() > u32::MAX as usize {
+            return Err(TableDiffError::TooManyChangedRows {
+                rows: batch.num_rows(),
+            });
+        }
         mask.clear();
         for rows in &mut self.part_rows {
             rows.clear();
@@ -6247,6 +6254,61 @@ mod tests {
     }
 
     #[test]
+    fn spill_field_type_targets_large_offsets_for_views_and_dictionaries() {
+        use super::spill_field_type;
+        // Byte-view columns spill as the *large* (i64-offset) non-view type: their
+        // `take` keeps the whole variadic buffer, which can exceed the 2 GiB an
+        // i32-offset `Utf8`/`Binary` caps at, so casting to `Utf8`/`Binary` would
+        // panic inside arrow. Dictionaries decode to their value type, composed
+        // recursively so a dictionary of a view also lands on the large type.
+        assert_eq!(spill_field_type(&DataType::Utf8View), DataType::LargeUtf8);
+        assert_eq!(
+            spill_field_type(&DataType::BinaryView),
+            DataType::LargeBinary
+        );
+        assert_eq!(
+            spill_field_type(&DataType::Dictionary(
+                Box::new(DataType::Int32),
+                Box::new(DataType::Utf8View)
+            )),
+            DataType::LargeUtf8
+        );
+        assert_eq!(
+            spill_field_type(&DataType::Dictionary(
+                Box::new(DataType::Int32),
+                Box::new(DataType::Utf8)
+            )),
+            DataType::Utf8
+        );
+        assert_eq!(spill_field_type(&DataType::Utf8), DataType::Utf8);
+        assert_eq!(spill_field_type(&DataType::Int64), DataType::Int64);
+    }
+
+    #[test]
+    fn dictionary_of_utf8_view_spill_bytes_do_not_scale_with_the_partition_count() {
+        // A dictionary whose value type is itself a byte view: the spill decodes
+        // the dictionary and casts the view to its large non-view type, so it
+        // spills flat across 2, 18, and 64 partitions. The plain-`Utf8` dictionary
+        // case cannot catch a non-recursive spill_field_type; this composition can.
+        let rows = 40_000i64;
+        let strings: StringArray = (0..rows)
+            .map(|i| Some(format!("value-{i}-{}", "x".repeat(64))))
+            .collect();
+        let dict = arrow_cast::cast(
+            &(Arc::new(strings) as ArrayRef),
+            &DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8View)),
+        )
+        .unwrap();
+        let two = spill_bytes_for(dict.clone(), 2);
+        let eighteen = spill_bytes_for(dict.clone(), 18);
+        let sixty_four = spill_bytes_for(dict, 64);
+        assert!(
+            eighteen <= two * 2 && sixty_four <= two * 2,
+            "dict-of-view spill must not scale with partitions: 2={two} 18={eighteen} 64={sixty_four}"
+        );
+    }
+
+    #[test]
     fn dictionary_spill_bytes_do_not_scale_with_the_partition_count() {
         // `take` on a dictionary keeps the whole values array, so before the
         // spill decodes dictionaries a spilled partition carried the entire
@@ -6290,6 +6352,40 @@ mod tests {
             sixty_four <= two * 2 && eighteen <= two * 2,
             "view spill must not scale with partitions: 2={two} 18={eighteen} 64={sixty_four}"
         );
+    }
+
+    #[test]
+    #[ignore = "allocates ~2.3 GiB of view data; run manually with --ignored"]
+    fn view_column_over_i32_offset_limit_streams_without_panic() {
+        // A single input batch whose byte-view column carries more than
+        // `i32::MAX` bytes: `take` retains the whole variadic buffer, so the
+        // spill cast sees all of it at once. Casting to `Utf8`/`Binary`
+        // (i32 offsets) would panic here; the spill targets `LargeUtf8`/
+        // `LargeBinary` (i64 offsets), so the diff streams without panic.
+        // Ignored by default: it needs several GiB of resident memory.
+        force_parallel_path();
+        let base = "x".repeat(450 * 1024 * 1024);
+        let rows = 5usize; // 5 x 450 MiB > i32::MAX total view bytes
+        let view: ArrayRef = Arc::new(StringViewArray::from(
+            (0..rows).map(|_| base.as_str()).collect::<Vec<_>>(),
+        ));
+        let row_ids: Vec<i64> = (0..rows).map(|i| i64::try_from(i).unwrap()).collect();
+        let ids: Int64Array = row_ids.iter().copied().map(Some).collect();
+        let left_n: Int64Array = row_ids.iter().copied().map(Some).collect();
+        let right_n: Int64Array = row_ids.iter().map(|&i| Some(i + 1)).collect();
+        let sch = schema(vec![
+            id_field(),
+            Field::new("v", DataType::Utf8View, false),
+            Field::new("n", DataType::Int64, true),
+        ]);
+        let left = reader(
+            &sch,
+            vec![Arc::new(ids.clone()), view.clone(), Arc::new(left_n)],
+        );
+        let right = reader(&sch, vec![Arc::new(ids), view, Arc::new(right_n)]);
+        let diff = diff_rows_with(&left, &right, &sch, &sch, &key(), 4).unwrap();
+        // Only `n` changes on every row; the wide `v` column is spilled intact.
+        assert_eq!(diff.cells_changed.num_rows(), rows);
     }
 
     #[test]
