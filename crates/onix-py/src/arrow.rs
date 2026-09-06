@@ -114,8 +114,10 @@ fn spool_input(obj: &Bound<'_, PyAny>) -> PyResult<SpooledInput> {
 /// names; it is required and must be non-empty, and every key column must
 /// exist on both sides. `threads` sets the number of worker threads the row
 /// diff uses; `None` (the default) uses the machine's available parallelism,
-/// `1` runs single-threaded, and a value below 1 is a `ValueError`. The
-/// output is identical at any thread count. The result is a [`TableDiff`].
+/// `1` runs single-threaded, and a value below 1 or above
+/// [`onix_arrow::MAX_THREADS`] (1024) is a `ValueError`. The value is ignored
+/// for inputs under 50,000 rows, which always run single-threaded. The output
+/// is identical at any thread count. The result is a [`TableDiff`].
 #[pyfunction]
 #[pyo3(signature = (left, right, *, key, threads=None))]
 pub(crate) fn diff_tables(

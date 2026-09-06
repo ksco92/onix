@@ -41,15 +41,21 @@
 //! grows with the requested threads. Every partitioning is by key hash and
 //! every reduction is order-independent or reordered back to batch order, so
 //! the output is byte-identical at any thread count; `threads == 1` runs the
-//! original single-threaded path.
+//! original single-threaded path. The parallel-vs-single-threaded choice is made
+//! by peeking up to [`MIN_PARALLEL_ROWS`] rows or [`MAX_PEEK_BYTES`] of each
+//! side (whichever comes first) before spawning: a diff whose sides both fit
+//! under that bound runs single-threaded, and the peek reads the left side first
+//! so a large left never also buffers the right.
 //!
 //! Memory beyond the per-row hash vectors: workers append directly into the
 //! shared partition buffers — the resident hashes are one copy per side, as in
 //! the single-threaded path — so the parallel path's structural addition is the
 //! in-flight batches, one batch's rows buffered per worker between flushes plus
 //! a few decoded batches held over the bounded channels (worker count times
-//! batch size), on top of the shared buffers' reallocation slack; the README's
-//! Known-limitations bullet states the measured figures. The duplicate-key report
+//! batch size), on top of the shared buffers' reallocation slack and the size
+//! gate's peek buffer (at most [`MAX_PEEK_BYTES`] per side, at most two sides
+//! resident); the README's Known-limitations bullet states the measured
+//! figures. The duplicate-key report
 //! holds the actual key values of every *distinct duplicated* key, so a
 //! duplicate-heavy input adds a term proportional to the number of distinct
 //! duplicated keys times the key width; the cell pass holds both sides' changed
@@ -1088,8 +1094,9 @@ fn min_parallel_rows() -> usize {
 
 /// Hashes and classifies both sides, and reports the thread count the
 /// materialize and cell passes should use (the requested threads for a large
-/// diff, `1` for a small one). Below [`MIN_PARALLEL_ROWS`] total rows — or at
-/// `threads == 1` — the whole diff runs single-threaded; above it, the hash and
+/// diff, `1` for a small one). A side under [`MIN_PARALLEL_ROWS`] rows and
+/// [`MAX_PEEK_BYTES`] of decoded data is small; at `threads == 1`, or when both
+/// sides are small, the whole diff runs single-threaded. Otherwise the hash and
 /// classify passes run across the workers. Every path yields the same null-key
 /// set and [`Classified`], so the output is byte-identical.
 fn hash_and_classify(
@@ -1099,71 +1106,96 @@ fn hash_and_classify(
     right_columns: &SideColumns,
     config: &HashConfig<'_>,
 ) -> Result<(HashSet<u128>, Classified, usize), TableDiffError> {
-    // Peek up to the threshold from each side before spawning anything: a diff
-    // whose two sides both fit under it is small, and a thread pool would cost
-    // more than the whole diff (see MIN_PARALLEL_ROWS).
-    let threshold = min_parallel_rows();
-    let (left_buf, left_reader, left_small) = if config.threads > 1 {
-        peek_batches(left.open()?, threshold)?
-    } else {
-        (Vec::new(), left.open()?, true)
-    };
-    let (right_buf, right_reader, right_small) = if config.threads > 1 {
-        peek_batches(right.open()?, threshold)?
-    } else {
-        (Vec::new(), right.open()?, true)
-    };
-
-    if config.threads <= 1 || (left_small && right_small) {
-        // Single-threaded: the peeked prefix is the whole side when small, so
-        // reuse it; at threads == 1 nothing was peeked and the reader is whole.
-        let left_pass = hash_reader_and_prefix(left_buf, left_reader, left_columns, config)?;
-        let right_pass = hash_reader_and_prefix(right_buf, right_reader, right_columns, config)?;
-        let mut null_keys = left_pass.null_keys;
-        null_keys.extend(&right_pass.null_keys);
-        return Ok((
-            null_keys,
-            classify(left_pass.entries, right_pass.entries),
-            1,
-        ));
+    if config.threads <= 1 {
+        let left_pass = hash_reader_and_prefix(Vec::new(), left.open()?, left_columns, config)?;
+        let right_pass = hash_reader_and_prefix(Vec::new(), right.open()?, right_columns, config)?;
+        return Ok(sequential_result(left_pass, right_pass));
     }
 
-    hash_and_classify_parallel(
-        left_buf,
-        left_reader,
-        right_buf,
-        right_reader,
-        left_columns,
-        right_columns,
-        config,
-    )
+    let partitions = partition_count(config.threads);
+    // Peek the left side only — up to the row or byte bound — before deciding.
+    let (left_buf, left_reader, left_small) = peek_side(left.open()?)?;
+    if !left_small {
+        // Left is large, so the whole diff is parallel. Hash left first (which
+        // consumes and frees its peek buffer), then read the right side fresh:
+        // the right peek buffer is never allocated, so at most one side's peek
+        // is ever resident.
+        let left = hash_side_parallel(left_buf, left_reader, left_columns, config, partitions)?;
+        let right =
+            hash_side_parallel(Vec::new(), right.open()?, right_columns, config, partitions)?;
+        return combine_sides(left, right, config.threads);
+    }
+
+    // Left fits under the bound; only now is the right side peeked, so a small
+    // left and a large right hold at most two bounded peeks (never 2 × the row
+    // threshold of arbitrarily wide cells).
+    let (right_buf, right_reader, right_small) = peek_side(right.open()?)?;
+    if right_small {
+        let left_pass = hash_reader_and_prefix(left_buf, left_reader, left_columns, config)?;
+        let right_pass = hash_reader_and_prefix(right_buf, right_reader, right_columns, config)?;
+        return Ok(sequential_result(left_pass, right_pass));
+    }
+    let left = hash_side_parallel(left_buf, left_reader, left_columns, config, partitions)?;
+    let right = hash_side_parallel(right_buf, right_reader, right_columns, config, partitions)?;
+    combine_sides(left, right, config.threads)
+}
+
+/// Assembles the single-threaded result: the union of both sides' null keys,
+/// their merge-join classification, and `1` (the materialize and cell passes
+/// stay single-threaded for a small diff).
+fn sequential_result(left: SidePass, right: SidePass) -> (HashSet<u128>, Classified, usize) {
+    let mut null_keys = left.null_keys;
+    null_keys.extend(&right.null_keys);
+    (null_keys, classify(left.entries, right.entries), 1)
+}
+
+/// Assembles the parallel result from the two hashed sides: the union of their
+/// null keys, the per-partition classification, and the worker count (so the
+/// materialize and cell passes parallelize too).
+fn combine_sides(
+    left: SidePartitions,
+    right: SidePartitions,
+    threads: usize,
+) -> Result<(HashSet<u128>, Classified, usize), TableDiffError> {
+    let mut null_keys = left.null_keys;
+    null_keys.extend(right.null_keys);
+    let classified = classify_parallel(left.parts, right.parts)?;
+    Ok((null_keys, classified, threads))
 }
 
 /// A peeked side: the buffered prefix batches, the still-open reader for the
-/// rest, and whether the reader was exhausted within the peek limit (so the
+/// rest, and whether the reader was exhausted within the peek bound (so the
 /// whole side is buffered and small).
 type PeekedSide = (Vec<RecordBatch>, Box<dyn RecordBatchReader + Send>, bool);
 
-/// Reads up to `limit` rows from `reader` into a buffer. Returns the buffered
-/// batches, the still-open reader, and whether the reader was exhausted within
-/// the limit (so the whole side is buffered and under `limit` rows).
-fn peek_batches(
-    mut reader: Box<dyn RecordBatchReader + Send>,
-    limit: usize,
-) -> Result<PeekedSide, TableDiffError> {
+/// The byte bound on a side's peek: reaching it (before the row bound) marks the
+/// side large, because the parallel setup cost is negligible against this much
+/// decoded data, and it caps the peek buffer's memory regardless of cell width.
+const MAX_PEEK_BYTES: usize = 64 * 1024 * 1024;
+
+/// Reads from `reader` into a buffer until it reaches [`MIN_PARALLEL_ROWS`] rows
+/// or [`MAX_PEEK_BYTES`] of decoded data (marking the side large), or the reader
+/// is exhausted first (marking it small). Bounding by bytes as well as rows
+/// keeps the peek buffer bounded no matter how wide the cells are.
+fn peek_side(mut reader: Box<dyn RecordBatchReader + Send>) -> Result<PeekedSide, TableDiffError> {
+    let max_rows = min_parallel_rows();
     let mut buffered = Vec::new();
-    let mut rows = 0;
-    while rows < limit {
+    let mut rows = 0usize;
+    let mut bytes = 0usize;
+    loop {
+        if rows >= max_rows || bytes >= MAX_PEEK_BYTES {
+            return Ok((buffered, reader, false));
+        }
         match reader.next() {
             Some(Ok(batch)) => {
                 rows += batch.num_rows();
+                bytes += batch.get_array_memory_size();
                 buffered.push(batch);
             }
             Some(Err(e)) => return Err(read_error(&e)),
             None => return Ok((buffered, reader, true)),
         }
     }
-    Ok((buffered, reader, false))
 }
 
 /// Single-threaded hash of a side, hashing the peeked prefix batches first and
@@ -1200,32 +1232,6 @@ fn hash_reader_and_prefix(
     Ok(SidePass { entries, null_keys })
 }
 
-/// Hashes and classifies both sides across the configured workers, returning
-/// the union of both sides' null keys, the same [`Classified`] the sequential
-/// path produces, and the requested thread count (so the materialize and cell
-/// passes parallelize too). Each side's peeked prefix batches are fed to the
-/// workers before the rest of its reader. Every partitioning is by key hash and
-/// every reduction is order-independent, so the output is byte-identical.
-fn hash_and_classify_parallel(
-    left_buf: Vec<RecordBatch>,
-    left_reader: Box<dyn RecordBatchReader + Send>,
-    right_buf: Vec<RecordBatch>,
-    right_reader: Box<dyn RecordBatchReader + Send>,
-    left_columns: &SideColumns,
-    right_columns: &SideColumns,
-    config: &HashConfig<'_>,
-) -> Result<(HashSet<u128>, Classified, usize), TableDiffError> {
-    let partitions = partition_count(config.threads);
-    let left = hash_side_parallel(left_buf, left_reader, left_columns, config, partitions)?;
-    let right = hash_side_parallel(right_buf, right_reader, right_columns, config, partitions)?;
-
-    let mut null_keys = left.null_keys;
-    null_keys.extend(right.null_keys);
-
-    let classified = classify_parallel(left.parts, right.parts)?;
-    Ok((null_keys, classified, config.threads))
-}
-
 /// The shared, per-partition destination the hash-pass workers append into
 /// directly, so the per-row hashes are never copied a second time into a
 /// combined layout: each worker holds only one batch's worth of buffered rows
@@ -1259,10 +1265,13 @@ fn hash_side_parallel(
         parts: (0..partitions).map(|_| Mutex::new(Vec::new())).collect(),
         null_keys: Mutex::new(HashSet::new()),
     };
-    let (tx, rx) = sync_channel::<RecordBatch>(threads);
-    let rx = Arc::new(Mutex::new(rx));
 
     std::thread::scope(|scope| -> Result<(), TableDiffError> {
+        // Bound inside the scope so a `scope.spawn` panic below drops the
+        // receiver on unwind and disconnects any already-spawned worker (which
+        // would otherwise block on `recv` forever and hang the scope join).
+        let (tx, rx) = sync_channel::<RecordBatch>(threads);
+        let rx = Arc::new(Mutex::new(rx));
         let mut handles = Vec::with_capacity(threads);
         for _ in 0..threads {
             let rx = Arc::clone(&rx);
@@ -1544,12 +1553,17 @@ where
     F: FnMut(&RecordBatch, &[u128]) -> Result<(), TableDiffError>,
 {
     let reader = source.open()?;
-    let (fwd_tx, fwd_rx) = sync_channel::<(usize, RecordBatch)>(threads);
-    let fwd_rx = Arc::new(Mutex::new(fwd_rx));
-    let (back_tx, back_rx) = sync_channel::<Result<OrderedPayload, TableDiffError>>(threads);
-    let stop = Arc::new(AtomicBool::new(false));
 
     std::thread::scope(|scope| -> Result<(), TableDiffError> {
+        // The channels and `stop` are bound inside the scope so that if a
+        // `scope.spawn` below panics (e.g. an OS thread-spawn failure), the
+        // unwind drops the receivers and disconnects the already-spawned
+        // producers, which would otherwise block forever on the full channels
+        // and hang the scope join.
+        let (fwd_tx, fwd_rx) = sync_channel::<(usize, RecordBatch)>(threads);
+        let fwd_rx = Arc::new(Mutex::new(fwd_rx));
+        let (back_tx, back_rx) = sync_channel::<Result<OrderedPayload, TableDiffError>>(threads);
+        let stop = Arc::new(AtomicBool::new(false));
         let reader_handle = {
             let stop = Arc::clone(&stop);
             let back_tx = back_tx.clone();
@@ -4873,13 +4887,19 @@ mod tests {
 
     #[test]
     fn parallel_matches_with_more_threads_than_batches() {
+        force_parallel_path();
         let left: Vec<(Option<i64>, i64)> = (0..6).map(|i| (Some(i), i)).collect();
         let right: Vec<(Option<i64>, i64)> = (3..9).map(|i| (Some(i), i)).collect();
         let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let left_in = chunked_reader(&sch, &left, 2);
         let right_in = chunked_reader(&sch, &right, 2);
-        let baseline = diff_rows(&left_in, &right_in, &sch, &sch, &key()).unwrap();
+        let baseline = diff_rows_with(&left_in, &right_in, &sch, &sch, &key(), 1).unwrap();
+        let before = super::parallel_hash_passes();
         let parallel = diff_rows_with(&left_in, &right_in, &sch, &sch, &key(), 16).unwrap();
+        assert!(
+            super::parallel_hash_passes() > before,
+            "more threads than batches must still run the parallel path"
+        );
         assert_eq!(parallel, baseline);
     }
 
@@ -5075,6 +5095,110 @@ mod tests {
         let result =
             super::hash_side_parallel(Vec::new(), input.open().unwrap(), &columns, &config, 4);
         assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
+    }
+
+    #[test]
+    fn hash_side_parallel_worker_panic_takes_precedence_over_a_read_error() {
+        // A prefix batch makes a worker panic (out-of-range value column) and the
+        // next read yields an error. `hash_side_parallel` must still join every
+        // worker, so the panic surfaces as WorkerPanicked instead of resuming
+        // (aborting) — the read-error path must not return before join_results.
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
+        let good = RecordBatch::try_new(
+            sch.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1), Some(2)])),
+                Arc::new(Int64Array::from(vec![1, 2])),
+            ],
+        )
+        .unwrap();
+        let erroring: Box<dyn RecordBatchReader + Send> =
+            Box::new(arrow_array::RecordBatchIterator::new(
+                std::iter::once(Err(ArrowError::ComputeError("boom".to_string()))),
+                sch.clone(),
+            ));
+        let hasher = super::RowHasher::new().unwrap();
+        let columns = super::SideColumns {
+            key: vec![0],
+            value: vec![99],
+        };
+        let config = super::HashConfig {
+            key_names: &["id"],
+            value_names: &["v"],
+            hasher: &hasher,
+            threads: 4,
+        };
+        let result = super::hash_side_parallel(vec![good], erroring, &columns, &config, 4);
+        assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
+    }
+
+    #[test]
+    fn diff_rows_accepts_the_thread_ceiling() {
+        // Exactly MAX_THREADS is accepted end-to-end (the ceiling check runs
+        // before the size gate; a small table then runs single-threaded, so no
+        // 1024 threads are actually spawned).
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
+        let input = reader(
+            &sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1)])),
+                Arc::new(Int64Array::from(vec![1])),
+            ],
+        );
+        let diff = diff_rows_with(&input, &input, &sch, &sch, &key(), crate::MAX_THREADS).unwrap();
+        assert_eq!(diff.counts.rows_added, 0);
+    }
+
+    #[test]
+    fn peek_gates_at_exactly_the_row_threshold() {
+        // With the threshold overridden to 100, a 100-row side is large (runs the
+        // parallel pass) and a 99-row side is small (does not).
+        super::MIN_PARALLEL_ROWS_OVERRIDE.with(|cell| cell.set(Some(100)));
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
+
+        let at: Vec<(Option<i64>, i64)> = (0..100).map(|i| (Some(i), i)).collect();
+        let left = chunked_reader(&sch, &at, 1);
+        let right = chunked_reader(&sch, &at, 1);
+        let before = super::parallel_hash_passes();
+        diff_rows_with(&left, &right, &sch, &sch, &key(), 4).unwrap();
+        assert!(
+            super::parallel_hash_passes() > before,
+            "exactly the threshold must run the parallel pass"
+        );
+
+        let below: Vec<(Option<i64>, i64)> = (0..99).map(|i| (Some(i), i)).collect();
+        let left = chunked_reader(&sch, &below, 1);
+        let right = chunked_reader(&sch, &below, 1);
+        let before = super::parallel_hash_passes();
+        diff_rows_with(&left, &right, &sch, &sch, &key(), 4).unwrap();
+        assert_eq!(
+            super::parallel_hash_passes(),
+            before,
+            "one row below the threshold must stay single-threaded"
+        );
+
+        use_real_size_gate();
+    }
+
+    #[test]
+    fn peek_byte_bound_makes_a_wide_small_row_count_large() {
+        // A side with fewer than 50,000 rows but wide cells crosses
+        // MAX_PEEK_BYTES and is therefore large, so the parallel pass runs even
+        // under the row threshold: 17,000 rows of a 4 KB string is ~68 MB.
+        use_real_size_gate();
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Utf8, false)]);
+        let wide = "x".repeat(4096);
+        let n = 17_000;
+        let ids: Int64Array = (0..n).map(Some).collect();
+        let vals: StringArray = (0..n).map(|_| Some(wide.as_str())).collect();
+        let batch = RecordBatch::try_new(sch.clone(), vec![Arc::new(ids), Arc::new(vals)]).unwrap();
+        let input = multi_reader(&sch, vec![batch]);
+        let before = super::parallel_hash_passes();
+        diff_rows_with(&input, &input, &sch, &sch, &key(), 4).unwrap();
+        assert!(
+            super::parallel_hash_passes() > before,
+            "a wide side over the byte bound must run the parallel pass"
+        );
     }
 
     #[test]

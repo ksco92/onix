@@ -2,7 +2,6 @@
 
 import decimal
 import random
-import threading
 import time as time_module
 from collections import defaultdict
 from datetime import datetime, time, timedelta, timezone
@@ -548,12 +547,13 @@ def test_threads_below_one_raises(threads: int) -> None:
 def test_threads_over_the_ceiling_raises_without_spawning() -> None:
     """A thread count over the ceiling is rejected before any thread spawns."""
     left = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([1], pa.int64())})
-    before = threading.active_count()
     start = time_module.perf_counter()
     with pytest.raises(ValueError, match="threads must not exceed 1024"):
         diff_tables(left, left, key=["id"], threads=2**31)
+    # Returns well under a second: the ceiling is checked before spooling or
+    # spawning. (Rust std worker threads are invisible to threading.active_count,
+    # so the fast return, not a thread count, is the observable evidence.)
     assert time_module.perf_counter() - start < 1.0, "must fail fast, before spawning workers"
-    assert threading.active_count() == before, "no worker thread may be spawned"
 
 
 def test_oracle_parity_with_duplicates_and_null_keys(tmp_path: Path) -> None:

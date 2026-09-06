@@ -46,7 +46,18 @@ use arrow_array::{ArrayRef, Int64Array, RecordBatch, RecordBatchReader, StringAr
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use onix_arrow::{TableDiffError, TableDiffOptions, TableInput, diff_tables};
 
+/// The default rows per generated batch; override with `ROW_DIFF_BATCH` to
+/// simulate a streamed input of many small batches.
 const BATCH: i64 = 65_536;
+
+/// The rows-per-batch used by the generator, from `ROW_DIFF_BATCH` or [`BATCH`].
+fn batch_rows() -> i64 {
+    std::env::var("ROW_DIFF_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(BATCH)
+}
 
 /// The generated table shape.
 #[derive(Clone, Copy)]
@@ -69,6 +80,7 @@ struct Generated {
     schema: SchemaRef,
     rows: i64,
     shape: Shape,
+    batch: i64,
 }
 
 impl TableInput for Generated {
@@ -81,6 +93,7 @@ impl TableInput for Generated {
             schema: self.schema.clone(),
             rows: self.rows,
             shape: self.shape,
+            batch: self.batch,
             next: 0,
         }))
     }
@@ -90,6 +103,7 @@ struct GenReader {
     schema: SchemaRef,
     rows: i64,
     shape: Shape,
+    batch: i64,
     next: i64,
 }
 
@@ -100,7 +114,7 @@ impl Iterator for GenReader {
         if self.next >= self.rows {
             return None;
         }
-        let end = (self.next + BATCH).min(self.rows);
+        let end = (self.next + self.batch).min(self.rows);
         let columns: Vec<ArrayRef> = match self.shape {
             Shape::Linear {
                 id_offset,
@@ -190,11 +204,14 @@ fn main() {
                 format!(" (dup, key_width={width})"),
             )
         }
-        "wide" => {
+        "wide" | "widesame" => {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("id", DataType::Int64, false),
                 Field::new("value", DataType::Utf8, false),
             ]));
+            // `widesame` fills both sides identically (zero changes), isolating
+            // the size gate's peek buffer; `wide` differs, changing every row.
+            let right_fill = if mode == "widesame" { b'a' } else { b'b' };
             (
                 schema,
                 Shape::Wide {
@@ -203,10 +220,10 @@ fn main() {
                 },
                 Shape::Wide {
                     value_width: width,
-                    fill: b'b',
+                    fill: right_fill,
                 },
                 "id",
-                format!(" (wide, value_width={width}, all changed)"),
+                format!(" ({mode}, value_width={width})"),
             )
         }
         _ => {
@@ -239,15 +256,18 @@ fn main() {
         }
     };
 
+    let batch = batch_rows();
     let left = Generated {
         schema: schema.clone(),
         rows,
         shape: left_shape,
+        batch,
     };
     let right = Generated {
         schema,
         rows,
         shape: right_shape,
+        batch,
     };
 
     let options = options_from_env(key);
