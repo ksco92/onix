@@ -137,6 +137,7 @@ const RESERVED_TAGS: &[&str] = &[
     "$timedelta",
     "$dict",
     "$bigint",
+    "$object",
 ];
 
 /// Decodes one parsed fixture value into the engine's own value model,
@@ -177,6 +178,7 @@ fn decode_tagged(value: &Value, builder: &mut onix_core::value::Builder) -> onix
                 onix_core::Value::FrozenSet(decode_set_members(map, "$frozenset", builder))
             }
             Some("$dict") => decode_tagged_dict(map, builder),
+            Some("$object") => decode_tagged_object(map, builder),
             Some(tag) => {
                 panic!("golden fixture uses the reserved tag {tag:?}, which has no decoder yet")
             }
@@ -235,6 +237,38 @@ fn decode_tagged_dict(
         .collect();
 
     builder.object_with_keys(entries)
+}
+
+/// Decodes an `$object` fixture — a custom object (issue #66): its payload is
+/// `{"class": "<name>", "attrs": {<str-keyed attributes>}}`, mirroring
+/// `scripts/golden_tags.py`'s `encode_tags`/`decode_tags`. Builds the same
+/// class-tagged, attribute-diffed value onix's own bindings build for a live
+/// instance.
+fn decode_tagged_object(
+    map: &serde_json::Map<String, Value>,
+    builder: &mut onix_core::value::Builder,
+) -> onix_core::Value {
+    let Some(Value::Object(payload)) = map.get("$object") else {
+        panic!("the \"$object\" tag's payload must be an object");
+    };
+    let Some(Value::String(class)) = payload.get("class") else {
+        panic!("an \"$object\" tag must carry a string \"class\"");
+    };
+    let Some(Value::Object(attrs)) = payload.get("attrs") else {
+        panic!("an \"$object\" tag must carry an \"attrs\" object");
+    };
+
+    let entries: Vec<(onix_core::value::ObjectKey, onix_core::Value)> = attrs
+        .iter()
+        .map(|(name, item)| {
+            (
+                onix_core::value::ObjectKey::Str(onix_core::value::Key::Utf8(builder.intern(name))),
+                decode_tagged(item, builder),
+            )
+        })
+        .collect();
+
+    builder.custom_object(entries, std::sync::Arc::from(class.as_str()))
 }
 
 /// The decoded members of a `$set`/`$frozenset` fixture.

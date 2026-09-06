@@ -554,32 +554,45 @@ def test_sub_second_utc_offset_raises_value_error() -> None:
         DeepDiff(datetime.datetime(2024, 1, 1, tzinfo=tz), datetime.datetime(2024, 1, 2))
 
 
-def test_custom_object_raises_type_error() -> None:
-    """An arbitrary custom object raises TypeError naming its class."""
+def test_custom_object_diffs_by_its_attributes() -> None:
+    """A custom object diffs by its attributes (issue #66), matching DeepDiff's `_diff_obj`."""
 
     class Custom:
-        pass
+        def __init__(self, x: int, y: int) -> None:
+            self.x = x
+            self.y = y
 
-    with pytest.raises(TypeError, match="Custom"):
-        DeepDiff(Custom(), Custom())
-
-
-def test_unsupported_type_is_reported_even_when_nested() -> None:
-    """An unsupported type nested inside an otherwise-supported dict raises with its exact path."""
-    with pytest.raises(TypeError, match=r"complex at root\['a'\]\['b'\]\[1\]"):
-        DeepDiff({"a": {"b": [1, 1j]}}, {"a": {"b": [1, 2j]}})
+    assert json.loads(DeepDiff(Custom(1, 2), Custom(1, 3)).to_json()) == {
+        "values_changed": {"root.y": {"new_value": 3, "old_value": 2}}
+    }
 
 
-def test_unsupported_type_nested_in_a_tuple_reports_its_path() -> None:
-    """A tuple is walked like a list, so an unsupported element inside one reports its index."""
-    with pytest.raises(TypeError, match=r"complex at root\['a'\]\[1\]"):
-        DeepDiff({"a": (1, 1j)}, {"a": (1, 2j)})
+def test_two_different_classes_report_a_type_change() -> None:
+    """Two instances of different classes are a `type_changes`, named by class (issue #66)."""
+
+    class A:
+        def __init__(self) -> None:
+            self.x = 1
+
+    class B:
+        def __init__(self) -> None:
+            self.x = 1
+
+    report = json.loads(DeepDiff(A(), B()).to_json())
+    assert report["type_changes"]["root"]["old_type"] == "A"
+    assert report["type_changes"]["root"]["new_type"] == "B"
 
 
-def test_unsupported_type_at_root_reports_bare_root_path() -> None:
-    """A top-level unsupported value reports the bare `root` path."""
-    with pytest.raises(TypeError, match=r"complex at root;"):
-        DeepDiff(1j, 2j)
+def test_a_custom_object_nested_in_a_dict_reports_its_attribute_path() -> None:
+    """A custom object nested inside a dict keeps the dict subscript then a dotted attribute (issue #66)."""
+
+    class Custom:
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+    assert json.loads(DeepDiff({"a": {"b": Custom(1)}}, {"a": {"b": Custom(2)}}).to_json()) == {
+        "values_changed": {"root['a']['b'].x": {"new_value": 2, "old_value": 1}}
+    }
 
 
 def test_unsupported_dict_key_error_reports_path_to_the_dict() -> None:

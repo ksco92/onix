@@ -1,12 +1,16 @@
-//! Dict (JSON object) diffing: [`object_diff`]'s key-set walk — added/removed
-//! keys become leaf findings, shared keys recurse through
-//! `super::dispatch`'s [`super::diff_at`] one level deeper.
+//! Dict (JSON object) and custom-object diffing: [`object_diff`]'s key-set
+//! walk — added/removed keys become leaf findings, shared keys recurse
+//! through `super::dispatch`'s [`super::diff_at`] one level deeper. The same
+//! walk serves a custom object diffed by its attributes (see
+//! [`crate::value::ObjectKind`]); only the path segment (`.attr` vs
+//! `['key']`) and the report category (`attribute_*` vs `dictionary_item_*`)
+//! differ, both selected once from [`Object::kind`].
 
-use crate::value::{Object, Value};
+use crate::value::{Object, ObjectKey, ObjectKind, Value};
 
 use crate::error::Error;
 use crate::ignore_order::IgnoreOrderMemo;
-use crate::path::{PathSegment, object_key_path_segment as key_segment};
+use crate::path::{PathSegment, attribute_path_segment, object_key_path_segment as key_segment};
 use crate::report::{Report, ValuesChangedEntry};
 
 use super::{DiffOptions, check_map_depth, check_value_depth, diff_at, scoped};
@@ -105,6 +109,11 @@ pub(crate) fn object_diff(
 
     let mut report = Report::new();
 
+    // A `dict` and a custom object share this walk; both sides are the same
+    // class here (`diff_at` reports `type_changes` otherwise), so one side's
+    // kind decides the path segment and report category for the whole walk.
+    let kind = a.kind();
+
     // Stepping into a key — whether it recurses (shared key) or is a leaf
     // finding (added/removed) — always adds one to depth, matching the
     // module's depth-counting convention: a shared key's own recursive
@@ -112,28 +121,61 @@ pub(crate) fn object_diff(
     // `check_value_depth` call needs that same `depth + 1` (the depth its
     // own path sits at), not the *parent* dict's `depth`.
     for (key, old_value) in a {
-        scoped(path, key_segment(key), |path| -> Result<(), Error> {
-            match b.get(key) {
-                None => check_value_depth(path, old_value, depth + 1, opts.max_depth).map(|()| {
-                    report.insert_dictionary_item_removed(path.clone(), old_value.clone());
-                }),
-                Some(new_value) => diff_at(path, old_value, new_value, depth + 1, opts, memo)
-                    .map(|sub_report| report.merge(sub_report)),
-            }
-        })?;
+        scoped(
+            path,
+            key_path_segment(kind, key),
+            |path| -> Result<(), Error> {
+                match b.get(key) {
+                    None => {
+                        check_value_depth(path, old_value, depth + 1, opts.max_depth).map(|()| {
+                            insert_removed(&mut report, kind, path.clone(), old_value.clone());
+                        })
+                    }
+                    Some(new_value) => diff_at(path, old_value, new_value, depth + 1, opts, memo)
+                        .map(|sub_report| report.merge(sub_report)),
+                }
+            },
+        )?;
     }
 
     for (key, new_value) in b {
         if !a.contains_key(key) {
-            scoped(path, key_segment(key), |path| {
+            scoped(path, key_path_segment(kind, key), |path| {
                 check_value_depth(path, new_value, depth + 1, opts.max_depth).map(|()| {
-                    report.insert_dictionary_item_added(path.clone(), new_value.clone());
+                    insert_added(&mut report, kind, path.clone(), new_value.clone());
                 })
             })?;
         }
     }
 
     Ok(report)
+}
+
+/// The path segment one key contributes, selected by [`ObjectKind`]: a
+/// subscript for a `dict`, a dotted attribute for a custom object.
+fn key_path_segment(kind: ObjectKind, key: &ObjectKey) -> PathSegment {
+    match kind {
+        ObjectKind::Dict => key_segment(key),
+        ObjectKind::CustomObject => attribute_path_segment(key),
+    }
+}
+
+/// Records a removed key as the category [`ObjectKind`] selects:
+/// `dictionary_item_removed` for a `dict`, `attribute_removed` for a custom
+/// object.
+fn insert_removed(report: &mut Report, kind: ObjectKind, path: Vec<PathSegment>, value: Value) {
+    match kind {
+        ObjectKind::Dict => report.insert_dictionary_item_removed(path, value),
+        ObjectKind::CustomObject => report.insert_attribute_removed(path, value),
+    }
+}
+
+/// [`insert_removed`]'s added-side twin.
+fn insert_added(report: &mut Report, kind: ObjectKind, path: Vec<PathSegment>, value: Value) {
+    match kind {
+        ObjectKind::Dict => report.insert_dictionary_item_added(path, value),
+        ObjectKind::CustomObject => report.insert_attribute_added(path, value),
+    }
 }
 
 /// [`object_diff`]'s walk for the (rare) case where `a` or `b` has a

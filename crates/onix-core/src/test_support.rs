@@ -124,6 +124,14 @@ pub(crate) fn cobj(map: &serde_json::Map<String, serde_json::Value>) -> Object {
     )
 }
 
+/// Compact custom-object [`Value`] from a `serde_json` map of attributes and
+/// a class name — the shape a JSON literal cannot express (an instance of a
+/// user-defined class, diffed by its attributes). See
+/// [`crate::value::ObjectKind::CustomObject`].
+pub(crate) fn ccustom(class: &str, map: &serde_json::Map<String, serde_json::Value>) -> Value {
+    Value::Object(cobj(map).into_custom_object(std::sync::Arc::from(class)))
+}
+
 /// Compact [`Number`] from a `serde_json` number.
 pub(crate) fn cnum(n: &serde_json::Number) -> Number {
     if let Some(u) = n.as_u64() {

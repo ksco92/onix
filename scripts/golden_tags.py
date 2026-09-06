@@ -61,8 +61,9 @@ TIME_TAG: Final[str] = "$time"
 TIMEDELTA_TAG: Final[str] = "$timedelta"
 DICT_TAG: Final[str] = "$dict"
 BIGINT_TAG: Final[str] = "$bigint"
+OBJECT_TAG: Final[str] = "$object"
 
-# Every tag name the encoding reserves. All nine are implemented; the list is still
+# Every tag name the encoding reserves. All ten are implemented; the list is still
 # fixed here so a fixture can never use one as an ordinary dict key, and so all three
 # readers agree on the full set.
 RESERVED_TAGS: Final[frozenset[str]] = frozenset(
@@ -76,6 +77,7 @@ RESERVED_TAGS: Final[frozenset[str]] = frozenset(
         TIMEDELTA_TAG,
         DICT_TAG,
         BIGINT_TAG,
+        OBJECT_TAG,
     }
 )
 
@@ -152,6 +154,73 @@ SetMember = Union[
 ]
 
 
+class GoldenObject:
+    """
+    A custom-object instance, as a golden ``CASE`` writes one (issue #66).
+
+    A ``CASE`` cannot hold a live instance of a user class — the classes are
+    created on decode — so it holds this marker instead: a class name plus the
+    instance attributes ``DeepDiff``'s ``_diff_obj`` would see. :func:`encode_tags`
+    writes it as an ``$object`` tag and :func:`decode_tags` turns it back into a
+    live instance of a plain, attribute-only class (see :func:`_object_class`),
+    which is exactly the shape onix diffs by attributes.
+    """
+
+    def __init__(self, class_name: str, attrs: dict[str, "TaggedValue"]) -> None:
+        self.class_name = class_name
+        self.attrs = attrs
+
+    def __eq__(self, other: object) -> bool:
+        # Equal to another marker with the same class and attributes, and — so
+        # `write_case_inputs`'s round-trip check passes — to a decoded live
+        # instance of the same class carrying the same `__dict__` (a nested
+        # value compares live-against-marker through this same reflected path).
+        if isinstance(other, GoldenObject):
+            return self.class_name == other.class_name and self.attrs == other.attrs
+        if type(other) in _OBJECT_CLASSES.values():
+            return type(other).__name__ == self.class_name and vars(other) == self.attrs
+        return NotImplemented
+
+    __hash__ = None  # type: ignore[assignment]  # a mutable marker is never hashed
+
+
+# Classes created for `$object` tags, cached by name so two instances of the
+# same class (e.g. the two sides of an attribute change) share one `type`
+# object — `DeepDiff` compares `type(t1) != type(t2)`, so a fresh class per
+# instance would turn every same-class diff into a spurious `type_changes`.
+_OBJECT_CLASSES: dict[str, type] = {}
+
+
+def _object_class(class_name: str) -> type:
+    """
+    The cached plain, attribute-only class named `class_name`.
+
+    :param class_name: The class's ``__name__``.
+    :return: A class with no methods, properties, or class attributes, so an
+        instance's enumerated attributes are exactly its own ``__dict__``.
+    """
+    cls = _OBJECT_CLASSES.get(class_name)
+    if cls is None:
+        cls = type(class_name, (), {})
+        _OBJECT_CLASSES[class_name] = cls
+    return cls
+
+
+def _make_object(class_name: str, attrs: dict[str, "TaggedValue"]) -> object:
+    """
+    Build a live instance of the cached class `class_name` carrying `attrs`.
+
+    :param class_name: The class's ``__name__``.
+    :param attrs: The instance attributes to set.
+    :return: The instance.
+    """
+    cls = _object_class(class_name)
+    obj = cls.__new__(cls)
+    for key, value in attrs.items():
+        setattr(obj, key, value)
+    return obj
+
+
 def _sole_tag(value: dict[str, TaggedValue]) -> str | None:
     """
     Return the reserved tag `value` is an encoding of, or ``None`` if it is plain data.
@@ -177,6 +246,14 @@ def encode_tags(value: TaggedValue) -> TaggedValue:
         back as a tagged value (its only key is a reserved name).
     :return: A value containing only JSON-expressible types.
     """
+    if isinstance(value, GoldenObject):
+        return {
+            OBJECT_TAG: {
+                "class": value.class_name,
+                "attrs": {key: encode_tags(item) for key, item in value.attrs.items()},
+            }
+        }
+
     if isinstance(value, tuple):
         return {TUPLE_TAG: [encode_tags(item) for item in value]}
 
@@ -287,6 +364,18 @@ def decode_tags(value: TaggedValue) -> TaggedValue:
             if not isinstance(pairs, list):
                 raise TypeError(f"the {DICT_TAG!r} tag's payload must be a list of pairs")
             return {decode_tags(key): decode_tags(item) for key, item in pairs}
+
+        if tag == OBJECT_TAG:
+            payload = value[tag]
+            if not isinstance(payload, dict):
+                raise TypeError(f"the {OBJECT_TAG!r} tag's payload must be an object")
+            attrs = payload["attrs"]
+            if not isinstance(attrs, dict):
+                raise TypeError(f"the {OBJECT_TAG!r} tag's attrs must be an object")
+            return _make_object(
+                str(payload["class"]),
+                {str(key): decode_tags(item) for key, item in attrs.items()},
+            )
 
         if tag is not None:
             raise NotImplementedError(f"the {tag!r} tag is reserved but not decodable yet")
