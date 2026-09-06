@@ -106,15 +106,10 @@ It reports the **schema** diff (which columns were added, removed, or changed ty
 import pyarrow as pa
 from deepdiff_rs import diff_tables
 
-left = pa.table({
-    "id": pa.array([1, 2, 3, 9, 9], pa.int64()),  # 9 is a duplicate key
-    "amount": pa.array([10, 20, 30, 90, 91], pa.int32()),
-})
-right = pa.table({
-    "id": pa.array([2, 3, 4], pa.int64()),
-    "amount": pa.array([20, 31, 40], pa.int64()),
-    "note": pa.array(["a", "b", "c"], pa.string()),
-})
+# 9 is a duplicate key
+left = pa.table({"id": pa.array([1, 2, 3, 9, 9], pa.int64()), "amount": pa.array([10, 20, 30, 90, 91], pa.int32())})
+right = pa.table({"id": pa.array([2, 3, 4], pa.int64()), "amount": pa.array([20, 31, 40], pa.int64()),
+                   "note": pa.array(["a", "b", "c"], pa.string())})
 
 diff = diff_tables(left, right, key=["id"])
 print(diff.summary(), "added ids:", pa.table(diff.rows_added()).column("id").to_pylist(), "removed ids:", pa.table(diff.rows_removed()).column("id").to_pylist())
@@ -126,11 +121,13 @@ print("cells changed:", pa.table(diff.cells_changed()).to_pylist(), "duplicate k
 cells changed: [{'id': 3, 'column': 'amount', 'old_value': '30', 'new_value': '31', 'change': 'value_changed'}] duplicate keys: [{'id': 9, 'left_count': 2, 'right_count': 0}]
 ```
 
-A key appearing more than once on either side is reported in `duplicate_keys` (with `left_count` and `right_count`) and excluded from the added/removed/changed sets; a null key matches its counterpart and is counted in `null_keys`. Rows are compared by the non-key columns present on *both* sides, with onix's value semantics (integers and integral floats fold together, all NaNs compare equal, `1.00` equals `1.0000`, a timestamp compares by its instant and a time or duration by its value across units, dictionary-encoded values equal their plain form, and null equals null); a nested non-key column is out of scope and is skipped rather than compared. The exact value-comparison rules are documented on the hashing functions in [`crates/onix-arrow/src/row_diff.rs`](crates/onix-arrow/src/row_diff.rs).
+A key appearing more than once on either side is reported in `duplicate_keys` (`left_count`/`right_count`) and excluded from added/removed/changed; a null key matches its counterpart and is counted in `null_keys`. Rows are compared by the non-key columns present on *both* sides, with onix's value semantics (integers and integral floats fold together, all NaNs compare equal, `1.00` equals `1.0000`, a timestamp compares by its instant and a time or duration by its value across units, dictionary-encoded values equal their plain form, and null equals null); a nested non-key column is skipped rather than compared. The exact rules are on the hashing functions in [`crates/onix-arrow/src/row_diff.rs`](crates/onix-arrow/src/row_diff.rs).
 
-Type comparison uses the full logical Arrow type (timestamp unit and timezone, decimal precision and scale, and so on), but physical encodings that carry the same logical type compare equal — a dictionary-encoded string equals a plain string, polars' `Utf8View` equals pyarrow's `Utf8`, the list variants normalize together, and a map compares equal however a library spells it — so the same table read through pyarrow, polars, or DuckDB reports no spurious type changes. The full normalization rules are documented on `normalized_type` (and `map_entries`) in [`crates/onix-arrow/src/schema.rs`](crates/onix-arrow/src/schema.rs); nullability is ignored but reported in each record. Column names must be unique on each side; a repeated name raises `ValueError`. `diff.schema_arrow` is the same result as an Arrow table: it implements `__arrow_c_stream__`, so `polars.DataFrame(diff.schema_arrow)` consumes it with no pyarrow needed, and `diff.schema_arrow.to_pyarrow()` returns a `pyarrow.Table`; `pandas.api.interchange.from_dataframe(diff.schema_arrow)` also works, but pandas' own implementation of that protocol needs pyarrow installed regardless of which path you take.
+Type comparison uses the full logical Arrow type (timestamp unit and timezone, decimal precision and scale, and so on), but physical encodings sharing a logical type compare equal — a dictionary-encoded string equals a plain string, polars' `Utf8View` equals pyarrow's `Utf8`, the list variants normalize together, and a map compares equal however a library spells it — so the same table read through pyarrow, polars, or DuckDB reports no spurious type changes; nullability is ignored but reported in each record. The full rules are on `normalized_type`/`map_entries` in [`crates/onix-arrow/src/schema.rs`](crates/onix-arrow/src/schema.rs). Column names must be unique on each side; a repeated name raises `ValueError`. `diff.schema_arrow` is the same result as an Arrow table: it implements `__arrow_c_stream__`, so `polars.DataFrame(diff.schema_arrow)` needs no pyarrow, and `.to_pyarrow()` returns a `pyarrow.Table`; `pandas.api.interchange.from_dataframe(diff.schema_arrow)` also works, but needs pyarrow installed regardless.
 
-`pyarrow` is optional: install it with `pip install deepdiff-rs[arrow]`. It is needed only for `to_pyarrow()` and for passing pyarrow objects in — importing `deepdiff_rs` and diffing polars or DuckDB tables need it not at all. Passing an object that implements neither Arrow protocol raises `TypeError`; calling `to_pyarrow()` without pyarrow installed raises `ImportError` naming the extra; `diff.to_json()` gives the whole diff — schema, summary, and `rows_added`/`rows_removed`/`cells_changed`/`duplicate_keys` in full, one JSON object per row — as a single string with no pyarrow, polars, or pandas needed at all; see [Known limitations](#known-limitations) for its row cap.
+`pyarrow` is optional: `pip install deepdiff-rs[arrow]`. It's needed only for `to_pyarrow()` and passing pyarrow objects in — importing `deepdiff_rs` and diffing polars or DuckDB tables need it not at all. An object implementing neither Arrow protocol raises `TypeError`; `to_pyarrow()` without pyarrow installed raises `ImportError` naming the extra. `diff.to_json()` gives the whole diff — schema, summary, and `rows_added`/`rows_removed`/`cells_changed`/`duplicate_keys` in full, one JSON object per row — as a single string with no pyarrow, polars, or pandas needed; see [Known limitations](#known-limitations) for its row cap.
+
+Beyond a join-based diff, `diff_tables` reports duplicate and null keys rather than silently multiplying or dropping them, distinguishes `type_changed` from `value_changed` per cell, renders every value by one documented rule set (Python's, with `Duration` the one exception -- an ISO 8601 string, not Python's own `str()`), and produces byte-identical output at any thread count with memory proportional to row count from a streamed input. What that costs over a hand-rolled join is in [`perf/arrow/RESULTS.md`](perf/arrow/RESULTS.md)'s polars-backed ceiling section.
 
 ## Performance
 

@@ -91,6 +91,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -157,6 +158,22 @@ def _duckdb_counts(fixture_dir: Path, key: list[str], out_dir: Path) -> dict[str
     return {k: summary[k] for k in ("rows_added", "rows_removed", "cells_changed", "duplicate_keys")}
 
 
+def _compare_columns(a: pl.DataFrame, b: pl.DataFrame, key: list[str], kind: str) -> list[str]:
+    """
+    Common non-key columns to compare, in left-schema order.
+
+    :param a: The base table, already read.
+    :param b: The changed table, already read.
+    :param key: The key column names.
+    :param kind: `"narrow"` or `"wide"` -- `"wide"` drops `ts_cast` (see the
+        module docstring's "The `wide` kind" section).
+    :return: Column names present on both sides, excluding the key and,
+        for `"wide"`, `_WIDE_POLARS_EXCLUDED_COLUMNS`.
+    """
+    excluded = _WIDE_POLARS_EXCLUDED_COLUMNS if kind == "wide" else frozenset()
+    return [c for c in a.columns if c in b.columns and c not in key and c not in excluded]
+
+
 def _polars_counts(fixture_dir: Path, key: list[str], kind: str) -> dict[str, int]:
     """
     Diff `fixture_dir`'s parquet pair with an anti-join/inner-join polars diff.
@@ -170,8 +187,7 @@ def _polars_counts(fixture_dir: Path, key: list[str], kind: str) -> dict[str, in
     """
     a = pl.read_parquet(fixture_dir / "a.parquet")
     b = pl.read_parquet(fixture_dir / "b.parquet")
-    excluded = _WIDE_POLARS_EXCLUDED_COLUMNS if kind == "wide" else frozenset()
-    compare_columns = [c for c in a.columns if c in b.columns and c not in key and c not in excluded]
+    compare_columns = _compare_columns(a, b, key, kind)
     added = b.join(a, on=key, how="anti")
     removed = a.join(b, on=key, how="anti")
     matched = a.join(b, on=key, how="inner", suffix="_b")
@@ -257,6 +273,26 @@ def _normalize_maxrss(ru_maxrss: int) -> int:
     return ru_maxrss * 1024
 
 
+def _time_call(fn: Callable[[], None]) -> dict[str, float]:
+    """
+    Call `fn` once, timed, for a worker to print as its measurement.
+
+    Shared by this module's and `polars_spike.py`'s own `--worker` mode, so
+    both scripts' subprocess measurements are wall/CPU/RSS-comparable.
+
+    :param fn: A zero-argument callable to run inside the timed window.
+    :return: `wall_s`, `cpu_s`, and `rss_bytes` (via `_normalize_maxrss`).
+    """
+    before = resource.getrusage(resource.RUSAGE_SELF)
+    wall_start = time.perf_counter()
+    fn()
+    wall_s = time.perf_counter() - wall_start
+    after = resource.getrusage(resource.RUSAGE_SELF)
+    cpu_s = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+
+    return {"wall_s": wall_s, "cpu_s": cpu_s, "rss_bytes": _normalize_maxrss(after.ru_maxrss)}
+
+
 def _run_worker(tool: str, fixture_dir: Path, key: list[str], kind: str) -> None:
     """
     Perform one diff and print its wall/CPU/RSS measurement as JSON on stdout.
@@ -268,23 +304,18 @@ def _run_worker(tool: str, fixture_dir: Path, key: list[str], kind: str) -> None
     """
     scratch = Path(tempfile.mkdtemp(prefix="onix-bench-oracle-")) if tool == "duckdb" else None
     try:
-        before = resource.getrusage(resource.RUSAGE_SELF)
-        wall_start = time.perf_counter()
         if tool == "onix":
-            _onix_counts(fixture_dir, key)
+            measurement = _time_call(lambda: _onix_counts(fixture_dir, key))
         elif tool == "duckdb":
             assert scratch is not None
-            _duckdb_counts(fixture_dir, key, scratch)
+            measurement = _time_call(lambda: _duckdb_counts(fixture_dir, key, scratch))
         else:
-            _polars_counts(fixture_dir, key, kind)
-        wall_s = time.perf_counter() - wall_start
-        after = resource.getrusage(resource.RUSAGE_SELF)
+            measurement = _time_call(lambda: _polars_counts(fixture_dir, key, kind))
     finally:
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
 
-    cpu_s = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
-    print(json.dumps({"wall_s": wall_s, "cpu_s": cpu_s, "rss_bytes": _normalize_maxrss(after.ru_maxrss)}))
+    print(json.dumps(measurement))
 
 
 ##############################################

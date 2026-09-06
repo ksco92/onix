@@ -308,6 +308,54 @@ term.
 This run was taken after `ps` showed no other `cargo`, `maturin`, or `pytest` process using CPU, and
 none appeared during it (the same convention as the narrow section).
 
+## Polars-backed ceiling (#93)
+
+The [Results](#results) and [Wide fixture pair](#wide-fixture-pair-84) tables above compare
+`diff_tables` against two baselines that answer a smaller question than `diff_tables` does: counts
+only, no `cells_changed` table, no rendering, no order (see `bench_tables.py`'s module docstring's
+"What the polars baseline does and does not see"). This section measures the ceiling instead: what
+an end-to-end polars-backed pipeline costs once it must also produce that long-format,
+duplicate/null-key-aware, rendered, ordered `cells_changed` table -- the method, and where its
+rendering diverges from onix's, are documented in
+[`perf/arrow/polars_spike.py`](perf/arrow/polars_spike.py)'s module docstring.
+
+Environment: same machine and versions as [Environment](#environment) above (Apple M5 Max, 18
+cores, 137438.95 MB RAM, polars 1.44.1, deepdiff-rs 0.11.1, the streaming cell pass of issue #87),
+measured 2026-09-06, median of 11 isolated subprocess runs per cell (same convention as the rest of
+this file). Each sweep was `ps`-checked clear of other `cargo`/`maturin`/`pytest` activity
+immediately before starting, on a shared machine running other, unrelated background jobs at a load
+average around 9-10 (of 18 cores) throughout (`uptime` checked before and after each sweep), so the
+`diff_tables` column here reads a little higher than the dedicated, otherwise-idle sweeps elsewhere
+in this file (354 ms vs. 336.84 ms narrow 1M in [Results](#results); 1.592 s vs. 1.376 s wide 1M in
+[Wide fixture pair](#wide-fixture-pair-84)) -- the three phases in one row are still directly
+comparable, since all three ran under the same contention.
+
+| Fixture | Phase | Wall clock (median) | CPU seconds (median) | Peak RSS (median) |
+| --- | --- | --- | --- | --- |
+| narrow 1M | (a) polars joins only | 162.63 ms | 1.065 s | 1323.5 MB |
+| narrow 1M | (b) joins + rendered `cells_changed` | 155.20 ms | 1.121 s | 1325.0 MB |
+| narrow 1M | (c) `diff_tables` | 354.06 ms | 0.965 s | 1201.7 MB |
+| wide 1M | (a) polars joins only | 428.81 ms | 3.146 s | 2698.4 MB |
+| wide 1M | (b) joins + rendered `cells_changed` | 460.69 ms | 3.957 s | 2690.6 MB |
+| wide 1M | (c) `diff_tables` | 1.592 s | 5.853 s | 3021.0 MB |
+
+At 1M rows, phase (b) -- the actual ceiling, a rendered and ordered per-cell table -- costs no more
+than phase (a)'s counts-only join: rendering and ordering only touch the changed rows (20,000 of 1M
+narrow, 229,077 of 1M wide), while `.ne_missing()` itself already scans every compared column in
+full for either phase, so that scan is the dominant cost and the two phases land within noise of
+each other. `diff_tables` is 2.3-3.5x phase (b)'s wall time here (narrow: 354 ms vs. 155 ms; wide:
+1.592 s vs. 461 ms), now that issue #87's streaming, parallel cell pass has closed most of the gap
+the pre-#87 cell pass left ([Results (wide)](#results-wide)'s own, otherwise-idle 0.11.0 figure was
+11.8x here at the wide size: 5.460 s against this section's 461 ms phase-(b) figure) --
+`diff_tables` still re-reads and re-hashes the whole table three times over per
+[`row_diff.rs`](crates/onix-arrow/src/row_diff.rs)'s module doc, against polars' single in-memory
+pass. The full ~5 GB wide pair (16.875M rows) was not measured here (see
+[Wide fixture pair](#wide-fixture-pair-84) for `diff_tables`'s own cost at that size, about 24 s on
+0.11.1, down from about 150 s pre-#87). `bench_tables.py`'s correctness precheck
+(`rows_added`/`rows_removed`/`cells_changed`/`duplicate_keys` against `generate_fixtures.py`'s
+manifest) passes for `polars_spike.py`'s counts on both fixtures, matching `_polars_counts`'s
+existing baseline exactly (narrow: 10,000/10,000/20,000/0; wide: 10,000/10,000/229,077/0).
+
 ## Disk usage
 
 Both fixture pairs (narrow and wide) at both sizes, all resident at once, from the two "Fixture
