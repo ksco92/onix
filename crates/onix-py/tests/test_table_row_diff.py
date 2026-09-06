@@ -489,6 +489,60 @@ def test_oracle_parity_on_the_fixture_pair(n_rows: int, tmp_path: Path) -> None:
     assert onix_cells == oracle_cells
 
 
+def _members_equal(a: object, b: object) -> bool:
+    """Every Arrow-table member of two diffs is byte-identical."""
+    return all(
+        _table(getattr(a, member)()).equals(_table(getattr(b, member)()))
+        for member in ("rows_added", "rows_removed", "cells_changed", "duplicate_keys")
+    )
+
+
+def test_thread_count_does_not_change_the_result(tmp_path: Path) -> None:
+    """The diff is identical single-threaded, multi-threaded, and at the default:
+    same Arrow batches, same summary, same to_json()."""
+    fixture_dir = tmp_path / "fixture"
+    generate(50_000, 4242, fixture_dir)
+    left = pq.read_table(fixture_dir / "a.parquet")
+    right = pq.read_table(fixture_dir / "b.parquet")
+
+    single = diff_tables(left, right, key=["id"], threads=1)
+    for threads in (None, 4, 8):
+        other = diff_tables(left, right, key=["id"], threads=threads)
+        assert other.summary() == single.summary(), f"summary at threads={threads}"
+        assert other.to_json() == single.to_json(), f"to_json at threads={threads}"
+        assert _members_equal(other, single), f"batches at threads={threads}"
+
+
+def test_thread_count_preserves_duplicate_and_null_key_output() -> None:
+    """A duplicate-heavy, null-key input diffs identically at threads=1 and 4,
+    including the duplicate-key report ordering."""
+    left = pa.table(
+        {
+            "id": pa.array([1, 1, 2, None, 3, 3, 4], pa.int64()),
+            "v": pa.array([10, 11, 20, 99, 30, 31, 40], pa.int64()),
+        }
+    )
+    right = pa.table(
+        {
+            "id": pa.array([2, 2, None, 3, 4, 5], pa.int64()),
+            "v": pa.array([20, 21, 99, 33, 40, 50], pa.int64()),
+        }
+    )
+    single = diff_tables(left, right, key=["id"], threads=1)
+    parallel = diff_tables(left, right, key=["id"], threads=4)
+    assert parallel.summary() == single.summary()
+    assert parallel.to_json() == single.to_json()
+    assert _members_equal(parallel, single)
+
+
+@pytest.mark.parametrize("threads", [0, -1, -8])
+def test_threads_below_one_raises(threads: int) -> None:
+    """A thread count below 1 is a ValueError naming the constraint."""
+    left = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([1], pa.int64())})
+    with pytest.raises(ValueError, match="threads must be a positive integer"):
+        diff_tables(left, left, key=["id"], threads=threads)
+
+
 def test_oracle_parity_with_duplicates_and_null_keys(tmp_path: Path) -> None:
     """onix matches the oracle on a synthetic table with duplicate and null keys (which the fixture never has)."""
     left = pa.table(

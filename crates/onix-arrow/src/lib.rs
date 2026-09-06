@@ -224,7 +224,14 @@ pub fn diff_tables(
         }
     }
 
-    let rows = row_diff::diff_rows(left, right, &left_schema, &right_schema, options.key())?;
+    let rows = row_diff::diff_rows(
+        left,
+        right,
+        &left_schema,
+        &right_schema,
+        options.key(),
+        options.threads(),
+    )?;
 
     Ok(TableDiff::new(changes, rows))
 }

@@ -11,6 +11,7 @@
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch, RecordBatchIterator, RecordBatchReader, StructArray};
@@ -111,16 +112,21 @@ fn spool_input(obj: &Bound<'_, PyAny>) -> PyResult<SpooledInput> {
 /// `left` and `right` are any objects implementing the Arrow `PyCapsule`
 /// interface (see the module docs). `key` is the list of primary-key column
 /// names; it is required and must be non-empty, and every key column must
-/// exist on both sides. The result is a [`TableDiff`].
+/// exist on both sides. `threads` sets the number of worker threads the row
+/// diff uses; `None` (the default) uses the machine's available parallelism,
+/// `1` runs single-threaded, and a value below 1 is a `ValueError`. The
+/// output is identical at any thread count. The result is a [`TableDiff`].
 #[pyfunction]
-#[pyo3(signature = (left, right, *, key))]
+#[pyo3(signature = (left, right, *, key, threads=None))]
 pub(crate) fn diff_tables(
     py: Python<'_>,
     left: &Bound<'_, PyAny>,
     right: &Bound<'_, PyAny>,
     key: &Bound<'_, PyAny>,
+    threads: Option<i64>,
 ) -> PyResult<TableDiff> {
     let key = extract_key(key)?;
+    let threads = resolve_threads(threads)?;
     // Import, diff, and drop all run on the stack-sized worker (re-acquiring the
     // GIL there) because the recursive Arrow FFI import and the imported types'
     // recursive drop are native-stack sinks on deep nesting, and — unlike the
@@ -138,13 +144,34 @@ pub(crate) fn diff_tables(
             // one-shot Python streams are never open at the same time.
             let left_input = spool_input(left.bind(py))?;
             let right_input = spool_input(right.bind(py))?;
-            let options = TableDiffOptions::new(key);
+            let mut options = TableDiffOptions::new(key);
+            if let Some(threads) = threads {
+                options = options.with_threads(threads);
+            }
             let core = core_diff_tables(&left_input, &right_input, &options)
                 .map_err(|e| map_table_error(&e))?;
 
             TableDiff::from_core(core)
         })
     })?
+}
+
+/// Turns the Python `threads` argument into an optional thread count: `None`
+/// keeps the [`TableDiffOptions`] default (available parallelism), a value of
+/// 1 or more sets the worker count, and a value below 1 is a `ValueError`.
+fn resolve_threads(threads: Option<i64>) -> PyResult<Option<NonZeroUsize>> {
+    match threads {
+        None => Ok(None),
+        Some(n) if n < 1 => Err(PyValueError::new_err(format!(
+            "threads must be a positive integer (or None for the default), got {n}"
+        ))),
+        Some(n) => {
+            let count = usize::try_from(n).map_err(|_| {
+                PyValueError::new_err("threads is larger than this platform supports")
+            })?;
+            Ok(NonZeroUsize::new(count))
+        }
+    }
 }
 
 /// Extracts the key column list, rejecting a bare string (which would

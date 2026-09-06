@@ -140,6 +140,14 @@ pub enum TableDiffError {
         /// The underlying `serde_json` error's message.
         message: String,
     },
+    /// A worker thread in the parallel row diff panicked. The panic is caught
+    /// and surfaced as this typed error rather than allowed to abort the
+    /// process, so a bug or an unexpected failure inside one worker fails the
+    /// diff recoverably. It does not fire on any supported input.
+    WorkerPanicked {
+        /// The panic payload, when it was a string.
+        message: String,
+    },
 }
 
 impl fmt::Display for TableDiffError {
@@ -197,6 +205,9 @@ impl fmt::Display for TableDiffError {
             ),
             TableDiffError::Json { message } => {
                 write!(f, "failed to serialize the table diff to JSON: {message}")
+            }
+            TableDiffError::WorkerPanicked { message } => {
+                write!(f, "a parallel row-diff worker thread panicked: {message}")
             }
         }
     }
@@ -263,6 +274,16 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("\"xs\""));
         assert!(message.contains("RunEndEncoded"));
+    }
+
+    #[test]
+    fn worker_panicked_message_carries_the_payload() {
+        let error = TableDiffError::WorkerPanicked {
+            message: "kaboom".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("worker thread panicked"));
+        assert!(message.contains("kaboom"));
     }
 
     #[test]

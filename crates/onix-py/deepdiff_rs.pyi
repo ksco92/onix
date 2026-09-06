@@ -97,7 +97,7 @@ def diff_json(
     :raises ValueError: If ``a`` or ``b`` fails to parse as JSON.
     """
 
-def diff_tables(left: Any, right: Any, *, key: list[str]) -> TableDiff:
+def diff_tables(left: Any, right: Any, *, key: list[str], threads: int | None = None) -> TableDiff:
     """Diffs two Arrow tables — schema and keyed rows.
 
     ``left`` and ``right`` are any object implementing the Arrow PyCapsule
@@ -118,11 +118,15 @@ def diff_tables(left: Any, right: Any, *, key: list[str]) -> TableDiff:
     :param right: The right table.
     :param key: The primary-key column names, required and non-empty; every
         key column must exist, with the same type, on both sides.
+    :param threads: Number of worker threads the row diff hashes and
+        classifies rows with. ``None`` (the default) uses the machine's
+        available parallelism; ``1`` runs single-threaded. The result is
+        byte-identical at any value. Must be ``None`` or a positive integer.
     :raises TypeError: If an input implements neither Arrow PyCapsule method,
         or ``key`` is a bare string rather than a list of column names.
     :raises ValueError: If a key column is missing, duplicated, or
         type-mismatched, or a column's type cannot be compared by value —
-        the message names the column.
+        the message names the column — or if ``threads`` is less than 1.
     :raises MaxDepthError: If a column's Arrow type is nested past the
         supported depth.
     """

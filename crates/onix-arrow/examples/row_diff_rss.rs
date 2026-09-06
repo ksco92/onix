@@ -144,6 +144,21 @@ impl RecordBatchReader for GenReader {
     }
 }
 
+/// Options for the diff, honoring a `ROW_DIFF_THREADS` override so the parallel
+/// path's peak RSS can be compared against the single-threaded baseline; unset
+/// uses the default (available parallelism).
+fn options_from_env(key: &str) -> TableDiffOptions {
+    let mut options = TableDiffOptions::new(vec![key.to_string()]);
+    if let Some(threads) = std::env::var("ROW_DIFF_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .and_then(std::num::NonZeroUsize::new)
+    {
+        options = options.with_threads(threads);
+    }
+    options
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let rows: i64 = args
@@ -233,13 +248,14 @@ fn main() {
         shape: right_shape,
     };
 
+    let options = options_from_env(key);
     let start = std::time::Instant::now();
-    let diff = diff_tables(&left, &right, &TableDiffOptions::new(vec![key.to_string()]))
-        .expect("diff succeeds");
+    let diff = diff_tables(&left, &right, &options).expect("diff succeeds");
     let elapsed = start.elapsed();
     let summary = diff.summary();
 
     println!("rows per side: {rows}{label}");
+    println!("threads: {}", options.threads());
     println!("wall: {:.2}s", elapsed.as_secs_f64());
     println!(
         "rows_added={} rows_removed={} rows_changed={} duplicate_keys={} cells_changed={}",
