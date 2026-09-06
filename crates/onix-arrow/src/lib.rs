@@ -106,6 +106,7 @@ mod json_rows;
 mod options;
 mod row_diff;
 mod schema;
+pub mod spool;
 mod table_diff;
 
 pub use error::{Side, TableDiffError};

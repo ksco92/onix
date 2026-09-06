@@ -25,8 +25,12 @@
 //!    whose key is in the *changed* set (present on both sides, differing row
 //!    hash); the two sides' changed rows are paired by key hash and every common
 //!    non-key column is compared cell by cell, one output record per differing
-//!    cell — see [`diff_cells`]. Only the changed rows are materialized, so this
-//!    pass never holds the whole table.
+//!    cell. Below the size gate this runs single-threaded and materializes both
+//!    sides' changed rows at once (see [`diff_cells`]); above it, the changed
+//!    value rows are spilled by key-hash partition to anonymous temporary IPC
+//!    files and one partition is compared and rendered at a time across the
+//!    workers (see [`diff_cells_streaming`]), so the pass holds one partition's
+//!    rows plus the output, never both sides' full changed rows.
 //!
 //! # Parallelism
 //!
@@ -34,14 +38,17 @@
 //! workers (the machine's available parallelism, capped at
 //! [`crate::MAX_THREADS`]): the hash pass hashes each batch on a worker and
 //! appends its rows straight into shared per-key-hash partition buffers, the
-//! classify pass merge-joins each partition on its own worker, and the
-//! materialize and cell passes hash their key columns on workers while the
-//! sequential filtering runs in batch order. The partition count is capped
-//! independently of the worker count (see [`partition_count`]), so it never
-//! grows with the requested threads. Every partitioning is by key hash and
-//! every reduction is order-independent or reordered back to batch order, so
-//! the output is byte-identical at any thread count; `threads == 1` runs the
-//! original single-threaded path. The parallel-vs-single-threaded choice is made
+//! classify pass merge-joins each partition on its own worker, the materialize
+//! pass hashes its key columns on workers while the sequential filtering runs in
+//! batch order, and the cell pass spills each side's changed value rows by
+//! key-hash partition and compares and renders one partition at a time across
+//! the workers (see [`diff_cells_streaming`]). The partition count is capped
+//! independently of the worker count (see [`partition_count`] and
+//! [`MAX_PARTITIONS`]), so it never grows with the requested threads. Every
+//! partitioning is by key hash and every reduction is order-independent or
+//! reordered back to batch order, so the output is byte-identical at any thread
+//! count; `threads == 1` runs the original single-threaded path. The
+//! parallel-vs-single-threaded choice is made
 //! by peeking up to [`MIN_PARALLEL_ROWS`] rows or [`MAX_PEEK_BYTES`] of each
 //! side (whichever comes first) before spawning: a diff whose sides both fit
 //! under that bound runs single-threaded, and the peek reads the left side first
@@ -58,11 +65,18 @@
 //! resident); the README's Known-limitations bullet states the measured
 //! figures. The duplicate-key report holds the actual key values of every
 //! *distinct duplicated* key, so a duplicate-heavy input adds a term
-//! proportional to the number of distinct duplicated keys times the key width;
-//! the cell pass holds both sides' changed rows and renders every changed cell
-//! to an owned string, so its term is the number of changed cells times the
-//! cell width (values are rendered in full).
-//! The README's Known-limitations bullet states these with measured figures.
+//! proportional to the number of distinct duplicated keys times the key width.
+//! The cell pass spills both sides' changed value rows — every common value
+//! column of every changed row, changed or not — to anonymous temporary IPC
+//! files and holds one key-hash partition plus the reordered output resident.
+//! Its peak term is the spilled changed value rows (the changed-row count times
+//! the total width of the common value columns, both sides — resident where
+//! written temp pages count, e.g. macOS or a RAM-backed tmpfs) plus about twice
+//! the `cells_changed` output (its one out-of-place reorder) plus the per-row
+//! hash vectors; the spill term dominates for wide rows with few changed cells,
+//! the output term for many changed cells. It is not bounded by the changed
+//! *cell* count alone. The README's Known-limitations bullet states these with
+//! measured figures.
 //!
 //! # Hashing
 //!
@@ -168,6 +182,7 @@
 //! [`crate::diff_schemas`] runs before any row is read.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::File;
 use std::hash::Hasher;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -176,6 +191,7 @@ use std::sync::{Arc, Mutex};
 
 use siphasher::sip128::{Hasher128, SipHasher13};
 
+use arrow_array::builder::StringBuilder;
 use arrow_array::cast::AsArray;
 use arrow_array::types::{
     Date32Type, Date64Type, Decimal32Type, Decimal64Type, Decimal128Type, Decimal256Type,
@@ -1075,12 +1091,41 @@ thread_local! {
     // parallel path on small inputs (set to 0) or exercise the real gate.
     static MIN_PARALLEL_ROWS_OVERRIDE: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
+    // Count of streaming (spilled, partitioned) cell passes run on this thread,
+    // so a test can assert the parallel diff takes the streaming cell path and
+    // the sequential diff does not.
+    static CELL_STREAMING_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    // A per-thread override of the spill flush threshold, so a test can force a
+    // partition to flush mid-stream and spill more than one batch per file.
+    static SPILL_FLUSH_ROWS_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    // When set, a spill write is forced to fail, so a test can exercise the
+    // write-failure error path (a full temp filesystem) without one.
+    static FAIL_SPILL_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// In tests, forces a spill write to fail so the write-failure error mapping is
+/// exercised; production always returns the writer's own outcome.
+#[cfg(test)]
+fn inject_spill_write_failure(outcome: Result<(), ArrowError>) -> Result<(), ArrowError> {
+    if FAIL_SPILL_WRITE.with(std::cell::Cell::get) {
+        return Err(ArrowError::ComputeError(
+            "injected spill write failure".to_string(),
+        ));
+    }
+    outcome
 }
 
 /// This thread's count of parallel hash passes run so far.
 #[cfg(test)]
 fn parallel_hash_passes() -> usize {
     PARALLEL_HASH_PASSES.with(std::cell::Cell::get)
+}
+
+/// This thread's count of streaming cell passes run so far.
+#[cfg(test)]
+fn cell_streaming_passes() -> usize {
+    CELL_STREAMING_PASSES.with(std::cell::Cell::get)
 }
 
 /// The row threshold below which the diff stays single-threaded. A test can
@@ -2230,12 +2275,12 @@ struct CellDiff<'a> {
     threads: usize,
 }
 
-/// Produces the long-format per-cell diff for the changed rows.
+/// Produces the long-format per-cell diff for the changed rows (the
+/// single-threaded path; [`diff_cells_streaming`] is the parallel, spilled one,
+/// and both produce identical output).
 ///
-/// Re-streams both inputs, materializes only the changed rows on each side, and
-/// renders each changed cell in full, so its memory term is the number of
-/// changed cells times the cell width (see the README's Known-limitations
-/// bullet). Pairs the rows by key hash and emits one record per differing cell —
+/// Re-streams both inputs, materializes both sides' changed rows at once, and
+/// renders each changed cell in full. Pairs the rows by key hash and emits one record per differing cell —
 /// one whose [`hash_cell`] contribution differs between the two matched rows. A
 /// cell is `became_null`/`became_non_null` when exactly one side is null,
 /// `type_changed` when both are non-null and the two types are not losslessly
@@ -2511,6 +2556,863 @@ fn build_cells_changed(
     RecordBatch::try_new(out_schema.clone(), columns).map_err(|e| read_error(&e))
 }
 
+// --- Streaming, partitioned cell pass (parallel path) ---------------------
+//
+// The sequential [`diff_cells`] materializes both sides' full changed rows and
+// renders on one thread. For a large diff the parallel path below instead
+// spills each side's changed *value* rows to anonymous per-key-hash-partition
+// IPC files, then processes one partition at a time — pairing, comparing and
+// rendering its rows across the worker threads — so its resident memory is one
+// partition's rows plus the growing output, not both sides' full changed rows.
+// The output is reassembled in the same total order [`diff_cells`] produces
+// (rendered key, then left-schema column order, then scan-order row index), so
+// it is byte-identical at every thread count.
+
+/// The schema of a projection of `schema` to `indices` (in that order): the
+/// value-column schema each partition spill file carries, or the key-column
+/// schema of the accumulated `left_keys` batch.
+fn indices_schema(schema: &Schema, indices: &[usize]) -> SchemaRef {
+    let fields: Vec<_> = indices
+        .iter()
+        .map(|&i| schema.fields()[i].clone())
+        .collect();
+    SchemaRef::new(Schema::new(fields))
+}
+
+/// The type a value column is spilled as. [`decoded_type`] unwraps a dictionary
+/// to its value type first, since `take` keeps the whole values array; a byte-view
+/// type then casts to the *large* non-view type (`i64` offsets), since `take`
+/// keeps the variadic buffers and a view column can hold more than the 2 GiB an
+/// `i32`-offset `Utf8`/`Binary` array caps at; everything else spills as itself
+/// (its `take` copies only the selected rows).
+fn spill_field_type(data_type: &DataType) -> DataType {
+    match decoded_type(data_type) {
+        DataType::Utf8View => DataType::LargeUtf8,
+        DataType::BinaryView => DataType::LargeBinary,
+        other => other,
+    }
+}
+
+/// The spill schema for a projection: [`indices_schema`] with byte-view columns
+/// mapped to their non-view type (see [`spill_field_type`]).
+fn spill_schema(schema: &Schema, indices: &[usize]) -> SchemaRef {
+    let fields: Vec<_> = indices
+        .iter()
+        .map(|&i| {
+            let field = &schema.fields()[i];
+            field
+                .as_ref()
+                .clone()
+                .with_data_type(spill_field_type(field.data_type()))
+        })
+        .collect();
+    SchemaRef::new(Schema::new(fields))
+}
+
+/// Casts each column of `batch` whose type differs from `schema` to `schema`'s
+/// type -- the byte-view columns (compacted) and the dictionary columns (decoded
+/// to their value type) that [`spill_field_type`] rewrites -- leaving the rest
+/// shared.
+fn cast_batch_to(batch: &RecordBatch, schema: &SchemaRef) -> Result<RecordBatch, TableDiffError> {
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    for (column, field) in batch.columns().iter().zip(schema.fields()) {
+        if column.data_type() == field.data_type() {
+            columns.push(column.clone());
+        } else {
+            columns.push(arrow_cast::cast(column, field.data_type()).map_err(|e| read_error(&e))?);
+        }
+    }
+    RecordBatch::try_new(schema.clone(), columns).map_err(|e| read_error(&e))
+}
+
+/// One side's changed value rows, spilled by key-hash partition to anonymous
+/// [`crate::spool`] IPC files so the cell pass holds one partition at a time.
+struct SideSpill {
+    files: Vec<File>,
+    /// Per partition, the key hash of each spilled row in spill (scan) order.
+    key_hashes: Vec<Vec<u128>>,
+}
+
+/// The left side's spill plus, per partition, each row's global changed-row
+/// index (its position in scan order — the output's stable tiebreak and the
+/// index into `left_keys`), and the key columns of every changed row in scan
+/// order (`left_keys`), from which the output's typed key columns and sort
+/// renderings are built.
+struct LeftSpill {
+    spill: SideSpill,
+    global_index: Vec<Vec<u32>>,
+    left_keys: RecordBatch,
+}
+
+/// Rows a partition buffers before a spill flush coalesces them into one larger
+/// IPC batch, so each partition file holds few batches and the read-back is cheap.
+const SPILL_FLUSH_ROWS: usize = 65_536;
+
+/// The spill flush threshold. A test can override it per-thread to force a
+/// mid-stream flush on a small input; production always uses [`SPILL_FLUSH_ROWS`].
+fn spill_flush_rows() -> usize {
+    #[cfg(test)]
+    if let Some(value) = SPILL_FLUSH_ROWS_OVERRIDE.with(std::cell::Cell::get) {
+        return value;
+    }
+    SPILL_FLUSH_ROWS
+}
+
+/// The open per-partition spill writers for one side, over anonymous temp
+/// files, each with a small buffer of routed slices coalesced on flush. `finish`
+/// flushes the buffers and the streams and yields the re-openable files.
+struct PartitionWriters {
+    files: Vec<File>,
+    writers: Vec<crate::spool::SpoolWriter>,
+    value_schema: SchemaRef,
+    buffers: Vec<Vec<RecordBatch>>,
+    buffered_rows: Vec<usize>,
+}
+
+impl PartitionWriters {
+    fn open(partitions: usize, value_schema: &SchemaRef) -> Result<Self, TableDiffError> {
+        let mut files = Vec::with_capacity(partitions);
+        let mut writers = Vec::with_capacity(partitions);
+        for _ in 0..partitions {
+            let (file, writer) = crate::spool::open(value_schema)?;
+            files.push(file);
+            writers.push(writer);
+        }
+        Ok(Self {
+            files,
+            writers,
+            value_schema: value_schema.clone(),
+            buffers: (0..partitions).map(|_| Vec::new()).collect(),
+            buffered_rows: vec![0; partitions],
+        })
+    }
+
+    /// Groups the batch's selected rows by partition with a single reorder
+    /// `take`, then buffers each partition's contiguous slice (zero-copy except
+    /// for a byte-view or dictionary compaction cast), flushing a partition once
+    /// it holds [`SPILL_FLUSH_ROWS`] rows.
+    fn write_routed(
+        &mut self,
+        value_batch: &RecordBatch,
+        part_rows: &[Vec<u32>],
+    ) -> Result<(), TableDiffError> {
+        let total: usize = part_rows.iter().map(Vec::len).sum();
+        if total == 0 {
+            return Ok(());
+        }
+        let mut perm = Vec::with_capacity(total);
+        for rows in part_rows {
+            perm.extend_from_slice(rows);
+        }
+        let indices = UInt32Array::from(perm);
+        let taken = arrow_select::take::take_record_batch(value_batch, &indices)
+            .map_err(|e| read_error(&e))?;
+        // Compact byte-view columns so a spilled partition holds only its rows'
+        // view data, not the whole side's retained variadic buffers.
+        let reordered = cast_batch_to(&taken, &self.value_schema)?;
+        let mut offset = 0;
+        for (partition, rows) in part_rows.iter().enumerate() {
+            if rows.is_empty() {
+                continue;
+            }
+            self.buffers[partition].push(reordered.slice(offset, rows.len()));
+            self.buffered_rows[partition] += rows.len();
+            offset += rows.len();
+            if self.buffered_rows[partition] >= spill_flush_rows() {
+                self.flush(partition)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Coalesces one partition's buffered slices into a single batch and writes
+    /// it, so its file holds few, large batches.
+    fn flush(&mut self, partition: usize) -> Result<(), TableDiffError> {
+        if self.buffers[partition].is_empty() {
+            return Ok(());
+        }
+        let batches = std::mem::take(&mut self.buffers[partition]);
+        self.buffered_rows[partition] = 0;
+        let coalesced = concat_or_empty(&self.value_schema, &batches)?;
+        let outcome = self.writers[partition].write(&coalesced);
+        #[cfg(test)]
+        let outcome = inject_spill_write_failure(outcome);
+        outcome.map_err(|e| crate::spool::error("write to", &e))
+    }
+
+    fn finish(mut self) -> Result<Vec<File>, TableDiffError> {
+        for partition in 0..self.writers.len() {
+            self.flush(partition)?;
+        }
+        for writer in &mut self.writers {
+            writer
+                .finish()
+                .map_err(|e| crate::spool::error("finish writing", &e))?;
+        }
+        Ok(self.files)
+    }
+}
+
+/// Re-reads one spilled partition file into its value batches (empty when the
+/// partition spilled no rows). The batches are concatenated one column at a
+/// time in [`plan_columns`], never all at once, so the read never holds a second
+/// full copy of the partition.
+fn read_partition_batches(file: &File) -> Result<Vec<RecordBatch>, TableDiffError> {
+    let reader = crate::spool::reopen(file)?;
+    let mut batches = Vec::new();
+    for batch in reader {
+        batches.push(batch.map_err(|e| read_error(&e))?);
+    }
+    Ok(batches)
+}
+
+/// Decodes and concatenates one value column across a partition's batches.
+fn concat_decoded_column(
+    batches: &[RecordBatch],
+    column: usize,
+) -> Result<ArrayRef, TableDiffError> {
+    let decoded_cols: Vec<ArrayRef> = batches
+        .iter()
+        .map(|batch| decoded(batch.column(column)))
+        .collect::<Result<_, _>>()?;
+    let refs: Vec<&dyn Array> = decoded_cols.iter().map(AsRef::as_ref).collect();
+    arrow_select::concat::concat(&refs).map_err(|e| read_error(&e))
+}
+
+/// The scan parameters shared by both spill passes.
+struct SpillPlan<'a> {
+    columns: &'a SideColumns,
+    key_names: &'a [&'a str],
+    hasher: &'a RowHasher,
+    changed: &'a HashSet<u128>,
+    partitions: usize,
+    threads: usize,
+    value_schema: &'a SchemaRef,
+}
+
+/// The per-partition writers and buffers shared by both spill passes.
+struct SpillState {
+    writers: PartitionWriters,
+    key_hashes: Vec<Vec<u128>>,
+    part_rows: Vec<Vec<u32>>,
+}
+
+impl SpillState {
+    fn open(partitions: usize, value_schema: &SchemaRef) -> Result<Self, TableDiffError> {
+        Ok(Self {
+            writers: PartitionWriters::open(partitions, value_schema)?,
+            key_hashes: (0..partitions).map(|_| Vec::new()).collect(),
+            part_rows: (0..partitions).map(|_| Vec::new()).collect(),
+        })
+    }
+
+    /// Routes one batch's changed rows to their key-hash partitions, records each
+    /// routed row's key hash and (into `mask`) every row's changed flag, calls
+    /// `on_changed(partition)` per changed row in scan order for the left pass's
+    /// global-index bookkeeping, and writes the routed value columns.
+    // `row as u32` is a batch-local index; the guard below rejects a batch with
+    // more than `u32::MAX` rows, so the cast (and the `u32` `take` indices) fit.
+    #[allow(clippy::cast_possible_truncation)]
+    fn route_batch<F: FnMut(usize)>(
+        &mut self,
+        batch: &RecordBatch,
+        hashes: &[u128],
+        plan: &SpillPlan<'_>,
+        mask: &mut Vec<bool>,
+        mut on_changed: F,
+    ) -> Result<(), TableDiffError> {
+        if batch.num_rows() > u32::MAX as usize {
+            return Err(TableDiffError::TooManyChangedRows {
+                rows: batch.num_rows(),
+            });
+        }
+        mask.clear();
+        for rows in &mut self.part_rows {
+            rows.clear();
+        }
+        for (row, &hash) in hashes.iter().enumerate() {
+            let is_changed = plan.changed.contains(&hash);
+            mask.push(is_changed);
+            if is_changed {
+                let partition = partition_of(hash, plan.partitions);
+                self.part_rows[partition].push(row as u32);
+                self.key_hashes[partition].push(hash);
+                on_changed(partition);
+            }
+        }
+        let value_proj = batch
+            .project(&plan.columns.value)
+            .map_err(|e| read_error(&e))?;
+        self.writers.write_routed(&value_proj, &self.part_rows)
+    }
+
+    fn finish(self) -> Result<SideSpill, TableDiffError> {
+        Ok(SideSpill {
+            files: self.writers.finish()?,
+            key_hashes: self.key_hashes,
+        })
+    }
+}
+
+/// Streams the right side once, routing each changed row's value columns to its
+/// key-hash partition's spill file and capturing that row's key hash per
+/// partition for the pairing step.
+fn spill_right(
+    source: &impl TableInput,
+    plan: &SpillPlan<'_>,
+) -> Result<SideSpill, TableDiffError> {
+    let mut state = SpillState::open(plan.partitions, plan.value_schema)?;
+    let mut mask = Vec::new();
+    drive_key_hashes(
+        source,
+        &plan.columns.key,
+        plan.key_names,
+        plan.hasher,
+        plan.threads,
+        |batch, hashes| state.route_batch(batch, hashes, plan, &mut mask, |_partition| {}),
+    )?;
+    state.finish()
+}
+
+/// Streams the left side once: routes each changed row's value columns to its
+/// key-hash partition, assigns each changed row a global scan-order index, and
+/// accumulates every changed row's key columns into `left_keys` (in scan order).
+fn spill_left(
+    source: &impl TableInput,
+    plan: &SpillPlan<'_>,
+    key_schema: &SchemaRef,
+) -> Result<LeftSpill, TableDiffError> {
+    let mut state = SpillState::open(plan.partitions, plan.value_schema)?;
+    let mut global_index: Vec<Vec<u32>> = (0..plan.partitions).map(|_| Vec::new()).collect();
+    let mut key_batches: Vec<RecordBatch> = Vec::new();
+    let mut counter: u32 = 0;
+    let mut mask = Vec::new();
+    drive_key_hashes(
+        source,
+        &plan.columns.key,
+        plan.key_names,
+        plan.hasher,
+        plan.threads,
+        |batch, hashes| {
+            state.route_batch(batch, hashes, plan, &mut mask, |partition| {
+                global_index[partition].push(counter);
+                counter += 1;
+            })?;
+            let key_proj = batch
+                .project(&plan.columns.key)
+                .map_err(|e| read_error(&e))?;
+            push_filtered(&key_proj, mask.clone(), &mut key_batches)
+        },
+    )?;
+    let left_keys = concat_or_empty(key_schema, &key_batches)?;
+    Ok(LeftSpill {
+        spill: state.finish()?,
+        global_index,
+        left_keys,
+    })
+}
+
+/// One compared column of a partition, decoded and prepared for rendering once
+/// so the parallel row loop only creates per-worker formatters over it.
+struct ColumnPlan {
+    column_rank: usize,
+    name: String,
+    left_dec: ArrayRef,
+    right_dec: ArrayRef,
+    left_render: ArrayRef,
+    right_render: ArrayRef,
+    left_suffix: String,
+    right_suffix: String,
+    is_type_change: bool,
+}
+
+/// Decodes and prepares every compared column of a partition, in output
+/// (left-schema) column order.
+fn plan_columns(
+    left_batches: &[RecordBatch],
+    right_batches: &[RecordBatch],
+    order: &[usize],
+    common_values: &[String],
+) -> Result<Vec<ColumnPlan>, TableDiffError> {
+    let mut plans = Vec::with_capacity(order.len());
+    for (column_rank, &j) in order.iter().enumerate() {
+        let left_dec = concat_decoded_column(left_batches, j)?;
+        let right_dec = concat_decoded_column(right_batches, j)?;
+        let left_dt = left_dec.data_type().clone();
+        let right_dt = right_dec.data_type().clone();
+        let is_type_change = value_domain(&left_dt) != value_domain(&right_dt)
+            || timestamp_awareness_differs(&left_dt, &right_dt)
+            || interval_variant_differs(&left_dt, &right_dt);
+        let common = common_render_type(&left_dt, &right_dt);
+        let (left_render, left_suffix) = prepare_render(&left_dec, common.as_ref())?;
+        let (right_render, right_suffix) = prepare_render(&right_dec, common.as_ref())?;
+        plans.push(ColumnPlan {
+            column_rank,
+            name: common_values[j].clone(),
+            left_dec,
+            right_dec,
+            left_render,
+            right_render,
+            left_suffix,
+            right_suffix,
+            is_type_change,
+        });
+    }
+    Ok(plans)
+}
+
+/// One key-hash partition's paired changed rows: each side's read-back value
+/// batches and per-row key hashes (in spill order), plus the left rows' global
+/// scan-order indices.
+struct PartitionData<'a> {
+    left_batches: &'a [RecordBatch],
+    left_key_hashes: &'a [u128],
+    left_global_index: &'a [u32],
+    right_batches: &'a [RecordBatch],
+    right_key_hashes: &'a [u128],
+}
+
+/// The invariants the cell emit needs across every partition: the output column
+/// order, the common column names, the shared hasher, and the worker count.
+struct EmitPlan<'a> {
+    order: &'a [usize],
+    common_values: &'a [String],
+    hasher: &'a RowHasher,
+    threads: usize,
+}
+
+/// Emits the changed-cell records for one partition, comparing and rendering its
+/// rows across `threads` workers (split by row range). The change kind and
+/// rendering follow the same rules as [`emit_column_records`]; each record
+/// carries the row's global scan-order index so the output can be reassembled in
+/// [`diff_cells`]'s order.
+// `row as u32` indexes a partition's right rows, bounded by the changed-row
+// count `diff_cells_streaming` has checked fits `u32`.
+#[allow(clippy::cast_possible_truncation)]
+fn emit_partition(
+    data: &PartitionData<'_>,
+    plan: &EmitPlan<'_>,
+) -> Result<Vec<CellRecord>, TableDiffError> {
+    let n_left = data.left_key_hashes.len();
+    if n_left == 0 {
+        return Ok(Vec::new());
+    }
+    let right_pos: HashMap<u128, u32> = data
+        .right_key_hashes
+        .iter()
+        .enumerate()
+        .map(|(row, &hash)| (hash, row as u32))
+        .collect();
+    // A changed key is present once on each side, so a miss is only a
+    // ~n²/2¹²⁸ hash collision; such a row is skipped, never paired.
+    let right_row_of: Vec<Option<u32>> = data
+        .left_key_hashes
+        .iter()
+        .map(|hash| right_pos.get(hash).copied())
+        .collect();
+    let plans = plan_columns(
+        data.left_batches,
+        data.right_batches,
+        plan.order,
+        plan.common_values,
+    )?;
+
+    let workers = plan.threads.min(n_left).max(1);
+    let chunk = n_left.div_ceil(workers);
+    let opts = FormatOptions::default();
+    let outcomes = std::thread::scope(|scope| -> Result<Vec<Vec<CellRecord>>, TableDiffError> {
+        let mut handles = Vec::with_capacity(workers);
+        for w in 0..workers {
+            let lo = w * chunk;
+            let hi = ((w + 1) * chunk).min(n_left);
+            if lo >= hi {
+                continue;
+            }
+            let plans = &plans;
+            let right_row_of = &right_row_of;
+            let left_global_index = data.left_global_index;
+            let hasher = plan.hasher;
+            let opts = &opts;
+            handles.push(
+                scope.spawn(move || -> Result<Vec<CellRecord>, TableDiffError> {
+                    emit_row_range(plans, right_row_of, left_global_index, hasher, opts, lo, hi)
+                }),
+            );
+        }
+        join_results(handles)
+    })?;
+    Ok(outcomes.into_iter().flatten().collect())
+}
+
+/// Compares and renders every compared column over one row range of a
+/// partition, appending a record per differing cell.
+fn emit_row_range(
+    plans: &[ColumnPlan],
+    right_row_of: &[Option<u32>],
+    left_global_index: &[u32],
+    hasher: &RowHasher,
+    opts: &FormatOptions<'_>,
+    lo: usize,
+    hi: usize,
+) -> Result<Vec<CellRecord>, TableDiffError> {
+    let mut records = Vec::new();
+    for plan in plans {
+        let left_renderer = SideRenderer::new(&plan.left_render, opts)?;
+        let right_renderer = SideRenderer::new(&plan.right_render, opts)?;
+        for row in lo..hi {
+            let Some(right_row) = right_row_of[row] else {
+                continue;
+            };
+            let right_row = right_row as usize;
+            let left_null = cell_is_null(&plan.left_dec, row);
+            let right_null = cell_is_null(&plan.right_dec, right_row);
+            let change = if left_null && right_null {
+                continue;
+            } else if left_null {
+                CHANGE_BECAME_NON_NULL
+            } else if right_null {
+                CHANGE_BECAME_NULL
+            } else {
+                let left_hash = cell_hash(hasher, &plan.left_dec, row)?;
+                let right_hash = cell_hash(hasher, &plan.right_dec, right_row)?;
+                if left_hash == right_hash {
+                    continue;
+                } else if plan.is_type_change {
+                    CHANGE_TYPE
+                } else {
+                    CHANGE_VALUE
+                }
+            };
+            let old_value = if left_null {
+                None
+            } else {
+                Some(left_renderer.render(row, &plan.name)? + &plan.left_suffix)
+            };
+            let new_value = if right_null {
+                None
+            } else {
+                Some(right_renderer.render(right_row, &plan.name)? + &plan.right_suffix)
+            };
+            check_distinct_renderings(change, old_value.as_ref(), new_value.as_ref(), &plan.name)?;
+            records.push(CellRecord {
+                left_row: left_global_index[row],
+                column_rank: plan.column_rank,
+                column: plan.name.clone(),
+                old_value,
+                new_value,
+                change,
+            });
+        }
+    }
+    Ok(records)
+}
+
+/// Renders each changed left row's key columns to a nullable string array per
+/// key column — the lean form of [`render_key_rows`] used as the output's
+/// primary sort key (timezone stripped, so key types unified across sides need
+/// no aware/naive distinction).
+fn render_key_arrays(
+    left_keys: &RecordBatch,
+    key_count: usize,
+) -> Result<Vec<ArrayRef>, TableDiffError> {
+    let opts = FormatOptions::default();
+    let mut columns = Vec::with_capacity(key_count);
+    for position in 0..key_count {
+        let decoded_column = decoded(left_keys.column(position))?;
+        let (render, _suffix) = prepare_render(&decoded_column, None)?;
+        let renderer = SideRenderer::new(&render, &opts)?;
+        let column_name = left_keys.schema().field(position).name().clone();
+        let mut builder = StringBuilder::new();
+        for row in 0..left_keys.num_rows() {
+            if cell_is_null(&decoded_column, row) {
+                builder.append_null();
+            } else {
+                builder.append_value(renderer.render(row, &column_name)?);
+            }
+        }
+        columns.push(Arc::new(builder.finish()) as ArrayRef);
+    }
+    Ok(columns)
+}
+
+/// Orders two changed rows by their rendered key columns (lexicographic, nulls
+/// first) — the same ordering [`diff_cells`]'s `Vec<Option<String>>` comparison
+/// produces.
+fn cmp_key_rows(key_renders: &[ArrayRef], a: usize, b: usize) -> std::cmp::Ordering {
+    for column in key_renders {
+        let array = column.as_string::<i32>();
+        let a_null = array.is_null(a);
+        let b_null = array.is_null(b);
+        let ordering = match (a_null, b_null) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => array.value(a).cmp(array.value(b)),
+        };
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// The streaming, partitioned per-cell diff (the parallel path): spills both
+/// sides' changed value rows by key-hash partition, processes one partition at
+/// a time across the workers, and reassembles the output in [`diff_cells`]'s
+/// total order. Byte-identical to [`diff_cells`] at every thread count.
+// Cell counts (`column_rank`, cumulative partition bounds, the output position
+// range) are cast to `u32` under checks that the changed-row count and the total
+// cell count both fit `u32`.
+#[allow(clippy::cast_possible_truncation)]
+fn diff_cells_streaming(
+    left: &impl TableInput,
+    right: &impl TableInput,
+    ctx: &CellDiff<'_>,
+    changed: &HashSet<u128>,
+    partitions: usize,
+) -> Result<RecordBatch, TableDiffError> {
+    #[cfg(test)]
+    CELL_STREAMING_PASSES.with(|count| count.set(count.get() + 1));
+    let out_schema = cells_changed_schema(ctx.left_schema, ctx.key);
+    if changed.is_empty() {
+        return Ok(RecordBatch::new_empty(out_schema));
+    }
+    // The output addresses each changed left row by a `u32` scan-order index.
+    if changed.len() > u32::MAX as usize {
+        return Err(TableDiffError::TooManyChangedRows {
+            rows: changed.len(),
+        });
+    }
+    let key_count = ctx.key.len();
+    let left_value_schema = spill_schema(ctx.left_schema, &ctx.left_columns.value);
+    let right_value_schema = spill_schema(ctx.right_schema, &ctx.right_columns.value);
+    let key_schema = indices_schema(ctx.left_schema, &ctx.left_columns.key);
+
+    let left_plan = SpillPlan {
+        columns: ctx.left_columns,
+        key_names: ctx.key_names,
+        hasher: ctx.hasher,
+        changed,
+        partitions,
+        threads: ctx.threads,
+        value_schema: &left_value_schema,
+    };
+    let right_plan = SpillPlan {
+        columns: ctx.right_columns,
+        value_schema: &right_value_schema,
+        ..left_plan
+    };
+    let left_spill = spill_left(left, &left_plan, &key_schema)?;
+    let right_spill = spill_right(right, &right_plan)?;
+
+    // Compared columns in left-schema order (common_values is name-sorted).
+    let mut ranks = Vec::with_capacity(ctx.common_values.len());
+    for name in ctx.common_values {
+        ranks.push(ctx.left_schema.index_of(name).map_err(|e| read_error(&e))?);
+    }
+    let mut order: Vec<usize> = (0..ctx.common_values.len()).collect();
+    order.sort_by_key(|&j| ranks[j]);
+
+    let key_renders = render_key_arrays(&left_spill.left_keys, key_count)?;
+
+    // Each partition emits its changed cells into its own output arrays; the
+    // per-partition arrays together are exactly one copy of the output. Holding
+    // them (rather than one growing set of builders) keeps the reorder below to
+    // one source and one destination copy at a time — see the build step.
+    let mut gidx: Vec<u32> = Vec::new();
+    let mut crank: Vec<u32> = Vec::new();
+    let mut bounds: Vec<u32> = Vec::with_capacity(partitions + 1);
+    bounds.push(0);
+    let emit_plan = EmitPlan {
+        order: &order,
+        common_values: ctx.common_values,
+        hasher: ctx.hasher,
+        threads: ctx.threads,
+    };
+    let mut cell_columns = CellColumns::with_partitions(partitions);
+    for partition in 0..partitions {
+        let left_batches = read_partition_batches(&left_spill.spill.files[partition])?;
+        let right_batches = read_partition_batches(&right_spill.files[partition])?;
+        let data = PartitionData {
+            left_batches: &left_batches,
+            left_key_hashes: &left_spill.spill.key_hashes[partition],
+            left_global_index: &left_spill.global_index[partition],
+            right_batches: &right_batches,
+            right_key_hashes: &right_spill.key_hashes[partition],
+        };
+        let records = emit_partition(&data, &emit_plan)?;
+        let mut part = CellColumnBuilders::with_capacity(records.len());
+        for record in records {
+            gidx.push(record.left_row);
+            crank.push(record.column_rank as u32);
+            part.push(&record);
+        }
+        // The total cell count must also fit the `u32` output positions.
+        if gidx.len() > u32::MAX as usize {
+            return Err(TableDiffError::TooManyChangedRows { rows: gidx.len() });
+        }
+        cell_columns.push_partition(part);
+        bounds.push(gidx.len() as u32);
+    }
+    // The spilled value rows and their key hashes are no longer needed; freeing
+    // them before the reorder keeps the peak to the output plus its reorder.
+    drop(right_spill);
+    let reorder = Reorder {
+        key_renders,
+        gidx,
+        crank,
+        bounds,
+        cell_columns,
+        left_keys: left_spill.left_keys,
+    };
+    reorder_output(reorder, ctx.key_output_types, &out_schema)
+}
+
+/// The output columns and the keys the final reorder needs, moved out of
+/// [`diff_cells_streaming`] so its body stays within the line budget.
+struct Reorder {
+    key_renders: Vec<ArrayRef>,
+    gidx: Vec<u32>,
+    crank: Vec<u32>,
+    bounds: Vec<u32>,
+    cell_columns: CellColumns,
+    left_keys: RecordBatch,
+}
+
+/// Sorts the emitted cells into the output's total order and builds the output
+/// batch: the typed key columns `take`n from `left_keys`, then the four cell
+/// columns `interleave`d from their per-partition arrays.
+// The output position range is cast to `u32`; the caller has checked the total
+// cell count fits `u32`.
+#[allow(clippy::cast_possible_truncation)]
+fn reorder_output(
+    r: Reorder,
+    key_output_types: &[DataType],
+    out_schema: &SchemaRef,
+) -> Result<RecordBatch, TableDiffError> {
+    let Reorder {
+        key_renders,
+        gidx,
+        crank,
+        bounds,
+        cell_columns,
+        left_keys,
+    } = r;
+    let total = gidx.len();
+    let mut order_out: Vec<u32> = (0..total as u32).collect();
+    order_out.sort_by(|&a, &b| {
+        let (ai, bi) = (gidx[a as usize] as usize, gidx[b as usize] as usize);
+        cmp_key_rows(&key_renders, ai, bi)
+            .then(crank[a as usize].cmp(&crank[b as usize]))
+            .then(gidx[a as usize].cmp(&gidx[b as usize]))
+    });
+    drop(key_renders);
+
+    // Map each output position to its (partition, row-in-partition) source, so
+    // the four cell columns are reordered with one `interleave` each.
+    let sources: Vec<(usize, usize)> = order_out
+        .iter()
+        .map(|&pos| {
+            let partition = bounds.partition_point(|&b| b <= pos) - 1;
+            (partition, (pos - bounds[partition]) as usize)
+        })
+        .collect();
+    let key_take = UInt32Array::from_iter_values(order_out.iter().map(|&i| gidx[i as usize]));
+    drop(order_out);
+
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(key_output_types.len() + 4);
+    for (position, output_type) in key_output_types.iter().enumerate() {
+        let decoded_column = decoded(left_keys.column(position))?;
+        let cast = arrow_cast::cast(&decoded_column, output_type).map_err(|e| read_error(&e))?;
+        let taken = arrow_select::take::take(&cast, &key_take, None).map_err(|e| read_error(&e))?;
+        columns.push(taken);
+    }
+    // Reorder the four cell columns, dropping each column's per-partition sources
+    // once it is built; the sources (one copy of the output) and the built
+    // columns (up to another) bound the reorder at about twice the output.
+    cell_columns.reorder_into(&sources, &mut columns)?;
+    RecordBatch::try_new(out_schema.clone(), columns).map_err(|e| read_error(&e))
+}
+
+/// The per-partition builders for the four non-key output columns of one
+/// partition (`column`, `old_value`, `new_value`, `change`).
+struct CellColumnBuilders {
+    column: StringBuilder,
+    old_value: StringBuilder,
+    new_value: StringBuilder,
+    change: StringBuilder,
+}
+
+impl CellColumnBuilders {
+    fn with_capacity(rows: usize) -> Self {
+        Self {
+            column: StringBuilder::with_capacity(rows, 0),
+            old_value: StringBuilder::with_capacity(rows, 0),
+            new_value: StringBuilder::with_capacity(rows, 0),
+            change: StringBuilder::with_capacity(rows, 0),
+        }
+    }
+
+    fn push(&mut self, record: &CellRecord) {
+        self.column.append_value(&record.column);
+        match &record.old_value {
+            Some(value) => self.old_value.append_value(value),
+            None => self.old_value.append_null(),
+        }
+        match &record.new_value {
+            Some(value) => self.new_value.append_value(value),
+            None => self.new_value.append_null(),
+        }
+        self.change.append_value(record.change);
+    }
+}
+
+/// The four non-key output columns, one exactly-sized array per partition,
+/// reordered into the sorted output one column at a time.
+struct CellColumns {
+    column: Vec<ArrayRef>,
+    old_value: Vec<ArrayRef>,
+    new_value: Vec<ArrayRef>,
+    change: Vec<ArrayRef>,
+}
+
+impl CellColumns {
+    fn with_partitions(partitions: usize) -> Self {
+        Self {
+            column: Vec::with_capacity(partitions),
+            old_value: Vec::with_capacity(partitions),
+            new_value: Vec::with_capacity(partitions),
+            change: Vec::with_capacity(partitions),
+        }
+    }
+
+    fn push_partition(&mut self, mut part: CellColumnBuilders) {
+        self.column.push(Arc::new(part.column.finish()));
+        self.old_value.push(Arc::new(part.old_value.finish()));
+        self.new_value.push(Arc::new(part.new_value.finish()));
+        self.change.push(Arc::new(part.change.finish()));
+    }
+
+    /// Interleaves each column's per-partition arrays into the sorted output.
+    /// The four columns' per-partition sources together are one copy of the
+    /// output and the built columns accumulate to another, so the reorder holds
+    /// about twice the output; each column's sources drop once it is interleaved.
+    fn reorder_into(
+        self,
+        sources: &[(usize, usize)],
+        out: &mut Vec<ArrayRef>,
+    ) -> Result<(), TableDiffError> {
+        for parts in [self.column, self.old_value, self.new_value, self.change] {
+            let refs: Vec<&dyn Array> = parts.iter().map(AsRef::as_ref).collect();
+            let reordered =
+                arrow_select::interleave::interleave(&refs, sources).map_err(|e| read_error(&e))?;
+            drop(refs);
+            out.push(reordered);
+        }
+        Ok(())
+    }
+}
+
 /// Diffs the rows of two tables matched by `key`. See the module docs for the
 /// algorithm and value semantics.
 pub(crate) fn diff_rows(
@@ -2610,7 +3512,20 @@ pub(crate) fn diff_rows(
         key_output_types: &key_output_types,
         threads: scan_threads,
     };
-    let cells_changed = diff_cells(left, right, &cell_ctx, &changed_set)?;
+    let cells_changed = if scan_threads > 1 {
+        // The cell pass spills its changed value rows into `partition_count`
+        // key-hash partitions (the worker count, capped at `MAX_PARTITIONS`) and
+        // holds one at a time; the resident chunk is one partition's rows.
+        diff_cells_streaming(
+            left,
+            right,
+            &cell_ctx,
+            &changed_set,
+            partition_count(scan_threads),
+        )?
+    } else {
+        diff_cells(left, right, &cell_ctx, &changed_set)?
+    };
 
     let counts = RowCounts {
         rows_added: classified.added.len(),
@@ -2642,14 +3557,14 @@ mod tests {
         DurationMicrosecondArray, DurationMillisecondArray, DurationNanosecondArray,
         DurationSecondArray, Float32Array, Float64Array, Int32Array, Int64Array,
         IntervalDayTimeArray, IntervalMonthDayNanoArray, IntervalYearMonthArray, ListArray,
-        NullArray, RecordBatch, RecordBatchReader, StringArray, Time32MillisecondArray,
-        Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
+        NullArray, RecordBatch, RecordBatchReader, StringArray, StringViewArray,
+        Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
         TimestampMicrosecondArray, TimestampMillisecondArray,
     };
     use arrow_buffer::{IntervalDayTime, IntervalMonthDayNano, i256};
     use arrow_cast::display::{ArrayFormatter, FormatOptions};
     use arrow_schema::{ArrowError, DataType, Field, IntervalUnit, Schema, SchemaRef, TimeUnit};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::num::NonZeroUsize;
     use std::sync::Arc;
 
@@ -4871,6 +5786,606 @@ mod tests {
         let left: Vec<(Option<i64>, i64)> = (0..50).map(|i| (Some(i), 0)).collect();
         let right: Vec<(Option<i64>, i64)> = (0..50).map(|i| (Some(i), 1)).collect();
         assert_parallel_matches(&left, &right);
+    }
+
+    // --- Streaming (spilled, partitioned) cell pass -----------------------
+
+    /// Asserts the streaming cell pass (threads > 1) is byte-identical to the
+    /// sequential one over a rich, multi-batch, multi-type input, and that the
+    /// parallel diff actually takes the streaming cell path while the
+    /// single-threaded one does not.
+    fn assert_streaming_matches_rich<L: TableInput, R: TableInput>(
+        left: &L,
+        right: &R,
+        left_schema: &Schema,
+        right_schema: &Schema,
+        key: &[String],
+    ) {
+        force_parallel_path();
+        let before_seq = super::cell_streaming_passes();
+        let baseline = diff_rows_with(left, right, left_schema, right_schema, key, 1).unwrap();
+        assert_eq!(
+            super::cell_streaming_passes(),
+            before_seq,
+            "threads=1 must not take the streaming cell path"
+        );
+        for threads in [2usize, 4, 8] {
+            let before = super::cell_streaming_passes();
+            let parallel =
+                diff_rows_with(left, right, left_schema, right_schema, key, threads).unwrap();
+            assert!(
+                super::cell_streaming_passes() > before,
+                "threads={threads} must take the streaming cell path"
+            );
+            assert_eq!(
+                parallel, baseline,
+                "threads={threads} streaming cell pass must match the sequential diff"
+            );
+        }
+        use_real_size_gate();
+    }
+
+    /// Builds a rich multi-type table split into `chunks` batches. `s` is a
+    /// wide-ish string with scattered nulls (exercises `became_null`/
+    /// `became_non_null`), `f` a float (width differs across sides),
+    /// `t` a timestamp (zone-awareness differs across sides), and `d` a duration.
+    #[allow(clippy::cast_possible_wrap, clippy::cast_precision_loss)]
+    fn rich_reader(
+        chunks: usize,
+        rows: usize,
+        f32_side: bool,
+        ts_aware: bool,
+        value_shift: i64,
+    ) -> (SchemaRef, MemoryInput) {
+        let f_type = if f32_side {
+            DataType::Float32
+        } else {
+            DataType::Float64
+        };
+        let ts_type = if ts_aware {
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        } else {
+            DataType::Timestamp(TimeUnit::Millisecond, None)
+        };
+        let sch = schema(vec![
+            id_field(),
+            Field::new("s", DataType::Utf8, true),
+            Field::new("f", f_type, true),
+            Field::new("t", ts_type, true),
+            Field::new("d", DataType::Duration(TimeUnit::Second), true),
+        ]);
+        let chunk_size = rows.div_ceil(chunks).max(1);
+        let mut batches = Vec::new();
+        let mut row = 0usize;
+        while row < rows {
+            let end = (row + chunk_size).min(rows);
+            let ids: Int64Array = (row..end).map(|i| Some(i as i64)).collect();
+            let s: ArrayRef = Arc::new(StringArray::from(
+                (row..end)
+                    .map(|i| {
+                        if i % 7 == 0 {
+                            None
+                        } else {
+                            Some(format!("value-{}-{}", i, "x".repeat((i % 5) * 8)))
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            ));
+            let f: ArrayRef = if f32_side {
+                #[allow(clippy::cast_precision_loss)]
+                Arc::new(Float32Array::from(
+                    (row..end)
+                        .map(|i| (i as f32) * 0.1 + value_shift as f32)
+                        .collect::<Vec<_>>(),
+                ))
+            } else {
+                #[allow(clippy::cast_precision_loss)]
+                Arc::new(Float64Array::from(
+                    (row..end)
+                        .map(|i| (i as f64) * 0.1 + value_shift as f64)
+                        .collect::<Vec<_>>(),
+                ))
+            };
+            let t_values: Vec<i64> = (row..end)
+                .map(|i| (i as i64 + value_shift) * 1000)
+                .collect();
+            let t: ArrayRef = if ts_aware {
+                Arc::new(TimestampMicrosecondArray::from(t_values).with_timezone("UTC"))
+            } else {
+                Arc::new(TimestampMillisecondArray::from(t_values))
+            };
+            let d: ArrayRef = Arc::new(DurationSecondArray::from(
+                (row..end)
+                    .map(|i| i as i64 + value_shift)
+                    .collect::<Vec<_>>(),
+            ));
+            batches
+                .push(RecordBatch::try_new(sch.clone(), vec![Arc::new(ids), s, f, t, d]).unwrap());
+            row = end;
+        }
+        (sch.clone(), multi_reader(&sch, batches))
+    }
+
+    #[test]
+    fn streaming_matches_sequential_over_mixed_types() {
+        // Same value shape on both sides but every value column shifted, plus a
+        // float-width change and a timestamp zone-awareness change across sides:
+        // exercises value_changed, type_changed, became_null/became_non_null,
+        // and every renderer (string, float, timestamp, duration) on the
+        // streaming path, over several batches.
+        let (left_sch, left) = rich_reader(4, 200, true, true, 0);
+        let (right_sch, right) = rich_reader(3, 200, false, false, 1);
+        assert_streaming_matches_rich(&left, &right, &left_sch, &right_sch, &key());
+    }
+
+    #[test]
+    fn streaming_matches_sequential_with_added_removed_and_null_keys() {
+        // Left ids 0..150 (id 30 null), right ids 50..200 (id 60 null): overlap
+        // changes, disjoint ends add/remove, and null keys are excluded — all
+        // reassembled in output order by the streaming path.
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
+        let build = |ids: std::ops::Range<i64>, null_at: i64, shift: i64| {
+            let rows: Vec<(Option<i64>, i64)> = ids
+                .map(|i| (if i == null_at { None } else { Some(i) }, i + shift))
+                .collect();
+            chunked_reader(&sch, &rows, 4)
+        };
+        let left = build(0..150, 30, 0);
+        let right = build(50..200, 60, 1);
+        assert_streaming_matches_rich(&left, &right, &sch, &sch, &key());
+    }
+
+    #[test]
+    fn streaming_matches_sequential_with_a_composite_key() {
+        // Two key columns: the output's typed key columns and rendered-key sort
+        // are reassembled correctly from the spilled partitions.
+        let sch = schema(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Utf8, true),
+            Field::new("v", DataType::Int64, false),
+        ]);
+        let build = |shift: i64| {
+            let a: Int64Array = (0..120).map(|i| Some(i % 20)).collect();
+            let b: ArrayRef = Arc::new(StringArray::from(
+                (0..120)
+                    .map(|i| Some(format!("k{}", i / 20)))
+                    .collect::<Vec<_>>(),
+            ));
+            let v: Int64Array = (0..120).map(|i| Some(i + shift)).collect();
+            let batch =
+                RecordBatch::try_new(sch.clone(), vec![Arc::new(a), b, Arc::new(v)]).unwrap();
+            // Split into two batches so partitions span batches.
+            let mid = batch.num_rows() / 2;
+            multi_reader(
+                &sch,
+                vec![
+                    batch.slice(0, mid),
+                    batch.slice(mid, batch.num_rows() - mid),
+                ],
+            )
+        };
+        let key = vec!["a".to_string(), "b".to_string()];
+        assert_streaming_matches_rich(&build(0), &build(1), &sch, &sch, &key);
+    }
+
+    #[test]
+    fn streaming_matches_sequential_with_asymmetric_nulls() {
+        // One column is null on the left only for some changed rows and on the
+        // right only for others, so the streaming emit produces became_null,
+        // became_non_null, and both-null (skipped) cells; all must match the
+        // sequential path. Stacked past the size gate to force the parallel path.
+        let sch = schema(vec![
+            id_field(),
+            Field::new("s", DataType::Utf8, true),
+            Field::new("v", DataType::Int64, false),
+        ]);
+        let build = |side: i64| {
+            let rows = 60_000;
+            let id: Int64Array = (0..rows).map(Some).collect();
+            let s: ArrayRef = Arc::new(StringArray::from(
+                (0..rows)
+                    .map(|i| match i % 4 {
+                        0 => None,              // null on both sides
+                        1 if side == 0 => None, // left-only null
+                        2 if side == 1 => None, // right-only null
+                        _ => Some(format!("s{i}")),
+                    })
+                    .collect::<Vec<_>>(),
+            ));
+            let v: Int64Array = (0..rows).map(|i| Some(i + side)).collect();
+            reader(&sch, vec![Arc::new(id), s, Arc::new(v)])
+        };
+        assert_streaming_matches_rich(&build(0), &build(1), &sch, &sch, &key());
+    }
+
+    #[test]
+    fn streaming_matches_sequential_with_asymmetric_column_layout() {
+        // The right side carries an extra non-common column before the common
+        // ones, so a common column's index differs between the two sides. The
+        // streaming path must project each side by its own resolved columns;
+        // using the left side's indices on the right would compare the wrong
+        // column. Compared against the sequential path, which resolves per side.
+        let left_sch = schema(vec![
+            id_field(),
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Utf8, true),
+        ]);
+        let right_sch = schema(vec![
+            id_field(),
+            Field::new("extra", DataType::Int64, true),
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Utf8, true),
+        ]);
+        let rows = 60_000i64;
+        let left = {
+            let id: Int64Array = (0..rows).map(Some).collect();
+            let a: Int64Array = (0..rows).map(Some).collect();
+            let b: ArrayRef = Arc::new(StringArray::from(
+                (0..rows).map(|i| Some(format!("b{i}"))).collect::<Vec<_>>(),
+            ));
+            reader(&left_sch, vec![Arc::new(id), Arc::new(a), b])
+        };
+        let right = {
+            let id: Int64Array = (0..rows).map(Some).collect();
+            let extra: Int64Array = (0..rows).map(|i| Some(i * 7)).collect();
+            let a: Int64Array = (0..rows).map(|i| Some(i + 1)).collect();
+            let b: ArrayRef = Arc::new(StringArray::from(
+                (0..rows).map(|i| Some(format!("B{i}"))).collect::<Vec<_>>(),
+            ));
+            reader(
+                &right_sch,
+                vec![Arc::new(id), Arc::new(extra), Arc::new(a), b],
+            )
+        };
+        assert_streaming_matches_rich(&left, &right, &left_sch, &right_sch, &key());
+    }
+
+    #[test]
+    fn streaming_cell_pass_surfaces_a_spill_write_failure() {
+        // A spill write failure (a full temp filesystem, forced here) must
+        // surface from the parallel cell pass as a typed error naming the spool
+        // and the temporary directory, not a panic.
+        force_parallel_path();
+        super::FAIL_SPILL_WRITE.with(|c| c.set(true));
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
+        let build = |shift: i64| {
+            let ids: Int64Array = (0..60_000).map(Some).collect();
+            let v: Int64Array = (0..60_000).map(|i| Some(i + shift)).collect();
+            reader(&sch, vec![Arc::new(ids), Arc::new(v)])
+        };
+        let error = diff_rows_with(&build(0), &build(1), &sch, &sch, &key(), 4).unwrap_err();
+        super::FAIL_SPILL_WRITE.with(|c| c.set(false));
+        use_real_size_gate();
+        assert!(
+            matches!(&error, TableDiffError::Read { message }
+                if message.contains("write to") && message.contains("TMPDIR")),
+            "expected a spool write error naming TMPDIR, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_cell_pass_surfaces_a_render_error() {
+        // A negative Time32 is out of the formatter's range; on the streaming
+        // path it must surface as a typed Render error from a worker, not
+        // "ERROR: …" prose in the output.
+        force_parallel_path();
+        let sch = schema(vec![
+            id_field(),
+            Field::new("t", DataType::Time32(TimeUnit::Second), true),
+        ]);
+        let build = |v: i32| {
+            let ids: Int64Array = (0..80).map(Some).collect();
+            let t = Time32SecondArray::from((0..80).map(|_| v).collect::<Vec<_>>());
+            reader(&sch, vec![Arc::new(ids), Arc::new(t)])
+        };
+        let error = diff_rows_with(&build(-1), &build(0), &sch, &sch, &key(), 4).unwrap_err();
+        use_real_size_gate();
+        assert!(
+            matches!(&error, TableDiffError::Render { column, .. } if column == "t"),
+            "expected a Render error naming column t, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_cell_pass_yields_the_expected_cells() {
+        // A direct content check (not only parallel==sequential): every row
+        // changed on a two-batch input, verified against the exact expected
+        // cell rows in output order.
+        force_parallel_path();
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
+        let left = chunked_reader(&sch, &[(Some(2), 20), (Some(10), 100), (Some(1), 10)], 2);
+        let right = chunked_reader(&sch, &[(Some(2), 21), (Some(10), 101), (Some(1), 11)], 2);
+        let diff = diff_rows_with(&left, &right, &sch, &sch, &key(), 4).unwrap();
+        use_real_size_gate();
+        // Ordered by rendered key: "1" < "10" < "2".
+        assert_eq!(
+            cells(&diff.cells_changed),
+            vec![
+                (
+                    "1".into(),
+                    "v".into(),
+                    Some("10".into()),
+                    Some("11".into()),
+                    "value_changed".into()
+                ),
+                (
+                    "10".into(),
+                    "v".into(),
+                    Some("100".into()),
+                    Some("101".into()),
+                    "value_changed".into()
+                ),
+                (
+                    "2".into(),
+                    "v".into(),
+                    Some("20".into()),
+                    Some("21".into()),
+                    "value_changed".into()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn streaming_mid_stream_flush_matches_sequential_with_a_dictionary_column() {
+        // Lower the flush threshold so a partition coalesces and writes more than
+        // one spill batch mid-stream, and include a dictionary column so the
+        // multi-batch read-back and decode are exercised. Output must still match
+        // the sequential path.
+        super::SPILL_FLUSH_ROWS_OVERRIDE.with(|c| c.set(Some(100)));
+        let sch = schema(vec![
+            id_field(),
+            Field::new(
+                "d",
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                false,
+            ),
+            Field::new("n", DataType::Int64, false),
+        ]);
+        let build = |shift: i64| {
+            let rows = 1_000i64;
+            let mut batches = Vec::new();
+            let mut row = 0;
+            while row < rows {
+                let end = (row + 250).min(rows);
+                let id: Int64Array = (row..end).map(Some).collect();
+                let strings: StringArray = (row..end)
+                    .map(|i| Some(format!("v{}", (i + shift) % 7)))
+                    .collect();
+                let d = arrow_cast::cast(
+                    &(Arc::new(strings) as ArrayRef),
+                    &DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                )
+                .unwrap();
+                let n: Int64Array = (row..end).map(|i| Some(i + shift)).collect();
+                batches.push(
+                    RecordBatch::try_new(sch.clone(), vec![Arc::new(id), d, Arc::new(n)]).unwrap(),
+                );
+                row = end;
+            }
+            multi_reader(&sch, batches)
+        };
+        assert_streaming_matches_rich(&build(0), &build(1), &sch, &sch, &key());
+        super::SPILL_FLUSH_ROWS_OVERRIDE.with(|c| c.set(None));
+    }
+
+    #[test]
+    fn streaming_matches_sequential_with_a_binary_view_column() {
+        // A BinaryView value column with long out-of-line values: the spill casts
+        // it to Binary (not Utf8), so the streaming path must match the
+        // sequential path, which decodes the view directly.
+        let sch = schema(vec![
+            id_field(),
+            Field::new("b", DataType::BinaryView, false),
+        ]);
+        let build = |shift: i64| {
+            let rows = 60_000i64;
+            let id: Int64Array = (0..rows).map(Some).collect();
+            let owned: Vec<Vec<u8>> = (0..rows)
+                .map(|i| format!("binary-view-{}-{}", i + shift, "z".repeat(40)).into_bytes())
+                .collect();
+            let b =
+                BinaryViewArray::from(owned.iter().map(|v| Some(v.as_slice())).collect::<Vec<_>>());
+            reader(&sch, vec![Arc::new(id), Arc::new(b)])
+        };
+        assert_streaming_matches_rich(&build(0), &build(1), &sch, &sch, &key());
+    }
+
+    #[test]
+    fn streaming_matches_sequential_with_a_null_first_composite_key_component() {
+        // A composite key (a, b) where `a` is null on every changed row: the
+        // output sort compares the rendered key columns and must take the
+        // both-null branch on `a` and order by `b`. Compared to the sequential
+        // path. `a` null makes each key a null key, still classified and diffed.
+        let sch = schema(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Int64, true),
+            Field::new("v", DataType::Int64, false),
+        ]);
+        let build = |shift: i64| {
+            let rows = 60_000i64;
+            let a: Int64Array = (0..rows).map(|_| None).collect();
+            let b: Int64Array = (0..rows).map(Some).collect();
+            let v: Int64Array = (0..rows).map(|i| Some(i + shift)).collect();
+            reader(&sch, vec![Arc::new(a), Arc::new(b), Arc::new(v)])
+        };
+        let key = vec!["a".to_string(), "b".to_string()];
+        assert_streaming_matches_rich(&build(0), &build(1), &sch, &sch, &key);
+    }
+
+    /// Sums the spill file bytes for a one-value-column right side across a
+    /// partition count, for the byte-view / dictionary spill-scaling tests.
+    #[allow(clippy::cast_possible_wrap)]
+    fn spill_bytes_for(value: ArrayRef, partitions: usize) -> u64 {
+        let sch = schema(vec![
+            id_field(),
+            Field::new("v", value.data_type().clone(), false),
+        ]);
+        let rows = value.len() as i64;
+        let id: Int64Array = (0..rows).map(Some).collect();
+        let batch = RecordBatch::try_new(sch.clone(), vec![Arc::new(id), value]).unwrap();
+        let source = MemoryInput::new(sch.clone(), vec![batch.clone()]);
+        let hasher = super::RowHasher::new().unwrap();
+        let key = vec!["id".to_string()];
+        let key_names = vec!["id"];
+        let common = vec!["v".to_string()];
+        let columns = super::side_columns(&sch, &key, &common);
+        let changed: HashSet<u128> =
+            super::hash_batch_keys(&batch, &columns.key, &key_names, &hasher)
+                .unwrap()
+                .into_iter()
+                .collect();
+        let value_schema = super::spill_schema(&sch, &columns.value);
+        let plan = super::SpillPlan {
+            columns: &columns,
+            key_names: &key_names,
+            hasher: &hasher,
+            changed: &changed,
+            partitions,
+            threads: 1,
+            value_schema: &value_schema,
+        };
+        super::spill_right(&source, &plan)
+            .unwrap()
+            .files
+            .iter()
+            .map(|f| f.metadata().unwrap().len())
+            .sum()
+    }
+
+    #[test]
+    fn spill_field_type_targets_large_offsets_for_views_and_dictionaries() {
+        use super::spill_field_type;
+        // Byte-view columns spill as the *large* (i64-offset) non-view type: their
+        // `take` keeps the whole variadic buffer, which can exceed the 2 GiB an
+        // i32-offset `Utf8`/`Binary` caps at, so casting to `Utf8`/`Binary` would
+        // panic inside arrow. Dictionaries decode to their value type, composed
+        // recursively so a dictionary of a view also lands on the large type.
+        assert_eq!(spill_field_type(&DataType::Utf8View), DataType::LargeUtf8);
+        assert_eq!(
+            spill_field_type(&DataType::BinaryView),
+            DataType::LargeBinary
+        );
+        assert_eq!(
+            spill_field_type(&DataType::Dictionary(
+                Box::new(DataType::Int32),
+                Box::new(DataType::Utf8View)
+            )),
+            DataType::LargeUtf8
+        );
+        assert_eq!(
+            spill_field_type(&DataType::Dictionary(
+                Box::new(DataType::Int32),
+                Box::new(DataType::Utf8)
+            )),
+            DataType::Utf8
+        );
+        assert_eq!(spill_field_type(&DataType::Utf8), DataType::Utf8);
+        assert_eq!(spill_field_type(&DataType::Int64), DataType::Int64);
+    }
+
+    #[test]
+    fn dictionary_of_utf8_view_spill_bytes_do_not_scale_with_the_partition_count() {
+        // A dictionary whose value type is itself a byte view: the spill decodes
+        // the dictionary and casts the view to its large non-view type, so it
+        // spills flat across 2, 18, and 64 partitions. The plain-`Utf8` dictionary
+        // case cannot catch a non-recursive spill_field_type; this composition can.
+        let rows = 40_000i64;
+        let strings: StringArray = (0..rows)
+            .map(|i| Some(format!("value-{i}-{}", "x".repeat(64))))
+            .collect();
+        let dict = arrow_cast::cast(
+            &(Arc::new(strings) as ArrayRef),
+            &DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8View)),
+        )
+        .unwrap();
+        let two = spill_bytes_for(dict.clone(), 2);
+        let eighteen = spill_bytes_for(dict.clone(), 18);
+        let sixty_four = spill_bytes_for(dict, 64);
+        assert!(
+            eighteen <= two * 2 && sixty_four <= two * 2,
+            "dict-of-view spill must not scale with partitions: 2={two} 18={eighteen} 64={sixty_four}"
+        );
+    }
+
+    #[test]
+    fn dictionary_spill_bytes_do_not_scale_with_the_partition_count() {
+        // `take` on a dictionary keeps the whole values array, so before the
+        // spill decodes dictionaries a spilled partition carried the entire
+        // side's dictionary. A high-cardinality (all-distinct) dictionary column
+        // must spill flat across 2, 18, and 64 partitions.
+        let rows = 40_000i64;
+        let strings: StringArray = (0..rows)
+            .map(|i| Some(format!("value-{i}-{}", "x".repeat(64))))
+            .collect();
+        let dict = arrow_cast::cast(
+            &(Arc::new(strings) as ArrayRef),
+            &DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+        )
+        .unwrap();
+        let two = spill_bytes_for(dict.clone(), 2);
+        let eighteen = spill_bytes_for(dict.clone(), 18);
+        let sixty_four = spill_bytes_for(dict, 64);
+        assert!(
+            eighteen <= two * 2 && sixty_four <= two * 2,
+            "dictionary spill must not scale with partitions: 2={two} 18={eighteen} 64={sixty_four}"
+        );
+    }
+
+    #[test]
+    fn utf8_view_spill_bytes_do_not_scale_with_the_partition_count() {
+        // `take` on a byte-view column retains the source's whole variadic buffer,
+        // so before the spill casts views to their non-view type a partition
+        // carried the entire side's view data and the total grew with the
+        // partition count. The cast compacts it: flat across 2, 18, and 64.
+        let rows = 40_000i64;
+        let v: ArrayRef = Arc::new(StringViewArray::from(
+            (0..rows)
+                .map(|i| format!("value-{i}-{}", "x".repeat(64)))
+                .collect::<Vec<_>>(),
+        ));
+        let two = spill_bytes_for(v.clone(), 2);
+        let eighteen = spill_bytes_for(v.clone(), 18);
+        let sixty_four = spill_bytes_for(v, 64);
+        // Without the cast, 64 partitions spilled ~32x the 2-partition bytes.
+        assert!(
+            sixty_four <= two * 2 && eighteen <= two * 2,
+            "view spill must not scale with partitions: 2={two} 18={eighteen} 64={sixty_four}"
+        );
+    }
+
+    #[test]
+    #[ignore = "allocates ~2.3 GiB of view data; run manually with --ignored"]
+    fn view_column_over_i32_offset_limit_streams_without_panic() {
+        // A single input batch whose byte-view column carries more than
+        // `i32::MAX` bytes: `take` retains the whole variadic buffer, so the
+        // spill cast sees all of it at once. Casting to `Utf8`/`Binary`
+        // (i32 offsets) would panic here; the spill targets `LargeUtf8`/
+        // `LargeBinary` (i64 offsets), so the diff streams without panic.
+        // Ignored by default: it needs several GiB of resident memory.
+        force_parallel_path();
+        let base = "x".repeat(450 * 1024 * 1024);
+        let rows = 5usize; // 5 x 450 MiB > i32::MAX total view bytes
+        let view: ArrayRef = Arc::new(StringViewArray::from(
+            (0..rows).map(|_| base.as_str()).collect::<Vec<_>>(),
+        ));
+        let row_ids: Vec<i64> = (0..rows).map(|i| i64::try_from(i).unwrap()).collect();
+        let ids: Int64Array = row_ids.iter().copied().map(Some).collect();
+        let left_n: Int64Array = row_ids.iter().copied().map(Some).collect();
+        let right_n: Int64Array = row_ids.iter().map(|&i| Some(i + 1)).collect();
+        let sch = schema(vec![
+            id_field(),
+            Field::new("v", DataType::Utf8View, false),
+            Field::new("n", DataType::Int64, true),
+        ]);
+        let left = reader(
+            &sch,
+            vec![Arc::new(ids.clone()), view.clone(), Arc::new(left_n)],
+        );
+        let right = reader(&sch, vec![Arc::new(ids), view, Arc::new(right_n)]);
+        let diff = diff_rows_with(&left, &right, &sch, &sch, &key(), 4).unwrap();
+        // Only `n` changes on every row; the wide `v` column is spilled intact.
+        assert_eq!(diff.cells_changed.num_rows(), rows);
     }
 
     #[test]

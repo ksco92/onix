@@ -10,7 +10,6 @@
 //! (unimplemented here), so pandas needs pyarrow either way.
 
 use std::fs::File;
-use std::io::{Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -24,20 +23,17 @@ use pyo3_arrow::input::AnyRecordBatch;
 
 use onix_arrow::{
     MAX_THREADS, SchemaChange, TableDiff as CoreTableDiff, TableDiffError, TableDiffOptions,
-    TableInput, diff_tables as core_diff_tables,
+    TableInput, diff_tables as core_diff_tables, spool,
 };
 
 /// A record batch reader over one imported input, with its schema attached.
 type ImportedReader = RecordBatchIterator<Box<dyn RecordBatchReader + Send>>;
 
-/// One diff input, spooled to an anonymous temporary Arrow IPC stream file so
-/// the core's multi-pass row diff can re-read it. The temp file is created with
-/// [`tempfile::tempfile`] — unlinked the instant it is opened, mode 0600, and
-/// never given a predictable name — so no other user can read the plaintext
-/// copy or pre-plant a symlink at its path, and nothing is left on disk even if
-/// the process is killed. Each input is imported and fully drained before the
-/// next, so two one-shot Python streams (a pair of `DuckDB` relations sharing
-/// one connection, say) are never open at once.
+/// One diff input, spooled to an anonymous [`onix_arrow::spool`] IPC file so the
+/// core's multi-pass row diff can re-read it (that module owns the temp-file
+/// posture). Each input is imported and fully drained before the next, so two
+/// one-shot Python streams (a pair of `DuckDB` relations sharing one connection,
+/// say) are never open at once.
 struct SpooledInput {
     file: File,
     schema: SchemaRef,
@@ -49,35 +45,10 @@ impl TableInput for SpooledInput {
     }
 
     fn open(&self) -> Result<Box<dyn RecordBatchReader + Send>, TableDiffError> {
-        // Re-read the anonymous file from the start through a fresh handle; the
-        // row diff opens each side sequentially, so rewinding here is safe.
-        let mut file = self.file.try_clone().map_err(|e| TableDiffError::Read {
-            message: e.to_string(),
-        })?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|e| TableDiffError::Read {
-                message: e.to_string(),
-            })?;
-        let reader =
-            arrow_ipc::reader::StreamReader::try_new_buffered(file, None).map_err(|e| {
-                TableDiffError::Read {
-                    message: e.to_string(),
-                }
-            })?;
-
-        Ok(Box::new(reader))
+        // Re-read the anonymous spool file from the start; the row diff opens
+        // each side sequentially, so rewinding is safe (see `onix_arrow::spool`).
+        Ok(Box::new(spool::reopen(&self.file)?))
     }
-}
-
-/// Turns a spool I/O failure into a `ValueError` that names what ran out and
-/// where — a full temporary filesystem is the likely cause, and it is set by
-/// `TMPDIR`.
-fn spool_io_error(context: &str, error: &dyn std::fmt::Display) -> PyErr {
-    PyValueError::new_err(format!(
-        "{context} the temporary directory ({}, overridable with TMPDIR); \
-         it may be out of space: {error}",
-        std::env::temp_dir().display()
-    ))
 }
 
 /// Imports one Python Arrow input and spools every batch to an anonymous
@@ -87,22 +58,16 @@ fn spool_input(obj: &Bound<'_, PyAny>) -> PyResult<SpooledInput> {
     let reader = import_reader(obj)?;
     let schema = reader.schema();
 
-    let file =
-        tempfile::tempfile().map_err(|e| spool_io_error("could not create a spool file in", &e))?;
-    let write_handle = file
-        .try_clone()
-        .map_err(|e| spool_io_error("could not open a spool file in", &e))?;
-    let mut writer = arrow_ipc::writer::StreamWriter::try_new_buffered(write_handle, &schema)
-        .map_err(|e| spool_io_error("could not write to a spool file in", &e))?;
+    let (file, mut writer) = spool::open(&schema).map_err(|e| map_table_error(&e))?;
     for batch in reader {
         let batch = batch.map_err(|e| PyValueError::new_err(e.to_string()))?;
         writer
             .write(&batch)
-            .map_err(|e| spool_io_error("could not write table data to a spool file in", &e))?;
+            .map_err(|e| map_table_error(&spool::error("write table data to", &e)))?;
     }
     writer
         .finish()
-        .map_err(|e| spool_io_error("could not finish writing a spool file in", &e))?;
+        .map_err(|e| map_table_error(&spool::error("finish writing", &e)))?;
 
     Ok(SpooledInput { file, schema })
 }

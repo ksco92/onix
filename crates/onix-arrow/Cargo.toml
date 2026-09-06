@@ -27,10 +27,19 @@ arrow-buffer = "=59.3.0"
 # cell's value to its canonical string (`display::ArrayFormatter`);
 # `arrow-select` filters the materialized rows, concatenates the output row
 # batches, and `take`s the key columns into the per-cell diff. The row diff
-# re-reads each side through the caller's re-openable `TableInput`, so no IPC
-# spooling lives here — the Python bindings own that.
+# re-reads each *input* side through the caller's re-openable `TableInput`. The
+# `spool` module owns the anonymous temporary Arrow IPC primitive used both by
+# the Python bindings' input spool and by the parallel cell pass, which spills
+# its changed-row key-hash partitions so it holds one partition in memory at a
+# time rather than both sides' full changed rows.
 arrow-cast = "=59.3.0"
 arrow-select = "=59.3.0"
+# The `spool` module writes to an anonymous `tempfile::tempfile()` as an Arrow
+# IPC stream and re-reads it; the cell pass spills one key-hash partition per
+# file so only one is resident at once. Pinned to the same 59.3.0 as the other
+# arrow crates.
+arrow-ipc = "=59.3.0"
+tempfile = "3"
 # Row identity is a keyed 128-bit SipHash-1-3 (`siphasher`), keyed from 16
 # bytes of OS randomness per diff (`getrandom`), so the row-matching table on
 # this default path cannot be forced into collisions by chosen input.
