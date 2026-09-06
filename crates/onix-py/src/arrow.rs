@@ -11,6 +11,7 @@
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch, RecordBatchIterator, RecordBatchReader, StructArray};
@@ -22,8 +23,8 @@ use pyo3_arrow::ffi::{ArrayIterator, ArrayReader, to_schema_pycapsule, to_stream
 use pyo3_arrow::input::AnyRecordBatch;
 
 use onix_arrow::{
-    SchemaChange, TableDiff as CoreTableDiff, TableDiffError, TableDiffOptions, TableInput,
-    diff_tables as core_diff_tables,
+    MAX_THREADS, SchemaChange, TableDiff as CoreTableDiff, TableDiffError, TableDiffOptions,
+    TableInput, diff_tables as core_diff_tables,
 };
 
 /// A record batch reader over one imported input, with its schema attached.
@@ -111,16 +112,25 @@ fn spool_input(obj: &Bound<'_, PyAny>) -> PyResult<SpooledInput> {
 /// `left` and `right` are any objects implementing the Arrow `PyCapsule`
 /// interface (see the module docs). `key` is the list of primary-key column
 /// names; it is required and must be non-empty, and every key column must
-/// exist on both sides. The result is a [`TableDiff`].
+/// exist on both sides. `threads` sets the number of worker threads the row
+/// diff uses; `None` (the default) uses the machine's available parallelism,
+/// `1` runs single-threaded, and a value below 1 or above
+/// [`onix_arrow::MAX_THREADS`] (1024) is a `ValueError`. The diff runs
+/// single-threaded (ignoring `threads`) only when both sides stay under 50,000
+/// rows and under 64 MB of decoded data; either bound reached first uses the
+/// requested threads. The output is identical at any thread count. The result
+/// is a [`TableDiff`].
 #[pyfunction]
-#[pyo3(signature = (left, right, *, key))]
+#[pyo3(signature = (left, right, *, key, threads=None))]
 pub(crate) fn diff_tables(
     py: Python<'_>,
     left: &Bound<'_, PyAny>,
     right: &Bound<'_, PyAny>,
     key: &Bound<'_, PyAny>,
+    threads: Option<i64>,
 ) -> PyResult<TableDiff> {
     let key = extract_key(key)?;
+    let threads = resolve_threads(threads)?;
     // Import, diff, and drop all run on the stack-sized worker (re-acquiring the
     // GIL there) because the recursive Arrow FFI import and the imported types'
     // recursive drop are native-stack sinks on deep nesting, and — unlike the
@@ -138,13 +148,43 @@ pub(crate) fn diff_tables(
             // one-shot Python streams are never open at the same time.
             let left_input = spool_input(left.bind(py))?;
             let right_input = spool_input(right.bind(py))?;
-            let options = TableDiffOptions::new(key);
+            let mut options = TableDiffOptions::new(key);
+            if let Some(threads) = threads {
+                options = options
+                    .with_threads(threads)
+                    .map_err(|e| map_table_error(&e))?;
+            }
             let core = core_diff_tables(&left_input, &right_input, &options)
                 .map_err(|e| map_table_error(&e))?;
 
             TableDiff::from_core(core)
         })
     })?
+}
+
+/// Turns the Python `threads` argument into an optional thread count: `None`
+/// keeps the [`TableDiffOptions`] default (available parallelism), a value from
+/// 1 to [`MAX_THREADS`] sets the worker count, and anything else is a
+/// `ValueError` raised here — before the inputs are spooled or any thread is
+/// spawned — so an enormous value cannot allocate or spawn first.
+fn resolve_threads(threads: Option<i64>) -> PyResult<Option<NonZeroUsize>> {
+    match threads {
+        None => Ok(None),
+        Some(n) if n < 1 => Err(PyValueError::new_err(format!(
+            "threads must be a positive integer (or None for the default), got {n}"
+        ))),
+        Some(n) => {
+            // `n >= 1` here; anything over the ceiling (or too large for usize)
+            // is refused before any thread is spawned or memory allocated.
+            let over_ceiling =
+                || PyValueError::new_err(format!("threads must not exceed {MAX_THREADS}, got {n}"));
+            let count = usize::try_from(n).map_err(|_| over_ceiling())?;
+            if count > MAX_THREADS {
+                return Err(over_ceiling());
+            }
+            Ok(NonZeroUsize::new(count))
+        }
+    }
 }
 
 /// Extracts the key column list, rejecting a bare string (which would

@@ -144,6 +144,10 @@ pub use table_diff::{TableDiff, TableDiffSummary};
 /// backstop.
 pub const MAX_NESTING_DEPTH: usize = 128;
 
+/// The maximum worker-thread count for the row diff. A larger `threads` is
+/// refused with [`TableDiffError::ThreadCountTooLarge`] before any thread spawns.
+pub const MAX_THREADS: usize = 1024;
+
 /// Diffs two tables presented as re-openable [`TableInput`]s.
 ///
 /// See the [crate-level docs](crate) for the type-comparison rules, the
@@ -224,7 +228,14 @@ pub fn diff_tables(
         }
     }
 
-    let rows = row_diff::diff_rows(left, right, &left_schema, &right_schema, options.key())?;
+    let rows = row_diff::diff_rows(
+        left,
+        right,
+        &left_schema,
+        &right_schema,
+        options.key(),
+        options.threads(),
+    )?;
 
     Ok(TableDiff::new(changes, rows))
 }
