@@ -143,10 +143,20 @@ pub enum TableDiffError {
     /// A worker thread in the parallel row diff panicked. The panic is caught
     /// and surfaced as this typed error rather than allowed to abort the
     /// process, so a bug or an unexpected failure inside one worker fails the
-    /// diff recoverably. It does not fire on any supported input.
+    /// diff recoverably.
     WorkerPanicked {
         /// The panic payload, when it was a string.
         message: String,
+    },
+    /// The requested worker-thread count exceeds [`crate::MAX_THREADS`]. The
+    /// row diff spawns one worker per requested thread, so an unbounded count
+    /// is refused before any thread is spawned rather than risking thread
+    /// exhaustion.
+    ThreadCountTooLarge {
+        /// The requested thread count.
+        threads: usize,
+        /// The maximum accepted, [`crate::MAX_THREADS`].
+        max: usize,
     },
 }
 
@@ -209,6 +219,11 @@ impl fmt::Display for TableDiffError {
             TableDiffError::WorkerPanicked { message } => {
                 write!(f, "a parallel row-diff worker thread panicked: {message}")
             }
+            TableDiffError::ThreadCountTooLarge { threads, max } => write!(
+                f,
+                "the requested thread count {threads} exceeds the maximum of {max}; \
+                 pass a smaller `threads` value"
+            ),
         }
     }
 }
@@ -294,6 +309,17 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("\"id\""));
         assert!(message.contains("same type on both sides"));
+    }
+
+    #[test]
+    fn thread_count_too_large_message_names_count_and_max() {
+        let error = TableDiffError::ThreadCountTooLarge {
+            threads: 5000,
+            max: 1024,
+        };
+        let message = error.to_string();
+        assert!(message.contains("5000"));
+        assert!(message.contains("1024"));
     }
 
     #[test]

@@ -154,7 +154,9 @@ fn options_from_env(key: &str) -> TableDiffOptions {
         .and_then(|v| v.parse().ok())
         .and_then(std::num::NonZeroUsize::new)
     {
-        options = options.with_threads(threads);
+        options = options
+            .with_threads(threads)
+            .expect("ROW_DIFF_THREADS within MAX_THREADS");
     }
     options
 }

@@ -9,14 +9,14 @@ rules).
 
 | | |
 |---|---|
-| Date (UTC) | 2026-09-06T01:42Z |
+| Date (UTC) | 2026-09-06T02:35Z |
 | OS | macOS 26.5.1 (build 25F80) |
 | CPU | Apple M5 Max |
 | Cores | 18 |
 | Memory | 137438.95 MB |
 | rustc / cargo | 1.98.0 |
 | Python | 3.14.6 (uv-managed, pinned by `crates/onix-py/.python-version`) |
-| deepdiff-rs | 0.9.1 |
+| deepdiff-rs | 0.10.0 |
 | pyarrow | 25.0.1 |
 | polars | 1.44.1 |
 | duckdb | 1.5.5 |
@@ -72,29 +72,61 @@ output is byte-identical between the two, so only the timings differ.
 
 | Tool | Wall clock (previous) | Wall clock (this run) | CPU seconds (this run) | Peak RSS (this run) |
 | --- | --- | --- | --- | --- |
-| onix (`diff_tables`) | 571.61 ms | **326.72 ms** | 0.876 s | 1175.8 MB |
-| DuckDB (oracle SQL) | 219.49 ms | 238.86 ms | 0.864 s | 810.4 MB |
-| polars (anti-join/inner-join) | 61.35 ms | 64.29 ms | 0.412 s | 914.2 MB |
+| onix (`diff_tables`) | 571.61 ms | **324.44 ms** | 0.875 s | 1228.2 MB |
+| DuckDB (oracle SQL) | 219.49 ms | 241.21 ms | 0.849 s | 799.9 MB |
+| polars (anti-join/inner-join) | 61.35 ms | 74.01 ms | 0.412 s | 915.0 MB |
 
-At 1M rows onix's wall time drops 1.75x (571.61 → 326.72 ms); it now trails DuckDB by 1.37x
-(was 2.6x) and polars by 5.1x. The fixed per-run cost (subprocess start, parquet decode, spool to
+At 1M rows onix's wall time drops 1.76x (571.61 → 324.44 ms); it now trails DuckDB by 1.35x
+(was 2.6x) and polars by 4.4x. The fixed per-run cost (subprocess start, parquet decode, spool to
 Arrow IPC) is a large fraction of a 1M-row run, so parallelism helps less here than at full size.
 
 ### Full pair (37M rows, ~5 GB + ~5 GB)
 
 | Tool | Wall clock (previous) | Wall clock (this run) | CPU seconds (this run) | Peak RSS (this run) |
 | --- | --- | --- | --- | --- |
-| onix (`diff_tables`) | 19.235 s | **6.933 s** | 32.569 s | 23367.1 MB |
-| DuckDB (oracle SQL) | 2.301 s | 2.573 s | 34.672 s | 15986.5 MB |
-| polars (anti-join/inner-join) | 2.236 s | 2.756 s | 22.111 s | 26787.4 MB |
+| onix (`diff_tables`) | 19.235 s | **6.992 s** | 31.027 s | 22671.2 MB |
+| DuckDB (oracle SQL) | 2.301 s | 2.527 s | 32.359 s | 15986.1 MB |
+| polars (anti-join/inner-join) | 2.236 s | 2.598 s | 21.174 s | 26785.5 MB |
 
-At the full 37M-row size onix's wall time drops 2.77x (19.235 → 6.933 s), far beyond run-to-run
-noise. onix now trails DuckDB by 2.69x (was 8.36x) and polars by 2.52x (was 8.60x). Peak RSS rises
-by about 1.07 GB (22293 → 23367 MB): the per-worker in-flight batch term (18 workers, each holding
-a few decoded batches over bounded channels) on top of the unchanged per-row hash vectors.
+At the full 37M-row size onix's wall time drops 2.75x (19.235 → 6.992 s), far beyond run-to-run
+noise. onix now trails DuckDB by 2.77x (was 8.36x) and polars by 2.69x (was 8.60x). Peak RSS is
+about 22671 MB — within run-to-run noise of the single-threaded peak (the row diff appends the
+per-row hashes into shared per-partition buffers, so there is no separate combined copy; the only
+structural addition is the in-flight batches, worker count times batch size).
 
 Both fixture pairs fit comfortably in this machine's 137 GB of RAM; no tool was memory-constrained
 at either size, so no tool's number is a "did not fit" result.
+
+## Thread-count scaling
+
+`diff_tables` wall time (median) as the `threads` knob varies, with the two parquet tables
+preloaded so the figure isolates the row diff. A small table is included to show the size gate:
+below 50,000 rows the diff runs single-threaded whatever `threads` is, so the knob has no effect.
+
+| Rows | threads=1 | threads=2 | threads=4 | threads=8 | threads=18 |
+| --- | --- | --- | --- | --- | --- |
+| 2 (in-memory) | 0.28 ms | — | — | — | 0.22 ms |
+| 1,000,000 | 418.6 ms | 227.1 ms | 170.6 ms | 149.7 ms | 146.6 ms |
+
+At 1M rows the row diff scales 2.85x from 1 to 18 threads, flattening past ~8 (the fixed spool and
+re-read cost is the serial remainder). At 2 rows the default (all cores) is if anything faster than
+threads=1 — no workers are spawned — where the pre-gate parallel path cost about 5.4x more.
+
+## Memory
+
+`row_diff_rss` (the example, `ROW_DIFF_THREADS` sets the worker count) peak resident set, the row
+diff's own state (no parquet), at 18 threads versus single-threaded:
+
+| Rows/side | threads=1 | threads=18 | delta |
+| --- | --- | --- | --- |
+| 8,000,000 | 629 MB | 857 MB | +228 MB |
+| 37,000,000 | 2866 MB | 3551 MB | +685 MB |
+
+The delta grows with the row count at roughly 10-15 bytes per row per side — about half of one extra
+copy of the 32-byte-per-row hash vectors, i.e. the reallocation slack of the shared per-partition
+buffers, bounded by one full copy — plus the in-flight batches (worker count times batch size, tens
+of MB). The 32-byte-per-row hash vectors dominate either path and their growable-`Vec` slack makes
+the single-threaded peak itself vary run-to-run by a comparable amount (2.9-4.2 GB at 37M).
 
 ## What changed: the row diff now runs on every core
 
@@ -102,10 +134,12 @@ The previous run of this harness showed onix trailing both baselines because `on
 diff ran single-threaded while DuckDB and polars parallelized their join and comparison work across
 this machine's 18 cores — the CPU-seconds column was close to onix's wall time (ratio ~1.0) while
 the baselines' CPU time exceeded their wall time several-fold. Issue #81 parallelizes the row diff:
-the hash pass hashes each batch on a worker and partitions rows by key hash, the classify pass
-merge-joins each partition on its own worker, and the materialize and cell passes hash their key
-columns on workers while their sequential filtering runs in batch order. onix's CPU-seconds is now
-comparable to before (32.6 s vs 26.8 s — a modest overhead for the channels and partition buffers)
-but spread across cores, so its wall time falls to a small multiple of the baselines' at full size.
-The remaining gap is the fixed per-run cost (spool to Arrow IPC, re-reads) that the SQL and join
-baselines avoid; it is a larger fraction at 1M than at 37M.
+the hash pass hashes each batch on a worker and appends its rows into shared per-key-hash partition
+buffers, the classify pass merge-joins each partition on its own worker, and the materialize and
+cell passes hash their key columns on workers while their sequential filtering runs in batch order.
+The whole diff falls through to the single-threaded path below 50,000 rows, where a thread pool
+would cost more than the diff. onix's CPU-seconds is comparable to before (31.0 s vs 26.8 s — a
+modest overhead for the channels and partition buffers) but spread across cores, so its wall time
+falls to a small multiple of the baselines' at full size. The remaining gap is the fixed per-run
+cost (spool to Arrow IPC, re-reads) that the SQL and join baselines avoid; it is a larger fraction
+at 1M than at 37M.

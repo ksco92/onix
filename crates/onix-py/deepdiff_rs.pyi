@@ -121,12 +121,14 @@ def diff_tables(left: Any, right: Any, *, key: list[str], threads: int | None = 
     :param threads: Number of worker threads the row diff hashes and
         classifies rows with. ``None`` (the default) uses the machine's
         available parallelism; ``1`` runs single-threaded. The result is
-        byte-identical at any value. Must be ``None`` or a positive integer.
+        byte-identical at any value. Must be ``None`` or a positive integer
+        no greater than 1024 (the diff spawns one worker per thread).
     :raises TypeError: If an input implements neither Arrow PyCapsule method,
         or ``key`` is a bare string rather than a list of column names.
     :raises ValueError: If a key column is missing, duplicated, or
         type-mismatched, or a column's type cannot be compared by value —
-        the message names the column — or if ``threads`` is less than 1.
+        the message names the column — or if ``threads`` is less than 1 or
+        greater than 1024.
     :raises MaxDepthError: If a column's Arrow type is nested past the
         supported depth.
     """

@@ -2,6 +2,8 @@
 
 import decimal
 import random
+import threading
+import time as time_module
 from collections import defaultdict
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -541,6 +543,19 @@ def test_threads_below_one_raises(threads: int) -> None:
     left = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([1], pa.int64())})
     with pytest.raises(ValueError, match="threads must be a positive integer"):
         diff_tables(left, left, key=["id"], threads=threads)
+
+
+def test_threads_over_the_ceiling_raises_without_spawning() -> None:
+    """An enormous thread count is rejected before any thread is spawned or
+    memory allocated -- the regression for the 2**31 crash. Assert no worker
+    thread appears and the call returns near-instantly."""
+    left = pa.table({"id": pa.array([1], pa.int64()), "v": pa.array([1], pa.int64())})
+    before = threading.active_count()
+    start = time_module.perf_counter()
+    with pytest.raises(ValueError, match="threads must not exceed 1024"):
+        diff_tables(left, left, key=["id"], threads=2**31)
+    assert time_module.perf_counter() - start < 1.0, "must fail fast, before spawning workers"
+    assert threading.active_count() == before, "no worker thread may be spawned"
 
 
 def test_oracle_parity_with_duplicates_and_null_keys(tmp_path: Path) -> None:

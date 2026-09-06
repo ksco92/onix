@@ -23,8 +23,8 @@ use pyo3_arrow::ffi::{ArrayIterator, ArrayReader, to_schema_pycapsule, to_stream
 use pyo3_arrow::input::AnyRecordBatch;
 
 use onix_arrow::{
-    SchemaChange, TableDiff as CoreTableDiff, TableDiffError, TableDiffOptions, TableInput,
-    diff_tables as core_diff_tables,
+    MAX_THREADS, SchemaChange, TableDiff as CoreTableDiff, TableDiffError, TableDiffOptions,
+    TableInput, diff_tables as core_diff_tables,
 };
 
 /// A record batch reader over one imported input, with its schema attached.
@@ -146,7 +146,9 @@ pub(crate) fn diff_tables(
             let right_input = spool_input(right.bind(py))?;
             let mut options = TableDiffOptions::new(key);
             if let Some(threads) = threads {
-                options = options.with_threads(threads);
+                options = options
+                    .with_threads(threads)
+                    .map_err(|e| map_table_error(&e))?;
             }
             let core = core_diff_tables(&left_input, &right_input, &options)
                 .map_err(|e| map_table_error(&e))?;
@@ -157,8 +159,10 @@ pub(crate) fn diff_tables(
 }
 
 /// Turns the Python `threads` argument into an optional thread count: `None`
-/// keeps the [`TableDiffOptions`] default (available parallelism), a value of
-/// 1 or more sets the worker count, and a value below 1 is a `ValueError`.
+/// keeps the [`TableDiffOptions`] default (available parallelism), a value from
+/// 1 to [`MAX_THREADS`] sets the worker count, and anything else is a
+/// `ValueError` raised here — before the inputs are spooled or any thread is
+/// spawned — so an enormous value cannot allocate or spawn first.
 fn resolve_threads(threads: Option<i64>) -> PyResult<Option<NonZeroUsize>> {
     match threads {
         None => Ok(None),
@@ -166,9 +170,14 @@ fn resolve_threads(threads: Option<i64>) -> PyResult<Option<NonZeroUsize>> {
             "threads must be a positive integer (or None for the default), got {n}"
         ))),
         Some(n) => {
-            let count = usize::try_from(n).map_err(|_| {
-                PyValueError::new_err("threads is larger than this platform supports")
-            })?;
+            // `n >= 1` here; anything over the ceiling (or too large for usize)
+            // is refused before any thread is spawned or memory allocated.
+            let over_ceiling =
+                || PyValueError::new_err(format!("threads must not exceed {MAX_THREADS}, got {n}"));
+            let count = usize::try_from(n).map_err(|_| over_ceiling())?;
+            if count > MAX_THREADS {
+                return Err(over_ceiling());
+            }
             Ok(NonZeroUsize::new(count))
         }
     }

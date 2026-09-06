@@ -144,6 +144,20 @@ pub use table_diff::{TableDiff, TableDiffSummary};
 /// backstop.
 pub const MAX_NESTING_DEPTH: usize = 128;
 
+/// The maximum worker-thread count [`diff_tables`] accepts in
+/// [`TableDiffOptions::with_threads`](crate::TableDiffOptions::with_threads); a
+/// larger value is refused with [`TableDiffError::ThreadCountTooLarge`] before
+/// any thread is spawned.
+///
+/// The row diff spawns one worker per requested thread, so an unbounded count
+/// is a denial-of-service vector: enough threads exhaust the OS thread limit
+/// (a spawn failure), and the reserved stacks and per-worker bookkeeping cost
+/// memory before any data is read. This ceiling caps that. It is far above any
+/// useful value — the diff never benefits from more workers than the machine
+/// has cores, and 1024 covers any current or foreseeable core count — so it
+/// bounds abuse without constraining real use.
+pub const MAX_THREADS: usize = 1024;
+
 /// Diffs two tables presented as re-openable [`TableInput`]s.
 ///
 /// See the [crate-level docs](crate) for the type-comparison rules, the
