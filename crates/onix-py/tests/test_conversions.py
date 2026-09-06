@@ -544,7 +544,7 @@ def test_lone_surrogate_high_and_low_surrogate_values() -> None:
 
 
 def test_non_bmp_character_is_accepted() -> None:
-    """A genuine non-BMP character converts fine, same as before this feature existed."""
+    """A genuine non-BMP character converts fine; only an unpaired surrogate needed this feature."""
     diff = DeepDiff("😀", "😁")
     assert diff.to_dict()["values_changed"]["root"] == {"new_value": "😁", "old_value": "😀"}
 

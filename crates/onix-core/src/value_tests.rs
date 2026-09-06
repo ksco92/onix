@@ -1410,30 +1410,17 @@ fn utf8_sequence_width_boundary_at_the_ascii_continuation_split() {
 }
 
 #[test]
-fn wtf8_chars_decode_time_scales_linearly_not_quadratically() {
-    // Quadrupling the input should roughly 4x the decode time; bounded
-    // generously at 8x to absorb machine noise without masking a real
-    // regression. Run for both a plain-ASCII string and one ending in a
-    // lone surrogate, since the two decode paths (`Ok`/`Err` in
-    // `Wtf8Chars::next`) have independent per-call costs. See `Wtf8Chars`'s
-    // own doc for why the decode must stay linear.
-    fn decode_all(bytes: &[u8]) -> usize {
-        Wtf8Chars::new(bytes).count()
-    }
-
-    fn time_decode(bytes: &[u8]) -> std::time::Duration {
-        // A handful of repeats, keeping only the minimum, damps scheduler
-        // noise without inflating the total runtime much.
-        (0..5)
-            .map(|_| {
-                let start = std::time::Instant::now();
-                assert!(decode_all(bytes) > 0);
-                start.elapsed()
-            })
-            .min()
-            .expect("5 repeats always yields a minimum")
-    }
-
+fn wtf8_chars_decode_validates_at_most_a_constant_number_of_bytes_per_call_and_o_n_total() {
+    // A quadratic decoder validates the whole remaining slice on every
+    // call, so total bytes validated grows with the square of the input;
+    // a linear one validates at most `utf8_sequence_width`'s bound (4)
+    // bytes per call, so the total is bounded by the input length plus a
+    // small constant. Counted directly via `wtf8_decode_stats` rather than
+    // timed, so this cannot flake on a noisy machine. Run for both a
+    // plain-ASCII string and one ending in a lone surrogate, since the two
+    // decode paths (`Ok`/`Err` in `Wtf8Chars::next`) are exercised
+    // independently. See `Wtf8Chars`'s own doc for why the decode must
+    // stay linear.
     fn build(chars: usize, with_surrogate: bool) -> Vec<u8> {
         let mut bytes = "a".repeat(chars).into_bytes();
         if with_surrogate {
@@ -1442,17 +1429,32 @@ fn wtf8_chars_decode_time_scales_linearly_not_quadratically() {
         bytes
     }
 
-    const SMALL: usize = 25_000;
-    const LARGE: usize = SMALL * 4;
-    const MAX_RATIO: u32 = 8;
+    const MAX_BYTES_PER_CALL: usize = 4;
+    const SLACK: usize = 8;
 
     for with_surrogate in [false, true] {
-        let small = time_decode(&build(SMALL, with_surrogate));
-        let large = time_decode(&build(LARGE, with_surrogate));
-        assert!(
-            large <= small * MAX_RATIO,
-            "decoding {LARGE} chars (surrogate: {with_surrogate}) took {large:?}, more than              {MAX_RATIO}x the {SMALL}-char time ({small:?}) — looks quadratic, not linear"
-        );
+        for chars in [25_000usize, 100_000] {
+            let bytes = build(chars, with_surrogate);
+
+            super::wtf8_decode_stats::reset();
+            let char_count = Wtf8Chars::new(&bytes).count();
+            let validated = super::wtf8_decode_stats::total_bytes();
+            let max_call = super::wtf8_decode_stats::max_call_bytes();
+
+            assert!(char_count > 0);
+            assert!(
+                max_call <= MAX_BYTES_PER_CALL,
+                "a single `Wtf8Chars::next` call validated {max_call} bytes, more than the \
+                 {MAX_BYTES_PER_CALL}-byte UTF-8/WTF-8 sequence width bound"
+            );
+            assert!(
+                validated <= bytes.len() + SLACK,
+                "decoding {} bytes (surrogate: {with_surrogate}) validated {validated} bytes \
+                 total, more than input length plus {SLACK} of slack — looks quadratic, not \
+                 linear",
+                bytes.len()
+            );
+        }
     }
 }
 

@@ -223,6 +223,50 @@ fn utf8_sequence_width(first_byte: u8) -> usize {
     }
 }
 
+/// Test-only instrumentation proving [`Wtf8Chars::next`] validates `O(n)`
+/// bytes total over a full decode, not `O(n^2)`: a byte counter, incremented
+/// with the size of every slice `next` hands to `str::from_utf8`, plus the
+/// largest single call it ever saw. A counter rather than a wall-clock
+/// measurement, so the check is exact and noise-free instead of tolerating
+/// a fudge factor for scheduler jitter — the same reason
+/// `crate::ignore_order::memo`'s recomputation count replaced a timing
+/// assertion (issue #37). Thread-local, not a shared `static`: the test
+/// harness runs each `#[test]` on its own thread by default, and a process-
+/// global counter would let an unrelated test's concurrent decode inflate
+/// this one's count, reintroducing exactly the kind of nondeterminism a
+/// counter is meant to avoid.
+#[cfg(test)]
+pub(crate) mod wtf8_decode_stats {
+    use std::cell::Cell;
+
+    thread_local! {
+        static TOTAL_BYTES: Cell<usize> = const { Cell::new(0) };
+        static MAX_CALL_BYTES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Zeroes both counters before a fresh measurement, on this thread only.
+    pub(crate) fn reset() {
+        TOTAL_BYTES.with(|c| c.set(0));
+        MAX_CALL_BYTES.with(|c| c.set(0));
+    }
+
+    pub(crate) fn record(bytes: usize) {
+        TOTAL_BYTES.with(|c| c.set(c.get() + bytes));
+        MAX_CALL_BYTES.with(|c| c.set(c.get().max(bytes)));
+    }
+
+    /// Total bytes validated on this thread since the last [`reset`].
+    pub(crate) fn total_bytes() -> usize {
+        TOTAL_BYTES.with(Cell::get)
+    }
+
+    /// The largest single slice validated on this thread since the last
+    /// [`reset`].
+    pub(crate) fn max_call_bytes() -> usize {
+        MAX_CALL_BYTES.with(Cell::get)
+    }
+}
+
 impl Iterator for Wtf8Chars<'_> {
     type Item = Wtf8Char;
 
@@ -230,6 +274,8 @@ impl Iterator for Wtf8Chars<'_> {
         let &first_byte = self.remaining.first()?;
         let width = utf8_sequence_width(first_byte);
         let candidate = &self.remaining[..width];
+        #[cfg(test)]
+        wtf8_decode_stats::record(candidate.len());
 
         let (first, rest) = if let Ok(valid) = std::str::from_utf8(candidate) {
             let c = valid
@@ -772,16 +818,17 @@ pub fn contains_wtf8(value: &Value) -> bool {
     false
 }
 
-/// Writes the escaped *content* of a JSON string (no surrounding quotes)
-/// for `bytes` — WTF-8, per [`Str`]'s doc. Groups consecutive real Unicode
+/// Writes the escaped *content* of a JSON string (no surrounding quotes) for
+/// `bytes` — WTF-8, per [`Str`]'s doc. Groups consecutive real Unicode
 /// scalars into runs and hands each run to `serde_json` for escaping
 /// (guaranteed identical to what [`Value::to_serde_json`] plus
 /// `serde_json::to_string` already produces for that content — see this
-/// module's private `push_escaped_run`), splicing in a lone surrogate's own single-backslash
-/// `\uXXXX` escape between runs, exactly where real `DeepDiff`'s
-/// `json.dumps` places it. Public so `onix-py`'s hand-written `to_json()`
-/// writer (`crate::guard`, a separate crate) can render a `Str::Wtf8`/
-/// `Key::Wtf8` byte-exactly without duplicating this escaping rule.
+/// module's private `push_escaped_run`), splicing in a lone surrogate's own
+/// single-backslash `\uXXXX` escape between runs, exactly where real
+/// `DeepDiff`'s `json.dumps` places it. Public so `onix-py`'s hand-written
+/// `to_json()` writer (`crate::guard`, a separate crate) can render a
+/// `Str::Wtf8`/`Key::Wtf8` byte-exactly without duplicating this escaping
+/// rule.
 pub fn write_json_str_content(bytes: &[u8], out: &mut String) {
     let mut run = String::new();
     for c in Wtf8Chars::new(bytes) {
@@ -1505,7 +1552,8 @@ fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
 
 /// An [`Object`]'s key: an interned `Arc<str>` for the common (valid UTF-8)
 /// case, or, for a key containing a lone surrogate code point, WTF-8 bytes
-/// held in their own, un-interned allocation. Interning shares one allocation across the
+/// held in their own,
+/// un-interned allocation. Interning shares one allocation across the
 /// handful of keys a record-shaped payload repeats thousands of times (see
 /// the [module documentation](self)); a surrogate-bearing key is never that
 /// shape in practice, so it costs its own small allocation instead of
