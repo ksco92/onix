@@ -128,41 +128,70 @@ so the 50,000-row threshold runs the workers only where they win.
 
 ## Per-pass profile
 
-Measured on `deepdiff-rs` 0.11.2 (2026-09-06T18:00Z), same machine as the Environment table above.
-The row diff's wall time, broken down by pass, from the committed `row_diff_profile` example (built
-with the `profile` feature; see `perf/arrow/README.md`'s "Profiling" section and the example's module
-docstring, which is the single home for the method). Each wall cell is the median of 11 runs (the
-file's 1M convention) and each RSS the median of the 11 runs' per-pass peaks. Two shapes at 1M rows
-per side, default 18 threads: `linear` (id + int64 value, ~2% of rows changed — the narrow fixture's
-shape) and `manycols` (id + 34 64-byte string columns, every row changed but one cell each — the
-wide fixture's shape, where the spill carries all value columns).
+Measured on `deepdiff-rs` 0.11.2 (2026-09-06T20:30Z), same machine as the Environment table above,
+with no other `cargo`/`maturin`/`pytest`/`row_diff_profile` process running (`ps` checked before and
+after each sweep). The row diff's wall time broken down by pass, from the committed
+`row_diff_profile` example (built with the `profile` feature; see `perf/arrow/README.md`'s
+"Profiling" section and the example's module docstring, which is the single home for the method).
+Each cell is `wall s (peak RSS MB)`, the median of independent runs (**11 at 1M, 5 at full**, the
+file's convention); wall is the example's uninstrumented run (no `ps` forks), RSS the median of the
+instrumented run's per-pass peaks. The `decode` and spill sub-rows are additive accums (no RSS).
 
-| Pass | `linear` 1M: s (RSS MB) | `manycols` 1M: s (RSS MB) |
+### Real fixtures (file mode, default 18 threads)
+
+Both parquet fixture pairs (`narrow`/`wide`, 1M and full) converted once to uncompressed Arrow IPC
+and read in file mode, so each pass re-reads and re-decodes its side exactly as the Python bindings'
+input spool does. Full sizes are 37M rows (`narrow`) and 16.875M rows (`wide`).
+
+| Pass | narrow 1M | wide 1M | narrow full | wide full |
+| --- | --- | --- | --- | --- |
+| set-up | 0.000 (260) | 0.000 (1498) | 0.000 (962) | 0.000 (10578) |
+| hash and classify | 0.044 (321) | 0.153 (1540) | 1.292 (4023) | 1.941 (10946) |
+| materialize | 0.035 (324) | 0.078 (1480) | 1.721 (3728) | 1.523 (16083) |
+| cell: spill | 0.031 (324) | 0.408 (1809) | 1.550 (1781) | 8.728 (18018) |
+| — spill route (take + cast) | 0.002 | 0.218 | 0.102 | 4.089 |
+| — spill write | 0.002 | 0.053 | 0.015 | 0.968 |
+| cell: render sort keys | 0.000 (324) | 0.020 (1809) | 0.015 (1658) | 0.373 (17212) |
+| cell: read-back and render | 0.010 (324) | 0.300 (1879) | 0.149 (1782) | 6.005 (19044) |
+| — partition read-back | 0.001 | 0.053 | 0.020 | 0.837 |
+| — compare and render | 0.008 | 0.193 | 0.071 | 4.237 |
+| cell: sort and interleave | 0.003 (324) | 0.172 (1949) | 0.101 (1644) | 3.535 (19727) |
+| decode (across all re-read passes) | 0.072 | 0.244 | 2.691 | 4.588 |
+| **total wall** | **0.132** | **1.194** | **4.870** | **22.041** |
+
+The re-read is decode-bound. Each of the three re-read rounds (hash, materialize, and the cell
+spill's re-read) opens and re-decodes both sides and re-hashes their key columns, but the `decode`
+accum — the wall spent in the spool reader's `next()` — is 60–66% of the combined re-read wall
+across every size, and `materialize` (which re-reads with an empty select, so it does almost no work
+beyond decoding and key-hashing) is essentially all decode: scanning every key value adds only a few
+ms over the read. So the re-read term is removable by **decoding each side once instead of three
+times**, not by avoiding the key re-hash (issue #90). The decomposition closes: the top-level passes
+sum to within 1% of the total wall at every size (the residual is the changed-key `HashSet` build
+and the between-pass setup).
+
+On `narrow full` the three re-read rounds (1.292 + 1.721 + (1.550 − 0.102 − 0.015) = 4.45 s) are 91%
+of the 4.87 s total — the row diff there is almost entirely re-reading. On `wide full` they are
+7.14 s of 22.04 s (32%); the rest is the cell pass's own route (4.089 s), compare-and-render
+(4.237 s), and reorder (3.535 s). Peak RSS is 19.7 GB on `wide full` (file mode holds no resident
+input spool, so below the ~33 GB the Python bench's whole-process peak reaches).
+
+### Proxy shapes (generated mode, 1M rows, 18 threads)
+
+Dependency-free proxies for a quick check without a fixture on disk. They are **proxies, not the
+fixtures**: `linear` is two int64 columns (the narrow fixture has five typed columns:
+`id`/`ts`/`category`-dictionary/`amount`-decimal/`payload`), and `manycols` is 34 identical 64-byte
+`Utf8` columns with every row changed (the wide fixture has 34 distinct scalar types — decimals,
+timestamps, intervals, binary — with ~2% of rows modified plus a zone-awareness retype), so the
+proxy walls do not match the real-fixture walls above.
+
+| Pass | `linear` 1M | `manycols` 1M |
 | --- | --- | --- |
-| set-up (input spool already written) | 0.000 (8) | 0.000 (196) |
-| hash and classify (re-read + hash both sides) | 0.016 (169) | 0.543 (1172) |
-| materialize (re-read both sides, filter added/removed) | 0.028 (174) | 0.370 (1173) |
-| cell: spill (re-read + hash + route + write both sides) | 0.021 (176) | 1.481 (4804) |
-| — of which spill write | 0.001 | 0.313 |
-| cell: partition read-back and render | 0.006 (177) | 0.684 (1620) |
-| — of which partition read-back | 0.000 | 0.391 |
-| — of which compare and render | 0.005 | 0.237 |
-| cell: sort and interleave | 0.001 (177) | 0.090 (1741) |
+| hash and classify | 0.044 (321) | 0.543 (1172) |
+| materialize | 0.035 (324) | 0.370 (1173) |
+| cell: spill | 0.031 (324) | 1.481 (4804) |
+| cell: read-back and render | 0.010 (324) | 0.684 (1620) |
+| cell: sort and interleave | 0.003 (324) | 0.090 (1741) |
 | **total wall** | **0.094** | **3.255** |
-
-The re-read passes dominate the wide-shape residual: the hash pass, the materialize pass, and the
-cell pass's spill each open and re-decode both spooled sides and re-hash their key columns. On
-`manycols` 1M those three re-read rounds are 0.543 + 0.370 + (1.481 − 0.313) = 2.08 s of the 3.26 s
-total (64%); the spill write (0.313 s), partition read-back (0.391 s), compare-and-render (0.237 s),
-and reorder (0.090 s) are the remainder. Decode is a large part of the re-read cost but not the whole
-of it — re-hashing the key columns is a comparable share — so the re-read term is removable (issue
-#90). This matches the shape of the real wide 1M cell-pass profile recorded in issue #90 (re-read +
-key hashing for the two spill passes the largest single bucket).
-
-For contrast, `manycols` 1M single-threaded (`threads 1`, a single run) totals 9.58 s: hash and
-classify 1.71 s, materialize 0.39 s, and the non-streaming cell pass (which holds both sides' changed
-rows at once) 7.46 s at 7.4 GB peak RSS — the pass the streaming cell path of issue #87 replaced on
-the parallel path.
 
 ## Memory
 

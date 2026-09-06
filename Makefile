@@ -1,7 +1,7 @@
-.PHONY: check fmt clippy test coverage docs deny machete mutants bench python-test
+.PHONY: check fmt clippy test test-all-features coverage docs deny machete mutants bench python-test
 
 # The local merge gate until CI exists: everything must be green.
-check: fmt clippy test coverage docs deny machete
+check: fmt clippy test test-all-features coverage docs deny machete
 
 fmt:
 	cargo fmt --all --check
@@ -11,6 +11,12 @@ clippy:
 
 test:
 	cargo test --workspace
+
+# Runs the suite with every feature on so the `onix-arrow/profile` arm of the
+# row diff (the pass!/accum! boundaries) and the profiler's own tests execute;
+# the default `test` and `coverage` targets build default features only.
+test-all-features:
+	cargo test --workspace --all-features
 
 # onix-cli is held to the same coverage bar as the rest of the workspace:
 # its diff subcommand logic has unit + integration tests, so it is not

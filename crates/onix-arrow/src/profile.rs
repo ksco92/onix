@@ -56,6 +56,11 @@ fn state() -> MutexGuard<'static, State> {
 static ACTIVE: AtomicUsize = AtomicUsize::new(NO_PASS);
 const NO_PASS: usize = usize::MAX;
 
+/// Whether [`enter`] and [`accumulate`] record. Off until [`begin`], so a diff
+/// built with the feature but not wrapped in a `begin`/`finish` (any diff other
+/// than the profiled one) records nothing and cannot grow the global state.
+static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Clears any prior run's records and starts the background RSS sampler. Call
 /// once before the diff being profiled; a second call while a sampler is already
 /// running is a no-op.
@@ -64,6 +69,7 @@ pub fn begin() {
     let mut state = state();
     state.passes.clear();
     state.accums.clear();
+    RECORDING.store(true, Ordering::Release);
     if state.sampler.is_some() {
         return;
     }
@@ -123,6 +129,9 @@ static LIVE_SAMPLERS: AtomicUsize = AtomicUsize::new(0);
 /// previous one's RSS attribution to the newer pass.
 #[must_use]
 pub fn enter(label: &'static str) -> PassGuard {
+    if !RECORDING.load(Ordering::Acquire) {
+        return PassGuard { idx: NO_PASS };
+    }
     // Read RSS before the timer starts so the boundary sample (which catches a
     // pass shorter than the sampler interval) never counts against the pass wall.
     let boundary = read_rss_kib(std::process::id()).unwrap_or(0);
@@ -145,6 +154,9 @@ pub fn enter(label: &'static str) -> PassGuard {
 
 /// Adds `elapsed` to the additive sub-cost named `label` (created on first use).
 pub fn accumulate(label: &'static str, elapsed: Duration) {
+    if !RECORDING.load(Ordering::Acquire) {
+        return;
+    }
     let mut state = state();
     if let Some(accum) = state.accums.iter_mut().find(|a| a.label == label) {
         accum.total += elapsed;
@@ -164,6 +176,10 @@ pub struct PassGuard {
 
 impl Drop for PassGuard {
     fn drop(&mut self) {
+        // A no-op guard (recording was off at `enter`) carries `NO_PASS`.
+        if self.idx == NO_PASS {
+            return;
+        }
         if let Some(pass) = state().passes.get_mut(self.idx)
             && pass.open
         {
@@ -195,6 +211,7 @@ pub struct PassReport {
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn finish() -> Vec<PassReport> {
+    RECORDING.store(false, Ordering::Release);
     // Stop the sampler and take its handle under the lock, then release the lock
     // before joining -- the sampler takes the lock each tick, so joining while
     // holding it would deadlock.
@@ -226,11 +243,23 @@ pub fn finish() -> Vec<PassReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LIVE_SAMPLERS, begin, enter, finish};
+    use super::{LIVE_SAMPLERS, accumulate, begin, enter, finish, read_rss_kib};
     use std::sync::atomic::Ordering;
+    use std::sync::{Mutex, MutexGuard};
+    use std::time::Duration;
+
+    /// The profiler is a process-global singleton, so its tests must not run
+    /// concurrently; each takes this lock first.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    fn serialized() -> MutexGuard<'static, ()> {
+        TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn finish_joins_the_sampler_so_cycles_never_accumulate() {
+        let _guard = serialized();
         for _ in 0..20 {
             begin();
             drop(enter("pass"));
@@ -241,5 +270,57 @@ mod tests {
                 "finish must join the sampler before returning"
             );
         }
+    }
+
+    #[test]
+    fn a_second_begin_does_not_spawn_a_second_sampler() {
+        let _guard = serialized();
+        begin();
+        begin();
+        // Let the sampler thread reach its start increment before counting.
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(LIVE_SAMPLERS.load(Ordering::Acquire), 1);
+        let _ = finish();
+        assert_eq!(LIVE_SAMPLERS.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn reports_passes_then_accums_in_order() {
+        let _guard = serialized();
+        begin();
+        drop(enter("profile-test-first"));
+        {
+            let _open = enter("profile-test-second");
+            accumulate("profile-test-sub", Duration::from_millis(1));
+        }
+        let report = finish();
+        // Filter to this test's own labels: with the feature on, a row-diff test
+        // running concurrently records its own passes into the shared state, but
+        // never under these labels, so the subsequence is deterministic.
+        let mine: Vec<_> = report
+            .iter()
+            .filter(|pass| pass.label.starts_with("profile-test-"))
+            .collect();
+        let labels: Vec<_> = mine.iter().map(|pass| pass.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "profile-test-first",
+                "profile-test-second",
+                "profile-test-sub"
+            ]
+        );
+        assert!(
+            mine[0].peak_rss_mib.is_some(),
+            "a pass carries an RSS reading"
+        );
+        assert!(mine[2].peak_rss_mib.is_none(), "an accum carries no RSS");
+    }
+
+    #[test]
+    fn rss_read_of_a_nonexistent_process_is_none() {
+        // `/bin/ps -p <no such pid>` prints nothing, so the parse yields None
+        // rather than a bogus figure.
+        assert_eq!(read_rss_kib(u32::MAX), None);
     }
 }
