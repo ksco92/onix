@@ -9,8 +9,9 @@
 //! tables use [`MemoryInput`]; a one-shot stream spools to a temporary file
 //! and implements [`TableInput`] over it, as the Python bindings do.
 //!
-//! See `src/row_diff.rs` for the row-matching and value-comparison rules, and
-//! `src/schema.rs` for the column type-normalization rules.
+//! See `src/row_diff.rs` for the row-matching passes, `docs/design/row-diff.md`
+//! for the algorithm, hashing, and value-comparison rules, and `src/schema.rs`
+//! for the column type-normalization rules.
 //!
 //! # Example
 //!
@@ -77,8 +78,9 @@ pub use schema::{ChangeKind, SchemaChange, diff_schemas};
 pub use table_diff::{TableDiff, TableDiffSummary};
 
 /// The maximum column-type nesting depth [`diff_tables`] will compare; deeper is refused
-/// with [`TableDiffError::MaxDepthExceeded`], turning a native-stack overflow (recursive
-/// comparison, `Display`, `Clone`/`Drop`) into an error before it can run.
+/// with [`TableDiffError::MaxDepthExceeded`], bounding the native-stack recursion in
+/// comparison, `Display`, `Clone`, and the drop of values onix builds from accepted
+/// input — not a caller's own drop of a `DataType` it built past this depth.
 /// Per-level cost is measured by `crates/onix-arrow/examples/type_stack_cost.rs`.
 pub const MAX_NESTING_DEPTH: usize = 128;
 

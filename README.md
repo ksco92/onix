@@ -118,7 +118,7 @@ Pass `--ignore-order` to compare every list by value instead of by position, mir
 
 `diff_tables` compares two tables the way `DeepDiff` compares two objects. It takes any object implementing the [Arrow PyCapsule interface](https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html) — a pyarrow `Table` or `RecordBatch`, a polars `DataFrame`, a DuckDB relation — and imports it with no Python round trip. The two tables are matched on a required, non-empty set of key columns (the table's primary key).
 
-It reports the **schema** diff (which columns were added, removed, or changed type), the keyed **row** diff (which rows were added, removed, or changed, and which keys are duplicated), and the per-cell diff (`cells_changed`): one row per changed cell, carrying the key columns, `column`, `old_value`/`new_value`, and `change` (`became_null`/`became_non_null`, `type_changed`, or `value_changed`), ordered by the canonical string rendering of the key columns (nulls first), then left-schema column order — the exact rendering and change-classification rules are in the module doc of [`crates/onix-arrow/src/row_diff.rs`](crates/onix-arrow/src/row_diff.rs). Rows are matched by the key columns; `rows_added`, `rows_removed`, `cells_changed`, and `duplicate_keys` return Arrow tables, and `summary()` counts each outcome.
+It reports the **schema** diff (which columns were added, removed, or changed type), the keyed **row** diff (which rows were added, removed, or changed, and which keys are duplicated), and the per-cell diff (`cells_changed`): one row per changed cell, carrying the key columns, `column`, `old_value`/`new_value`, and `change` (`became_null`/`became_non_null`, `type_changed`, or `value_changed`), ordered by the canonical string rendering of the key columns (nulls first), then left-schema column order — the exact rendering and change-classification rules are in [`docs/design/row-diff.md`](docs/design/row-diff.md)'s "Per-cell changes" section. Rows are matched by the key columns; `rows_added`, `rows_removed`, `cells_changed`, and `duplicate_keys` return Arrow tables, and `summary()` counts each outcome.
 
 ```python
 import pyarrow as pa
@@ -225,7 +225,7 @@ crates/onix-core   # the diff engine (library, no I/O)
 crates/onix-cli    # the `onix` binary (thin CLI over the core)
 crates/onix-arrow  # Arrow table diffing (schema diff and keyed row diff)
 crates/onix-py     # PyO3 bindings, published as `deepdiff-rs`
-docs/design/       # algorithm/invariant reference pages (list-diff, ignore-order, value-model, depth-budget)
+docs/design/       # algorithm/invariant reference pages (list-diff, ignore-order, value-model, depth-budget, row-diff)
 scripts/           # gen_goldens.py: regenerates tests/golden/ from real DeepDiff
 tests/golden       # DeepDiff-generated expected outputs (the compatibility corpus)
 perf/              # cross-language benchmark harness and RESULTS.md

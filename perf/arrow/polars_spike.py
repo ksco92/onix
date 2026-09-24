@@ -16,7 +16,7 @@ concatenates the per-column fragments; `change` is
 if the column's polars dtype differs between the two sides (a cheap,
 schema-level check) else `value_changed`. The sort key is each key column
 cast to `Utf8` (nulls first, polars' `nulls_last` default) then column
-rank -- onix's record order (`row_diff.rs`'s module doc).
+rank -- onix's record order (`row_diff.rs`'s `diff_cells` doc).
 
 Divergences from onix (the point is the timing ceiling, not byte parity):
 `_render` is polars' own formatter, not onix's Python `repr`/`str`

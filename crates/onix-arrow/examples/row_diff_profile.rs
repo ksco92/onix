@@ -1,6 +1,5 @@
-//! Per-pass wall-time and peak-RSS profile of one keyed row diff, the committed
-//! harness every row-diff performance change posts a before/after table from.
-//! Builds only with the `profile` feature, which the release wheel never enables.
+//! Per-pass wall-time and peak-RSS profile of one keyed row diff. Builds only
+//! with the `profile` feature, which the release wheel never enables.
 //!
 //! Each invocation runs a discarded warm-up diff, a timed uninstrumented diff
 //! (the `uninstrumented wall` line), and an instrumented diff whose passes make

@@ -53,8 +53,8 @@ Usage::
 # The `wide` kind (`--kind wide`, #84)
 
 `wide` trades the five columns above for one of every scalar type `onix-arrow`'s row diff
-hashes, cast-normalizes, or renders (see `crates/onix-arrow/src/row_diff.rs`'s "Value
-semantics"/"Per-cell changes" and `schema.rs`'s normalization rules), at the same 5 GB-per-side
+hashes, cast-normalizes, or renders (see `docs/design/row-diff.md`'s "Value
+semantics"/"Per-cell changes" sections and `schema.rs`'s normalization rules), at the same 5 GB-per-side
 target, so fewer, much wider rows (see `_wide_column_specs` for the exact list and
 `WIDE_DEFAULT_ROWS`'s comment for the row-count derivation). Nested types are out (the row diff
 skips a nested non-key column entirely -- see row_diff.rs's "Which column types are hashed,
