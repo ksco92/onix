@@ -795,8 +795,7 @@ and `test_differential_fuzz.py`'s subclass-key batch.
 - **`to_dict()` reports a `type_changes` entry's types as names, not
   classes.** Real `DeepDiff` puts the type objects themselves (`<class
   'tuple'>`) in `to_dict()`; `onix` puts the same names its `to_json()` uses
-  (`"tuple"`). Values are unaffected. See
-  `crates/onix-py/src/deepdiff.rs`'s `to_dict` doc.
+  (`"tuple"`). Values are unaffected.
 
 - **List-LCS numeric matching is exact only within `2^53`.** The matcher's
   cross-type equality (previous bullet) normalizes any integral value —
