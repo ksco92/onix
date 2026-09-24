@@ -1576,7 +1576,7 @@ fn next_dict_entry<'py>(
 /// an overridden `__eq__`/`__hash__` is not consulted (that is custom-object
 /// territory, out of this MVP's scope), so a key subclass whose equality
 /// or hash disagrees with its base type's is a documented nuance, not a
-/// bug — see `tests/golden/README.md`'s subclass section.
+/// bug — see `tests/golden/README.md`'s "Subclasses" section.
 fn classify_dict_key(
     key: &Bound<'_, PyAny>,
     dict_path: &[PathSegment],

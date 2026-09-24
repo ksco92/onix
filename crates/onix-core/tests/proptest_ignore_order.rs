@@ -4,7 +4,7 @@
 //! the one invariant genuinely specific to `ignore_order`: a shuffled copy of
 //! any list diffs to an empty report, for arbitrary JSON-shaped list
 //! elements (scalars and small nested containers), not just the hand-picked
-//! examples in `ignore_order.rs`'s own unit tests. Reuses the same bounded,
+//! examples in `ignore_order/tests.rs`'s own unit tests. Reuses the same bounded,
 //! seeded generator shape as `proptest_diff.rs` — see that file's doc for
 //! the rationale behind the depth/node/case-count bounds and the fixed seed.
 

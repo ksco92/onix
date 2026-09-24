@@ -382,7 +382,8 @@ fn object_with_non_str_keys_has_non_str_keys_is_true() {
 }
 
 /// See `tests/golden/README.md`'s nested-non-`str`-dict-key `to_json()`
-/// section, where this test is pinned as the `tuple`-key case.
+/// bullet in Known `DeepDiff` quirks, where this test is pinned as the
+/// `tuple`-key case.
 #[test]
 fn to_serde_json_stringifies_a_tuple_key_via_python_repr_where_deepdiff_would_crash() {
     let obj = Value::Object(Object::from_pairs(vec![(

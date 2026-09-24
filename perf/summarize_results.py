@@ -422,7 +422,8 @@ def render_fixture_matrix(report: Report) -> str:
         "changed, ~2% added, ~2% removed between each fixture's `a`/`b` pair, "
         "except `identical_1m` (byte-identical copy), `startup_trivial` "
         "(`{}` vs `{}`), and `ignore_order_10k` (pure shuffle plus ~5% "
-        "value-changed, no add/remove; see `ignore_order.rs`).",
+        "value-changed, no add/remove; see `build_ignore_order_list` in that "
+        "file).",
         "",
         "| Fixture | What it stresses | Input size (a+b) |",
         "|---|---|---|",
