@@ -11,7 +11,7 @@ system). Medians are taken over 11 runs at the 1M size and 5 runs at the full
 size (a single full-size run already takes tens of seconds; more runs would
 not fit a foreground session). Every run's raw metrics, plus the pair's
 SHA-256 checksums, are written to `bench_raw/<size>/<tool>_<run>.json`.
-This script's `Measurement`/`_normalize_maxrss`/`_fmt_mb` duplicate rather
+This script's `Measurement`/`_normalize_maxrss` duplicate rather
 than import their `bench_bindings.py` counterparts: it runs from `perf/arrow`
 with only that directory on `sys.path`, the same cross-directory-import
 constraint `perf/_common.py`'s own docstring documents for this repo's other
@@ -353,17 +353,6 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _fixture_checksums(fixture_dir: Path) -> dict[str, str]:
-    """
-    :param fixture_dir: Directory holding `a.parquet`/`b.parquet`.
-    :return: `a_sha256`/`b_sha256`, each file's SHA-256 hex digest.
-    """
-    return {
-        "a_sha256": _sha256_file(fixture_dir / "a.parquet"),
-        "b_sha256": _sha256_file(fixture_dir / "b.parquet"),
-    }
-
-
 def _measure_tool(
     tool: str,
     kind: str,
@@ -414,19 +403,9 @@ def _measure_tool(
     return Measurement(statistics.median(walls), statistics.median(cpus), statistics.median(rsses))
 
 
-def _fmt_ms(seconds: float) -> str:
-    """:return: A duration formatted in milliseconds."""
-    return f"{seconds * 1000:.2f} ms"
-
-
 def _fmt_s(seconds: float) -> str:
     """:return: A duration formatted in seconds."""
     return f"{seconds:.3f} s"
-
-
-def _fmt_mb(num_bytes: float) -> str:
-    """:return: A byte count formatted in MB (1 MB = 1_000_000 bytes)."""
-    return f"{num_bytes / 1_000_000:.1f} MB"
 
 
 def _print_table(size: str, results: dict[str, Measurement]) -> None:
@@ -441,8 +420,9 @@ def _print_table(size: str, results: dict[str, Measurement]) -> None:
     print("| --- | --- | --- | --- |")
     for tool in TOOLS:
         m = results[tool]
-        wall = _fmt_ms(m.wall_s) if m.wall_s < 1.0 else _fmt_s(m.wall_s)
-        print(f"| {tool} | {wall} | {_fmt_s(m.cpu_s)} | {_fmt_mb(m.rss_bytes)} |")
+        wall = f"{m.wall_s * 1000:.2f} ms" if m.wall_s < 1.0 else _fmt_s(m.wall_s)
+        # 1 MB = 1_000_000 bytes.
+        print(f"| {tool} | {wall} | {_fmt_s(m.cpu_s)} | {m.rss_bytes / 1_000_000:.1f} MB |")
 
 
 def _run_size(kind: str, size: str, fixture_dir: Path, key: list[str], runs: int) -> None:
@@ -458,7 +438,12 @@ def _run_size(kind: str, size: str, fixture_dir: Path, key: list[str], runs: int
     print(f"Checking {kind}/{size} correctness against {fixture_dir / 'manifest.json'} ...")
     _check_correctness(fixture_dir, key, kind)
     print(f"Hashing {kind}/{size} fixture pair ...")
-    checksums = _fixture_checksums(fixture_dir)
+
+    checksums = {
+        "a_sha256": _sha256_file(fixture_dir / "a.parquet"),
+        "b_sha256": _sha256_file(fixture_dir / "b.parquet"),
+    }
+
     print(json.dumps(checksums, indent=2))
 
     results = {tool: _measure_tool(tool, kind, size, fixture_dir, key, runs, checksums) for tool in TOOLS}

@@ -97,12 +97,6 @@ def _onix_json(a: JsonValue, b: JsonValue, *, ignore_order: bool) -> str:
     return _canonical_json(OnixDeepDiff(a, b, ignore_order=ignore_order).to_json())
 
 
-def _dd_json(a: JsonValue, b: JsonValue, *, ignore_order: bool) -> str:
-    return _canonical_json(
-        RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2).to_json()
-    )
-
-
 def _diverges_non_finite(
     a: JsonValue, b: JsonValue, *, ignore_order: bool
 ) -> tuple[str, str] | None:
@@ -115,7 +109,7 @@ def _diverges_non_finite(
     :param ignore_order: Whether to diff with `ignore_order=True`.
     :return: `(expected, actual)` if they diverge, else `None`.
     """
-    expected = _dd_json(a, b, ignore_order=ignore_order)
+    expected = _canonical_json(RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2).to_json())
     actual = _onix_json(a, b, ignore_order=ignore_order)
     if expected != actual:
         return expected, actual

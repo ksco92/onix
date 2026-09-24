@@ -530,14 +530,6 @@ def _member_ipc(diff: object, member: str) -> bytes:
     return sink.getvalue().to_pybytes()
 
 
-def _members_byte_identical(a: object, b: object) -> bool:
-    """Every Arrow-table member of two diffs serializes to identical IPC bytes."""
-    return all(
-        _member_ipc(a, member) == _member_ipc(b, member)
-        for member in ("rows_added", "rows_removed", "cells_changed", "duplicate_keys")
-    )
-
-
 def test_thread_count_does_not_change_the_result(tmp_path: Path) -> None:
     """The narrow diff is byte-identical single-threaded, at 2, 18, and the
     default: same Arrow batches, same summary, same to_json(). At 60,000 rows
@@ -575,7 +567,11 @@ def test_wide_fixture_thread_count_does_not_change_the_result(tmp_path: Path) ->
     for threads in (2, 18, None):
         other = diff_tables(left, right, key=["id"], threads=threads)
         assert other.summary() == single.summary(), f"summary at threads={threads}"
-        assert _members_byte_identical(other, single), f"batches at threads={threads}"
+
+        assert all(
+            _member_ipc(other, member) == _member_ipc(single, member)
+            for member in ("rows_added", "rows_removed", "cells_changed", "duplicate_keys")
+        ), f"batches at threads={threads}"
 
 
 # Digest pinning cells_changed's record order (and every member's row count)
