@@ -217,7 +217,10 @@ mod set;
 #[path = "tests.rs"]
 mod tests;
 
-pub use options::{DEFAULT_MAX_DEPTH, DiffOptions, diff, diff_with_max_depth, diff_with_options};
+pub use options::{
+    DEFAULT_MAX_DEPTH, DiffOptions, Resolved, diff, diff_with_max_depth, diff_with_options,
+    diff_with_resolved,
+};
 
 pub(crate) use array::array_diff;
 pub(crate) use dispatch::{

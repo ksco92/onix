@@ -42,6 +42,9 @@ pub(crate) fn diff_at(
     memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     check_traversal_depth(path, depth, opts.max_depth)?;
+    let Some((a, b)) = memo.substitute(a, b) else {
+        return Ok(Report::new());
+    };
 
     match (a, b) {
         (Value::Null, Value::Null) => Ok(Report::new()),

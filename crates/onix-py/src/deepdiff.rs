@@ -6,7 +6,11 @@
 use onix_core::Value;
 use pyo3::prelude::*;
 
-use crate::convert::{Held, opaque_error, render_report, to_value, value_to_pyobject};
+use onix_core::diff::Resolved;
+
+use crate::convert::{
+    Held, opaque_error, render_report, resolve_token, to_value, value_to_pyobject,
+};
 use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, serialize_value};
 
 /// A drop-in subset of `deepdiff.DeepDiff`.
@@ -114,17 +118,35 @@ impl DeepDiff {
         // shallow, else on the stack-sized worker (GIL released). The report
         // comes back in the same compact value model the inputs use, so it can
         // carry a tuple all the way out to `to_dict`.
-        let mut report_value = diff_to_value(py, a, b, opts)?;
-        let mut report_is_deep = is_deep(&report_value);
-        if held.needs_render {
-            let rendered = if report_is_deep {
+        // A class attribute stays an opaque token until the report compares
+        // it; each such token is converted and the diff run again.
+        let mut resolved = Resolved::new();
+        let report_value = loop {
+            let report_value = diff_to_value(py, &a, &b, opts, &resolved)?;
+            if !held.needs_render {
+                break report_value;
+            }
+            let rendered = if is_deep(&report_value) {
                 run_on_worker(py, || render_report(&report_value))?
             } else {
                 render_report(&report_value)
             };
-            report_value = rendered.map_err(|(type_name, path)| opaque_error(&type_name, &path))?;
-            report_is_deep = is_deep(&report_value);
-        }
+            match rendered {
+                Ok(rendered) => break rendered,
+                Err(token) if !resolved.contains_key(token.identity.as_str()) => {
+                    let value = resolve_token(
+                        py,
+                        &token.identity,
+                        &token.type_name,
+                        &token.path,
+                        &mut held,
+                    )?;
+                    resolved.insert(token.identity.into_boxed_str(), value);
+                }
+                Err(token) => return Err(opaque_error(&token.type_name, &token.path)),
+            }
+        };
+        let report_is_deep = is_deep(&report_value);
         // A conservative upper bound: the report only ever carries values
         // (or coerced copies, which coercion always renders as plain UTF-8
         // — see `crate::guard`) that already existed in `t1`/`t2`, so

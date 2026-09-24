@@ -334,7 +334,7 @@ pub fn object_key_path_segment(key: &ObjectKey) -> PathSegment {
 #[must_use]
 pub fn entry_path_segment(kind: ObjectKind, key: &ObjectKey) -> PathSegment {
     match (kind, key) {
-        (ObjectKind::CustomObject | ObjectKind::Opaque, ObjectKey::Str(s)) => {
+        (ObjectKind::CustomObject | ObjectKind::Opaque | ObjectKind::Cycle, ObjectKey::Str(s)) => {
             PathSegment::Attribute(s.into())
         }
         _ => object_key_path_segment(key),

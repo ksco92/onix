@@ -659,10 +659,12 @@ reconstruct an instance, so `to_dict()` returns the object's attribute `dict`.
 
 ### A recursive object
 
-A self-referential object (`obj.self_ref is obj`) is a cycle DeepDiff breaks with
-`parents_ids`, returning an empty diff. onix holds a compact value model, not the
-Python objects, and bounds recursion by depth instead, raising `MaxDepthError` at
-the ceiling: a deterministic error where DeepDiff returns `{}`.
+DeepDiff's `parents_ids` skips a child that is an object already on the path from
+the root, so a self-referential object or a parent pointer reports nothing for
+the cycle. onix holds such a child as a cycle token that reports nothing; it
+applies the rule to either side, where DeepDiff tests `t1`'s child, and a cycle
+token in an added or removed value renders as `{}` where DeepDiff's `to_json()`
+raises on the circular reference.
 
 ### Types DeepDiff routes to a handler onix lacks
 
@@ -678,16 +680,18 @@ for the attribute-less ones (`complex`, a bare `object()`) would otherwise
 silently report `{}` for two *unequal* values.
 
 Below the root, DeepDiff's `_diff` returns before any handler when `t1 is t2`, so
-a value both sides share is never diffed. onix holds such a value as an identity
-token, equal only to the same object. A class attribute (a class-level `Enum`
-member, config object or `re.Pattern`) is converted once per diff by its own walk,
-so an instance value that shadows it compares against the default's value; one
-onix cannot convert (ABCMeta's `_abc_impl`, a class-level lock, a
-`logging.Logger`, whose registry is cyclic) is a token too. So is a class
-attribute reached through more than 16 nested class-attribute defaults, so an
-instance that shadows every default above it raises where DeepDiff reports
-nothing. A whole object in a report leaves
-every class attribute out, as DeepDiff's `to_json()` render does. A token raises a
+a value both sides share is never diffed. onix skips two custom objects converted
+from the identical Python object the same way, and holds a value it cannot
+convert as an identity token, equal only to the same object. A class attribute is
+a token until a report compares it with a value that shadows it; it is then
+converted once for the diff (a class-level `Enum` member, config object or
+`re.Pattern`), so the shadowing value compares against the default's value. A
+class attribute onix cannot convert (ABCMeta's `_abc_impl`, a class-level lock)
+raises `TypeError` there, and one nested past `max_depth` on its own raises
+`MaxDepthError`. An error while converting an object's attributes (an unsupported
+dict key, a value nested past `max_depth`) is raised likewise only where a report
+compares or shows that object. A whole object in a report leaves every class
+attribute out, as DeepDiff's `to_json()` render does. A token raises a
 `TypeError` naming its path wherever a report would have to show it: as the
 compared value of a finding, or as an instance attribute of an object in the
 report. Two equal but distinct unsupported objects (`Decimal("1")` built twice)

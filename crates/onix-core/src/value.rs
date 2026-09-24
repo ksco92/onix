@@ -1755,6 +1755,9 @@ pub enum ObjectKind {
     /// A value onix cannot diff, held by the identity of its Python object: it
     /// has no entries and equals only a token for the same object.
     Opaque,
+    /// An object already on the conversion path above this position: the
+    /// diff reports nothing for it, as `DeepDiff`'s `parents_ids` skips it.
+    Cycle,
 }
 
 /// A JSON object: key-sorted, exactly-sized entries backed by a single
@@ -1809,6 +1812,10 @@ struct ObjectClass {
     /// The sorted names of the entries read from the class rather than the
     /// instance, which a whole-object render leaves out.
     class_attributes: Box<[Arc<str>]>,
+    /// The address of the Python object a custom object was converted from,
+    /// held alive for the diff: two equal addresses at one position are the
+    /// identical object, which `DeepDiff` never walks.
+    instance: Option<usize>,
 }
 
 /// The lengths `DeepDiff`'s `ignore_order` distance reads off a custom object
@@ -1874,14 +1881,16 @@ impl Object {
                 kind: ObjectKind::Dict,
                 lengths: ObjectLengths::default(),
                 class_attributes: Box::default(),
+                instance: None,
             })
         });
         self
     }
 
     /// Marks these entries as `kind`'s (a custom object's attributes, or an
-    /// opaque token's none) under class `name`, `identity`, `lengths` and
-    /// `class_attributes` — see [`ObjectKind`] and the `ObjectClass` struct.
+    /// opaque token's none) under class `name`, `identity`, `lengths`,
+    /// `class_attributes` and `instance` — see [`ObjectKind`] and the
+    /// `ObjectClass` struct.
     #[must_use]
     pub fn into_class(
         mut self,
@@ -1890,6 +1899,7 @@ impl Object {
         identity: Arc<str>,
         lengths: ObjectLengths,
         mut class_attributes: Vec<Arc<str>>,
+        instance: Option<usize>,
     ) -> Self {
         class_attributes.sort_unstable();
         self.class = Some(Box::new(ObjectClass {
@@ -1898,8 +1908,28 @@ impl Object {
             kind,
             lengths,
             class_attributes: class_attributes.into_boxed_slice(),
+            instance,
         }));
         self
+    }
+
+    /// Whether this is an [`ObjectKind::Cycle`] token.
+    #[must_use]
+    pub fn is_cycle(&self) -> bool {
+        self.kind() == ObjectKind::Cycle
+    }
+
+    /// Whether `self` and `other` stand for the identical Python object: two
+    /// custom objects converted from one address, or two tokens for one.
+    #[must_use]
+    pub fn same_instance(&self, other: &Object) -> bool {
+        match (self.class.as_ref(), other.class.as_ref()) {
+            (Some(a), Some(b)) if a.kind == ObjectKind::Opaque && b.kind == ObjectKind::Opaque => {
+                a.identity == b.identity
+            }
+            (Some(a), Some(b)) => a.instance.is_some() && a.instance == b.instance,
+            _ => false,
+        }
     }
 
     /// Whether `key` names an entry read from the class rather than the
@@ -2237,7 +2267,7 @@ impl Builder {
     }
 
     /// Builds a custom object [`Value`] from its attribute `entries` (all
-    /// `str`-keyed) under class `name`, `identity` and `lengths` — see
+    /// `str`-keyed), with the class parts [`Object::into_class`] takes — see
     /// [`ObjectKind::CustomObject`] and [`Object::same_class`].
     #[must_use]
     pub fn custom_object(
@@ -2247,6 +2277,7 @@ impl Builder {
         identity: Arc<str>,
         lengths: ObjectLengths,
         class_attributes: Vec<Arc<str>>,
+        instance: Option<usize>,
     ) -> Value {
         Value::Object(Object::from_pairs(entries).into_class(
             ObjectKind::CustomObject,
@@ -2254,6 +2285,7 @@ impl Builder {
             identity,
             lengths,
             class_attributes,
+            instance,
         ))
     }
 
@@ -2267,32 +2299,63 @@ impl Builder {
             identity,
             ObjectLengths::default(),
             Vec::new(),
+            None,
+        ))
+    }
+
+    /// Builds an [`ObjectKind::Cycle`] token for an object of type `name`.
+    #[must_use]
+    pub fn cycle(&mut self, name: Arc<str>) -> Value {
+        Value::Object(Object::from_pairs(Vec::new()).into_class(
+            ObjectKind::Cycle,
+            name,
+            Arc::from(""),
+            ObjectLengths::default(),
+            Vec::new(),
+            None,
         ))
     }
 }
 
 /// A copy of `value` as a report shows it: every custom object's class
 /// attributes left out, at any depth, as `DeepDiff`'s whole-object render leaves them out.
-/// `Err` carries the path below `value` and the type name of the first opaque
-/// token the render would show.
+/// `Err` names the first opaque token the render would show.
 ///
 /// Recurses natively over `value`'s nesting; a caller runs a deep value on a
 /// sized stack.
 ///
 /// # Errors
 ///
-/// Returns the token's relative path and type name when one is left in the
-/// render.
-pub fn rendered(value: &Value) -> Result<Value, (Vec<PathSegment>, String)> {
+/// Returns an [`Unrendered`] when an opaque token is left in the render.
+pub fn rendered(value: &Value) -> Result<Value, Unrendered> {
     let mut path = Vec::new();
-    rendered_at(value, &mut path).map_err(|name| (path, name))
+    rendered_at(value, &mut path).map_err(|(type_name, identity)| Unrendered {
+        path,
+        type_name,
+        identity,
+    })
 }
 
-fn rendered_at(value: &Value, path: &mut Vec<PathSegment>) -> Result<Value, String> {
+/// An opaque token a report would have to show: its path below the rendered
+/// value, its type name and its identity.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Unrendered {
+    /// The token's path below the rendered value.
+    pub path: Vec<PathSegment>,
+    /// The type name of the value the token stands for.
+    pub type_name: String,
+    /// The token's identity.
+    pub identity: String,
+}
+
+fn rendered_at(value: &Value, path: &mut Vec<PathSegment>) -> Result<Value, (String, String)> {
     let (items, tuple) = match value {
         Value::Object(map) => {
-            if map.opaque_identity().is_some() {
-                return Err(map.type_name().unwrap_or_default().to_string());
+            if let Some(identity) = map.opaque_identity() {
+                return Err((
+                    map.type_name().unwrap_or_default().to_string(),
+                    identity.to_string(),
+                ));
             }
             let mut kept = Vec::with_capacity(map.entries.len());
             for (key, child) in map {

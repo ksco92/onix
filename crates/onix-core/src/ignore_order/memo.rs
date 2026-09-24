@@ -130,6 +130,9 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use crate::diff::Resolved;
+use crate::value::Value;
+
 use super::fxhash::HashMap;
 use super::hash::{
     DistKey, ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId,
@@ -168,7 +171,7 @@ type DistanceKey = (DistKey, DistKey);
 ///
 /// [`rough_distance`]: super::distance::rough_distance
 /// [`is_container`]: super::memo::is_container
-pub(crate) struct IgnoreOrderMemo {
+pub(crate) struct IgnoreOrderMemo<'r> {
     cache: RefCell<HashMap<DistanceKey, f64>>,
     /// Interns each distinct hashable-tuple identity to its place in
     /// `tuple_digests`, so a nested tuple can be named by one [`TupleId`]
@@ -201,6 +204,9 @@ pub(crate) struct IgnoreOrderMemo {
     /// keyed by each of the dict's own keys' `ItemKey` trees (a `tuple`
     /// dict key included), not a cheap string ordering.
     member_content: RefCell<BTreeMap<MemberContent, RepId>>,
+    /// The values the diff compares in place of opaque tokens (see
+    /// [`crate::diff::diff_with_resolved`]).
+    resolved: &'r Resolved,
     enabled: bool,
     /// Total number of times [`Self::put`] has actually run — every distance
     /// *recomputation*, not just the distinct entries it leaves behind (a
@@ -213,7 +219,10 @@ pub(crate) struct IgnoreOrderMemo {
     puts: std::cell::Cell<usize>,
 }
 
-impl IgnoreOrderMemo {
+/// The empty table a memo compares opaque tokens against by default.
+static NO_RESOLVED: Resolved = BTreeMap::new();
+
+impl IgnoreOrderMemo<'_> {
     /// A live cache (production path).
     pub(crate) fn new() -> Self {
         Self {
@@ -222,6 +231,7 @@ impl IgnoreOrderMemo {
             tuple_digests: RefCell::new(Vec::new()),
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),
+            resolved: &NO_RESOLVED,
             enabled: true,
             #[cfg(test)]
             puts: std::cell::Cell::new(0),
@@ -239,8 +249,42 @@ impl IgnoreOrderMemo {
             tuple_digests: RefCell::new(Vec::new()),
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),
+            resolved: &NO_RESOLVED,
             enabled: false,
             puts: std::cell::Cell::new(0),
+        }
+    }
+
+    /// A live memo that compares an opaque token by the value `resolved` maps
+    /// its identity to.
+    pub(crate) fn with_resolved(resolved: &Resolved) -> IgnoreOrderMemo<'_> {
+        IgnoreOrderMemo {
+            resolved,
+            ..IgnoreOrderMemo::new()
+        }
+    }
+
+    /// The pair `(a, b)` as the diff compares it, each opaque token with a
+    /// resolved value replaced by that value, or `None` when the pair reports
+    /// nothing: the identical Python object on both sides, or a cycle token on
+    /// either, as `DeepDiff`'s `t1 is t2` and `parents_ids` checks skip them.
+    pub(crate) fn substitute<'v>(
+        &'v self,
+        a: &'v Value,
+        b: &'v Value,
+    ) -> Option<(&'v Value, &'v Value)> {
+        let resolve = |value: &'v Value| match value {
+            Value::Object(map) => map
+                .opaque_identity()
+                .and_then(|identity| self.resolved.get(identity))
+                .unwrap_or(value),
+            _ => value,
+        };
+        match (a, b) {
+            (Value::Object(x), Value::Object(y)) if x.same_instance(y) => None,
+            (Value::Object(x), _) if x.is_cycle() => None,
+            (_, Value::Object(y)) if y.is_cycle() => None,
+            _ => Some((resolve(a), resolve(b))),
         }
     }
 

@@ -287,6 +287,7 @@ fn decode_tagged_object(
             ..Default::default()
         },
         Vec::new(),
+        None,
     )
 }
 

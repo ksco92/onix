@@ -5,6 +5,8 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use onix_core::diff::Resolved;
+
 use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 
 /// Diffs two JSON documents and returns a `DeepDiff`-compatible JSON report
@@ -28,7 +30,7 @@ pub(crate) fn diff_json(
     // Stack safety: diffing, see `guard`'s doc; parsing/dropping, see `onix_core::value`'s.
     let a_value = parse_json(a, "a")?;
     let b_value = parse_json(b, "b")?;
-    let report_value = diff_to_value(py, a_value, b_value, opts)?;
+    let report_value = diff_to_value(py, &a_value, &b_value, opts, &Resolved::new())?;
     // `false`: parsed JSON text can never hold a lone surrogate escape.
     serialize_value(py, &report_value, is_deep(&report_value), false)
 }

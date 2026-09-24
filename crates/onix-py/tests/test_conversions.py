@@ -1510,15 +1510,16 @@ def test_a_deep_class_attribute_converts_on_a_small_thread() -> None:
     assert outcome == [{"iterable_item_added": {"root[1]": {}}}]
 
 
-def test_a_class_attribute_placed_past_the_depth_budget_raises_max_depth_error() -> None:
-    """A class attribute converted at a shallow position and reached again 10,000 levels deeper raises."""
+def test_a_deep_class_attribute_reached_shallow_and_deep_but_never_compared_reports_nothing_for_it() -> None:
+    """A 12,000-deep class attribute reached at depth 1 and again 10,000 levels deeper is never walked."""
     holder = type("Holder", (), {"a": _nest(1, 12000)})
-    with pytest.raises(MaxDepthError):
-        DeepDiff([holder(), _nest(holder(), 10000)], [holder()], max_depth=20000)
+    report = json.loads(DeepDiff([holder(), _nest(holder(), 10000)], [holder()], max_depth=20000).to_json())
+    assert list(report) == ["iterable_item_removed"]
+    assert list(report["iterable_item_removed"]) == ["root[1]"]
 
 
-def test_a_class_attribute_too_deep_for_its_position_raises_max_depth_error() -> None:
-    """A class attribute that converts on its own but is too deep where it is reached raises MaxDepthError."""
+def test_a_class_attribute_shadowed_at_one_position_and_shared_at_a_deeper_one_diffs_like_deepdiff() -> None:
+    """A class attribute compared where it is shadowed and shared 15 levels deep reports what DeepDiff reports."""
 
     class E:
         shared = {"k": [[[[1]]]]}
@@ -1527,8 +1528,10 @@ def test_a_class_attribute_too_deep_for_its_position_raises_max_depth_error() ->
             if shared is not None:
                 self.shared = shared
 
-    with pytest.raises(MaxDepthError):
-        DeepDiff([E({"k": [[[[1]]]]}), _nest(E(), 14)], [E(), _nest(E(), 14)], max_depth=20)
+    a, b = [E({"k": [[[[1]]]]}), _nest(E(), 14)], [E(), _nest(E(), 14)]
+    assert json.loads(DeepDiff(a, b, max_depth=20).to_json()) == json.loads(
+        RealDeepDiff(a, b, verbose_level=2).to_json()
+    )
 
 
 def _class_attribute_chain(levels: int) -> tuple[object, object]:
@@ -1543,9 +1546,107 @@ def _class_attribute_chain(levels: int) -> tuple[object, object]:
     return classes[levels](), shadowed
 
 
-def test_class_attributes_nested_past_sixteen_conversions_are_identity_tokens() -> None:
-    """At 16 nested class-attribute defaults onix matches DeepDiff; at 17 the innermost is a token and raises."""
-    assert json.loads(DeepDiff(*_class_attribute_chain(16)).to_json()) == {}
-    assert RealDeepDiff(*_class_attribute_chain(17)) == {}
-    with pytest.raises(TypeError, match="cannot report the K0"):
-        DeepDiff(*_class_attribute_chain(17))
+@pytest.mark.parametrize("levels", [16, 17, 40])
+def test_a_shadowed_chain_of_class_attribute_defaults_diffs_like_deepdiff(levels: int) -> None:
+    """An instance shadowing every default but the innermost of a chain of class attributes reports nothing."""
+    onix, real = _canonical(*_class_attribute_chain(levels))
+    assert onix == real == {}
+
+
+# --- Identity and cycles: DeepDiff's `t1 is t2` and `parents_ids` rules (issue #66) ---
+
+
+class _Service:
+    def __init__(self, v: int) -> None:
+        self.v = v
+        self.log = logging.getLogger("my.own.module")
+
+
+def test_an_instance_attribute_holding_a_shared_logger_reports_only_the_changed_value() -> None:
+    """A logger both instances hold is the identical object and never walked, so only root.v changes."""
+    onix, real = _canonical(_Service(1), _Service(2))
+    assert onix == real == {"values_changed": {"root.v": {"new_value": 2, "old_value": 1}}}
+
+
+class _Node:
+    def __init__(self, value: int, parent: "_Node | None" = None) -> None:
+        self.value = value
+        self.parent = parent
+        self.children: list[_Node] = []
+        if parent is not None:
+            parent.children.append(self)
+
+
+def _tree(leaf_value: int) -> _Node:
+    root = _Node(0)
+    for i in range(3):
+        child = _Node(i + 1, root)
+        _Node(leaf_value if i == 2 else 10 + i, child)
+    return root
+
+
+def test_a_parent_pointer_tree_with_one_changed_leaf_diffs_like_deepdiff() -> None:
+    """A child pointing back at an ancestor is skipped, as DeepDiff's parents_ids skips it."""
+    onix, real = _canonical(_tree(5), _tree(6))
+    assert onix == real
+    assert list(onix["values_changed"]) == ["root.children[2].children[0].value"]
+
+
+def test_a_self_referential_object_diffs_like_deepdiff() -> None:
+    """An object holding itself reports its other changes and nothing for the cycle."""
+
+    class Recursive:
+        def __init__(self, x: int) -> None:
+            self.x = x
+            self.self_ref = self
+
+    onix, real = _canonical(Recursive(1), Recursive(2))
+    assert onix == real == {"values_changed": {"root.x": {"new_value": 2, "old_value": 1}}}
+
+
+class _Deep:
+    a = _nest(1, 600)
+    b = _nest(1, 505)
+
+    def __init__(self, a: object = None) -> None:
+        if a is not None:
+            self.a = a
+
+
+def test_a_class_attribute_deeper_than_max_depth_raises_where_it_is_compared() -> None:
+    """A 600-deep class attribute compared against a shadowing value raises MaxDepthError at its path."""
+    with pytest.raises(MaxDepthError, match=r"at root\.a"):
+        DeepDiff(_Deep(1), _Deep())
+
+
+def test_class_attributes_deeper_than_max_depth_report_nothing_when_never_compared() -> None:
+    """A 505-deep and a 600-deep class attribute ten levels down, never compared, report nothing."""
+    assert json.loads(DeepDiff(_nest(_Deep(), 9), _nest(_Deep(), 9)).to_json()) == {}
+
+
+_COUNTED_READS: list[int] = []
+
+
+class _Counted:
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+    @property
+    def watched(self) -> int:
+        _COUNTED_READS.append(self.v)
+        return self.v
+
+
+class _WithCountedDefault:
+    default = _Counted(1)
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+def test_a_shared_class_attribute_is_never_converted() -> None:
+    """A class attribute both instances share is never walked, as DeepDiff's `t1 is t2` check never walks it."""
+    _COUNTED_READS.clear()
+    onix = json.loads(DeepDiff(_WithCountedDefault(1), _WithCountedDefault(2)).to_json())
+    assert _COUNTED_READS == []
+    assert onix == json.loads(RealDeepDiff(_WithCountedDefault(1), _WithCountedDefault(2), verbose_level=2).to_json())

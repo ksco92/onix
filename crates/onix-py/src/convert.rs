@@ -222,7 +222,6 @@ use pyo3::types::{
 };
 
 use crate::errors::MaxDepthError;
-use crate::guard::{is_deep, run_on_worker};
 
 /// A Python sequence being walked: a `list` or a `tuple`. The two differ
 /// only in their iterator type and in which [`CValue`] the finished items
@@ -559,9 +558,12 @@ fn classify_other<'py>(
 ) -> PyResult<Step<'py>> {
     if let Ok(attribute) = current.cast::<ClassAttribute>() {
         let value = attribute.get().0.bind(current.py()).clone();
-        return Ok(Step::Done(class_attribute_value(
-            &value, path, builder, held,
-        )?));
+        held.class_attributes
+            .insert(identity_of(&value), value.clone().unbind());
+        return Ok(Step::Done(opaque(&value, builder, held)));
+    }
+    if held.on_path.contains(&(current.as_ptr() as usize)) {
+        return Ok(Step::Done(builder.cycle(class_name(current))));
     }
     if let Some(strategy) = object_strategy(current)? {
         return object_step(current, &strategy, path, builder, held);
@@ -576,81 +578,64 @@ fn classify_other<'py>(
 }
 
 /// A class attribute's value, as [`detailed_dict`] hands it to [`classify`]:
-/// converted once per diff by [`class_attribute_value`].
+/// held as an opaque token until a report compares it, then converted by
+/// [`resolve_token`].
 #[pyclass(frozen)]
 struct ClassAttribute(Py<PyAny>);
 
-/// How many class-attribute conversions may nest inside one another on the
-/// native stack before a further one becomes an opaque token.
-// Fixed ceiling; raise it if a real shadowed default nests deeper.
-const MAX_CLASS_ATTRIBUTE_NESTING: usize = 16;
-
-/// The class attribute `value` at `path`, converted by its own walk with the
-/// full `max_depth` budget and memoized by address for the diff. A value that
-/// cannot be converted, one already being converted, or one nested too deep is
-/// an opaque token, as `DeepDiff`'s `t1 is t2` check never looks inside a value
-/// two instances share; a value too deep to place at `path` raises
-/// `MaxDepthError`.
-fn class_attribute_value(
-    value: &Bound<'_, PyAny>,
-    path: &[PathSegment],
-    builder: &mut Builder,
+/// The value the opaque token `identity`, found at `path` in a report, stands
+/// for: its class attribute converted by its own walk. A token for an object
+/// whose conversion failed raises that error; a token for anything else, or a
+/// class attribute that cannot be converted, raises the refusal; one nested
+/// past `max_depth` on its own raises `MaxDepthError`.
+pub(crate) fn resolve_token(
+    py: Python<'_>,
+    identity: &str,
+    type_name: &str,
+    path: &str,
     held: &mut Held,
 ) -> PyResult<CValue> {
-    let py = value.py();
-    let address = value.as_ptr() as usize;
-    let converted = match held.class_attributes.get(&address) {
-        Some(Some(converted)) => clone_off_stack(py, converted)?,
-        Some(None) => return Ok(opaque(value, builder, held)),
-        None if held.nesting == MAX_CLASS_ATTRIBUTE_NESTING => {
-            return Ok(opaque(value, builder, held));
-        }
-        None => {
-            held.objects.push(value.clone().unbind());
-            held.class_attributes.insert(address, None);
-            held.nesting += 1;
-            let converted = to_value(value, held.max_depth, held);
-            held.nesting -= 1;
-            let converted = match converted {
-                Ok((converted, saw_wtf8)) => {
-                    held.saw_wtf8 |= saw_wtf8;
-                    converted
-                }
-                Err(err) if err.is_instance_of::<PyException>(py) => opaque(value, builder, held),
-                Err(err) => return Err(err),
-            };
-            let copy = clone_off_stack(py, &converted)?;
-            held.class_attributes.insert(address, Some(converted));
-            copy
-        }
-    };
-    if onix_core::exceeds_depth(&converted, held.max_depth.saturating_sub(path.len())) {
-        return Err(max_depth_error(held.max_depth, path));
+    if let Some(err) = held.failures.get(identity) {
+        return Err(err.clone_ref(py));
     }
-    Ok(converted)
+    let Some(value) = held.class_attributes.get(identity).map(|v| v.clone_ref(py)) else {
+        return Err(opaque_error(type_name, path));
+    };
+    match to_value(value.bind(py), held.max_depth, held) {
+        Ok((converted, saw_wtf8)) => {
+            held.saw_wtf8 |= saw_wtf8;
+            Ok(converted)
+        }
+        Err(err) if err.is_instance_of::<MaxDepthError>(py) => {
+            Err(MaxDepthError::new_err(format!(
+                "the {type_name} class attribute at {path} is nested past the configured max_depth \
+             ({})",
+                held.max_depth,
+            )))
+        }
+        Err(err) if err.is_instance_of::<PyException>(py) => Err(opaque_error(type_name, path)),
+        Err(err) => Err(err),
+    }
 }
 
-/// `value.clone()`, on the sized worker when `value` is too deep for the
-/// natively recursive clone to run on the calling thread.
-fn clone_off_stack(py: Python<'_>, value: &CValue) -> PyResult<CValue> {
-    if is_deep(value) {
-        run_on_worker(py, || value.clone())
-    } else {
-        Ok(value.clone())
-    }
+/// The identity string an opaque token for `obj` carries: its address.
+fn identity_of(obj: &Bound<'_, PyAny>) -> String {
+    format!("{:x}", obj.as_ptr() as usize)
 }
 
 /// What one diff's conversions share: every Python object whose address a
-/// conversion keys into an identity or a memo, held so no address is reused
-/// while the diff runs; the converted class attributes (`None` while one is
-/// being converted); each `Enum` class's length; and whether the report needs
-/// [`render_report`].
+/// conversion keys into an identity, held so no address is reused while the
+/// diff runs; the class attributes tokens stand for, and the errors of the
+/// objects whose conversion failed, by identity; the custom
+/// objects on the current walk's path; each `Enum` class's length; and
+/// whether the report needs [`render_report`].
 pub(crate) struct Held {
     objects: Vec<Py<PyAny>>,
-    class_attributes: HashMap<usize, Option<CValue>>,
+    class_attributes: HashMap<String, Py<PyAny>>,
+    failures: HashMap<String, PyErr>,
+    on_path: Vec<usize>,
     enum_lengths: HashMap<usize, usize>,
     max_depth: usize,
-    nesting: usize,
     pub(crate) saw_wtf8: bool,
     pub(crate) needs_render: bool,
 }
@@ -660,9 +645,10 @@ impl Held {
         Self {
             objects: Vec::new(),
             class_attributes: HashMap::new(),
+            failures: HashMap::new(),
+            on_path: Vec::new(),
             enum_lengths: HashMap::new(),
             max_depth,
-            nesting: 0,
             saw_wtf8: false,
             needs_render: false,
         }
@@ -674,10 +660,7 @@ impl Held {
 fn opaque(obj: &Bound<'_, PyAny>, builder: &mut Builder, held: &mut Held) -> CValue {
     held.objects.push(obj.clone().unbind());
     held.needs_render = true;
-    builder.opaque(
-        class_name(obj),
-        Arc::from(format!("{:x}", obj.as_ptr() as usize)),
-    )
+    builder.opaque(class_name(obj), Arc::from(identity_of(obj)))
 }
 
 /// How `_diff_obj` or `_diff_enum` enumerates an accepted object's attributes.
@@ -790,6 +773,8 @@ fn object_step<'py>(
     held.needs_render |= !class_attributes.is_empty();
     let mut class = Box::new(py_class(obj, lengths, held));
     class.class_attributes = class_attributes;
+    class.instance = Some(obj.as_ptr() as usize);
+    held.objects.push(obj.clone().unbind());
     let mut iter = attrs.iter();
     Ok(match next_dict_entry(&mut iter, path, builder)? {
         None => Step::Done(finish_object(
@@ -1167,7 +1152,7 @@ fn finish_object(
         ObjectKind::Dict => {
             builder.object_with_keys_and_class(built, class.map(|c| (c.name, c.identity)))
         }
-        ObjectKind::CustomObject | ObjectKind::Opaque => {
+        ObjectKind::CustomObject | ObjectKind::Opaque | ObjectKind::Cycle => {
             let class = class.expect("a custom object always carries its class");
             builder.custom_object(
                 built,
@@ -1175,9 +1160,93 @@ fn finish_object(
                 class.identity,
                 class.lengths,
                 class.class_attributes,
+                class.instance,
             )
         }
     }
+}
+
+/// The name and address of the custom object a frame converts, `None` for any
+/// other frame.
+fn frame_object(frame: &Frame<'_>) -> Option<(Arc<str>, usize)> {
+    match frame {
+        Frame::Dict {
+            class: Some(class), ..
+        } => class
+            .instance
+            .map(|instance| (class.name.clone(), instance)),
+        _ => None,
+    }
+}
+
+/// [`advance_frame`], turning a custom object whose next entry fails with an
+/// `Exception` into [`object_failure`]'s token, and taking a finished custom
+/// object off the walk's path.
+fn advance_or_fail<'py>(
+    py: Python<'_>,
+    frame: Frame<'py>,
+    value: CValue,
+    path: &mut Vec<PathSegment>,
+    builder: &mut Builder,
+    held: &mut Held,
+) -> PyResult<Advance<'py>> {
+    let object = frame_object(&frame);
+    let advanced = match advance_frame(frame, value, path, builder) {
+        Err(err) if object.is_some() && err.is_instance_of::<PyException>(py) => Advance::Done(
+            object_failure(err, object.clone().expect("checked above"), held, builder),
+        ),
+        advanced => advanced?,
+    };
+    if object.is_some() && matches!(advanced, Advance::Done(_)) {
+        held.on_path.pop();
+    }
+    Ok(advanced)
+}
+
+/// After `err`, unwinds the walk to the innermost custom object still being
+/// converted, dropping the frames above it and its own, and returns
+/// [`object_failure`]'s token for it; `Err(err)` when `err` is not an
+/// `Exception` or no custom object is being converted.
+fn object_failure_at(
+    py: Python<'_>,
+    err: PyErr,
+    stack: &mut Vec<Frame<'_>>,
+    path: &mut Vec<PathSegment>,
+    held: &mut Held,
+    builder: &mut Builder,
+) -> PyResult<CValue> {
+    if !err.is_instance_of::<PyException>(py) {
+        return Err(err);
+    }
+    let Some(index) = stack
+        .iter()
+        .rposition(|frame| frame_object(frame).is_some())
+    else {
+        return Err(err);
+    };
+    let object = frame_object(&stack[index]).expect("the frame at `index` converts an object");
+    for frame in stack.drain(index..) {
+        if frame_object(&frame).is_some() {
+            held.on_path.pop();
+        }
+    }
+    path.truncate(index);
+    Ok(object_failure(err, object, held, builder))
+}
+
+/// An opaque token for the custom object `(name, address)` whose conversion
+/// failed with `err`, which a report showing the token raises.
+fn object_failure(
+    err: PyErr,
+    (name, address): (Arc<str>, usize),
+    held: &mut Held,
+    builder: &mut Builder,
+) -> CValue {
+    let identity = format!("{address:x}");
+    held.needs_render = true;
+    let token = builder.opaque(name, Arc::from(identity.as_str()));
+    held.failures.insert(identity, err);
+    token
 }
 
 /// Converts a Python object into an [`onix_core::Value`], recursing at most
@@ -1206,6 +1275,7 @@ pub(crate) fn to_value(
     held: &mut Held,
 ) -> PyResult<(CValue, bool)> {
     let mut builder = Builder::new();
+    held.on_path.clear();
     let mut stack: Vec<Frame<'_>> = Vec::new();
     let mut path: Vec<PathSegment> = Vec::new();
     let mut pending: Option<Pending<'_>> = Some((obj.clone(), 0, false));
@@ -1218,11 +1288,17 @@ pub(crate) fn to_value(
     // conversion never needs a sized-worker drop path.
     loop {
         if let Some((current, depth, set_member)) = pending.take() {
-            if depth > max_depth {
-                return Err(max_depth_error(max_depth, &path));
+            let step = if depth > max_depth {
+                Err(max_depth_error(max_depth, &path))
+            } else {
+                classify(&current, &path, &mut builder, set_member, held)
             }
+            .or_else(|err| {
+                object_failure_at(obj.py(), err, &mut stack, &mut path, held, &mut builder)
+                    .map(Step::Done)
+            })?;
 
-            match classify(&current, &path, &mut builder, set_member, held)? {
+            match step {
                 Step::Done(value) => {
                     if matches!(&value, CValue::Str(CStr::Wtf8(_))) {
                         saw_wtf8 = true;
@@ -1266,6 +1342,8 @@ pub(crate) fn to_value(
                     }
                     path.push(entry_path_segment(kind, &first_key));
                     let capacity = iter.len().saturating_add(1);
+                    held.on_path
+                        .extend(class.as_ref().and_then(|class| class.instance));
                     stack.push(Frame::Dict {
                         remaining: iter,
                         built: Vec::with_capacity(capacity),
@@ -1287,8 +1365,7 @@ pub(crate) fn to_value(
             None => return Ok((value, saw_wtf8)),
             Some(frame) => {
                 path.pop();
-
-                match advance_frame(frame, value, &mut path, &mut builder)? {
+                match advance_or_fail(obj.py(), frame, value, &mut path, &mut builder, held)? {
                     Advance::NeedsChild {
                         pending: next_pending,
                         frame,
@@ -1708,8 +1785,8 @@ fn unprocessed_error(obj: &Bound<'_, PyAny>, path: &[PathSegment], err: &PyErr) 
 
 /// `report` as it renders, each finding's value through
 /// [`onix_core::value::rendered`]. An opaque token left in the render is the
-/// `Err` of its type name and full path.
-pub(crate) fn render_report(report: &CValue) -> Result<CValue, (String, String)> {
+/// `Err`.
+pub(crate) fn render_report(report: &CValue) -> Result<CValue, Unrendered> {
     let CValue::Object(categories) = report else {
         return Ok(report.clone());
     };
@@ -1753,11 +1830,23 @@ pub(crate) fn render_report(report: &CValue) -> Result<CValue, (String, String)>
 }
 
 /// [`onix_core::value::rendered`] for the finding value at `path`.
-fn rendered_at(value: &CValue, path: &str) -> Result<CValue, (String, String)> {
-    rendered(value).map_err(|(below, type_name)| {
-        let below = render_path(&below).to_string();
-        (type_name, format!("{path}{}", &below["root".len()..]))
+fn rendered_at(value: &CValue, path: &str) -> Result<CValue, Unrendered> {
+    rendered(value).map_err(|unrendered| Unrendered {
+        path: format!(
+            "{path}{}",
+            &render_path(&unrendered.path).to_string()["root".len()..]
+        ),
+        type_name: unrendered.type_name,
+        identity: unrendered.identity,
     })
+}
+
+/// An opaque token left in a rendered report: its full path, its type name
+/// and its identity.
+pub(crate) struct Unrendered {
+    pub(crate) path: String,
+    pub(crate) type_name: String,
+    pub(crate) identity: String,
 }
 
 /// The error for an object that reached a set member, or anything nested
@@ -1795,6 +1884,7 @@ struct PyClass {
     identity: Arc<str>,
     lengths: ObjectLengths,
     class_attributes: Vec<Arc<str>>,
+    instance: Option<usize>,
 }
 
 /// The [`PyClass`] of `obj`'s type, identified by the type object's address;
@@ -1808,6 +1898,7 @@ fn py_class(obj: &Bound<'_, PyAny>, lengths: ObjectLengths, held: &mut Held) -> 
         identity,
         lengths,
         class_attributes: Vec::new(),
+        instance: None,
     }
 }
 

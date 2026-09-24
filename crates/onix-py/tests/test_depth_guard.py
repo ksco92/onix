@@ -656,22 +656,3 @@ def test_deep_custom_object_nesting_past_a_raised_max_depth_raises_at_conversion
     with pytest.raises(MaxDepthError):
         DeepDiff(a, b, max_depth=MAX_DEPTH_CEILING)
 
-
-def test_a_recursive_object_raises_max_depth_error_rather_than_looping() -> None:
-    """
-    A self-referential object is a cycle onix bounds by depth rather than by
-    identity: where DeepDiff's `parents_ids` cycle detection returns an empty
-    diff, onix raises MaxDepthError deterministically instead of following the
-    cycle forever or crashing (documented in tests/golden/README.md).
-    """
-
-    class _Recursive:
-        pass
-
-    a = _Recursive()
-    a.self_ref = a
-    b = _Recursive()
-    b.self_ref = b
-
-    with pytest.raises(MaxDepthError):
-        DeepDiff(a, b)

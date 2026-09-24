@@ -9,6 +9,7 @@
 //! it ([`serialize_value`]), prevent that. `crate::convert`'s walk from Python
 //! objects runs on the calling thread instead, so it must itself be iterative.
 
+use onix_core::diff::Resolved;
 use onix_core::{DEFAULT_MAX_DEPTH, DiffOptions, Value};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -70,9 +71,10 @@ pub(crate) fn resolve_options(
     })
 }
 
-/// Diffs `a` and `b` and renders the report to a [`Value`] (see
+/// Diffs `a` and `b`, comparing an opaque token as the value `resolved` maps
+/// it to, and renders the report to a [`Value`] (see
 /// [`onix_core::Report::to_value`]), running the natively-recursive diff on
-/// the sized worker thread when either input is nested past
+/// the sized worker thread when an input or a resolved value is nested past
 /// [`MAX_INLINE_DEPTH`], inline otherwise.
 ///
 /// # Errors
@@ -80,20 +82,20 @@ pub(crate) fn resolve_options(
 /// `deepdiff_rs.MaxDepthError` if the diff would exceed `opts.max_depth`.
 pub(crate) fn diff_to_value(
     py: Python<'_>,
-    a: Value,
-    b: Value,
+    a: &Value,
+    b: &Value,
     opts: DiffOptions,
+    resolved: &Resolved,
 ) -> PyResult<Value> {
-    if is_deep(&a) || is_deep(&b) {
-        run_on_worker(py, move || {
-            onix_core::diff_with_options(&a, &b, &opts).map(|report| report.to_value())
-        })?
-        .map_err(|error| map_diff_error(&error))
+    let diff = || {
+        onix_core::diff::diff_with_resolved(a, b, &opts, resolved).map(|report| report.to_value())
+    };
+    if is_deep(a) || is_deep(b) || resolved.values().any(is_deep) {
+        run_on_worker(py, diff)?
     } else {
-        onix_core::diff_with_options(&a, &b, &opts)
-            .map(|report| report.to_value())
-            .map_err(|error| map_diff_error(&error))
+        diff()
     }
+    .map_err(|error| map_diff_error(&error))
 }
 
 /// Serializes `value` to a JSON string, on the sized worker thread when

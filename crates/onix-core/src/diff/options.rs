@@ -114,6 +114,30 @@ pub fn diff_with_options(a: &Value, b: &Value, opts: &DiffOptions) -> Result<Rep
     diff_with_options_memo(a, b, opts, &crate::ignore_order::IgnoreOrderMemo::new())
 }
 
+/// Values the diff compares in place of opaque tokens, keyed by a token's
+/// identity (see [`crate::value::ObjectKind::Opaque`]).
+pub type Resolved = std::collections::BTreeMap<Box<str>, Value>;
+
+/// [`diff_with_options`], comparing an opaque token whose identity `resolved`
+/// holds as the value it maps to.
+///
+/// # Errors
+///
+/// Same as [`diff_with_options`].
+pub fn diff_with_resolved(
+    a: &Value,
+    b: &Value,
+    opts: &DiffOptions,
+    resolved: &Resolved,
+) -> Result<Report, Error> {
+    diff_with_options_memo(
+        a,
+        b,
+        opts,
+        &crate::ignore_order::IgnoreOrderMemo::with_resolved(resolved),
+    )
+}
+
 /// The shared body of [`diff_with_options`], taking an explicit
 /// [`crate::ignore_order::IgnoreOrderMemo`] so the decision-equivalence
 /// differential test can run the exact same code path with the cache

@@ -317,6 +317,9 @@ pub(crate) fn count_diff_leaves(
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
 ) -> usize {
+    let Some((a, b)) = memo.substitute(a, b) else {
+        return 0;
+    };
     match (a, b) {
         (Value::Null, Value::Null) => 0,
         (Value::Bool(x), Value::Bool(y)) => usize::from(x != y),
