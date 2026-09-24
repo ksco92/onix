@@ -46,21 +46,15 @@ docstring for the full mutation mix.
 
 ## Correctness precheck
 
-Before either size was timed, `diff_tables`, the DuckDB oracle, and the polars join-based diff
-were each run once and their `rows_added`/`rows_removed`/`cells_changed`/`duplicate_keys` counts
-compared against `generate_fixtures.py`'s sidecar `manifest.json`
-(`rows_added`/`rows_deleted`/`rows_modified_amount + rows_modified_payload`/`duplicate_keys`).
-Both sizes matched on all three tools: 1M reports 10,000 added, 10,000 removed, 20,000 changed
-cells, 0 duplicate keys; full reports 370,000 added, 370,000 removed, 740,000 changed cells, 0
-duplicate keys.
+Methodology documented in `bench_tables.py`'s module docstring ("Correctness before timing"). Both
+sizes matched on all three tools: 1M reports 10,000 added, 10,000 removed, 20,000 changed cells, 0
+duplicate keys; full reports 370,000 added, 370,000 removed, 740,000 changed cells, 0 duplicate
+keys.
 
 ## Run procedure
 
-Each `(tool, size)` cell is the median of independent, isolated subprocess runs — one process per
-run, so `resource.getrusage`'s whole-process `ru_maxrss` can be attributed to a single tool's diff
-(see `bench_tables.py`'s module docstring): **11 runs at 1M, 5 runs at full size**. All three
-tools read the same two parquet files from disk inside the timed window every run; no side reuses
-a cached table from a previous run.
+Methodology (subprocess isolation, fairness) documented in `bench_tables.py`'s module docstring.
+Each `(tool, size)` cell is the median of **11 runs at 1M, 5 runs at full size**.
 
 ## Results
 

@@ -73,8 +73,7 @@ two speed baselines a data engineer would otherwise reach for (#43).
   `category` as `VARCHAR` on both sides, both before and after the retype,
   because that is genuinely what the Parquet file's physical schema says.
   This is an accepted, structural limitation of a SQL-only, Parquet-reading
-  oracle, not a bug -- `perf/arrow/README.md`'s "Oracle semantics" section
-  restates it, and the dictionary retype is instead verified directly via
+  oracle, not a bug; the dictionary retype is instead verified directly via
   `pyarrow` in `tests/test_oracle_duckdb.py`.
 * **Timestamp zone-awareness.** DuckDB normalizes both sides to one instant
   type before comparing, so `wide`'s `ts_cast` zone drop (#84) is invisible
@@ -92,7 +91,9 @@ Usage::
 Writes `<out>/schema_diff.parquet`, `<out>/rows_added.parquet`,
 `<out>/rows_removed.parquet`, `<out>/cells_changed.parquet`, and
 `<out>/duplicate_keys.parquet`, and prints a JSON summary of counts to
-stdout (comparable against `generate_fixtures.py`'s sidecar `manifest.json`).
+stdout (comparable against `generate_fixtures.py`'s sidecar `manifest.json`,
+which it matches exactly at 1k, 100k, and 1M rows -- see
+`tests/test_oracle_duckdb.py`).
 """
 
 from __future__ import annotations

@@ -111,27 +111,10 @@ cd perf/arrow
 uv run --group perf oracle_duckdb.py --left fixtures/100k/a.parquet --right fixtures/100k/b.parquet --key id --out /tmp/oracle_100k
 ```
 
-`oracle_duckdb.py` computes schema differences, rows added, rows removed,
-changed cells (long format: key, column, old_value, new_value, change), and
-duplicate keys, using DuckDB SQL (joins and `GROUP BY`, no row-by-row
-Python), and writes each as a parquet file under `--out`. Its counts match
-`generate_fixtures.py`'s sidecar exactly at 1k, 100k, and 1M rows (see
-`tests/test_oracle_duckdb.py`), except for one documented, structural gap:
-the `category` dictionary retype has no footprint in Parquet's own schema,
-so it's invisible to a SQL-only schema diff (`oracle_duckdb.py`'s module
-docstring, "Dictionary encoding is invisible here").
-
-Its full value-comparison semantics -- nulls (including null keys, per #39),
-decimals, cross-unit timestamps, and floats (none are exercised, since this
-fixture has no float column) -- are documented in `oracle_duckdb.py`'s own
-module docstring, since that's also where the SQL implementing each rule
-lives.
-
-Against `wide`, the oracle picks up two further documented gaps -- a
-zone-awareness change is invisible to its value comparison (DuckDB
-normalizes to one instant type before comparing), and a `decimal256` above
-precision 38 is unusable by either baseline -- both in the same module
-docstring.
+`oracle_duckdb.py` computes schema differences, rows added, rows removed, changed cells, and
+duplicate keys via DuckDB SQL and writes each as a parquet file under `--out`; its
+value-comparison semantics, structural gaps (against both the default fixture and `wide`), and
+count-matching behavior are documented in `oracle_duckdb.py`'s own module docstring.
 
 ## Tests
 
