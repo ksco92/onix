@@ -1400,8 +1400,8 @@ struct SharedSink {
 /// path's only memory term over the single-threaded hash vectors. `hook` runs
 /// on the worker with each batch's input index and row hashes; with
 /// `keep_pairs` false only the null keys are kept. Joins every worker on every
-/// exit path (including a read error) so a concurrent worker
-/// panic surfaces as [`TableDiffError::WorkerPanicked`], never an abort.
+/// exit path (including a read error) so a concurrent worker panic surfaces as
+/// [`TableDiffError::WorkerPanicked`], never an abort.
 fn hash_side_parallel(
     prefix: Vec<RecordBatch>,
     reader: Box<dyn RecordBatchReader + Send>,
