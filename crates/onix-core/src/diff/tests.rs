@@ -1650,8 +1650,7 @@ fn int_vs_float_single_element_list_matches_via_lcs_python_equality() {
     // and `1.0` as equal, and a `difflib` `'equal'` opcode is never
     // diffed further — so real `DeepDiff` reports this pair as
     // *completely empty*, confirmed against `deepdiff==9.1.0`. See
-    // `crate::diff`'s "List diffing" module doc and `crate::lcs`'s doc
-    // for the full write-up.
+    // `docs/design/list-diff.md` for the full write-up.
     let report = diff(&json!([1]), &json!([1.0])).unwrap();
     assert!(report.is_empty());
 }

@@ -260,16 +260,14 @@ fn assert_membership_delta(
 /// This checks only that `index` is in range for `present_side`'s parent
 /// array — deliberately *not* the stricter "tail surplus" form (also out of
 /// range on the other side). That second half is not a valid invariant:
-/// `array_diff`'s LCS list-matching path (see `crate::diff`'s "List diffing"
-/// module doc section) can legitimately report an
-/// `iterable_item_added`/`removed` at an index that is very much *in
-/// range* on the other side too — e.g. a value that moved elsewhere in the
-/// same list produces a remove at its old index and an add at its new one,
-/// and both indices can easily be in range for both lists. Concretely,
-/// `[1, 1.5, "a", null, true]` vs `[true, "a", null, 1.5, 1]` (see
-/// `diff.rs`'s "List diffing" module doc) reports `iterable_item_removed`
-/// at `root[1]` where `a` has length 5 — well in-range, not a surplus tail
-/// at all.
+/// `array_diff`'s LCS list-matching path (see `docs/design/list-diff.md`)
+/// can legitimately report an `iterable_item_added`/`removed` at an index
+/// that is very much *in range* on the other side too — e.g. a value that
+/// moved elsewhere in the same list produces a remove at its old index and
+/// an add at its new one, and both indices can easily be in range for both
+/// lists. Concretely, `[1, 1.5, "a", null, true]` vs
+/// `[true, "a", null, 1.5, 1]` reports `iterable_item_removed` at `root[1]`
+/// where `a` has length 5 — well in-range, not a surplus tail at all.
 ///
 /// What still holds unconditionally, regardless of which list algorithm
 /// produced the finding: `index` resolves in `present_side`'s parent array,
@@ -361,7 +359,7 @@ proptest! {
     /// path `values_changed`/`type_changes` are always keyed by) resolves in
     /// `b` too. That held only for the old index-aligned algorithm, which
     /// always compared same-index pairs; the LCS list-matching path
-    /// (`crate::diff`'s "List diffing" module doc section) can pair an
+    /// (`docs/design/list-diff.md`) can pair an
     /// `a`-side index with a *different* `b`-side index and record the drift
     /// as [`crate::report::ValuesChangedEntry::new_path`] — and `path` (the
     /// old index) can end up entirely out of range for `b` once that drift

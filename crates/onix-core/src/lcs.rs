@@ -13,8 +13,8 @@
 //! [`crate::report::Report`], [`crate::path::PathSegment`], or recursion
 //! depth — it only turns two slices of [`crate::value::Value`] scalars into an
 //! ordered list of [`Opcode`]s. [`crate::diff::array_diff`] is what maps
-//! those opcodes into report findings; see that module's doc for the full,
-//! empirically-verified `DeepDiff` list-compat spec this exists to serve.
+//! those opcodes into report findings; see `docs/design/list-diff.md` for
+//! the full `DeepDiff` list-compat spec this exists to serve.
 //!
 //! # Why this exists
 //!
@@ -29,9 +29,9 @@
 //! match and, only when that produces more than one finding, compares its
 //! finding *count* against the plain index-aligned algorithm's, keeping
 //! whichever is smaller (a tie keeps the index-aligned result). See
-//! `crate::diff`'s module doc for the full write-up, including the
-//! surprising matching-equality and `new_path` details this module's
-//! algorithm alone doesn't explain.
+//! `docs/design/list-diff.md` for the full write-up, including the
+//! matching-equality and `new_path` details this module's algorithm alone
+//! doesn't explain.
 //!
 //! # Junk and autojunk
 //!

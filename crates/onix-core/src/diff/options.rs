@@ -287,8 +287,7 @@ pub(crate) fn diff_with_options_memo(
 /// ```
 ///
 /// After the recursive traversal completes, runs the whole-tree
-/// mutual-add-remove merge exactly once (see this module's "The
-/// mutual-add-remove merge" doc section and
+/// mutual-add-remove merge exactly once (see
 /// `crate::report::Report::merge_mutual_add_removes`) — matching
 /// `DeepDiff`'s own once-per-call, post-traversal timing.
 pub fn diff_with_max_depth(a: &Value, b: &Value, max_depth: usize) -> Result<Report, Error> {

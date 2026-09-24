@@ -62,7 +62,7 @@ pub struct ValuesChangedEntry {
     /// list comparison always pairs same-index elements. It becomes `Some`
     /// for a
     /// `values_changed`/`type_changes` pair matched by the list-LCS path
-    /// (see [`mod@crate::diff`]'s module doc) at two *different* absolute
+    /// (see `docs/design/list-diff.md`) at two *different* absolute
     /// indices, e.g. a value that shifted from index `5` to index `3`
     /// because of an earlier insert/delete elsewhere in the same list.
     ///
@@ -738,7 +738,7 @@ impl Report {
     ///
     /// Mirrors `DeepDiff`'s own `len(TreeResult)` (a flat count over every
     /// report category, not per-category) — used by the list-LCS path (see
-    /// [`mod@crate::diff`]'s module doc) to pick between the LCS-matched and
+    /// `docs/design/list-diff.md`) to pick between the LCS-matched and
     /// the plain index-aligned candidate report for a given list: `DeepDiff`
     /// runs both and keeps whichever has *fewer* total findings, favoring
     /// the index-aligned one on a tie.

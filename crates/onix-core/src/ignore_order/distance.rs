@@ -454,7 +454,8 @@ fn new_value_reproduced_by_coercion(old_value: &Value, new_value: &Value) -> boo
 /// `[2]`), while `[(1, [2])]` vs `[[1, [2]]]` is a `type_changes`.
 ///
 /// Recurses natively, like every other function in this module — safe for
-/// the same reason (see this module's "Depth safety" doc section).
+/// the same reason (see `docs/design/ignore-order.md`'s "Depth safety"
+/// section).
 fn python_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {

@@ -3,8 +3,8 @@
 //! path-buffer helper ([`scoped`]) every container loop in `super::array`
 //! and `super::object` uses to push/pop path segments as they recurse.
 //!
-//! See the parent `diff` module's doc for the full recursion-depth hardening
-//! (its "Hardening" section) this file implements.
+//! See [`super::diff_with_max_depth`]'s doc for the full recursion-depth
+//! hardening contract this file implements.
 
 use crate::value::{Object, ObjectKind, Value, same_class};
 
@@ -316,7 +316,7 @@ pub(crate) fn check_map_depth(
 /// LCS `'replace'`-opcode pairwise comparison as `diff_at` would have
 /// enforced had the pair been reached by ordinary recursion instead (which
 /// is what `positional_array_diff`'s equivalent same-index pairs go
-/// through) — see [`array_diff`]'s module-level "List diffing" doc section.
+/// through) — see `docs/design/list-diff.md`.
 /// Deliberately distinct from [`check_value_depth`]: that function bounds a
 /// *value's own nesting* combined with the remaining budget, and is a
 /// structural no-op for a scalar (nesting `0`) at any depth; this function

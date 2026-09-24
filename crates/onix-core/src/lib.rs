@@ -16,18 +16,18 @@
 //!
 //! 1. **Dispatch** ([`mod@diff`], specifically its `dispatch` submodule):
 //!    `diff_at` recurses through the pair by JSON type, enforcing the
-//!    recursion-depth/value-depth invariants documented on that module's
-//!    doc (the crate's core `DoS` hardening).
+//!    recursion-depth/value-depth invariants [`diff_with_max_depth`]'s doc
+//!    contracts (the crate's core `DoS` hardening).
 //! 2. **Container comparison**, depending on [`DiffOptions::ignore_order`]:
 //!    - **ordered (default):** `diff::object` walks a dict's key set;
 //!      `diff::array` picks between an index-aligned scan and an
 //!      LCS/`difflib`-style match (`crate::lcs`) for scalar-only lists — see
-//!      [`mod@diff`]'s "List diffing" doc section for the exact spec.
+//!      `docs/design/list-diff.md` for the exact spec.
 //!    - **`ignore_order=true`:** every list, at any depth, instead goes
 //!      through `crate::ignore_order`: hash each item to a canonical key,
 //!      gate on how much the two lists overlap, greedily pair the rest by
-//!      structural distance, then recurse into each paired pair — see that
-//!      module's own doc for the full, empirically-verified algorithm.
+//!      structural distance, then recurse into each paired pair — see
+//!      `docs/design/ignore-order.md` for the full algorithm.
 //! 3. **Report** ([`report`]): every finding (added/removed/changed/
 //!    type-changed) accumulates into a [`Report`], keyed by structural path
 //!    ([`path::PathSegment`]) rather than by rendered string, so distinct
@@ -42,11 +42,11 @@
 //! shared keys), and lists (`iterable_item_added`, `iterable_item_removed`,
 //! index-aligned/LCS comparison, plus recursion into shared indices), with
 //! findings reported at their full deep path, in any mix of nesting. See
-//! the [`mod@diff`] module doc for the recursion-depth hardening against
+//! [`diff_with_max_depth`]'s doc for the recursion-depth hardening against
 //! untrusted deeply nested input. [`diff_with_options`] additionally
 //! supports [`DiffOptions::ignore_order`] (mirroring `DeepDiff(...,
-//! ignore_order=True)`) — see `crate::ignore_order`'s module doc (private,
-//! read the source) for the full spec.
+//! ignore_order=True)`) — see `docs/design/ignore-order.md` for the full
+//! spec.
 
 pub mod datetime;
 pub mod diff;
@@ -73,8 +73,8 @@ pub use value::{Builder, Number, Value};
 /// `1 + max(depth of its elements/values)` (`0` if empty).
 ///
 /// This is the public entry point to the same depth check the diff engine
-/// uses internally to bound native recursion before cloning a value (see the
-/// [`mod@diff`] module doc). It is **iterative** — an explicit heap-allocated
+/// uses internally to bound native recursion before cloning a value (see
+/// [`diff_with_max_depth`]'s doc). It is **iterative** — an explicit heap-allocated
 /// work-stack, no native recursion — so it is itself safe to run on any input
 /// depth, and it returns as soon as one node past `limit` is seen without
 /// visiting the rest of `value`. Consumers that recurse into a `Value` on the

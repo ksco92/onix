@@ -1,8 +1,8 @@
 //! Item hashing: the canonical equivalence key ([`ItemKey`]) and the
 //! per-list hash table ([`HashedList`]) it feeds, matching `DeepHash`'s
 //! default semantics for **item matching** under `ignore_order=True` — see
-//! each type's own doc for the exact rules, and the parent module's doc for
-//! how this fits into the algorithm end to end.
+//! each type's own doc for the exact rules, and `docs/design/ignore-order.md`
+//! for how this fits into the algorithm end to end.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
@@ -772,8 +772,8 @@ fn number_key(n: &crate::value::Number) -> ItemKey {
 ///
 /// Recurses natively — safe only because
 /// every caller in this module first proves `value`'s nesting is within the
-/// crate's shared depth budget via [`check_value_depth`](crate::diff::check_value_depth) (see this module's
-/// "Depth safety" doc section).
+/// crate's shared depth budget via [`check_value_depth`](crate::diff::check_value_depth) (see
+/// `docs/design/ignore-order.md`'s "Depth safety" section).
 pub(crate) fn item_key(value: &Value, memo: &IgnoreOrderMemo) -> ItemKey {
     keyed(value, memo, false).0
 }
