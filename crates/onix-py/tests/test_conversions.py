@@ -1650,3 +1650,119 @@ def test_a_shared_class_attribute_is_never_converted() -> None:
     onix = json.loads(DeepDiff(_WithCountedDefault(1), _WithCountedDefault(2)).to_json())
     assert _COUNTED_READS == []
     assert onix == json.loads(RealDeepDiff(_WithCountedDefault(1), _WithCountedDefault(2), verbose_level=2).to_json())
+
+
+def _structure(report: dict) -> dict[str, object]:
+    """A `to_dict()` report reduced to its categories, paths and `type_changes` type names."""
+    return {
+        category: sorted(
+            (path, getattr(e["old_type"], "__name__", e["old_type"]), getattr(e["new_type"], "__name__", e["new_type"]))
+            for path, e in entries.items()
+        )
+        if category == "type_changes"
+        else sorted(entries)
+        for category, entries in report.items()
+    }
+
+
+def _same_structure(a: object, b: object, **options: object) -> None:
+    """Assert both engines report the same categories, paths and type names."""
+    onix = _structure(DeepDiff(a, b, **options).to_dict())
+    assert onix == _structure(RealDeepDiff(a, b, verbose_level=2, **options).to_dict())
+
+
+class _Looped:
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+def _looped(v: int, me: object = None) -> _Looped:
+    node = _Looped(v)
+    node.me = node if me is None else me
+    return node
+
+
+def test_a_value_against_a_second_side_cycle_is_a_type_change_like_deepdiff() -> None:
+    """A cycle only on the second side is compared, as DeepDiff's parents_ids holds first-side ids only."""
+    _same_structure(_looped(1, 5), _looped(1))
+
+
+def test_an_object_against_a_second_side_cycle_is_compared_with_the_ancestor_like_deepdiff() -> None:
+    """An object facing a second-side cycle is diffed against the object the cycle points back at."""
+    _same_structure(_looped(1, _Looped(99)), _looped(1))
+
+
+def test_a_list_item_against_a_second_side_cycle_is_a_type_change_like_deepdiff() -> None:
+    """A list item facing a second-side cycle reports the type change."""
+    looped = _Looped(1)
+    looped.items = [looped]
+    plain = _Looped(1)
+    plain.items = ["other"]
+    _same_structure(plain, looped)
+
+
+def test_a_second_side_cycle_under_ignore_order_is_compared_like_deepdiff() -> None:
+    """Under ignore_order a pair with a cycle on the second side only still reports its change."""
+    _same_structure([_looped(1, 5)], [_looped(1)], ignore_order=True)
+
+
+class _Raising:
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+    @property
+    def p(self) -> int:
+        raise ValueError("boom")
+
+
+def test_an_object_whose_attributes_cannot_be_read_is_skipped_where_it_is_the_same_object() -> None:
+    """The same unreadable object on both sides reports nothing, and a sibling change is still reported."""
+    shared = _Raising(1)
+    _same_structure({"k": shared}, {"k": shared})
+    _same_structure({"k": shared, "n": 1}, {"k": shared, "n": 2})
+
+
+def test_an_unreadable_object_hashes_by_its_instance_dict_under_ignore_order() -> None:
+    """Under ignore_order two unreadable objects with equal instance dicts match without reading them."""
+    _same_structure([_Raising(1), 1], [_Raising(1), 2], ignore_order=True)
+
+
+class _Wrap:
+    def __init__(self, inner: object, n: int) -> None:
+        self.inner = inner
+        self.n = n
+
+
+def test_a_shared_unreadable_object_inside_compared_objects_is_skipped() -> None:
+    """An unreadable object both wrappers hold is the token, so the wrappers diff by their other attributes."""
+    shared = _Raising(3)
+    _same_structure(_Wrap(shared, 1), _Wrap(shared, 2))
+
+
+@pytest.mark.parametrize("keys", [[(1, 2j), "x"], ["x", (1, 2j)]], ids=["bad_key_first", "bad_key_last"])
+def test_an_unsupported_dict_key_inside_an_object_is_lazy_in_either_key_order(keys: list) -> None:
+    """An unsupported key raises only where its object is compared, whichever position it holds."""
+    holder = _Wrap({key: 1 for key in keys}, 0)
+    _same_structure({"h": holder, "n": 1}, {"h": holder, "n": 2})
+    with pytest.raises(TypeError, match="unsupported type for a dict key: complex"):
+        DeepDiff({"h": _Wrap({key: 1 for key in keys}, 0)}, {"h": _Wrap({key: 1 for key in keys}, 0)})
+
+
+def test_an_unreadable_object_that_is_compared_raises_its_error() -> None:
+    """Two different unreadable objects at one position raise the error reading them raised."""
+    with pytest.raises(ValueError, match="boom"):
+        DeepDiff({"k": _Raising(1)}, {"k": _Raising(1)})
+
+
+def test_shadowed_class_attributes_resolve_in_one_extra_pass() -> None:
+    """Fifty classes each with a shadowed class-attribute default take at most two diff passes."""
+    classes = [type(f"C{i}", (), {"d": [i, "x"]}) for i in range(50)]
+    a, b = [], []
+    for i, cls in enumerate(classes):
+        shadowed = cls()
+        shadowed.d = [i, "x" if i % 2 else "y"]
+        a.append(shadowed)
+        b.append(cls())
+    onix = DeepDiff(a, b)
+    assert json.loads(onix.to_json()) == json.loads(RealDeepDiff(a, b, verbose_level=2).to_json())
+    assert onix._passes <= 2

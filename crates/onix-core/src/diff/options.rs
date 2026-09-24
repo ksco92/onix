@@ -1,8 +1,8 @@
 //! The public API surface: [`DiffOptions`], [`DEFAULT_MAX_DEPTH`], and the
-//! three entry points ([`diff()`], [`diff_with_options()`],
-//! [`diff_with_max_depth()`]) — all thin wrappers around
-//! `super::dispatch`'s recursive [`super::diff_at`], differing only in how
-//! much of [`DiffOptions`] the caller controls.
+//! four entry points ([`diff()`], [`diff_with_options()`],
+//! [`diff_with_max_depth()`], [`diff_with_resolved()`]) — all thin wrappers
+//! around `super::dispatch`'s recursive [`super::diff_at`], differing in how
+//! much of [`DiffOptions`] the caller controls and whether tokens resolve.
 
 use crate::value::Value;
 
@@ -118,8 +118,9 @@ pub fn diff_with_options(a: &Value, b: &Value, opts: &DiffOptions) -> Result<Rep
 /// identity (see [`crate::value::ObjectKind::Opaque`]).
 pub type Resolved = std::collections::BTreeMap<Box<str>, Value>;
 
-/// [`diff_with_options`], comparing an opaque token whose identity `resolved`
-/// holds as the value it maps to.
+/// [`diff_with_options`], comparing a token whose identity `resolved` holds as
+/// the value it maps to; also returns the identities of the tokens it compared
+/// with no value in `resolved`.
 ///
 /// # Errors
 ///
@@ -129,13 +130,10 @@ pub fn diff_with_resolved(
     b: &Value,
     opts: &DiffOptions,
     resolved: &Resolved,
-) -> Result<Report, Error> {
-    diff_with_options_memo(
-        a,
-        b,
-        opts,
-        &crate::ignore_order::IgnoreOrderMemo::with_resolved(resolved),
-    )
+) -> Result<(Report, Vec<Box<str>>), Error> {
+    let memo = crate::ignore_order::IgnoreOrderMemo::with_resolved(resolved);
+    let report = diff_with_options_memo(a, b, opts, &memo)?;
+    Ok((report, memo.into_unresolved()))
 }
 
 /// The shared body of [`diff_with_options`], taking an explicit

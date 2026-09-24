@@ -128,7 +128,7 @@
 //! deterministic.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diff::Resolved;
 use crate::value::Value;
@@ -204,9 +204,11 @@ pub(crate) struct IgnoreOrderMemo<'r> {
     /// keyed by each of the dict's own keys' `ItemKey` trees (a `tuple`
     /// dict key included), not a cheap string ordering.
     member_content: RefCell<BTreeMap<MemberContent, RepId>>,
-    /// The values the diff compares in place of opaque tokens (see
-    /// [`crate::diff::diff_with_resolved`]).
+    /// The values the diff compares in place of tokens (see
+    /// [`crate::diff::diff_with_resolved`]), and the identities of the tokens
+    /// it compared with no value there.
     resolved: &'r Resolved,
+    unresolved: RefCell<BTreeSet<Box<str>>>,
     enabled: bool,
     /// Total number of times [`Self::put`] has actually run — every distance
     /// *recomputation*, not just the distinct entries it leaves behind (a
@@ -232,6 +234,7 @@ impl IgnoreOrderMemo<'_> {
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),
             resolved: &NO_RESOLVED,
+            unresolved: RefCell::new(BTreeSet::new()),
             enabled: true,
             #[cfg(test)]
             puts: std::cell::Cell::new(0),
@@ -250,6 +253,7 @@ impl IgnoreOrderMemo<'_> {
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),
             resolved: &NO_RESOLVED,
+            unresolved: RefCell::new(BTreeSet::new()),
             enabled: false,
             puts: std::cell::Cell::new(0),
         }
@@ -264,28 +268,36 @@ impl IgnoreOrderMemo<'_> {
         }
     }
 
-    /// The pair `(a, b)` as the diff compares it, each opaque token with a
-    /// resolved value replaced by that value, or `None` when the pair reports
-    /// nothing: the identical Python object on both sides, or a cycle token on
-    /// either, as `DeepDiff`'s `t1 is t2` and `parents_ids` checks skip them.
+    /// The pair `(a, b)` as the diff compares it, each token with a resolved
+    /// value replaced by that value, or `None` when the pair reports nothing:
+    /// the identical Python object on both sides, or a cycle token on the
+    /// first, as `DeepDiff`'s `t1 is t2` and `parents_ids` checks skip them.
     pub(crate) fn substitute<'v>(
         &'v self,
         a: &'v Value,
         b: &'v Value,
     ) -> Option<(&'v Value, &'v Value)> {
         let resolve = |value: &'v Value| match value {
-            Value::Object(map) => map
-                .opaque_identity()
-                .and_then(|identity| self.resolved.get(identity))
-                .unwrap_or(value),
+            Value::Object(map) => match map.token_identity() {
+                Some(identity) => self.resolved.get(identity).unwrap_or_else(|| {
+                    self.unresolved.borrow_mut().insert(Box::from(identity));
+                    value
+                }),
+                None => value,
+            },
             _ => value,
         };
         match (a, b) {
             (Value::Object(x), Value::Object(y)) if x.same_instance(y) => None,
             (Value::Object(x), _) if x.is_cycle() => None,
-            (_, Value::Object(y)) if y.is_cycle() => None,
             _ => Some((resolve(a), resolve(b))),
         }
+    }
+
+    /// The identities of the tokens the diff compared with no resolved value,
+    /// in order.
+    pub(crate) fn into_unresolved(self) -> Vec<Box<str>> {
+        self.unresolved.into_inner().into_iter().collect()
     }
 
     /// Whether distance memoization is live for this run. A candidate pair is

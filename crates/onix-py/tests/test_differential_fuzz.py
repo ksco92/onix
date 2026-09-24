@@ -1,10 +1,10 @@
 """Differential fuzz test: onix's Python bindings vs real DeepDiff on live objects.
 
 Runs through `deepdiff_rs.DeepDiff`, exercising the Python-object-to-`Value`
-conversion layer. Fourteen batches of seeded cases run twice (ordered and
+conversion layer. Fifteen batches of seeded cases run twice (ordered and
 `ignore_order=True`), comparing `to_json()` (parsed) and `to_dict()`; the
-custom-object batch compares `to_json()` alone and the enum batch the report
-structure alone, since DeepDiff renders a whole object from other views. The
+custom-object batch compares `to_json()` alone and the enum and class-attribute
+batches the report structure alone, since DeepDiff renders a whole object from other views. The
 big-integer batch (issue #65) draws its big ints as bare scalars only, never
 inside a tuple/set, so it stays on the arbitrary-precision property under
 test rather than surfacing the pre-existing container-hashing divergence a
@@ -1306,6 +1306,7 @@ def test_differential_fuzz_with_surrogate_strings_matches_real_deepdiff() -> Non
 # the container-hashing divergence.
 OBJECT_SEED_BASE: Final[int] = 12_000_000
 ENUM_OBJECT_SEED_BASE: Final[int] = 13_000_000
+CLASS_ATTRIBUTE_SEED_BASE: Final[int] = 14_000_000
 _OBJECT_ATTR_NAMES: Final[list[str]] = ["p", "q", "r", "s"]
 
 
@@ -1466,5 +1467,39 @@ def test_differential_fuzz_with_enum_members_and_objects_matches_real_deepdiff()
 
     assert not mismatches, (
         f"{len(mismatches)} of {SEED_COUNT * 2} enum-and-object fuzz cases diverged from real "
+        f"DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+_DEFAULT_CLASSES: Final[list[type]] = [
+    type(f"_Default{i}", (), {"d": default, "__init__": _set_attributes})
+    for i, default in enumerate([1, "a", [1, 2], {"k": 1}])
+]
+
+
+def _gen_default_item(rng: random.Random) -> object:
+    """Generate an instance of a class with a `d` default, shadowing it half the time."""
+    attrs: dict[str, object] = {"x": rng.randint(0, 3)}
+    if rng.random() < 0.5:
+        attrs["d"] = rng.choice([1, 2, "a", "b", [1, 2], [1, 3], {"k": 1}, {"k": 2}])
+    return rng.choice(_DEFAULT_CLASSES)(**attrs)
+
+
+def _generate_class_attribute_case(seed: int) -> tuple[list[object], list[object]]:
+    """Generate two lists of instances whose class-attribute defaults are shadowed or shared."""
+    rng = random.Random(seed)
+    return (
+        [_gen_default_item(rng) for _ in range(rng.randint(0, 4))],
+        [_gen_default_item(rng) for _ in range(rng.randint(0, 4))],
+    )
+
+
+def test_differential_fuzz_with_class_attribute_defaults_matches_real_deepdiff() -> None:
+    """Runs a SEED_COUNT-case batch of instances shadowing or sharing class defaults, ordered and ignore_order=True."""
+    seeds = range(CLASS_ATTRIBUTE_SEED_BASE, CLASS_ATTRIBUTE_SEED_BASE + SEED_COUNT)
+    mismatches = _run_batch(seeds, case_fn=_generate_class_attribute_case, diverge_fn=_structure_diverges)
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} class-attribute fuzz cases diverged from real "
         f"DeepDiff (showing up to 3): {mismatches[:3]}"
     )

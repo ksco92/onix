@@ -71,11 +71,11 @@ pub(crate) fn resolve_options(
     })
 }
 
-/// Diffs `a` and `b`, comparing an opaque token as the value `resolved` maps
-/// it to, and renders the report to a [`Value`] (see
-/// [`onix_core::Report::to_value`]), running the natively-recursive diff on
-/// the sized worker thread when an input or a resolved value is nested past
-/// [`MAX_INLINE_DEPTH`], inline otherwise.
+/// Diffs `a` and `b`, comparing a token as the value `resolved` maps it to,
+/// and renders the report to a [`Value`] (see [`onix_core::Report::to_value`]),
+/// with the identities of the tokens compared with no value in `resolved`;
+/// the natively-recursive diff runs on the sized worker thread when an input
+/// or a resolved value is nested past [`MAX_INLINE_DEPTH`], inline otherwise.
 ///
 /// # Errors
 ///
@@ -86,9 +86,10 @@ pub(crate) fn diff_to_value(
     b: &Value,
     opts: DiffOptions,
     resolved: &Resolved,
-) -> PyResult<Value> {
+) -> PyResult<(Value, Vec<Box<str>>)> {
     let diff = || {
-        onix_core::diff::diff_with_resolved(a, b, &opts, resolved).map(|report| report.to_value())
+        onix_core::diff::diff_with_resolved(a, b, &opts, resolved)
+            .map(|(report, unresolved)| (report.to_value(), unresolved))
     };
     if is_deep(a) || is_deep(b) || resolved.values().any(is_deep) {
         run_on_worker(py, diff)?

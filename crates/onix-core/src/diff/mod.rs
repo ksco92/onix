@@ -179,8 +179,8 @@
 //! once, not by call order:
 //!
 //! - `options` — the public API surface: [`DiffOptions`], [`DEFAULT_MAX_DEPTH`],
-//!   and the three entry points ([`diff()`], [`diff_with_options()`],
-//!   [`diff_with_max_depth()`]).
+//!   and the four entry points ([`diff()`], [`diff_with_options()`],
+//!   [`diff_with_max_depth()`], [`diff_with_resolved()`]).
 //! - `dispatch` — the recursive traversal core: `diff_at` (the type-dispatch
 //!   switch every recursion step goes through), the depth-guard invariants
 //!   (`check_traversal_depth`, `check_value_depth` — see this doc's

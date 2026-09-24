@@ -157,7 +157,7 @@ pub(crate) fn object_diff(
 fn insert_removed(report: &mut Report, kind: ObjectKind, path: Vec<PathSegment>, value: Value) {
     match kind {
         ObjectKind::Dict => report.insert_dictionary_item_removed(path, value),
-        ObjectKind::CustomObject | ObjectKind::Opaque | ObjectKind::Cycle => {
+        ObjectKind::CustomObject | ObjectKind::Opaque | ObjectKind::Cycle | ObjectKind::Failed => {
             report.insert_attribute_removed(path, value);
         }
     }
@@ -167,7 +167,7 @@ fn insert_removed(report: &mut Report, kind: ObjectKind, path: Vec<PathSegment>,
 fn insert_added(report: &mut Report, kind: ObjectKind, path: Vec<PathSegment>, value: Value) {
     match kind {
         ObjectKind::Dict => report.insert_dictionary_item_added(path, value),
-        ObjectKind::CustomObject | ObjectKind::Opaque | ObjectKind::Cycle => {
+        ObjectKind::CustomObject | ObjectKind::Opaque | ObjectKind::Cycle | ObjectKind::Failed => {
             report.insert_attribute_added(path, value);
         }
     }

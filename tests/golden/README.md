@@ -542,16 +542,20 @@ token back out of JSON text at all; they are pinned instead in
 directly (sidestepping `NaN != NaN` in the comparison itself).
 
 The one real divergence, in every case deterministic and traceable to the
-same cause: this crate's value model carries no Python object identity, and
-real `DeepDiff`/`CPython` occasionally use it as a shortcut that lets one
-`NaN` match itself where two independently-obtained `NaN`s would not:
+same cause: this crate's value model carries Python object identity for custom
+objects only, and real `DeepDiff`/`CPython` also use it for a float or a
+container as a shortcut that lets one `NaN` match itself where two
+independently-obtained `NaN`s would not:
 
 ```text
 DeepDiff(nan, nan) where both sides are literally the same object (t1 is t2)
   -> {} : DeepDiff's own diff() short-circuits on t1 is t2 before comparing
 DeepDiff(nan, nan) with two distinct NaN objects -> values_changed
-onix -> values_changed always: it has no notion of "the same object", so it
-  always takes the distinct-objects answer (the overwhelmingly common case)
+onix -> values_changed always for a float or a container holding one:
+  DeepDiff({"a": nan_list}, {"a": nan_list}) with one shared [nan] list is {},
+  onix reports values_changed root['a'][0]
+onix -> {} for the same custom object on both sides, like DeepDiff:
+  DeepDiff({"a": o}, {"a": o}) with o = O2(float("nan"))
 ```
 
 ```text
@@ -659,12 +663,13 @@ reconstruct an instance, so `to_dict()` returns the object's attribute `dict`.
 
 ### A recursive object
 
-DeepDiff's `parents_ids` skips a child that is an object already on the path from
-the root, so a self-referential object or a parent pointer reports nothing for
-the cycle. onix holds such a child as a cycle token that reports nothing; it
-applies the rule to either side, where DeepDiff tests `t1`'s child, and a cycle
-token in an added or removed value renders as `{}` where DeepDiff's `to_json()`
-raises on the circular reference.
+DeepDiff's `parents_ids` skips a child whose first-side object is already on the
+path from the root, so a self-referential object or a parent pointer reports
+nothing for the cycle. onix holds such a child as a cycle token: on the first side
+it reports nothing; on the second side only, it is compared as the object it
+points back at, so `a.me = 5` against `b.me = b` is a `type_changes` as in
+DeepDiff. A cycle token in an added or removed value renders as `{}` where
+DeepDiff's `to_json()` raises on the circular reference.
 
 ### Types DeepDiff routes to a handler onix lacks
 
@@ -688,9 +693,14 @@ converted once for the diff (a class-level `Enum` member, config object or
 `re.Pattern`), so the shadowing value compares against the default's value. A
 class attribute onix cannot convert (ABCMeta's `_abc_impl`, a class-level lock)
 raises `TypeError` there, and one nested past `max_depth` on its own raises
-`MaxDepthError`. An error while converting an object's attributes (an unsupported
-dict key, a value nested past `max_depth`) is raised likewise only where a report
-compares or shows that object. A whole object in a report leaves every class
+`MaxDepthError`. An `Exception` while reading an object's attributes (a property
+that raises) makes that object a token equal only to itself, hashed under
+`ignore_order` by its instance `__dict__` as `DeepHash` hashes it; one while
+converting what the attributes hold (an unsupported dict key, a value nested past
+`max_depth`) makes the innermost object being converted such a token. Either
+raises its error only where a report compares or shows that object, so the same
+object on both sides reports nothing; `KeyboardInterrupt` and `SystemExit` raise
+at once. A whole object in a report leaves every class
 attribute out, as DeepDiff's `to_json()` render does. A token raises a
 `TypeError` naming its path wherever a report would have to show it: as the
 compared value of a finding, or as an instance attribute of an object in the

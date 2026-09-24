@@ -11,7 +11,7 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 
 use crate::lcs::{ScalarKey, mix_float_bits, python_scalar_key};
-use crate::value::Value;
+use crate::value::{ObjectKind, Value};
 
 use super::IgnoreOrderMemo;
 use super::fxhash::HashMap;
@@ -827,7 +827,10 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
             None,
         ),
         Value::Object(map) => {
-            if let Some(identity) = map.opaque_identity() {
+            if let Some(identity) = map
+                .opaque_identity()
+                .filter(|_| map.kind() == ObjectKind::Opaque)
+            {
                 return (ItemKey::Opaque(Box::from(identity)), None);
             }
             let attrs = map
