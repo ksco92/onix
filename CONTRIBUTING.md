@@ -115,7 +115,7 @@ The code is best read in this order, each step building on the last:
    ([`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)) before
    calling the same core the CLI does.
 5. [`crates/onix-arrow/src/lib.rs`](crates/onix-arrow/src/lib.rs)'s module
-   doc for the Arrow table diff, into
+   doc: the Arrow table diff's entry point. Follow it into
    [`crates/onix-arrow/src/row_diff.rs`](crates/onix-arrow/src/row_diff.rs)
    and [`docs/design/row-diff.md`](docs/design/row-diff.md) for the keyed
    row diff's algorithm, hashing, and value-comparison rules.

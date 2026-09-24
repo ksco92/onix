@@ -79,8 +79,8 @@ pub use table_diff::{TableDiff, TableDiffSummary};
 
 /// The maximum column-type nesting depth [`diff_tables`] will compare; deeper is refused
 /// with [`TableDiffError::MaxDepthExceeded`], bounding the native-stack recursion in
-/// comparison, `Display`, and the drop of values onix builds from accepted input — not a
-/// caller's own drop of a `DataType` it built past this depth.
+/// comparison, `Display`, `Clone`, and the drop of values onix builds from accepted
+/// input — not a caller's own drop of a `DataType` it built past this depth.
 /// Per-level cost is measured by `crates/onix-arrow/examples/type_stack_cost.rs`.
 pub const MAX_NESTING_DEPTH: usize = 128;
 

@@ -33,23 +33,23 @@ so parallel output is byte-identical to the single-threaded path.
 ## Hashing
 
 Row identity is one keyed 128-bit SipHash-1-3 (`siphasher`), keyed
-from 16 bytes of OS randomness (`getrandom`) drawn once per diff;
-both sides of one diff share the key so their hashes are comparable,
-and a different diff draws a fresh key. Because the key is secret and
-random per run, no unkeyed content hash table is used on this default
-(no-flag) path, and two distinct keys colliding to the same 128-bit
-hash has probability on the order of `n² / 2¹²⁸`.
+from 16 bytes of OS randomness (`getrandom`) drawn once per diff. Both
+sides share the key, so the row-matching table cannot be forced into
+collisions by chosen input, and no unkeyed content hash table sits on
+this default (no-flag) path. A different diff draws a fresh key; two
+distinct keys colliding to the same 128-bit hash has probability on
+the order of `n² / 2¹²⁸`.
 
 ## Value semantics
 
-Cell hashing matches `onix-core`'s scalar comparison: integers and
-integral floats within `±2⁵³` fold to one integer form, other floats
-hash by bit pattern, decimals hash by exact value with trailing
-zeros removed, timestamps/times/durations normalize to nanoseconds,
-and a null is a distinct value equal only to another null (`IS
-DISTINCT FROM`). Every NaN folds to one canonical NaN, unlike
-`onix-core` (which refuses NaN at conversion), because the renderer
-cannot show two NaN payloads apart.
+Cell hashing matches `onix-core`'s scalar comparison except for NaN,
+which folds to one canonical form here (unlike `onix-core`, which
+refuses NaN at conversion), because the renderer cannot show two NaN
+payloads apart: integers and integral floats within `±2⁵³` fold to
+one integer form, other floats hash by bit pattern, decimals hash by
+exact value with trailing zeros removed, timestamps/times/durations
+normalize to nanoseconds, and a null is a distinct value equal only
+to another null (`IS DISTINCT FROM`).
 
 ## Per-cell changes
 
@@ -65,16 +65,21 @@ different variant; otherwise `value_changed`. A lossless type change
 a decimal-scale change) hashes equal and reports nothing unless the
 value itself also differs.
 
-`old_value`/`new_value` render through `arrow_cast::display`: numbers
-of differing width render at the wider type, an aware timestamp
+`old_value`/`new_value` are a canonical string rendering through
+`arrow_cast::display`, null for a null cell: numbers of differing
+width render at the wider type (an `f32` `0.1` shows as
+`0.10000000149011612` against an `f64` `0.1`), an aware timestamp
 renders its UTC instant with its zone appended, a decimal renders at
-its native scale, a duration renders as an ISO 8601 `PT<seconds>S`
-string computed from its raw value (never the Arrow formatter, whose
-duration path can emit `<invalid>` while still succeeding), and a
-cross-variant interval renders with its variant appended. A
-`value_changed` record whose two renderings are nonetheless equal is
-`TableDiffError::EqualRenderings` (`check_distinct_renderings`),
-never a silent row.
+its native scale, a string renders verbatim, a duration renders as an
+ISO 8601 `PT<seconds>S` string computed from its raw value (never the
+Arrow formatter, whose duration path can emit `<invalid>` while still
+succeeding), and a cross-variant interval renders with its variant
+appended. A `value_changed` record whose two renderings are
+nonetheless equal is `TableDiffError::EqualRenderings`
+(`check_distinct_renderings`), never a silent row. There is no typed
+old/new column: a long-format table mixes every compared column's
+type in one column, so a single typed column cannot represent them
+and the string rendering is the uniform form.
 
 ## Depth safety
 

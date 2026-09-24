@@ -519,7 +519,8 @@ fn decimal_value(array: &ArrayRef, row: usize) -> Option<(i256, i8)> {
 
 /// Hashes one cell into `hasher`, tagged by kind so unlike kinds never collide.
 /// A null writes only [`TAG_NULL`]; every other kind writes its tag then a
-/// canonical form of the value (see the module docs' value semantics).
+/// canonical form of the value (see `docs/design/row-diff.md`'s "Value
+/// semantics" section).
 fn hash_cell(
     hasher: &mut CellHasher,
     array: &ArrayRef,
@@ -2484,11 +2485,12 @@ struct ColumnInputs<'a> {
 }
 
 /// Compares one column across the paired changed rows and appends a record for
-/// every differing cell. The change kind and rendering follow the module docs'
-/// per-cell rules: a value domain or timestamp-awareness mismatch is a type
-/// change, a differing value over the hash's lossless normalization is a value
-/// change, and each side renders in the common comparison form so a
-/// `value_changed` record never carries equal renderings.
+/// every differing cell. The change kind and rendering follow
+/// `docs/design/row-diff.md`'s "Per-cell changes" section: a value domain or
+/// timestamp-awareness mismatch is a type change, a differing value over the
+/// hash's lossless normalization is a value change, and each side renders in
+/// the common comparison form so a `value_changed` record never carries equal
+/// renderings.
 fn emit_column_records(
     column: &ColumnInputs<'_>,
     records: &mut Vec<CellRecord>,
@@ -4058,8 +4060,8 @@ impl CellColumns {
     }
 }
 
-/// Diffs the rows of two tables matched by `key`. See the module docs for the
-/// algorithm and value semantics.
+/// Diffs the rows of two tables matched by `key`. See `docs/design/row-diff.md`
+/// for the algorithm and value semantics.
 pub(crate) fn diff_rows(
     left: &impl TableInput,
     right: &impl TableInput,
