@@ -108,29 +108,29 @@ helps nor hurts it measurably; the wide fixture (nearly every row changed) is wh
 
 `deepdiff-rs` 0.12.0 decodes the right input once and the left twice on the parallel path, where
 0.11.2 decoded each three times (see the Per-pass profile section for where the time went). Both
-versions ran through this harness in one session, 2026-09-24T05:28Z to 05:38Z, same machine and tool
+versions ran through this harness in one session, 2026-09-24T08:47Z to 08:56Z, same machine and tool
 versions as the Environment table (only `deepdiff-rs` differs), 0.12.0 first for each kind, on the
 same fixture pairs (identical SHA-256s); the correctness precheck passed for every tool at both
-sizes. The machine was shared (load average 13 to 24 during the runs), which affects the three tools
+sizes. The machine was shared (load average 15 to 28 during the runs), which affects the three tools
 alike within a run. DuckDB and polars rows come from the 0.12.0 run.
 
 | Fixture | Tool | Wall (0.11.2) | Wall (0.12.0) | Speedup | RSS (0.11.2) | RSS (0.12.0) | CPU (0.12.0) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| narrow 1M | onix (`diff_tables`) | 316.46 ms | **276.93 ms** | 1.14x | 1187.1 MB | 1174.8 MB | 0.855 s |
-| narrow 1M | DuckDB (oracle SQL) | — | 223.73 ms | — | — | 809.3 MB | 0.824 s |
-| narrow 1M | polars (anti-join/inner-join) | — | 62.71 ms | — | — | 913.9 MB | 0.382 s |
-| narrow full | onix (`diff_tables`) | 5.786 s | **4.108 s** | 1.41x | 22704.1 MB | 22125.7 MB | 31.806 s |
-| narrow full | DuckDB (oracle SQL) | — | 2.421 s | — | — | 15991.3 MB | 30.879 s |
-| narrow full | polars (anti-join/inner-join) | — | 2.448 s | — | — | 26778.5 MB | 20.973 s |
-| wide 1M | onix (`diff_tables`) | 1.466 s | **1.053 s** | 1.39x | 3032.9 MB | 2744.6 MB | 5.296 s |
-| wide 1M | DuckDB (oracle SQL) | — | 529.94 ms | — | — | 3331.9 MB | 4.329 s |
-| wide 1M | polars (anti-join/inner-join) | — | 165.24 ms | — | — | 1967.9 MB | 1.324 s |
-| wide full | onix (`diff_tables`) | 24.542 s | **16.707 s** | 1.47x | 33095.8 MB | 28717.6 MB | 92.630 s |
-| wide full | DuckDB (oracle SQL) | — | 5.369 s | — | — | 11851.5 MB | 66.447 s |
-| wide full | polars (anti-join/inner-join) | — | 3.391 s | — | — | 29808.0 MB | 26.999 s |
+| narrow 1M | onix (`diff_tables`) | 318.00 ms | **278.85 ms** | 1.14x | 1195.7 MB | 1186.5 MB | 0.857 s |
+| narrow 1M | DuckDB (oracle SQL) | — | 228.39 ms | — | — | 810.6 MB | 0.825 s |
+| narrow 1M | polars (anti-join/inner-join) | — | 61.93 ms | — | — | 912.8 MB | 0.376 s |
+| narrow full | onix (`diff_tables`) | 6.014 s | **4.522 s** | 1.33x | 22670.6 MB | 22070.9 MB | 31.736 s |
+| narrow full | DuckDB (oracle SQL) | — | 2.362 s | — | — | 16000.5 MB | 30.673 s |
+| narrow full | polars (anti-join/inner-join) | — | 2.556 s | — | — | 26777.5 MB | 20.746 s |
+| wide 1M | onix (`diff_tables`) | 1.385 s | **1.121 s** | 1.24x | 3034.9 MB | 2728.2 MB | 5.461 s |
+| wide 1M | DuckDB (oracle SQL) | — | 568.52 ms | — | — | 3352.4 MB | 4.574 s |
+| wide 1M | polars (anti-join/inner-join) | — | 210.00 ms | — | — | 1965.5 MB | 1.428 s |
+| wide full | onix (`diff_tables`) | 22.929 s | **17.298 s** | 1.33x | 33081.5 MB | 28707.7 MB | 98.389 s |
+| wide full | DuckDB (oracle SQL) | — | 5.161 s | — | — | 11865.7 MB | 67.450 s |
+| wide full | polars (anti-join/inner-join) | — | 3.110 s | — | — | 29818.3 MB | 26.738 s |
 
-At full size `onix` now trails DuckDB by 1.70x on the narrow pair (4.108 against 2.421 s) and 3.11x
-on the wide pair (16.707 against 5.369 s), and polars by 1.68x and 4.93x. Peak RSS falls on every
+At full size `onix` now trails DuckDB by 1.91x on the narrow pair (4.522 against 2.362 s) and 3.35x
+on the wide pair (17.298 against 5.161 s), and polars by 1.77x and 5.56x. Peak RSS falls on every
 cell: the wide pair's by 4.4 GB, because rows kept for `rows_added`/`rows_removed` no longer hold
 whole decoded input batches through a `Utf8View` column, and the narrow pair's by 0.6 GB, because
 the right side keeps no per-row hashes, only a map entry per key the left lacks (the Memory
