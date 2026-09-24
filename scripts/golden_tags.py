@@ -1,48 +1,12 @@
-"""The tagged JSON encoding the golden corpus uses for Python values JSON cannot express.
+"""The tagged JSON encoding the golden corpus uses for values JSON cannot express.
 
-A golden case's ``a.json``/``b.json`` are plain JSON files, but the values they stand
-for are Python objects, and several of the types DeepDiff diffs (``tuple``, ``set``,
-``frozenset``, ``datetime``, ``date``, ``time``, ``timedelta``) have no JSON literal. This
-module defines the one encoding that closes that gap, shared by every reader of the corpus:
-
-- A JSON object with **exactly one** key, and that key one of :data:`RESERVED_TAGS`, is a
-  tagged value and decodes to the corresponding Python object.
-- **Any other** JSON object is plain data and decodes to a ``dict``, recursively.
-
-So ``{"$tuple": [1, 2]}`` is the tuple ``(1, 2)``, ``{"$datetime": "2024-01-01T10:00:00+02:00"}``
-is that aware ``datetime``, ``{"$date": "2024-01-01"}`` that ``date`` and ``{"$time":
-"10:00:00+02:00"}`` that aware ``time``, while ``{"$tuple": [1], "x": 2}`` and ``{"other": 1}``
-are ordinary dicts. The three calendar tags carry an ISO 8601 string — exactly what
-``isoformat()`` produces and ``fromisoformat()`` reads back, with the UTC offset present only
-for an aware value. ``$timedelta`` carries Python's own already-normalized ``{"days": D,
-"seconds": S, "microseconds": U}`` triple instead of a single number: a flattened total-
-microsecond count overflows even a 64-bit integer at Python's own extreme
-``days=999_999_999`` (see ``onix_core::datetime::TimeDelta``'s own doc), where the three
-components never do. ``$bigint`` carries an integer's exact decimal digits as a string:
-JSON *can* express an arbitrary-precision integer as a bare number literal, but onix's
-Rust golden reader parses one beyond ``i64``/``u64`` back to a lossy ``f64`` (serde_json
-without arbitrary precision), so an out-of-range ``int`` is tagged to survive that reader
-intact; an in-range ``int`` stays a plain number. The cost of the encoding is that a dict
-whose only key is literally one of the reserved names cannot be written as a golden
-fixture; :func:`encode_tags` refuses such a value rather than writing a file that would
-decode back into something else.
-
-A **plain JSON object can only ever have ``str`` keys**, so a dict with any other key kind
-(``int``, ``bool``, ``float``, ``None``, ``datetime``, ``date``, or a ``tuple`` of those) needs
-its own tag: ``{"$dict": [[key, value], ...]}`` is a list of ``[key, value]`` pairs, each
-itself tagged where its type needs it (a ``$tuple``/``$datetime``/``$date`` key encodes exactly
-like a value of that type would). This is the one tag whose payload is a list of pairs rather
-than a list of items or a bare string — a JSON object cannot represent a non-``str`` key at
-all, so pairs are the only shape left. A ``$dict`` value never itself needs the plain-object
-form (any dict that would round-trip through it is `str`-keyed and is written directly), so
-:func:`encode_tags` only ever *emits* one of these when it meets a genuinely non-``str`` key.
-
-This is corpus tooling only. onix's own parse paths (``onix_core::Value``'s
-``Deserialize``, ``deepdiff_rs.diff_json``, the CLI) never interpret these names — a
-tagged object is an ordinary dict to all of them, which the test suites pin down.
-
-The Rust reader (``crates/onix-core/tests/golden.rs``) implements the identical rule
-against the same fixtures.
+A JSON object with exactly one key drawn from :data:`RESERVED_TAGS` decodes to the
+corresponding Python object (a container type JSON has no literal for, an
+out-of-range ``int``, or a custom object); any other JSON object decodes to a plain
+``dict``. ``$timedelta`` carries Python's own normalized ``{days, seconds,
+microseconds}`` triple, not a flattened microsecond count, which overflows an
+``i64`` at Python's own extreme (``days=999_999_999``). Corpus tooling only: onix's own
+parse paths never interpret these tags; ``crates/onix-core/tests/golden.rs`` implements the same rule.
 """
 
 from __future__ import annotations
@@ -64,9 +28,7 @@ DICT_TAG: Final[str] = "$dict"
 BIGINT_TAG: Final[str] = "$bigint"
 OBJECT_TAG: Final[str] = "$object"
 
-# Every tag name the encoding reserves. All ten are implemented; the list is still
-# fixed here so a fixture can never use one as an ordinary dict key, and so all three
-# readers agree on the full set.
+# Every tag name the encoding reserves, so a fixture can never use one as an ordinary dict key.
 RESERVED_TAGS: Final[frozenset[str]] = frozenset(
     {
         TUPLE_TAG,
@@ -82,18 +44,12 @@ RESERVED_TAGS: Final[frozenset[str]] = frozenset(
     }
 )
 
-# The inclusive `int` range JSON (and onix's own serde_json parse path) round-trips
-# without loss. An `int` outside it is written as a `$bigint` tag carrying its exact
-# decimal digits, because a plain JSON number literal beyond this range parses back to
-# a lossy `f64` in onix's Rust golden reader (serde_json without arbitrary precision) —
-# exactly the representation gap onix's own value model closes with its arbitrary-
-# precision arm. An in-range `int` stays a plain JSON number, unchanged.
+# The inclusive `int` range JSON round-trips without loss; an `int` outside it is
+# tagged as `$bigint` since onix's serde_json reader has no arbitrary-precision int form.
 _I64_MIN: Final[int] = -(2**63)
 _U64_MAX: Final[int] = 2**64 - 1
 
-# The key kinds a dict may hold (mirrors `onix_core::value::ObjectKey`'s
-# non-`str` case, plus `str` itself, and only a `tuple` *of* these — never a
-# nested `tuple`).
+# The key kinds a dict may hold, mirroring `onix_core::value::ObjectKey`'s non-`str` case.
 DictKey = Union[
     str,
     int,
@@ -105,13 +61,8 @@ DictKey = Union[
     tuple[Union[str, int, float, bool, None, datetime.datetime, datetime.date], ...],
 ]
 
-# DeepDiff's own `to_json()` cannot serialize a `date`, `time` or `timedelta` at all:
-# `serialization.JSON_CONVERTOR` has an entry for `datetime.datetime` (`isoformat()`) and none
-# for the other three, so a report carrying one raises TypeError. onix renders a `date`/`time`
-# as `isoformat()`'s own bytes and a `timedelta` as `str()`'s — documented supersets (see
-# tests/golden/README.md) — and passing this mapping to DeepDiff's own
-# `to_json(default_mapping=...)` makes it produce exactly the same bytes, so a golden case
-# holding any of the three still has real DeepDiff output as its spec.
+# DeepDiff's own `to_json()` raises on a `date`/`time`/`timedelta`; this mapping renders
+# them the way onix does, so `to_json(default_mapping=...)` stays real DeepDiff's own output.
 _Renderable = Union[datetime.date, datetime.time, datetime.timedelta]
 
 JSON_DEFAULT_MAPPING: Final[dict[type, Callable[[_Renderable], str]]] = {
@@ -120,8 +71,7 @@ JSON_DEFAULT_MAPPING: Final[dict[type, Callable[[_Renderable], str]]] = {
     datetime.timedelta: str,
 }
 
-# A JSON-shaped value, plus the Python types the tags decode to. Named instead of
-# `typing.Any` per the python-coding-guide's ban on `Any`.
+# A JSON-shaped value, plus the Python types the tags decode to.
 TaggedValue = Union[
     dict[DictKey, "TaggedValue"],
     list["TaggedValue"],
@@ -156,26 +106,14 @@ SetMember = Union[
 
 
 class GoldenObject:
-    """
-    A custom-object instance, as a golden ``CASE`` writes one (issue #66).
-
-    A ``CASE`` cannot hold a live instance of a user class — the classes are
-    created on decode — so it holds this marker instead: a class name plus the
-    instance attributes ``DeepDiff``'s ``_diff_obj`` would see. :func:`encode_tags`
-    writes it as an ``$object`` tag and :func:`decode_tags` turns it back into a
-    live instance of a plain, attribute-only class (see :func:`_object_class`),
-    which is exactly the shape onix diffs by attributes.
-    """
+    """A custom-object marker a golden ``CASE`` writes in place of a live user-class instance."""
 
     def __init__(self, class_name: str, attrs: dict[str, "TaggedValue"]) -> None:
         self.class_name = class_name
         self.attrs = attrs
 
     def __eq__(self, other: object) -> bool:
-        # Equal to another marker with the same class and attributes, and — so
-        # `write_case_inputs`'s round-trip check passes — to a decoded live
-        # instance of the same class carrying the same `__dict__` (a nested
-        # value compares live-against-marker through this same reflected path).
+        # Also equal to a decoded live instance carrying the same `__dict__`.
         if isinstance(other, GoldenObject):
             return self.class_name == other.class_name and self.attrs == other.attrs
         if type(other) in _OBJECT_CLASSES.values():
@@ -193,21 +131,14 @@ class GoldenEnum(GoldenObject):
         self.member = member
 
 
-# Classes created for `$object` tags, cached by name so two instances of the
-# same class (e.g. the two sides of an attribute change) share one `type`
-# object — `DeepDiff` compares `type(t1) != type(t2)`, so a fresh class per
-# instance would turn every same-class diff into a spurious `type_changes`.
+# Classes created for `$object` tags, cached by name so two instances of the same
+# class share one `type` object; a fresh class per instance would spuriously
+# `type_changes` every same-class diff, since `DeepDiff` compares `type(t1) != type(t2)`.
 _OBJECT_CLASSES: dict[str, type] = {}
 
 
 def _object_class(class_name: str) -> type:
-    """
-    The cached plain, attribute-only class named `class_name`.
-
-    :param class_name: The class's ``__name__``.
-    :return: A class with no methods, properties, or class attributes, so an
-        instance's enumerated attributes are exactly its own ``__dict__``.
-    """
+    """Return the cached plain, attribute-only class named `class_name`."""
     cls = _OBJECT_CLASSES.get(class_name)
     if cls is None:
         cls = type(class_name, (), {})
@@ -216,13 +147,7 @@ def _object_class(class_name: str) -> type:
 
 
 def _make_object(class_name: str, attrs: dict[str, "TaggedValue"]) -> object:
-    """
-    Build a live instance of the cached class `class_name` carrying `attrs`.
-
-    :param class_name: The class's ``__name__``.
-    :param attrs: The instance attributes to set.
-    :return: The instance.
-    """
+    """Build a live instance of the cached class `class_name` carrying `attrs`."""
     cls = _object_class(class_name)
     obj = cls.__new__(cls)
     for key, value in attrs.items():
@@ -231,12 +156,7 @@ def _make_object(class_name: str, attrs: dict[str, "TaggedValue"]) -> object:
 
 
 def _sole_tag(value: dict[str, TaggedValue]) -> str | None:
-    """
-    Return the reserved tag `value` is an encoding of, or ``None`` if it is plain data.
-
-    :param value: A decoded JSON object.
-    :return: The single reserved key, or ``None``.
-    """
+    """Return the reserved tag `value` is an encoding of, or ``None`` if it is plain data."""
     if len(value) != 1:
         return None
 
@@ -249,11 +169,7 @@ def encode_tags(value: TaggedValue) -> TaggedValue:
     """
     Encode a Python value into its JSON-writable tagged form.
 
-    :param value: The value to encode; tuples, datetimes and dates become tagged objects,
-        everything else is rebuilt unchanged.
-    :raises ValueError: If a plain dict would encode to something a decoder would read
-        back as a tagged value (its only key is a reserved name).
-    :return: A value containing only JSON-expressible types.
+    :raises ValueError: If a plain dict's only key is itself a reserved tag name.
     """
     if isinstance(value, GoldenObject):
         return {
@@ -266,8 +182,7 @@ def encode_tags(value: TaggedValue) -> TaggedValue:
     if isinstance(value, tuple):
         return {TUPLE_TAG: [encode_tags(item) for item in value]}
 
-    # `bool` is an `int` subclass but has its own JSON literal, so it must be
-    # excluded before the out-of-range `int` check below.
+    # `bool` is an `int` subclass but has its own JSON literal.
     if isinstance(value, int) and not isinstance(value, bool) and not (_I64_MIN <= value <= _U64_MAX):
         return {BIGINT_TAG: str(value)}
 
@@ -290,10 +205,7 @@ def encode_tags(value: TaggedValue) -> TaggedValue:
             }
         }
 
-    # Written in onix's canonical set order rather than the live set's own iteration
-    # order, which is hash order and, for `str` members, PYTHONHASHSEED-dependent. onix
-    # never depends on a set's order, so the fixture does not have to record one — and
-    # writing the canonical order is what makes the file byte-identical between runs.
+    # Written in onix's canonical set order, not the live set's PYTHONHASHSEED-dependent one.
     if isinstance(value, frozenset):
         return {FROZENSET_TAG: [encode_tags(item) for item in canonical_set_order(value)]}
 
@@ -304,10 +216,7 @@ def encode_tags(value: TaggedValue) -> TaggedValue:
         return [encode_tags(item) for item in value]
 
     if isinstance(value, dict):
-        # A JSON object can only ever have `str` keys; any other key kind
-        # forces the `$dict` pair-list form (see this module's own doc) —
-        # for *every* key, once any one of them needs it, so decoding never
-        # has to guess which entries were originally `str`.
+        # A non-`str` key forces the `$dict` pair-list form for every key in the dict.
         if not all(isinstance(key, str) for key in value):
             return {DICT_TAG: [[encode_tags(key), encode_tags(item)] for key, item in value.items()]}
 
@@ -326,10 +235,7 @@ def decode_tags(value: TaggedValue) -> TaggedValue:
     """
     Decode a parsed JSON value, turning tagged objects into their Python counterparts.
 
-    :param value: A value parsed from a golden fixture file.
-    :raises NotImplementedError: If the value carries a reserved tag no decoder supports
-        yet (the corpus must not use one before its slice lands).
-    :return: The Python value the fixture stands for.
+    :raises NotImplementedError: If the value carries a reserved tag no decoder supports yet.
     """
     if isinstance(value, list):
         return [decode_tags(item) for item in value]
@@ -394,8 +300,7 @@ def decode_tags(value: TaggedValue) -> TaggedValue:
     return value
 
 
-# The two report categories whose entries are bare path strings rather than
-# path-keyed values (see :func:`canonical_report`).
+# The two report categories whose entries are bare path strings, not path-keyed values.
 SET_CATEGORIES: Final[frozenset[str]] = frozenset({"set_item_added", "set_item_removed"})
 
 
@@ -403,57 +308,28 @@ class OnixReport(Protocol):
     """The one method :func:`sorted_set_categories` needs from an onix report."""
 
     def to_json(self) -> str:
-        """
-        Render the report as a JSON string.
-
-        :return: The JSON text.
-        """
+        """Render the report as a JSON string."""
 
 
 class RealReport(Protocol):
     """The two methods :func:`canonical_report` needs from a real DeepDiff report."""
 
     def to_json(self, default_mapping: dict[type, Callable[[datetime.date], str]]) -> str:
-        """
-        Render the report as a JSON string.
-
-        :param default_mapping: Serializers for the types DeepDiff cannot render itself.
-        :return: The JSON text.
-        """
+        """Render the report as a JSON string, using `default_mapping` for types it cannot render itself."""
 
     def to_dict(self) -> dict[str, object]:
-        """
-        Render the report as native Python objects.
-
-        :return: The report, with real ``set``/``frozenset`` objects still in place.
-        """
+        """Render the report as native Python objects, with real ``set``/``frozenset`` still in place."""
 
 
 def canonical_report(diff: RealReport) -> TaggedValue:
     """
-    Render one **real DeepDiff** report as the JSON spec onix must match.
+    Render one real DeepDiff report as the JSON spec onix must match.
 
-    ``to_json()`` is the spec for everything except the *order* of anything that came
-    out of a Python set, which follows hash order and, for ``str`` members,
-    ``PYTHONHASHSEED``. Exactly two things are reordered here, and nothing else is
-    touched:
-
-    - the two set categories, whose entries are path strings, are sorted; and
-    - every JSON array that stands for a set value (found by walking ``to_dict()``,
-      which still holds the real ``set`` objects, alongside the parsed JSON) is
-      reordered into :func:`canonical_set_order`, onix's own documented order.
-
-    Reordering pairs each JSON element with its Python member by iterating the set once
-    more: ``to_json()`` serialized it by the same single iteration, so ``zip`` lines the
-    two up exactly. Every value in the result is therefore still DeepDiff's own. Use
-    :func:`sorted_set_categories` for onix's own report, whose arrays are canonical
-    already and would be scrambled by that pairing.
-
-    :param diff: A real DeepDiff instance.
-    :return: The parsed, canonically ordered report.
+    Reorders only the two set categories and every set-derived array into
+    :func:`canonical_set_order`, since a Python set's own iteration order is
+    PYTHONHASHSEED-dependent; everything else stays exactly as ``to_json()`` wrote it.
     """
-    # `JSON_DEFAULT_MAPPING` is what lets a `date`-carrying case be rendered at all:
-    # DeepDiff's stock `to_json()` raises TypeError on one.
+    # `JSON_DEFAULT_MAPPING` lets a `date`-carrying case render; stock `to_json()` raises on one.
     parsed = json.loads(diff.to_json(default_mapping=JSON_DEFAULT_MAPPING))
     as_objects = diff.to_dict()
 
@@ -471,15 +347,7 @@ def canonical_report(diff: RealReport) -> TaggedValue:
 
 
 def sorted_set_categories(diff: OnixReport) -> TaggedValue:
-    """
-    Render one **onix** report, sorting only the two set categories.
-
-    onix already emits every set value in :func:`canonical_set_order`; only the two
-    categories are left in the structural order the report stores them in.
-
-    :param diff: An onix report object.
-    :return: The parsed report, with both set categories sorted.
-    """
+    """Render one onix report, sorting only the two set categories (its arrays are already canonical)."""
     return {
         category: sorted(entries) if category in SET_CATEGORIES else entries
         for category, entries in json.loads(diff.to_json()).items()
@@ -487,14 +355,7 @@ def sorted_set_categories(diff: OnixReport) -> TaggedValue:
 
 
 def _canonical_value(as_object: object, as_json: TaggedValue) -> TaggedValue:
-    """
-    Reorder every set-derived array inside one report entry; leave everything else alone.
-
-    :param as_object: The same subtree as DeepDiff's own ``to_dict()`` holds it, still
-        carrying real ``set``/``frozenset`` objects.
-    :param as_json: That subtree parsed back from ``to_json()``.
-    :return: `as_json` with each set-derived array in canonical order.
-    """
+    """Reorder every set-derived array inside one report entry; leave everything else alone."""
     if isinstance(as_object, (set, frozenset)) and isinstance(as_json, list):
         paired = sorted(zip(as_object, as_json), key=lambda pair: _order_key(pair[0]))
 
@@ -506,12 +367,8 @@ def _canonical_value(as_object: object, as_json: TaggedValue) -> TaggedValue:
         ]
 
     if isinstance(as_object, dict) and isinstance(as_json, dict):
-        # Paired positionally, not by `key in as_json`/`as_json[key]`: a
-        # non-`str` key (`1`, `True`, ...) is stringified by `to_json()`
-        # (`"1"`, `"true"`, ...), so it can never look itself up in
-        # `as_json` by identity. Both dicts come from serializing the same
-        # `as_object` once, so their key order already corresponds — no
-        # lookup is needed, only the zip.
+        # Paired positionally: a non-`str` key is stringified by `to_json()`, so it
+        # can never look itself up in `as_json` by identity.
         return dict(
             zip(
                 as_json.keys(),
@@ -526,18 +383,7 @@ def _canonical_value(as_object: object, as_json: TaggedValue) -> TaggedValue:
 
 
 def canonical_set_order(members: object) -> list[SetMember]:
-    """
-    Sort a set's members into onix's canonical set order.
-
-    This is the Python twin of ``onix_core::value::SetItems``'s own ordering, whose doc
-    is the definition of the rule. Two points it is easy to get wrong here: ``bool`` is
-    ranked before ``int`` even though every Python bool *is* an int, and ``float``
-    comparison folds ``-0.0`` into ``0.0`` before ordering, matching Python's own
-    equality -- see ``number_cmp`` in ``crates/onix-core/src/value.rs``.
-
-    :param members: Any iterable of set members.
-    :return: The members in canonical order.
-    """
+    """Sort a set's members into onix's canonical order, the Python twin of ``onix_core::value::SetItems``."""
     return sorted(members, key=_order_key)
 
 
@@ -545,9 +391,7 @@ def _order_key(value: object) -> tuple[object, ...]:
     """
     Build the sort key :func:`canonical_set_order` compares by.
 
-    :param value: Any value.
     :raises TypeError: If `value` is of a kind no set can hold.
-    :return: A tuple ordering `value` against any other by kind, then by value.
     """
     if value is None:
         return (0,)
@@ -560,8 +404,7 @@ def _order_key(value: object) -> tuple[object, ...]:
         return (2, value)
 
     if isinstance(value, float):
-        # Folds -0.0 into +0.0 before ordering -- see `number_cmp` in
-        # crates/onix-core/src/value.rs.
+        # Folds -0.0 into +0.0, matching `number_cmp` in crates/onix-core/src/value.rs.
         return (3, value + 0.0)
 
     if isinstance(value, str):
@@ -599,19 +442,7 @@ def _order_key(value: object) -> tuple[object, ...]:
 
 
 def _datetime_instant(value: datetime.datetime) -> tuple[int, bool, int]:
-    """
-    Build a `datetime`'s ordering key: its UTC instant, then whether it is aware.
-
-    The Python twin of ``onix_core::datetime::DateTime::instant`` plus
-    ``crate::value``'s aware/naive tie-break: a naive value is read as UTC (matching
-    ``datetime_normalize``'s default), so this ranks by microseconds since the epoch
-    with the offset already applied, then by awareness (naive first) and finally by the
-    raw offset — the same order two datetimes at one instant fall back on in
-    ``onix_core::value::canonical_cmp``.
-
-    :param value: A `datetime`, naive or aware.
-    :return: A tuple ordering `value` against any other `datetime` the same way onix does.
-    """
+    """Build a `datetime`'s ordering key: UTC instant, then awareness, then raw offset (naive read as UTC)."""
     offset = value.utcoffset() or datetime.timedelta()
     naive = value.replace(tzinfo=None) - offset
     epoch = datetime.datetime(1970, 1, 1)
@@ -622,20 +453,7 @@ def _datetime_instant(value: datetime.datetime) -> tuple[int, bool, int]:
 
 
 def _time_sort_key(value: datetime.time) -> tuple[bool, int, int]:
-    """
-    Build a `time`'s ordering key: naive first, then by the offset-adjusted
-    micros-of-day, then by the raw offset.
-
-    The Python twin of ``onix_core::datetime::Time::sort_instant`` plus
-    ``crate::value::canonical_cmp``'s own tie-break for `Time` -- unlike
-    :func:`_datetime_instant`, a naive value is NOT read as if it were UTC
-    (real `time.__eq__` never does that; see docs/design/value-model.md's
-    "Calendar types" section),
-    so its own micros-of-day is used unadjusted.
-
-    :param value: A `time`, naive or aware.
-    :return: A tuple ordering `value` against any other `time` the same way onix does.
-    """
+    """Build a `time`'s ordering key: naive first, then offset-adjusted micros-of-day, then raw offset."""
     offset = value.utcoffset()
     wall_micros = (
         (value.hour * 3600 + value.minute * 60 + value.second) * 1_000_000 + value.microsecond
