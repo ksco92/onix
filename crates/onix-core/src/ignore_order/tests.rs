@@ -3828,3 +3828,18 @@ fn a_failed_object_keys_under_ignore_order_apart_from_a_dict_and_another_class()
     assert_ne!(key(&failed("A")), key(&failed("B")));
     assert_eq!(key(&failed("A")), key(&failed("A")));
 }
+
+#[test]
+fn an_object_reports_the_address_it_was_converted_from() {
+    let instance = |value: &CValue| match value {
+        CValue::Object(map) => map.instance(),
+        _ => unreachable!("both values are objects"),
+    };
+    assert_eq!(
+        (
+            instance(&cobject_at(1, Some(7))),
+            instance(&cv(&json!({"x": 1})))
+        ),
+        (Some(7), None)
+    );
+}
