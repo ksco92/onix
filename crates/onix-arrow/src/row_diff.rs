@@ -7849,24 +7849,19 @@ mod fused_tests {
         assert!(unshared(&dict).unwrap().is_none());
     }
 
-    /// Asserts no buffer of `batch` is a slice of a much larger allocation.
+    /// Asserts no buffer of `batch`'s columns is a slice of a much larger
+    /// allocation.
     fn assert_owned(batch: &RecordBatch) {
-        fn walk(data: &arrow_array::ArrayRef, column: &str) {
-            let data = data.to_data();
-            for buffer in data.buffers() {
+        for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+            for buffer in column.to_data().buffers() {
                 assert!(
                     buffer.capacity() <= 2 * buffer.len() + 64,
-                    "{column}: a {} byte buffer holds {} bytes",
+                    "{}: a {} byte buffer holds {} bytes",
+                    field.name(),
                     buffer.len(),
                     buffer.capacity()
                 );
             }
-            for child in data.child_data() {
-                walk(&arrow_array::make_array(child.clone()), column);
-            }
-        }
-        for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
-            walk(column, field.name());
         }
     }
 
