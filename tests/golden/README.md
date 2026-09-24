@@ -679,10 +679,14 @@ silently report `{}` for two *unequal* values.
 
 Below the root, DeepDiff's `_diff` returns before any handler when `t1 is t2`, so
 a value both sides share is never diffed. onix holds such a value as an identity
-token, equal only to the same object. A class attribute (ABCMeta's `_abc_impl`, a
-class-level lock, `Enum` member or `logging.Logger`) is converted once per diff by
-its own walk, so an instance value that shadows it compares against the default's
-value; one onix cannot convert is a token too. A whole object in a report leaves
+token, equal only to the same object. A class attribute (a class-level `Enum`
+member, config object or `re.Pattern`) is converted once per diff by its own walk,
+so an instance value that shadows it compares against the default's value; one
+onix cannot convert (ABCMeta's `_abc_impl`, a class-level lock, a
+`logging.Logger`, whose registry is cyclic) is a token too. So is a class
+attribute reached through more than 16 nested class-attribute defaults, so an
+instance that shadows every default above it raises where DeepDiff reports
+nothing. A whole object in a report leaves
 every class attribute out, as DeepDiff's `to_json()` render does. A token raises a
 `TypeError` naming its path wherever a report would have to show it: as the
 compared value of a finding, or as an instance attribute of an object in the

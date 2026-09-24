@@ -222,6 +222,7 @@ use pyo3::types::{
 };
 
 use crate::errors::MaxDepthError;
+use crate::guard::{is_deep, run_on_worker};
 
 /// A Python sequence being walked: a `list` or a `tuple`. The two differ
 /// only in their iterator type and in which [`CValue`] the finished items
@@ -559,10 +560,7 @@ fn classify_other<'py>(
     if let Ok(attribute) = current.cast::<ClassAttribute>() {
         let value = attribute.get().0.bind(current.py()).clone();
         return Ok(Step::Done(class_attribute_value(
-            &value,
-            path.len(),
-            builder,
-            held,
+            &value, path, builder, held,
         )?));
     }
     if let Some(strategy) = object_strategy(current)? {
@@ -584,46 +582,62 @@ struct ClassAttribute(Py<PyAny>);
 
 /// How many class-attribute conversions may nest inside one another on the
 /// native stack before a further one becomes an opaque token.
-// ponytail: fixed nesting bound, raise it if a real shadowed default nests deeper.
+// Fixed ceiling; raise it if a real shadowed default nests deeper.
 const MAX_CLASS_ATTRIBUTE_NESTING: usize = 16;
 
-/// The class attribute `value` at `depth`, converted by its own walk and
-/// memoized by address for the diff. A value that cannot be converted, one
-/// already being converted, or one nested too deep is an opaque token, as
-/// `DeepDiff`'s `t1 is t2` check never looks inside a value two instances
-/// share.
+/// The class attribute `value` at `path`, converted by its own walk with the
+/// full `max_depth` budget and memoized by address for the diff. A value that
+/// cannot be converted, one already being converted, or one nested too deep is
+/// an opaque token, as `DeepDiff`'s `t1 is t2` check never looks inside a value
+/// two instances share; a value too deep to place at `path` raises
+/// `MaxDepthError`.
 fn class_attribute_value(
     value: &Bound<'_, PyAny>,
-    depth: usize,
+    path: &[PathSegment],
     builder: &mut Builder,
     held: &mut Held,
 ) -> PyResult<CValue> {
+    let py = value.py();
     let address = value.as_ptr() as usize;
-    if let Some(converted) = held.class_attributes.get(&address) {
-        return Ok(match converted {
-            Some(converted) => converted.clone(),
-            None => opaque(value, builder, held),
-        });
-    }
-    if held.nesting == MAX_CLASS_ATTRIBUTE_NESTING {
-        return Ok(opaque(value, builder, held));
-    }
-    held.objects.push(value.clone().unbind());
-    held.class_attributes.insert(address, None);
-    held.nesting += 1;
-    let converted = to_value(value, held.max_depth.saturating_sub(depth), held);
-    held.nesting -= 1;
-    let converted = match converted {
-        Ok((converted, saw_wtf8)) => {
-            held.saw_wtf8 |= saw_wtf8;
-            converted
+    let converted = match held.class_attributes.get(&address) {
+        Some(Some(converted)) => clone_off_stack(py, converted)?,
+        Some(None) => return Ok(opaque(value, builder, held)),
+        None if held.nesting == MAX_CLASS_ATTRIBUTE_NESTING => {
+            return Ok(opaque(value, builder, held));
         }
-        Err(err) if err.is_instance_of::<PyException>(value.py()) => opaque(value, builder, held),
-        Err(err) => return Err(err),
+        None => {
+            held.objects.push(value.clone().unbind());
+            held.class_attributes.insert(address, None);
+            held.nesting += 1;
+            let converted = to_value(value, held.max_depth, held);
+            held.nesting -= 1;
+            let converted = match converted {
+                Ok((converted, saw_wtf8)) => {
+                    held.saw_wtf8 |= saw_wtf8;
+                    converted
+                }
+                Err(err) if err.is_instance_of::<PyException>(py) => opaque(value, builder, held),
+                Err(err) => return Err(err),
+            };
+            let copy = clone_off_stack(py, &converted)?;
+            held.class_attributes.insert(address, Some(converted));
+            copy
+        }
     };
-    held.class_attributes
-        .insert(address, Some(converted.clone()));
+    if onix_core::exceeds_depth(&converted, held.max_depth.saturating_sub(path.len())) {
+        return Err(max_depth_error(held.max_depth, path));
+    }
     Ok(converted)
+}
+
+/// `value.clone()`, on the sized worker when `value` is too deep for the
+/// natively recursive clone to run on the calling thread.
+fn clone_off_stack(py: Python<'_>, value: &CValue) -> PyResult<CValue> {
+    if is_deep(value) {
+        run_on_worker(py, || value.clone())
+    } else {
+        Ok(value.clone())
+    }
 }
 
 /// What one diff's conversions share: every Python object whose address a
@@ -773,7 +787,7 @@ fn object_step<'py>(
     held: &mut Held,
 ) -> PyResult<Step<'py>> {
     let (attrs, lengths, class_attributes) = object_attributes(obj, strategy, path, held)?;
-    held.needs_render = true;
+    held.needs_render |= !class_attributes.is_empty();
     let mut class = Box::new(py_class(obj, lengths, held));
     class.class_attributes = class_attributes;
     let mut iter = attrs.iter();

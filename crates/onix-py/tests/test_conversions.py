@@ -25,7 +25,7 @@ require_deepdiff()
 
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import DeepDiff, diff_json
+from deepdiff_rs import DeepDiff, MaxDepthError, diff_json
 
 
 # int range
@@ -1441,16 +1441,98 @@ def test_a_pydantic_model_is_refused_where_deepdiff_diffs_it() -> None:
         DeepDiff(Model(a=1, b="x"), Model(a=1, b="y"))
 
 
-def test_converting_every_member_of_a_large_enum_scales_linearly() -> None:
-    """A list of all members of an N-member Enum converts in time linear in N."""
+class _CountingEnumType(_enum.EnumType):
+    iterations = 0
 
-    def convert_seconds(size: int) -> float:
-        members = list(_enum.Enum("Big", [f"M{i}" for i in range(size)]))
-        best = math.inf
-        for _ in range(3):
-            start = time.perf_counter()
-            DeepDiff(members, members[:-1])
-            best = min(best, time.perf_counter() - start)
-        return best
+    def __iter__(cls):  # type: ignore[override]
+        _CountingEnumType.iterations += 1
+        return super().__iter__()
 
-    assert convert_seconds(4000) < 8 * convert_seconds(1000)
+
+def test_an_enum_class_is_iterated_once_per_diff() -> None:
+    """Converting every member of an Enum iterates the class once, not once per member."""
+    namespace = _CountingEnumType.__prepare__("Counted", (_enum.Enum,))
+    for i in range(50):
+        namespace[f"M{i}"] = i
+    counted = _CountingEnumType("Counted", (_enum.Enum,), namespace)
+    members = [counted[f"M{i}"] for i in range(50)]
+    _CountingEnumType.iterations = 0
+    DeepDiff(members, members[:-1])
+    assert _CountingEnumType.iterations == 1
+
+
+def _nest(value: object, levels: int) -> object:
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def test_a_chain_of_deep_class_attributes_diffs_like_deepdiff() -> None:
+    """Sixty classes whose class attribute nests the previous class 500 levels deep diff without a crash."""
+    previous = type("C0", (), {})
+    roots = []
+    for i in range(1, 61):
+        cls = type(f"C{i}", (), {"a": _nest(previous(), 500)})
+        roots.append(cls())
+        previous = cls
+    onix, real = _canonical(roots, roots[:-1])
+    assert onix == real
+
+
+def test_a_deep_class_attribute_converts_on_a_small_thread() -> None:
+    """A class attribute nested 2,000 levels deep diffs on a 512 KiB thread without overflowing it."""
+    holder = type("Holder", (), {"a": _nest(1, 2000)})
+    outcome: list[object] = []
+
+    def run() -> None:
+        outcome.append(json.loads(DeepDiff([holder()], [holder(), holder()], max_depth=5000).to_json()))
+
+    previous = threading.stack_size(512 * 1024)
+    try:
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+    finally:
+        threading.stack_size(previous)
+    assert outcome == [{"iterable_item_added": {"root[1]": {}}}]
+
+
+def test_a_class_attribute_placed_past_the_depth_budget_raises_max_depth_error() -> None:
+    """A class attribute converted at a shallow position and reached again 10,000 levels deeper raises."""
+    holder = type("Holder", (), {"a": _nest(1, 12000)})
+    with pytest.raises(MaxDepthError):
+        DeepDiff([holder(), _nest(holder(), 10000)], [holder()], max_depth=20000)
+
+
+def test_a_class_attribute_too_deep_for_its_position_raises_max_depth_error() -> None:
+    """A class attribute that converts on its own but is too deep where it is reached raises MaxDepthError."""
+
+    class E:
+        shared = {"k": [[[[1]]]]}
+
+        def __init__(self, shared: object = None) -> None:
+            if shared is not None:
+                self.shared = shared
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff([E({"k": [[[[1]]]]}), _nest(E(), 14)], [E(), _nest(E(), 14)], max_depth=20)
+
+
+def _class_attribute_chain(levels: int) -> tuple[object, object]:
+    """An instance whose defaults nest `levels` classes deep, and one that shadows every level but the last."""
+    classes = [type("K0", (), {"leaf": 1})]
+    for i in range(1, levels + 1):
+        classes.append(type(f"K{i}", (), {"child": classes[-1]()}))
+    shadowed = node = classes[levels]()
+    for i in range(levels - 1, 0, -1):
+        node.child = classes[i]()
+        node = node.child
+    return classes[levels](), shadowed
+
+
+def test_class_attributes_nested_past_sixteen_conversions_are_identity_tokens() -> None:
+    """At 16 nested class-attribute defaults onix matches DeepDiff; at 17 the innermost is a token and raises."""
+    assert json.loads(DeepDiff(*_class_attribute_chain(16)).to_json()) == {}
+    assert RealDeepDiff(*_class_attribute_chain(17)) == {}
+    with pytest.raises(TypeError, match="cannot report the K0"):
+        DeepDiff(*_class_attribute_chain(17))
