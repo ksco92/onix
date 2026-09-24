@@ -3122,8 +3122,8 @@ struct KeyIndex {
 enum Tally {
     /// The key is not on the indexed side.
     Absent,
-    /// The key is on the indexed side once, with a different row hash, and this
-    /// is the other side's first row of it; the key's count is at `slot`.
+    /// The key is on the indexed side once, with a different row hash; the
+    /// key's count is at `slot` (see [`KeyIndex::repeated`]).
     Changed { partition: usize, slot: usize },
     /// Any other key on the indexed side.
     Present,
@@ -3185,11 +3185,8 @@ impl KeyIndex {
             return Tally::Absent;
         }
         let count = &self.counts[partition][start + at];
-        let earlier = count.fetch_add(1, Ordering::Relaxed) & !ROW_DIFFERS;
-        if earlier > 0
-            || rest.first().is_some_and(|&(next, _)| next == key)
-            || *indexed_hash == row_hash
-        {
+        count.fetch_add(1, Ordering::Relaxed);
+        if rest.first().is_some_and(|&(next, _)| next == key) || *indexed_hash == row_hash {
             return Tally::Present;
         }
         count.fetch_or(ROW_DIFFERS, Ordering::Relaxed);
@@ -3347,7 +3344,8 @@ impl RightFuse<'_> {
                 Tally::Present => {}
             }
         }
-        // A key the batch itself repeats is a duplicate, never compared.
+        // A key the right has repeated by the end of this batch is a duplicate,
+        // never compared; only a repeat in a later batch finds its row spilled.
         for (row, partition, slot) in changed_slots {
             changed[row] = !self.index.repeated(partition, slot);
         }
