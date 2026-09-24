@@ -6,11 +6,12 @@ LCS/`difflib`-style match for one pair of lists.
 ## Condition and candidate selection
 
 The LCS path applies only when every element of both lists is a JSON
-scalar (null, bool, number, string); a dict or a nested list anywhere in
-either list disqualifies the whole comparison back to index-aligned. When
-it applies, compute the LCS match first: at most one finding, use it as
-is; otherwise also compute the index-aligned result and keep whichever
-has fewer total findings, favoring index-aligned on an exact tie.
+scalar (null, bool, number, string, datetime, date, time, timedelta); a
+dict or a nested list anywhere in either list disqualifies the whole
+comparison back to index-aligned. When it applies, compute the LCS
+match first: at most one finding, use it as is; otherwise also compute
+the index-aligned result and keep whichever has fewer total findings,
+favoring index-aligned on an exact tie.
 
 ## Opcode-to-finding mapping
 

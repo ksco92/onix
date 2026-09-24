@@ -242,9 +242,9 @@ fn insert_lcs_pair_finding(
     })
 }
 /// Diffs two lists of JSON scalars via a `difflib`-style LCS match — see
-/// [`array_diff`]'s doc for when this is tried, and this module's "List
-/// diffing" doc section for the opcode-to-finding mapping this implements
-/// (a direct port of `deepdiff/diff.py::_diff_ordered_iterable_by_difflib`).
+/// [`array_diff`]'s doc for when this is tried, and `docs/design/list-diff.md`
+/// for the opcode-to-finding mapping this implements (a direct port of
+/// `deepdiff/diff.py::_diff_ordered_iterable_by_difflib`).
 ///
 /// The only possible [`Error::MaxDepthExceeded`] source is
 /// [`insert_lcs_pair_finding`]'s traversal-depth check on a `'replace'`

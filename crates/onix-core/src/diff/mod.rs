@@ -1,7 +1,7 @@
 //! The diff engine's entry point: recursive type-dispatch over two
 //! `Value` trees into a `Report`; list diffing is `docs/design/list-diff.md`.
-//! Submodules: `options` (public API), `dispatch` (traversal core),
-//! `scalar` (leaf comparison), `array` (list diffing), `object` (dict diffing).
+//! Submodules: `options` (API), `dispatch` (traversal), `scalar` (leaf
+//! comparison), `array` (list diffing), `object` (dict diffing), `set` (sets).
 
 mod array;
 mod dispatch;

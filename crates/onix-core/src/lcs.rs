@@ -345,8 +345,8 @@ pub(crate) struct Opcode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tag {
     /// `a[a1..a2]` and `b[b1..b2]` are the same (by [`ScalarKey`] equality),
-    /// element for element. Never diffed further — see `crate::diff`'s
-    /// module doc.
+    /// element for element. Never diffed further — see
+    /// `docs/design/list-diff.md`.
     Equal,
     /// `a[a1..a2]` should be replaced by `b[b1..b2]`; the two ranges never
     /// share a matching element (see [`compute_opcodes`]'s doc).

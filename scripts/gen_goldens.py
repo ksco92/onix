@@ -276,8 +276,8 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
     # DeepDiff's default (non-ignore_order) list comparison runs an
     # LCS/difflib-style match instead of plain index-aligned comparison
     # whenever every element of *both* lists is a JSON scalar (its own
-    # "basic hashable" check) — see crates/onix-core/src/diff/mod.rs's
-    # "List diffing" module doc for the full spec these cases pin down.
+    # "basic hashable" check) — see docs/design/list-diff.md for the
+    # full spec these cases pin down.
     #
     # Real DeepDiff matches this pair as an insert of True at the front plus
     # a delete of the trailing False, not the three-way values_changed a
@@ -976,8 +976,8 @@ def _generate_time_timedelta_ignore_order_fuzz_cases() -> (
 
 
 # Hand-designed ignore_order=True cases — see
-# crates/onix-core/src/ignore_order/mod.rs's module doc for the full,
-# source-cited spec these pin down. Each entry carries an
+# docs/design/ignore-order.md for the full spec these pin down.
+# Each entry carries an
 # explicit {"ignore_order": True} kwargs dict (the third tuple element),
 # distinguishing it from the ordered-path CASES above.
 IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] = {

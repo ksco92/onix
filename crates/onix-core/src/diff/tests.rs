@@ -1878,8 +1878,8 @@ fn equal_deeply_nested_lists_at_a_tiny_max_depth_still_succeed() {
 
 #[test]
 fn lcs_tie_break_positional_candidate_hits_the_depth_bound_at_the_root() {
-    // `[1.0, 2]` vs `[2, 1]` is exactly the tie-break example this
-    // module's doc walks through: the LCS pass finds 2 findings (an
+    // `[1.0, 2]` vs `[2, 1]` is exactly the tie-break case
+    // `docs/design/list-diff.md` describes: the LCS pass finds 2 findings (an
     // add + a remove, via `1.0`/`1`'s cross-type match), which is
     // `> 1`, so `array_diff` also computes `positional_array_diff` to
     // compare counts. That candidate recurses into same-index pairs
@@ -1934,9 +1934,9 @@ fn lcs_replace_pair_itself_hits_the_depth_bound_not_via_the_positional_fallback(
 fn lcs_tie_break_positional_candidate_succeeds_at_a_sufficient_max_depth() {
     // Same shape as the test above, one level of budget higher (1
     // instead of 0) — the tie-break's positional candidate now fits,
-    // and (per this module's doc) wins the tie, producing the plain
-    // index-aligned `type_changes`/`values_changed` result rather than
-    // the LCS add/remove one.
+    // and (per `docs/design/list-diff.md`) wins the tie, producing the
+    // plain index-aligned `type_changes`/`values_changed` result rather
+    // than the LCS add/remove one.
     let a = json!([1.0, 2]);
     let b = json!([2, 1]);
 

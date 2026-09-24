@@ -95,7 +95,9 @@ The code is best read in this order, each step building on the last:
    each step lives in. Follow it into
    [`crates/onix-core/src/diff/mod.rs`](crates/onix-core/src/diff/mod.rs) and
    [`crates/onix-core/src/ignore_order/mod.rs`](crates/onix-core/src/ignore_order/mod.rs),
-   each its own module-doc front door.
+   then into [`docs/design/list-diff.md`](docs/design/list-diff.md) and
+   [`docs/design/ignore-order.md`](docs/design/ignore-order.md) for the two
+   algorithms those modules implement.
 3. [`tests/golden/README.md`](tests/golden/README.md): what the compatibility
    corpus pins down, and the documented DeepDiff quirks it deliberately does
    not chase.

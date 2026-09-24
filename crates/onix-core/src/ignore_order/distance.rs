@@ -195,8 +195,8 @@ pub(crate) fn numeric_distance(n1: f64, n2: f64, cutoff: f64) -> f64 {
 /// `counts += 1` for the key plus `counts += count` for the value).
 ///
 /// Recurses natively — safe only because every caller first proves the
-/// value's nesting via [`crate::diff::check_value_depth`] (see this module's "Depth
-/// safety" doc section).
+/// value's nesting via [`crate::diff::check_value_depth`] (see
+/// `docs/design/ignore-order.md`'s "Depth safety" section).
 pub(crate) fn rough_length(value: &Value) -> usize {
     match value {
         Value::Null

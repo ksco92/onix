@@ -17,7 +17,7 @@
 //! 1. **Dispatch** ([`mod@diff`], specifically its `dispatch` submodule):
 //!    `diff_at` recurses through the pair by JSON type, enforcing the
 //!    recursion-depth/value-depth invariants [`diff_with_max_depth`]'s doc
-//!    contracts (the crate's core `DoS` hardening).
+//!    documents (the crate's core `DoS` hardening).
 //! 2. **Container comparison**, depending on [`DiffOptions::ignore_order`]:
 //!    - **ordered (default):** `diff::object` walks a dict's key set;
 //!      `diff::array` picks between an index-aligned scan and an
