@@ -338,7 +338,7 @@ pub(crate) fn count_diff_leaves(
         // either way, and this is a pairing heuristic, not a report.
         (Value::DateTime(x), Value::DateTime(y)) => usize::from(x.instant() != y.instant()),
         (Value::Date(x), Value::Date(y)) => usize::from(x != y),
-        // Plain `_diff_time` equality (see `crate::datetime`'s module doc),
+        // Plain `_diff_time` equality (see `docs/design/value-model.md`),
         // matching `diff_at`'s own dispatch for `Time`.
         (Value::Time(x), Value::Time(y)) => {
             usize::from(!crate::datetime::times_equal(x.value(), y.value()))

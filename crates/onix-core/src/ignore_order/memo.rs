@@ -1,131 +1,8 @@
-//! The caches one `ignore_order` diff shares across its whole run: the
-//! pairwise subtree distances it has already computed, the digests it has
-//! already assigned to hashable tuples for list-item matching, and the ids it
-//! has assigned to set members.
-//!
-//! # Pairwise distances
-//!
-//! Memoizing them is the fix
-//! for the otherwise-exponential cost of `ignore_order` pairing on nested
-//! containers.
-//!
-//! `super::pairing::compute_pairs` ranks every candidate `(removed, added)`
-//! pair by `super::distance::rough_distance`, and for a container pair that
-//! distance is a trial diff that re-enters `ignore_order_array_diff` on the
-//! sub-items — so without caching, the same subtree pair is re-diffed once
-//! per candidate that embeds it, compounding to `~2x` cost per nesting level.
-//! This cache collapses that: a container-pair distance is computed once and
-//! reused, so the total work becomes polynomial in the number of *distinct*
-//! container-pair queries.
-//!
-//! # Soundness (why this changes no decision)
-//!
-//! [`rough_distance`](super::distance::rough_distance) is a **pure function
-//! of the two subtrees' content** on this pairing path:
-//!
-//! * The numeric fast path is `numeric_distance(numeric_value(removed),
-//!   numeric_value(added), CUTOFF)` — the cutoff is the one constant
-//!   [`CUTOFF_DISTANCE_FOR_PAIRS`](super::pairing::CUTOFF_DISTANCE_FOR_PAIRS),
-//!   so the result depends only on the two numeric values.
-//! * The structural path is `count_diff_leaves(removed, added, ...) /
-//!   (rough_length(removed) + rough_length(added))`; `rough_length` is a pure
-//!   content node-count, and `count_diff_leaves`'s only depth/budget
-//!   dependence is `count_array_diff_leaves`'s trial-diff budget, which can
-//!   change the result *only* by having the trial hit a depth bound (counted
-//!   as `0`). On the `ignore_order` pairing path that never happens:
-//!   `ignore_order_array_diff` runs `check_value_depth` on every paired item
-//!   against `max_depth - (depth + 1)` before pairing, so each item's own
-//!   nesting is `<= max_depth - depth - 1`, hence its elements' nesting is
-//!   `<= max_depth - depth - 2`, strictly below the trial's budget of
-//!   `max_depth - depth - 1` — the trial always completes. So the structural
-//!   result depends only on content too.
-//!
-//! Caching is therefore decision-neutral **as long as the key distinguishes
-//! every value pair whose distance differs** — which is exactly why the cache
-//! is keyed by [`super::hash::DistKey`] (a value's exact structural identity),
-//! not by the order- and repetition-insensitive `ItemKey` that conflated
-//! repetition-differing values into one slot (issue #31); see `DistKey`'s own
-//! doc for that rationale. Verified empirically by the with/without
-//! differential test in `super::tests` (including a repetition-only sibling
-//! divergence).
-//!
-//! # Tuple digests
-//!
-//! The second cache is **not** an optimization: it is `DeepHash`'s own
-//! observable behavior. `deephash.py::_make_hash_key` type-wraps only bare
-//! numbers, so every other object — a tuple included — keys
-//! the `hashes` dict as *itself*; `DeepHash._hash` reads that dict before
-//! computing anything and writes its result back under the same key; and
-//! `diff.py::_create_hashtable` builds both of a comparison's hashtables
-//! against one shared `hashes` dict. A **hashable** tuple is therefore looked
-//! up under Python's own `==`/`hash` and inherits the digest of the first
-//! Python-equal tuple hashed anywhere in the run:
-//!
-//! ```text
-//! DeepDiff([(1,)],     [(1.0,)],     ignore_order=True) -> {}
-//! DeepDiff([(1, [1])], [(1.0, [1])], ignore_order=True) -> type_changes at root[0][0]
-//! ```
-//!
-//! The second line is the boundary: a tuple holding a list or a dict cannot
-//! be a dict key at all, so both the lookup and the store raise `TypeError`,
-//! `DeepHash` falls back to object identity, and the tuple keeps its own
-//! type-strict digest.
-//!
-//! [`super::hash::item_key`] consults this cache at every hashable tuple node
-//! it walks, in the order the engine hashes items (t1's list, then t2's — the
-//! same order `_create_hashtable` uses), so the *first* member of a Python
-//! equality class seen decides the digest for all of them. That ordering is
-//! observable, and matching it is the point: `[(1.0,)]` vs `[(1, 1)]` is a
-//! `type_changes` in real `DeepDiff` while `[(1,)]` vs `[(1, 1)]` is empty,
-//! because in the first case the float tuple fixed the class digest before
-//! the deduplicated `(1, 1)` content digest could match it.
-//!
-//! # Set-member digests
-//!
-//! [`super::hash::set_member_digest`] reduces each set member to one content id
-//! ([`super::hash::RepId`]), reproducing `DeepHash`'s per-node cache decision
-//! with two run-scoped tables. `node_table`
-//! ([`super::hash::MemberHashKey`] → ([`super::hash::NodeId`], `RepId`)) is the
-//! first-Python-equal-wins cache the tuple digests also use: a container
-//! Python-equal to one hashed earlier in the run wins both ids, so `1` and
-//! `1.0` inside an otherwise-equal tuple collapse. `member_content`
-//! ([`super::hash::MemberContent`] → `RepId`) interns each distinct *content* —
-//! children content ids plus, at a leaf, the type-distinct scalar [`ItemKey`],
-//! with a `datetime` normalised to its instant — so a naive and an aware
-//! datetime at one moment collapse to one content id.
-//!
-//! The two ids are distinct on purpose. A parent's Python-equality key names a
-//! nested container by its `NodeId`, so `(naive,)` and `(aware,)` — different
-//! `NodeId`s though one content id — keep `(1, (naive,))` and `(1.0, (aware,))`
-//! Python-*un*equal, and those are then compared by content, where `1` and
-//! `1.0` differ: exactly what `DeepDiff` reports. A parent's content and the
-//! final comparison use the `RepId`, so a naive/aware difference that does not
-//! break Python-equality of a wrapping tuple still collapses, at the root or
-//! arbitrarily deep. A member is compared by its `RepId` — an `O(1)`,
-//! stack-safe comparison, which matters because a set member's nesting is not
-//! depth-guarded before this runs.
-//!
-//! **Both set-member tables are [`BTreeMap`]s, not `FxHash` maps** — a
-//! deliberate, security-motivated exception to the rest of the crate. They are
-//! keyed by *attacker-controlled member content* and reached for **every**
-//! set/frozenset comparison, including with the default `ignore_order=false`.
-//! `FxHash` uses a fixed, public seed and an invertible step, so collisions can
-//! be crafted in closed form (see `super::fxhash`'s hash-flooding note); an
-//! `FxHash` table here would let a crafted set drive interning to `O(n^2)` — a
-//! denial-of-service vector. A `BTreeMap` has no hash to attack: lookups are
-//! `O(log n)` in the worst case regardless of input, so the walk is
-//! `O(n log n)`. The `FxHash` tables the crate keeps (`HashedList`, the tuple
-//! digests, the distance memo) are only reached under `ignore_order=true` and
-//! are the pairing hot path, so they stay on `FxHash`; their float-carrying keys
-//! are protected from the *non-adversarial* bit-pattern collision of integral
-//! and half-integer floats by mixing (see `crate::lcs::mix_float_bits`), but a
-//! deterministic adversary is out of scope there.
-//!
-//! A tuple stays positional and a frozenset by membership (onix's one
-//! deliberate divergence from `DeepHash`'s order-insensitive iterable hashing —
-//! see [`super::hash::set_member_digest`]'s doc). Members are hashed a-side in
-//! canonical order, then b-side, so the id each equality class settles on is
-//! deterministic.
+//! The per-diff caches `ignore_order` pairing shares across one run:
+//! container-pair distances, tuple digests for list-item matching, and
+//! set-member digests for set/frozenset comparison. See
+//! `docs/design/ignore-order.md`'s "Distance memo" section for the
+//! caching rationale, soundness condition, and the digest rules.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -138,84 +15,42 @@ use super::hash::{
     DistKey, ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId,
 };
 
-/// A `(removed, added)` container-pair distance-cache key — see
-/// [`super::hash::DistKey`] for why each side is a value's exact structural
-/// identity (not its order/repetition-insensitive `ItemKey`). Memory per
-/// entry is a refcount bump: each side's value is interned once per candidate
-/// and the `A * R` entries one pairing records just share those [`Rc`](std::rc::Rc)s. The
-/// *lookup* cost is not constant, though — every probe hashes both keys (a
-/// full walk of each value) and, on a bucket match, compares them structurally
-/// — so per-pair work is proportional to record size (see [`super::hash::DistKey`]),
-/// and a leaf that is an integer beyond `i128` (an [`ItemKey::BigInt`], via
-/// `number_key`) additionally costs its own *digit length* per hash and per
-/// comparison, which the element-count cap does not bound.
+/// A `(removed, added)` container-pair cache key, each side a value's
+/// exact structural identity (not the order/repetition-insensitive
+/// `ItemKey`). See `docs/design/ignore-order.md`.
 type DistanceKey = (DistKey, DistKey);
 
-/// The per-top-level-diff caches described in this module's doc: container-pair
-/// [`rough_distance`] results keyed by the `(removed, added)` [`DistKey`]
-/// pair (each side a value's exact structural identity), the tuple-digest
-/// interning table for list-item matching, and the two
-/// set-member interning tables. Created in `crate::diff::diff_with_options`,
-/// threaded (by shared reference, interior mutability) through the whole
-/// recursive diff, and dropped when it returns. No eviction and no tuning
-/// knobs: each is bounded by the number of distinct queries one diff makes.
-/// `member_content`'s own key can itself carry a nested dict's keys (see its
-/// own field doc), so a lookup there is not always a flat comparison. A leaf
-/// that is an integer beyond `i128` is keyed by an [`ItemKey::BigInt`] (in the
-/// `cache`'s `DistKey`s and, when a set member, in `member_content`), hashed
-/// and compared by its magnitude at `O(digit length)` — a per-lookup cost the
-/// element-count bounds above do not cap (see `super::fxhash`'s doc). A custom
-/// object keys as an [`ItemKey::Object`] and is memoized like a `dict` (see
-/// [`is_container`]); an opaque token keys as an `ItemKey::Opaque` and is
-/// never memoized. `super::fxhash`'s doc states both per-lookup costs.
-///
-/// [`rough_distance`]: super::distance::rough_distance
-/// [`is_container`]: super::memo::is_container
+/// The per-diff caches described in `docs/design/ignore-order.md`'s
+/// "Distance memo" section: pairwise container distances, tuple
+/// digests, and set-member digests, scoped to one diff run. `DistKey`
+/// keys hash and compare by a full-tree walk; `MemberContent` keys
+/// compare by one (it has no `Hash`). A big-integer leaf costs
+/// `O(digits)` per lookup; `super::fxhash`'s doc enumerates each key's cost.
 pub(crate) struct IgnoreOrderMemo<'r> {
     cache: RefCell<HashMap<DistanceKey, f64>>,
-    /// Interns each distinct hashable-tuple identity to its place in
-    /// `tuple_digests`, so a nested tuple can be named by one [`TupleId`]
-    /// inside its parent's identity instead of by a copy of its own. A tuple
-    /// member that is an integer beyond `i128` reaches this `FxHash` key as a
-    /// [`ScalarKey::Big`](crate::lcs::ScalarKey) (via `PyHashPart::Scalar`),
-    /// hashed and compared by its magnitude digits at `O(digit length)` — the
-    /// same per-lookup cost `super::fxhash`'s doc notes for `ItemKey::BigInt`.
+    /// Interns each hashable-tuple identity to its digest, shared
+    /// across the run — see `docs/design/ignore-order.md`'s "Distance
+    /// memo" section.
     tuple_ids: RefCell<HashMap<PyHashKey, TupleId>>,
     /// The digest assigned to each interned identity, indexed by
     /// [`TupleId::index`].
     tuple_digests: RefCell<Vec<ItemKey>>,
-    /// Set-member Python-equality cache (see this module's "Set-member digests"
-    /// section): each distinct [`MemberHashKey`] gets a fresh [`NodeId`]
-    /// (its Python-equality class) paired with its content [`RepId`], so a
-    /// container Python-equal to one hashed earlier wins both — collapsing
-    /// `1`/`1.0` — while a naive/aware difference keeps distinct `NodeId`s. A
-    /// [`BTreeMap`], not an `FxHash` map: it is keyed by attacker-controlled
-    /// content and reached with default options, so it must be
-    /// collision-immune (module doc, "Set-member digests").
+    /// Set-member Python-equality cache; see `docs/design/ignore-order.md`.
+    /// A `BTreeMap`, not `FxHash`, reached on the default path against
+    /// attacker-controlled content; its key type carries no `Hash` derive.
     node_table: RefCell<BTreeMap<MemberHashKey, (NodeId, RepId)>>,
-    /// Set-member content interning: each distinct [`MemberContent`] gets one
-    /// [`RepId`] (its `usize` index), so content-equal members — a naive and an
-    /// aware datetime at one instant, and (via the [`ItemKey::Float`] a
-    /// `MemberContent::Scalar` embeds) every `NaN` regardless of its own
-    /// bits — collapse to one id. A [`BTreeMap`] for the same
-    /// collision-immunity reason as `node_table`; per-lookup cost is
-    /// `O(log n)` comparisons, each a full walk of the probed
-    /// `MemberContent` — a `MemberContent::UnhashableDict` key is itself
-    /// keyed by each of the dict's own keys' `ItemKey` trees (a `tuple`
-    /// dict key included), not a cheap string ordering.
+    /// Set-member content interning; see `docs/design/ignore-order.md`.
+    /// A `BTreeMap`, not `FxHash`, reached on the default path against
+    /// attacker-controlled content; its key type carries no `Hash` derive.
     member_content: RefCell<BTreeMap<MemberContent, RepId>>,
     /// The caller's resolver (see [`crate::diff::diff_with_resolver`]), and
     /// what it returned for each token identity it was called with.
     resolver: RefCell<Option<&'r mut Resolver<'r>>>,
     resolutions: RefCell<BTreeMap<Box<str>, Option<Resolution<'r>>>>,
     enabled: bool,
-    /// Total number of times [`Self::put`] has actually run — every distance
-    /// *recomputation*, not just the distinct entries it leaves behind (a
-    /// repeated `put` for a key already in `cache` overwrites the entry
-    /// rather than growing [`Self::cache_len`], so this is the only signal
-    /// that would rise if a caller re-derived a distance it should have
-    /// gotten from [`Self::get`] instead). Test-only: see
-    /// [`Self::put_count`]'s own doc for what it guards.
+    /// Count of [`Self::put`] calls, not just distinct entries: the
+    /// signal that rises if a caller recomputes a distance instead of
+    /// reusing the cache. Test-only.
     #[cfg(test)]
     puts: std::cell::Cell<usize>,
 }
@@ -237,9 +72,8 @@ impl<'r> IgnoreOrderMemo<'r> {
         }
     }
 
-    /// A cache that never stores or reads — the "without memoization" arm of
-    /// the decision-equivalence differential test, so both arms run the exact
-    /// same code paths and differ only in whether the cache is consulted.
+    /// A cache that never stores or reads, so a caller can run the same
+    /// code path with memoization off.
     #[cfg(test)]
     pub(crate) fn disabled() -> Self {
         Self {
@@ -276,9 +110,9 @@ impl<'r> IgnoreOrderMemo<'r> {
     }
 
     /// The value the diff compares in place of the token `value` against
-    /// `other`, `None` when `value` is not a token or stays one. A cycle token
-    /// resolves only against an object of the class it points back at, unless
-    /// `any_other` is set.
+    /// `other`, `None` when `value` is not a token or stays one. A cycle
+    /// token resolves only against an object of the class it points back
+    /// at, unless `any_other` is set.
     pub(crate) fn resolve(
         &self,
         value: &Value,
@@ -307,33 +141,20 @@ impl<'r> IgnoreOrderMemo<'r> {
         Some(resolution)
     }
 
-    /// Whether distance memoization is live for this run. A candidate pair is
-    /// additionally only cached when both sides are containers (see
-    /// [`is_container`]): scalar-involving pairs never recurse, so they never
-    /// re-compute and skip the cache entirely, keeping flat `ignore_order`
-    /// shapes (a list of numbers, say) free of any memoization overhead. The
-    /// `disabled()` cache reports `false` here so the with/without differential
-    /// test runs the identical code path with the cache inert.
+    /// Whether distance memoization is live for this run; a candidate
+    /// pair is cached only when both sides are containers
+    /// ([`is_container`]).
     pub(crate) fn caching_enabled(&self) -> bool {
         self.enabled
     }
 
     /// The number of distinct container-pair distances currently memoized.
-    /// Test-only: lets the gate tests assert that scalar pairs are never
-    /// cached and that a `disabled()` memo caches nothing, pinning the two
-    /// conditions `caching_enabled`/`is_container` guard.
     #[cfg(test)]
     pub(crate) fn cache_len(&self) -> usize {
         self.cache.borrow().len()
     }
 
-    /// The number of times [`Self::put`] has run — see that counter's own
-    /// field doc. A deep, self-similar nesting whose distance is computed
-    /// through this cache must see this count grow *linearly* with depth: a
-    /// cache whose lookup is broken (every candidate pair is recomputed
-    /// rather than reused) instead compounds `~2x` per level, which this
-    /// deterministically catches without timing anything — see
-    /// `super::tests::deep_nested_ignore_order_memoizes_distance_computations_linearly`.
+    /// The number of times [`Self::put`] has run. Test-only.
     #[cfg(test)]
     pub(crate) fn put_count(&self) -> usize {
         self.puts.get()
@@ -352,20 +173,8 @@ impl<'r> IgnoreOrderMemo<'r> {
     }
 
     /// Interns a hashable tuple's Python equality identity and returns its
-    /// id together with its digest: the one already assigned to an earlier
-    /// Python-equal tuple in this run, or `compute()`'s result, recorded for
-    /// the rest of the run.
-    ///
-    /// See this module's "Tuple digests" section for why this cache is part
-    /// of the observable behavior rather than a speed-up. Both the identity
-    /// (whose nested tuples are named by id) and the digest (whose nested
-    /// keys are shared through [`ItemKey::Tuple`]'s `Rc`) are `O(arity)` per
-    /// tuple node, so the two tables together stay linear in the number of
-    /// nodes hashed rather than quadratic in nesting depth. `compute` runs
-    /// with no borrow held, so it is free to recurse back into this same
-    /// cache for a nested tuple. The `disabled()` cache still serves this
-    /// method: it turns off *distance* memoization only, which is the one
-    /// thing proven decision-neutral.
+    /// id together with its digest, computing it on a first sighting. See
+    /// `docs/design/ignore-order.md`'s "Distance memo" section.
     pub(crate) fn tuple_digest(
         &self,
         key: PyHashKey,
@@ -383,12 +192,9 @@ impl<'r> IgnoreOrderMemo<'r> {
         (id, computed)
     }
 
-    /// Interns one set-member content identity to its [`RepId`] (its `usize`
-    /// index): the id already assigned to an equal [`MemberContent`], or a
-    /// fresh one. This is the content half of [`super::hash::set_member_digest`]
-    /// (see this module's "Set-member digests" section) — where a naive and an
-    /// aware datetime at one instant collapse, their `MemberContent::Scalar`
-    /// being one and the same.
+    /// Interns one set-member content identity to its [`RepId`]: the id
+    /// already assigned to an equal [`MemberContent`], or a fresh one.
+    /// See `docs/design/ignore-order.md`'s "Distance memo" section.
     pub(crate) fn content_rep(&self, content: MemberContent) -> RepId {
         let mut map = self.member_content.borrow_mut();
         if let Some(&id) = map.get(&content) {
@@ -399,15 +205,10 @@ impl<'r> IgnoreOrderMemo<'r> {
         id
     }
 
-    /// The Python-equality half of [`super::hash::set_member_digest`]: returns
-    /// the ([`NodeId`], [`RepId`]) of the container Python-equal to `key` hashed
-    /// earlier in the run (collapsing `1`/`1.0`), or, on a miss, a fresh
-    /// `NodeId` paired with `content()`'s interned `RepId`, recorded under `key`.
-    /// The `NodeId` is the container's Python-equality class (a parent names it
-    /// by that, keeping a naive/aware difference distinct); the `RepId` is its
-    /// content class (a parent's content and the final comparison use that,
-    /// collapsing a naive/aware difference). `content` runs with no borrow held,
-    /// free to recurse back in for a nested member.
+    /// The Python-equality half of [`super::hash::set_member_digest`]: the
+    /// `(NodeId, RepId)` of the container Python-equal to `key` hashed
+    /// earlier in the run, or a fresh pair on a miss. See
+    /// `docs/design/ignore-order.md`'s "Distance memo" section.
     pub(crate) fn member_rep(
         &self,
         key: MemberHashKey,

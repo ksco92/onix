@@ -293,8 +293,7 @@ pairs with a number, and `time` never pairs with a `date`/`datetime`
 Fifteen seeded fuzz cases each cover the ordered
 (`list_lcs_time_timedelta_fuzz_seed_*`) and `ignore_order`
 (`ignore_order_time_timedelta_fuzz_seed_*`) paths.
-`crates/onix-core/src/datetime.rs`'s module doc is the full, source-cited
-spec.
+`docs/design/value-model.md`'s "Calendar types" section is the full spec.
 
 **Multi-line string cases (`multiline_string_*`,
 `ignore_order_multiline_string_*`):** at `verbose_level=2` DeepDiff adds a
@@ -840,8 +839,8 @@ documented divergence, unchanged here.
   one cache across a whole run: a tuple that is Python-equal to one hashed earlier
   inherits its digest, while a tuple holding a list or a dict is unhashable and keeps
   its own. Which member of an equality class is hashed first is therefore observable,
-  and reproduced — see the `ignore_order_tuple_digest_*` cases and the "Tuple digests"
-  section of `crates/onix-core/src/ignore_order/memo.rs` for the full mechanism.
+  and reproduced — see the `ignore_order_tuple_digest_*` cases and
+  `docs/design/ignore-order.md`'s "Distance memo" section for the full mechanism.
   **`frozenset` is hashable too, and `DeepDiff` caches one the same way** —
   `[frozenset({1}), frozenset({1.0})]` vs `[]` reports a *single* removal there,
   of whichever one it hashed first. `onix` deliberately does not reproduce that:

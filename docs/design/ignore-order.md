@@ -31,6 +31,37 @@ pair's distance is memoized by structural identity, so a distinct
 container pair costs one trial regardless of how many candidates
 embed it.
 
+## Distance memo
+
+Container candidate-pair distances are cached for the whole diff,
+keyed by each side's exact structural identity, bounding a subtree
+pair's own trial diff to one computation regardless of how many
+candidates embed it.
+
+Caching changes no decision: on this path `rough_distance` depends
+only on the two values' content (the structural trial's own depth
+bound is unreachable here, since every paired item is depth-checked
+before ranking begins), so a cache keyed by exact structural
+identity returns exactly what a fresh computation would.
+
+Two further tables share the memo's lifetime and key the same way
+`DeepHash` keys its own run-scoped cache:
+
+- **Tuple digests** — a hashable tuple looks up and stores its digest
+  under Python's own `==`/`hash`, shared across both sides of the
+  diff, so the first Python-equal tuple hashed in the run fixes the
+  digest every later Python-equal one inherits. An unhashable tuple
+  (holding a list or dict) keeps its own type-strict digest instead.
+- **Set-member digests** — each member reduces to a Python-equality id
+  (first-Python-equal-wins, so `1` and `1.0` inside an otherwise-equal
+  container collapse) and a content id (collapsing naive/aware
+  datetimes and every `NaN` at a leaf). A parent names a nested member
+  by its equality id, keeping a naive/aware difference visible;
+  comparison and rendering use the content id. Both interning tables
+  are `BTreeMap`s, not `FxHash`: they are keyed by attacker-controlled
+  member content and reached on the default (`ignore_order=false`)
+  path too, so their key types carry no `Hash` derive.
+
 ## Walk
 
 Walking `hashes_added` in order, then remaining `hashes_removed`: a

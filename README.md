@@ -225,7 +225,7 @@ crates/onix-core   # the diff engine (library, no I/O)
 crates/onix-cli    # the `onix` binary (thin CLI over the core)
 crates/onix-arrow  # Arrow table diffing (schema diff and keyed row diff)
 crates/onix-py     # PyO3 bindings, published as `deepdiff-rs`
-docs/design/       # algorithm/invariant reference pages (list-diff, ignore-order)
+docs/design/       # algorithm/invariant reference pages (list-diff, ignore-order, value-model)
 scripts/           # gen_goldens.py: regenerates tests/golden/ from real DeepDiff
 tests/golden       # DeepDiff-generated expected outputs (the compatibility corpus)
 perf/              # cross-language benchmark harness and RESULTS.md

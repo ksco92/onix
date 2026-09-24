@@ -90,14 +90,18 @@ The code is best read in this order, each step building on the last:
 1. This file and the [README](README.md): what onix is, how to build it, and
    where everything lives.
 2. [`crates/onix-core/src/lib.rs`](crates/onix-core/src/lib.rs)'s module doc:
-   the engine's front door, an architecture map (parse, diff dispatch,
-   ordered/`ignore_order` comparison, `Report`, render) that names the module
-   each step lives in. Follow it into
+   the engine's front door, a four-bullet pipeline summary (dispatch,
+   container comparison, report, render) linking the two comparison
+   algorithms to their design pages. Follow it into
    [`crates/onix-core/src/diff/mod.rs`](crates/onix-core/src/diff/mod.rs) and
    [`crates/onix-core/src/ignore_order/mod.rs`](crates/onix-core/src/ignore_order/mod.rs),
    then into [`docs/design/list-diff.md`](docs/design/list-diff.md) and
    [`docs/design/ignore-order.md`](docs/design/ignore-order.md) for the two
-   algorithms those modules implement.
+   algorithms those modules implement, and
+   [`crates/onix-core/src/value.rs`](crates/onix-core/src/value.rs)/
+   [`crates/onix-core/src/datetime.rs`](crates/onix-core/src/datetime.rs)
+   into [`docs/design/value-model.md`](docs/design/value-model.md) for the
+   value model those two modules implement.
 3. [`tests/golden/README.md`](tests/golden/README.md): what the compatibility
    corpus pins down, and the documented DeepDiff quirks it deliberately does
    not chase.

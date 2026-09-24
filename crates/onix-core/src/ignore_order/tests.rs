@@ -1461,7 +1461,8 @@ proptest! {
     /// The distance memo must change no decision: an `ignore_order` diff run
     /// with the memo enabled produces a byte-identical report to one run with
     /// it disabled, over generated nested shapes. This is the empirical
-    /// counterpart to the purity argument in `super::memo`'s module doc.
+    /// counterpart to the purity argument in `docs/design/ignore-order.md`'s
+    /// "Distance memo" section.
     #[test]
     fn memoized_and_unmemoized_reports_are_byte_identical(
         a in arb_nested(),
@@ -1644,8 +1645,8 @@ fn a_tuple_and_a_list_whose_items_differ_fall_back_to_raw_add_remove() {
 //
 // `DeepHash` keys its cache by the object itself and shares one cache across
 // both hashtables of a run, so a hashable tuple inherits the digest of an
-// earlier Python-equal one (see `super::memo`'s "Tuple digests" section for
-// the source citations). Every expected value below was confirmed against a
+// earlier Python-equal one (see `docs/design/ignore-order.md`'s "Distance
+// memo" section). Every expected value below was confirmed against a
 // real `deepdiff==9.1.0` probe.
 
 #[test]

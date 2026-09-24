@@ -821,7 +821,7 @@ fn time_equality_never_reads_a_naive_value_as_aware() {
     let plus_two = ctime(12, 0, 0, 0, Some(2 * 3600));
 
     // Unlike DateTime, a naive time is NEVER equal to an aware one — no
-    // "read naive as UTC" rule applies (see `crate::datetime`'s module doc).
+    // "read naive as UTC" rule applies (see `docs/design/value-model.md`).
     assert_ne!(naive, utc);
     // Two aware values at the same offset-adjusted instant ARE equal.
     assert_eq!(utc, plus_two);

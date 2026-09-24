@@ -629,7 +629,8 @@ def _time_sort_key(value: datetime.time) -> tuple[bool, int, int]:
     The Python twin of ``onix_core::datetime::Time::sort_instant`` plus
     ``crate::value::canonical_cmp``'s own tie-break for `Time` -- unlike
     :func:`_datetime_instant`, a naive value is NOT read as if it were UTC
-    (real `time.__eq__` never does that; see `crate::datetime`'s module doc),
+    (real `time.__eq__` never does that; see docs/design/value-model.md's
+    "Calendar types" section),
     so its own micros-of-day is used unadjusted.
 
     :param value: A `time`, naive or aware.
