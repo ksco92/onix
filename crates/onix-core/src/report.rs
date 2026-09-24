@@ -446,7 +446,7 @@ impl Report {
     /// the duplicate-path debug assertion still fires if two subtrees ever
     /// produce the exact same *structural* path (a genuine engine bug: each
     /// node in a traversal is visited exactly once, so this cannot happen
-    /// today — see [`crate::diff::object_diff`]'s doc). This is independent
+    /// today). This is independent
     /// of whether two *different* structural paths render to the same
     /// string, which is expected on some input and handled separately at
     /// serialization time (see this module's doc).
