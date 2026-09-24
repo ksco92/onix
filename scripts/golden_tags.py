@@ -5,9 +5,8 @@ corresponding Python object (a container type JSON has no literal for, an
 out-of-range ``int``, or a custom object); any other JSON object decodes to a plain
 ``dict``. ``$timedelta`` carries Python's own normalized ``{days, seconds,
 microseconds}`` triple, not a flattened microsecond count, which overflows an
-``i64`` at Python's own extreme (``days=999_999_999``). This is corpus tooling only:
-onix's own parse paths never interpret these tag names, and the Rust reader
-(``crates/onix-core/tests/golden.rs``) implements the identical rule.
+``i64`` at Python's own extreme (``days=999_999_999``). Corpus tooling only: onix's own
+parse paths never interpret these tags; ``crates/onix-core/tests/golden.rs`` implements the same rule.
 """
 
 from __future__ import annotations
