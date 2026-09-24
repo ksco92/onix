@@ -4005,7 +4005,7 @@ fn colliding_tuple_keys_in_a_set_member_cost_what_distinct_keys_cost_with_defaul
 }
 
 #[test]
-#[ignore = "measurement: cargo test --release -p onix-core --lib default_path_key_curves -- --ignored --nocapture"]
+#[ignore = "measurement: cargo test --release -p onix-core --lib default_path_key_curves -- --ignored --nocapture (about 5 s in release; about 4 minutes with FxHash-keyed default-path tables)"]
 fn default_path_key_curves() {
     for n in [5_000, 10_000, 20_000, 40_000, 80_000] {
         let seconds = |build, prefix: &[u64]| {

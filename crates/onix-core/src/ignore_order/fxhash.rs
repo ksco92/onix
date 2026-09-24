@@ -38,11 +38,11 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// additionally folds onto one fixed key, matching `DeepHash`'s `str()`-based digest: this
 /// changes which values these tables treat as the same item, not their per-lookup cost.
 ///
-/// `node_table`, `member_content` and `tuple_ids` in `IgnoreOrderMemo` are `BTreeMap`s
-/// instead, since they are keyed by attacker-controlled member content and reached on the
-/// default path too, with no `Hash` derive: `O(log n)` worst case, always, though each comparison still walks the
-/// whole probed key — `member_content`'s `MemberContent::UnhashableDict` key is itself keyed
-/// by each dict key's own `ItemKey` tree, not a flat string.
+/// `node_table`, `member_content` and `tuple_ids` in `IgnoreOrderMemo` are `BTreeMap`s instead,
+/// since they are keyed by attacker-controlled member content and reached on the default path
+/// too, with no `Hash` derive: `O(log n)` worst case, always, though each comparison still
+/// walks the whole probed key — `member_content`'s `MemberContent::UnhashableDict` key is
+/// itself keyed by each dict key's own `ItemKey` tree, not a flat string.
 ///
 /// An integer beyond `i128` (`ItemKey::BigInt`) hashes and compares by its magnitude digits,
 /// `O(digits)` not `O(1)` per lookup — inside a hashable tuple it reaches the same cost via
