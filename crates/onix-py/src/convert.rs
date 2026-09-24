@@ -308,7 +308,7 @@ enum Frame<'py> {
         current_key: ObjectKey,
         /// The `dict` subclass or custom object's class (`None` for a plain
         /// `dict`) — its render name and class identity. See [`PyClass`].
-        class: Option<PyClass>,
+        class: Option<Box<PyClass>>,
         /// Whether the entries being collected are a `dict`'s items or a
         /// custom object's attributes — decides which `Value` this frame
         /// builds (see [`finish_object`]).
@@ -333,7 +333,7 @@ enum Step<'py> {
         first_key: ObjectKey,
         first_value: Bound<'py, PyAny>,
         /// See [`Frame::Dict::class`].
-        class: Option<PyClass>,
+        class: Option<Box<PyClass>>,
         /// See [`Frame::Dict::kind`].
         kind: ObjectKind,
     },
@@ -437,18 +437,126 @@ fn classify<'py>(
     set_member: bool,
     held: &mut Held,
 ) -> PyResult<Step<'py>> {
-    if let Some(step) = classify_native(current, path, builder, set_member, held)? {
-        return Ok(step);
+    if current.is_none() {
+        return Ok(Step::Done(CValue::Null));
     }
+
+    // `bool` is a Python `int` subclass, so this check must precede the
+    // `PyInt` one below or every bool would be misread as an int.
+    if let Ok(b) = current.cast::<PyBool>() {
+        return Ok(Step::Done(CValue::Bool(b.is_true())));
+    }
+
+    if let Ok(i) = current.cast::<PyInt>() {
+        return Ok(Step::Done(int_to_value(i, path)?));
+    }
+
+    if let Ok(f) = current.cast::<PyFloat>() {
+        return Ok(Step::Done(float_to_value(f.value())));
+    }
+
+    if let Ok(s) = current.cast::<PyString>() {
+        return Ok(Step::Done(CValue::Str(pystring_to_cstr(s)?)));
+    }
+
+    if let Some(value) = classify_temporal(current, path)? {
+        return Ok(Step::Done(value));
+    }
+
+    if !set_member && let Ok(list) = current.cast_exact::<PyList>() {
+        return Ok(seq_step(SeqIter::List(list.iter()), None));
+    }
+    if !set_member && let Ok(list) = current.cast::<PyList>() {
+        return Ok(seq_step(
+            SeqIter::List(list.iter()),
+            Some(class_name(current)),
+        ));
+    }
+
+    if let Ok(tuple) = current.cast_exact::<PyTuple>() {
+        return Ok(seq_step(SeqIter::Tuple(tuple.iter()), None));
+    }
+    // Non-exact, unlike the branch above: a `tuple` subclass — including a
+    // `namedtuple` — carries its own class name and compares as a plain
+    // `tuple` otherwise (see the module doc's "Subclasses" section), except
+    // as a set member, where only the exact type is accepted (see this
+    // function's own doc).
+    if !set_member && let Ok(tuple) = current.cast::<PyTuple>() {
+        return Ok(seq_step(
+            SeqIter::Tuple(tuple.iter()),
+            Some(class_name(current)),
+        ));
+    }
+
+    if let Ok(set) = current.cast_exact::<PySet>() {
+        return Ok(seq_step(SeqIter::Set(set.iter()), None));
+    }
+    // Non-exact: a `set` subclass, refused as a set member like `tuple`
+    // above (a plain `set` is itself unhashable and so can never actually
+    // reach here as a member; a hashable subclass could, and is refused the
+    // same way for consistency).
+    if !set_member && let Ok(set) = current.cast::<PySet>() {
+        return Ok(seq_step(
+            SeqIter::Set(set.iter()),
+            Some(class_name(current)),
+        ));
+    }
+
+    if let Ok(frozen) = current.cast_exact::<PyFrozenSet>() {
+        return Ok(seq_step(SeqIter::FrozenSet(frozen.iter()), None));
+    }
+    if !set_member && let Ok(frozen) = current.cast::<PyFrozenSet>() {
+        return Ok(seq_step(
+            SeqIter::FrozenSet(frozen.iter()),
+            Some(class_name(current)),
+        ));
+    }
+
+    if !set_member && let Ok(dict) = current.cast::<PyDict>() {
+        // A plain `dict` carries no class; a `dict` subclass carries its name
+        // and class identity (a subclass is a `type_changes` against the
+        // base `dict` and against another same-named subclass from elsewhere).
+        let class = current
+            .cast_exact::<PyDict>()
+            .is_err()
+            .then(|| Box::new(py_class(current, ObjectLengths::default(), held)));
+        // Iterate a snapshot, not the live dict: converting a value runs user
+        // code (a `@property` getter, `__getattr__`) that can insert into this
+        // very dict, which would panic pyo3's live-dict iterator with
+        // "dictionary changed size during iteration". `dict.copy()` is what
+        // `DeepDiff`'s `_diff_dict` effectively does with its copied key sets.
+        let mut iter = dict.copy()?.iter();
+
+        return Ok(match next_dict_entry(&mut iter, path, builder)? {
+            None => Step::Done(finish_object(builder, Vec::new(), class, ObjectKind::Dict)),
+            Some((first_key, first_value)) => Step::Dict {
+                iter,
+                first_key,
+                first_value,
+                class,
+                kind: ObjectKind::Dict,
+            },
+        });
+    }
+
     if set_member {
         return Err(unhashable_member_error(current, path));
     }
+    classify_other(current, path, builder, held)
+}
+
+/// [`classify`] for a value onix does not convert natively: a custom object,
+/// or an opaque token for a value `DeepDiff` would never reach, refused at
+/// the root.
+fn classify_other<'py>(
+    current: &Bound<'py, PyAny>,
+    path: &[PathSegment],
+    builder: &mut Builder,
+    held: &mut Held,
+) -> PyResult<Step<'py>> {
     if let Ok(attribute) = current.cast::<ClassAttribute>() {
         let value = attribute.get().0.bind(current.py()).clone();
-        return Ok(match classify_native(&value, path, builder, false, held)? {
-            Some(step) => step,
-            None => Step::Done(opaque(&value, builder, held)),
-        });
+        return Ok(Step::Done(opaque(&value, builder, held)));
     }
     if let Some(strategy) = object_strategy(current)? {
         return object_step(current, &strategy, path, builder, held);
@@ -462,123 +570,26 @@ fn classify<'py>(
     Ok(Step::Done(opaque(current, builder, held)))
 }
 
-/// [`classify`]'s arms for the types onix converts natively, `None` for
-/// anything else.
-fn classify_native<'py>(
-    current: &Bound<'py, PyAny>,
-    path: &[PathSegment],
-    builder: &mut Builder,
-    set_member: bool,
-    held: &mut Held,
-) -> PyResult<Option<Step<'py>>> {
-    if current.is_none() {
-        return Ok(Some(Step::Done(CValue::Null)));
-    }
-
-    // `bool` is a Python `int` subclass, so this check must precede the
-    // `PyInt` one below or every bool would be misread as an int.
-    if let Ok(b) = current.cast::<PyBool>() {
-        return Ok(Some(Step::Done(CValue::Bool(b.is_true()))));
-    }
-
-    if let Ok(i) = current.cast::<PyInt>() {
-        return Ok(Some(Step::Done(int_to_value(i, path)?)));
-    }
-
-    if let Ok(f) = current.cast::<PyFloat>() {
-        return Ok(Some(Step::Done(float_to_value(f.value()))));
-    }
-
-    if let Ok(s) = current.cast::<PyString>() {
-        return Ok(Some(Step::Done(CValue::Str(pystring_to_cstr(s)?))));
-    }
-
-    if let Some(value) = classify_temporal(current, path)? {
-        return Ok(Some(Step::Done(value)));
-    }
-
-    if !set_member && let Ok(list) = current.cast_exact::<PyList>() {
-        return Ok(Some(seq_step(SeqIter::List(list.iter()), None)));
-    }
-    if !set_member && let Ok(list) = current.cast::<PyList>() {
-        return Ok(Some(seq_step(
-            SeqIter::List(list.iter()),
-            Some(class_name(current)),
-        )));
-    }
-
-    if let Ok(tuple) = current.cast_exact::<PyTuple>() {
-        return Ok(Some(seq_step(SeqIter::Tuple(tuple.iter()), None)));
-    }
-    // Non-exact, unlike the branch above: a `tuple` subclass — including a
-    // `namedtuple` — carries its own class name and compares as a plain
-    // `tuple` otherwise (see the module doc's "Subclasses" section), except
-    // as a set member, where only the exact type is accepted (see this
-    // function's own doc).
-    if !set_member && let Ok(tuple) = current.cast::<PyTuple>() {
-        return Ok(Some(seq_step(
-            SeqIter::Tuple(tuple.iter()),
-            Some(class_name(current)),
-        )));
-    }
-
-    if let Ok(set) = current.cast_exact::<PySet>() {
-        return Ok(Some(seq_step(SeqIter::Set(set.iter()), None)));
-    }
-    // Non-exact: a `set` subclass, refused as a set member like `tuple`
-    // above (a plain `set` is itself unhashable and so can never actually
-    // reach here as a member; a hashable subclass could, and is refused the
-    // same way for consistency).
-    if !set_member && let Ok(set) = current.cast::<PySet>() {
-        return Ok(Some(seq_step(
-            SeqIter::Set(set.iter()),
-            Some(class_name(current)),
-        )));
-    }
-
-    if let Ok(frozen) = current.cast_exact::<PyFrozenSet>() {
-        return Ok(Some(seq_step(SeqIter::FrozenSet(frozen.iter()), None)));
-    }
-    if !set_member && let Ok(frozen) = current.cast::<PyFrozenSet>() {
-        return Ok(Some(seq_step(
-            SeqIter::FrozenSet(frozen.iter()),
-            Some(class_name(current)),
-        )));
-    }
-
-    if !set_member && let Ok(dict) = current.cast::<PyDict>() {
-        // A plain `dict` carries no class; a `dict` subclass carries its name
-        // and class identity (a subclass is a `type_changes` against the
-        // base `dict` and against another same-named subclass from elsewhere).
-        let class = current
-            .cast_exact::<PyDict>()
-            .is_err()
-            .then(|| py_class(current, ObjectLengths::default(), held));
-        // Iterate a snapshot, not the live dict: converting a value runs user
-        // code (a `@property` getter, `__getattr__`) that can insert into this
-        // very dict, which would panic pyo3's live-dict iterator with
-        // "dictionary changed size during iteration". `dict.copy()` is what
-        // `DeepDiff`'s `_diff_dict` effectively does with its copied key sets.
-        let mut iter = dict.copy()?.iter();
-
-        return Ok(Some(match next_dict_entry(&mut iter, path, builder)? {
-            None => Step::Done(finish_object(builder, Vec::new(), class, ObjectKind::Dict)),
-            Some((first_key, first_value)) => Step::Dict {
-                iter,
-                first_key,
-                first_value,
-                class,
-                kind: ObjectKind::Dict,
-            },
-        }));
-    }
-
-    Ok(None)
+/// Whether [`classify`] converts `value` natively, outside a set member.
+fn is_native(value: &Bound<'_, PyAny>) -> bool {
+    value.is_none()
+        || value.is_instance_of::<PyInt>()
+        || value.is_instance_of::<PyFloat>()
+        || value.is_instance_of::<PyString>()
+        || value.is_instance_of::<PyDate>()
+        || value.is_instance_of::<PyTime>()
+        || value.is_instance_of::<PyDelta>()
+        || value.is_instance_of::<PyList>()
+        || value.is_instance_of::<PyTuple>()
+        || value.is_instance_of::<PySet>()
+        || value.is_instance_of::<PyFrozenSet>()
+        || value.is_instance_of::<PyDict>()
 }
 
-/// A class attribute's value, as [`detailed_dict`] hands it to [`classify`]:
-/// two instances of one class share it, so `DeepDiff`'s `t1 is t2` check skips
-/// it, and anything onix does not convert natively becomes an [`opaque`] token.
+/// A class attribute's value onix does not convert natively, as
+/// [`detailed_dict`] hands it to [`classify`] to become an [`opaque`] token:
+/// two instances of one class share it, so `DeepDiff`'s `t1 is t2` check
+/// skips it.
 #[pyclass(frozen)]
 struct ClassAttribute(Py<PyAny>);
 
@@ -705,7 +716,7 @@ fn object_step<'py>(
     held: &mut Held,
 ) -> PyResult<Step<'py>> {
     let (attrs, lengths) = object_attributes(obj, strategy, path)?;
-    let class = py_class(obj, lengths, held);
+    let class = Box::new(py_class(obj, lengths, held));
     let mut iter = attrs.iter();
     Ok(match next_dict_entry(&mut iter, path, builder)? {
         None => Step::Done(finish_object(
@@ -874,7 +885,7 @@ fn detailed_dict<'py>(
         let is_class_attribute = class
             .getattr(&*text)
             .is_ok_and(|class_value| class_value.is(&value));
-        if is_class_attribute {
+        if is_class_attribute && !is_native(&value) {
             result.set_item(name, ClassAttribute(value.unbind()))?;
         } else {
             result.set_item(name, value)?;
@@ -1058,7 +1069,7 @@ fn advance_frame<'py>(
 fn finish_object(
     builder: &mut Builder,
     built: Vec<(ObjectKey, CValue)>,
-    class: Option<PyClass>,
+    class: Option<Box<PyClass>>,
     kind: ObjectKind,
 ) -> CValue {
     match kind {

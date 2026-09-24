@@ -1270,3 +1270,29 @@ def test_a_dict_whose_copy_returns_itself_is_still_iterated_as_a_snapshot() -> N
     a, b = Holder(1), Holder(2)
     Key.live = a.live
     assert "root.v" in json.loads(DeepDiff(a, b).to_json())["values_changed"]
+
+
+def test_a_class_attribute_of_a_natively_converted_type_is_rendered_in_a_whole_object_value() -> None:
+    """A class attribute onix converts natively stays a value, so a whole-object render shows it."""
+
+    class Natives:
+        none = None
+        count = 2
+        number = 1.5
+        text = "t"
+        day = datetime.date(2020, 1, 1)
+        clock = datetime.time(1, 2)
+        span = datetime.timedelta(days=1)
+        items = [1]
+        pair = (1, 2)
+        members = frozenset({1})
+        bag = {3}
+        mapping = {"k": 1}
+
+    class Other:
+        pass
+
+    old_value = json.loads(DeepDiff(Natives(), Other()).to_json())["type_changes"]["root"]["old_value"]
+    assert sorted(old_value) == [
+        "bag", "clock", "count", "day", "items", "mapping", "members", "none", "number", "pair", "span", "text",
+    ]
