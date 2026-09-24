@@ -4,9 +4,9 @@ Directed regression cases plus two differential batches, reusing
 ``test_differential_fuzz``'s generators: one over plain lists, one over
 sets/frozensets directly (issue #46). A real `set`/`frozenset` can never
 hold both `-0.0` and `0.0` (the pair collapses before reaching onix), so
-the set batch pins the single-representative case; the two-zero dedup is
-guarded instead by onix-core's own tests (``ignore_order::hash::item_key``,
-``onix_core::value::number_cmp``).
+the set batch pins the single-representative case; two-zero normalization
+is implemented in onix-core's ``ignore_order::hash::item_key`` float branch
+and ``value::number_cmp``, and covered by that crate's own suite.
 """
 
 import json

@@ -8,9 +8,9 @@ Writes one directory per fixture under ``perf/fixtures/`` (gitignored), each
 holding ``a.json``/``b.json`` plus a top-level ``manifest.json`` recording
 the seed and every fixture's name and byte sizes.
 
-Every fixture derives its own `random.Random` from `BASE_SEED`, insertion
-order is always construction order, and JSON is written with fixed
-`json.dump` settings, so two runs produce byte-identical fixture files.
+Every fixture derives its own `random.Random` from `BASE_SEED` and is written
+with fixed `json.dump` settings, so two runs are byte-identical: verify with
+two generator runs, `shasum -a 256` over `perf/fixtures`, and an empty `diff`.
 """
 
 import copy
@@ -117,7 +117,7 @@ def mutate_list(
     change_item: Callable[[JsonValue, random.Random], JsonValue],
     new_item: Callable[[int, random.Random], JsonValue],
 ) -> list[JsonValue]:
-    """Build a mutated copy of `base`: items change in place, removals/additions are tail-only (avoids an index-shift avalanche)."""
+    """Build a mutated copy of `base`: items change in place; removals/additions are tail-only (no index-shift avalanche)."""
     n = len(base)
     change_n = int(n * VALUE_CHANGE_RATE)
     remove_n = int(n * REMOVE_RATE)
