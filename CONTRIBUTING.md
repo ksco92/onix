@@ -173,12 +173,12 @@ each lives at its pointer, not restated here:
 - **Year-boundary rejection** — `tests/golden/README.md`'s "Known DeepDiff
   quirks" section.
 - **Tuple/set/frozenset-subclass and namedtuple refusal** —
-  `tests/golden/README.md`'s "Custom objects" section, its "Every other
-  subclass" point.
+  `tests/golden/README.md`'s "Known DeepDiff quirks" section, its "Every
+  other subclass" point.
 - **Fixed-offset `tzinfo` round-trip** — a `zoneinfo`/`pytz` zone comes back as
   a plain `datetime.timezone`, not the original zone object —
-  `tests/golden/README.md`'s "Fixed-offset tzinfo round-trip" and
-  "Normalized versus raw datetimes" sections;
+  `tests/golden/README.md`'s "Normalized versus raw datetimes" section, its
+  "Fixed-offset `tzinfo` round-trip" point;
   [`docs/design/value-conversion.md`](docs/design/value-conversion.md)'s
   "Subclasses" section for the same simplification on any other subclass.
 

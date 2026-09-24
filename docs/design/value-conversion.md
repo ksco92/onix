@@ -15,7 +15,8 @@ or a `datetime`/`date`/`time`/`timedelta` subclass) cannot round-trip
 through `DeepDiff.to_dict()` as itself: it renders back as the plain
 base type its fields describe. A `zoneinfo`/`pytz` `tzinfo` on a
 `datetime` is the same simplification, one level down — see
-`tests/golden/README.md`'s "Fixed-offset tzinfo round-trip" section.
+`tests/golden/README.md`'s "Normalized versus raw datetimes" section,
+its "Fixed-offset `tzinfo` round-trip" point.
 
 ## Key interning
 

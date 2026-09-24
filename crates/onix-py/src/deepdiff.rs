@@ -222,7 +222,8 @@ impl DeepDiff {
     /// here, where real `DeepDiff` returns the type objects themselves, and
     /// an aware datetime carries a fixed-offset `datetime.timezone` rather
     /// than whatever `tzinfo` class it went in with (see
-    /// `tests/golden/README.md`'s "Fixed-offset tzinfo round-trip" section).
+    /// `tests/golden/README.md`'s "Normalized versus raw datetimes" section,
+    /// its "Fixed-offset `tzinfo` round-trip" point).
     /// Conversion back to Python objects is iterative
     /// ([`crate::convert::value_to_pyobject`]), safe at any depth.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
