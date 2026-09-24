@@ -3282,15 +3282,16 @@ type AbsentKeys = Vec<Mutex<HashMap<u128, FirstRow>>>;
 
 /// A right-side batch's added candidates, captured by the parallel hash pass so
 /// the right is never read again: the position of the batch's first row, the
-/// batch filtered to the rows kept for keys absent from the left, those rows'
-/// indices in the input batch and key hashes, and whether the batch has been
-/// reduced to its key columns because every one of its keys is a duplicate.
+/// key columns of the rows kept for keys absent from the left with those rows'
+/// indices and key hashes, and, at full width, the kept rows marked `in_full`
+/// (those whose key had not repeated when last compacted).
 struct Candidate {
     at: u64,
-    batch: RecordBatch,
+    keys: RecordBatch,
     rows: Vec<usize>,
     hashes: Vec<u128>,
-    key_only: bool,
+    full: RecordBatch,
+    in_full: Vec<bool>,
 }
 
 /// The kept candidates, their full-width rows, and how many kept rows have
@@ -3391,10 +3392,11 @@ impl RightFuse<'_> {
             let hashes = kept.iter().map(|&row| pairs[row].0).collect();
             let candidate = Candidate {
                 at,
-                batch: rows,
+                keys: rows.project(self.key_columns).map_err(|e| read_error(&e))?,
+                in_full: vec![true; kept.len()],
                 rows: kept,
                 hashes,
-                key_only: false,
+                full: rows,
             };
             self.keep(candidate, stale)?;
         } else if stale > 0 {
@@ -3427,9 +3429,9 @@ impl RightFuse<'_> {
     }
 
     /// Once stale rows outnumber half the full-width ones, drops every kept row
-    /// that is no longer its key's first and reduces each batch whose keys are
-    /// all duplicates to its key columns, so full-width rows are held for at
-    /// most about one key in two that could still be added.
+    /// that is no longer its key's first and every full-width row whose key has
+    /// repeated, so full-width rows are held for at most about twice the keys
+    /// that could still be added.
     fn compact_if_stale(
         &self,
         store: &mut CandidateStore,
@@ -3441,17 +3443,26 @@ impl RightFuse<'_> {
         }
         let partitions = self.absent.len();
         let mut rows = 0;
-        for candidate in store.batches.iter_mut().filter(|c| !c.key_only) {
-            let (mut first, mut all_repeated) = (Vec::with_capacity(candidate.rows.len()), true);
-            for (&row, &hash) in candidate.rows.iter().zip(&candidate.hashes) {
+        for candidate in &mut store.batches {
+            let (mut first, mut full_mask) = (Vec::new(), Vec::new());
+            for (i, (&row, &hash)) in candidate.rows.iter().zip(&candidate.hashes).enumerate() {
                 let part = self.absent[partition_of(hash, partitions)]
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 let entry = part.get(&hash);
                 let is_first = entry.is_some_and(|e| e.at == candidate.at + row as u64);
-                all_repeated &= !is_first || entry.is_some_and(|e| e.count > 1);
                 first.push(is_first);
+                if candidate.in_full[i] {
+                    let addable = is_first && entry.is_some_and(|e| e.count == 1);
+                    full_mask.push(addable);
+                    candidate.in_full[i] = addable;
+                }
             }
+            candidate.full = arrow_select::filter::filter_record_batch(
+                &candidate.full,
+                &BooleanArray::from(full_mask),
+            )
+            .map_err(|e| read_error(&e))?;
             let mut keep = first.iter();
             candidate
                 .rows
@@ -3460,20 +3471,16 @@ impl RightFuse<'_> {
             candidate
                 .hashes
                 .retain(|_| keep.next().copied().unwrap_or(false));
-            let filtered = arrow_select::filter::filter_record_batch(
-                &candidate.batch,
+            let mut keep = first.iter();
+            candidate
+                .in_full
+                .retain(|_| keep.next().copied().unwrap_or(false));
+            candidate.keys = arrow_select::filter::filter_record_batch(
+                &candidate.keys,
                 &BooleanArray::from(first),
             )
             .map_err(|e| read_error(&e))?;
-            if all_repeated {
-                candidate.batch = filtered
-                    .project(self.key_columns)
-                    .map_err(|e| read_error(&e))?;
-                candidate.key_only = true;
-            } else {
-                candidate.batch = filtered;
-                rows += candidate.rows.len();
-            }
+            rows += candidate.in_full.iter().filter(|&&full| full).count();
         }
         store.batches.retain(|c| !c.rows.is_empty());
         store.rows = rows;
@@ -3483,11 +3490,11 @@ impl RightFuse<'_> {
 }
 
 /// Materializes the added rows and the right side's duplicate capture from the
-/// right's added candidates, in input order; `key_ctx` reads a candidate reduced
-/// to its key columns.
+/// right's added candidates, in input order; `key_ctx` reads a candidate's key
+/// columns.
 fn materialize_candidates(
     mut candidates: Vec<Candidate>,
-    (ctx, key_ctx): (&Materialize<'_>, &Materialize<'_>),
+    key_ctx: &Materialize<'_>,
     schema: &SchemaRef,
     added: &HashSet<u128>,
     pending_dups: &mut HashSet<u128>,
@@ -3495,20 +3502,24 @@ fn materialize_candidates(
     candidates.sort_unstable_by_key(|candidate| candidate.at);
     let mut out = MaterializeOut::default();
     for candidate in &candidates {
-        let (ctx, hashes) = (
-            if candidate.key_only { key_ctx } else { ctx },
-            &candidate.hashes,
-        );
-        let mask = hashes.iter().map(|h| added.contains(h)).collect();
+        let (keys, hashes) = (&candidate.keys, &candidate.hashes);
+        let none = vec![false; hashes.len()];
         materialize_batch(
-            &candidate.batch,
+            keys,
             hashes,
-            mask,
+            none,
             0..hashes.len(),
-            ctx,
+            key_ctx,
             pending_dups,
             &mut out,
         )?;
+        let mask = hashes
+            .iter()
+            .zip(&candidate.in_full)
+            .filter(|&(_, &full)| full)
+            .map(|(h, _)| added.contains(h))
+            .collect();
+        push_filtered(&candidate.full, mask, &mut out.selected)?;
     }
     Ok((concat_or_empty(schema, &out.selected)?, out.capture))
 }
@@ -3919,7 +3930,7 @@ fn diff_members_parallel<L: TableInput, R: TableInput>(
         "materialize added (right candidates)",
         materialize_candidates(
             right_capture.candidates,
-            (&right_ctx, &key_ctx),
+            &key_ctx,
             &right.schema(),
             &classified.added,
             &mut pending_dups,
@@ -8297,8 +8308,8 @@ mod fused_tests {
         fuse.visit(0, &batch, &pairs).unwrap();
         let store = fuse.candidates.into_inner().unwrap();
         assert_eq!(store.batches.len(), 1);
-        assert_eq!(store.batches[0].batch.num_rows(), 1);
-        assert_owned(&store.batches[0].batch);
+        assert_eq!(store.batches[0].full.num_rows(), 1);
+        assert_owned(&store.batches[0].full);
     }
 
     #[test]
@@ -8346,9 +8357,13 @@ mod fused_tests {
         }
     }
 
-    /// The kept candidates' positions and whether each is key-only.
-    fn kept(store: &super::CandidateStore) -> Vec<(u64, bool)> {
-        store.batches.iter().map(|c| (c.at, c.key_only)).collect()
+    /// The kept candidates' positions and full-width row counts.
+    fn kept(store: &super::CandidateStore) -> Vec<(u64, usize)> {
+        store
+            .batches
+            .iter()
+            .map(|c| (c.at, c.full.num_rows()))
+            .collect()
     }
 
     #[test]
@@ -8357,12 +8372,12 @@ mod fused_tests {
         let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
         let fuse = right_fuse(&index, &value_schema);
         visit_absent_key(&fuse, &[(0, "x"), (1, "x")]);
-        assert_eq!(kept(&fuse.candidates.lock().unwrap()), vec![(0, true)]);
+        assert_eq!(kept(&fuse.candidates.lock().unwrap()), vec![(0, 0)]);
         let rows: Vec<(u64, &str)> = (2..10).map(|at| (at, "x")).collect();
         visit_absent_key(&fuse, &rows);
         let store = fuse.candidates.into_inner().unwrap();
-        assert_eq!((kept(&store), store.rows), (vec![(0, true)], 0));
-        assert_eq!(store.batches[0].batch.num_columns(), 1);
+        assert_eq!((kept(&store), store.rows), (vec![(0, 0)], 0));
+        assert_eq!(store.batches[0].keys.num_columns(), 1);
         let absent = fuse.absent[0].lock().unwrap();
         assert_eq!((absent[&7].at, absent[&7].count), (0, 10));
     }
@@ -8379,7 +8394,7 @@ mod fused_tests {
             let store = fuse.candidates.lock().unwrap();
             assert_eq!(
                 (kept(&store), store.rows, store.stale),
-                (vec![(0, false), (1, false)], 2, 1)
+                (vec![(0, 1), (1, 1)], 2, 1)
             );
         }
         // A repeat that is also an earlier row supersedes the kept one: the
@@ -8390,8 +8405,36 @@ mod fused_tests {
         let store = fuse.candidates.lock().unwrap();
         assert_eq!(
             (kept(&store), store.rows, store.stale),
-            (vec![(5, false), (1, true)], 1, 0)
+            (vec![(5, 1), (1, 0)], 1, 0)
         );
+    }
+
+    #[test]
+    fn right_side_drops_repeated_rows_from_a_batch_that_also_keeps_a_new_key() {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        // Each batch keeps one key that never repeats (100+) next to a new key
+        // (1, 2, 3) the following batch repeats.
+        let batches: [(u64, &[&str], &[u128]); 3] = [
+            (0, &["a", "n"], &[1, 100]),
+            (2, &["b", "a", "m"], &[2, 1, 101]),
+            (5, &["c", "b", "o"], &[3, 2, 102]),
+        ];
+        for (at, keys, hashes) in batches {
+            let batch = view_keyed(keys, 0).open().unwrap().next().unwrap().unwrap();
+            let pairs: Vec<(u128, u128, bool)> = hashes.iter().map(|&h| (h, 0, false)).collect();
+            fuse.visit(at, &batch, &pairs).unwrap();
+        }
+        let mut store = fuse.candidates.lock().unwrap();
+        fuse.compact_if_stale(&mut store, 100).unwrap();
+        // Only the rows whose key has not repeated stay at full width.
+        assert_eq!(
+            (kept(&store), store.rows),
+            (vec![(0, 1), (2, 1), (5, 2)], 4)
+        );
+        let keys: Vec<usize> = store.batches.iter().map(|c| c.keys.num_rows()).collect();
+        assert_eq!(keys, vec![2, 2, 2]);
     }
 
     #[test]
@@ -8403,7 +8446,7 @@ mod fused_tests {
         let store = fuse.candidates.lock().unwrap();
         assert_eq!(
             (kept(&store), store.rows, store.stale),
-            (vec![(5, false)], 1, 0)
+            (vec![(5, 1)], 1, 0)
         );
     }
 
@@ -8416,7 +8459,7 @@ mod fused_tests {
         // Later positions arrive first; each earlier one supersedes the last.
         visit_absent_key(&fuse, &[(3, "d"), (2, "c"), (1, "b"), (0, "a")]);
         let candidates = fuse.candidates.into_inner().unwrap().batches;
-        assert!(candidates.iter().all(|c| c.key_only));
+        assert!(candidates.iter().all(|c| c.full.num_rows() == 0));
         assert!(candidates.iter().any(|c| c.at == 0));
         let hasher = super::RowHasher::new().unwrap();
         let key_only_schema = Arc::new(Schema::new(vec![right.schema.field(0).clone()]));
@@ -8442,7 +8485,7 @@ mod fused_tests {
         let mut pending = std::collections::HashSet::from([7u128]);
         let (added, capture) = super::materialize_candidates(
             candidates,
-            (&ctx, &key_ctx),
+            &key_ctx,
             &right.schema,
             &std::collections::HashSet::new(),
             &mut pending,
