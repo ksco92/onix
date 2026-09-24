@@ -32,13 +32,14 @@ so parallel output is byte-identical to the single-threaded path.
 
 ## Hashing
 
-Row identity is one keyed 128-bit SipHash-1-3 (`siphasher`), keyed
-from 16 bytes of OS randomness (`getrandom`) drawn once per diff. Both
-sides share the key, so the row-matching table cannot be forced into
-collisions by chosen input, and no unkeyed content hash table sits on
-this default (no-flag) path. A different diff draws a fresh key; two
-distinct keys colliding to the same 128-bit hash has probability on
-the order of `n² / 2¹²⁸`.
+Row identity is one keyed 128-bit SipHash-1-3 (`siphasher`), drawn
+once per diff from the OS; both sides share the key, so their hashes
+are comparable. Because the key is secret and random per diff, the
+row-matching table cannot be forced into collisions by chosen input,
+and no unkeyed content hash table sits on this default (no-flag)
+path. Two distinct keys colliding to the same 128-bit hash, the only
+way the diff can misclassify, has probability on the order of
+`n² / 2¹²⁸`.
 
 ## Value semantics
 
