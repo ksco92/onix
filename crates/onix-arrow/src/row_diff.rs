@@ -3630,7 +3630,7 @@ fn canonical_floats(array: &ArrayRef) -> Result<ArrayRef, TableDiffError> {
 /// when left row `lo + i` and right row `right_rows[i]` differ under [`hash_cell`]
 /// (null only equals null), and unset for a null (unpaired) index. Every
 /// [`CellCompare`] arm gives the mask the per-cell arm gives. Memory: one bit per row
-/// for the mask, plus, on the kernel and type-change arms, a `take`n copy of the right
+/// for the mask, plus, on the kernel arm, a `take`n copy of the right
 /// column for this row range (a float column also widened to `Float64` on both sides).
 fn changed_mask(
     plan: &ColumnPlan,
@@ -3640,26 +3640,22 @@ fn changed_mask(
 ) -> Result<BooleanBuffer, TableDiffError> {
     let len = right_rows.len();
     let changed = match plan.compare {
-        CellCompare::Kernel | CellCompare::TypeChange => {
+        CellCompare::TypeChange => BooleanBuffer::collect_bool(len, |i| {
+            !cell_is_null(&plan.left_dec, lo + i)
+                || (right_rows.is_valid(i)
+                    && !cell_is_null(&plan.right_dec, right_rows.value(i) as usize))
+        }),
+        CellCompare::Kernel => {
             let left = plan.left_dec.slice(lo, len);
             let right = arrow_select::take::take(&plan.right_dec, right_rows, None)
                 .map_err(|e| read_error(&e))?;
-            if plan.compare == CellCompare::TypeChange {
-                let valid = |array: &ArrayRef| {
-                    array
-                        .logical_nulls()
-                        .map_or_else(|| BooleanBuffer::new_set(len), |n| n.inner().clone())
-                };
-                &valid(&left) | &valid(&right)
+            let (left, right) = if is_float(left.data_type()) {
+                (canonical_floats(&left)?, canonical_floats(&right)?)
             } else {
-                let (left, right) = if is_float(left.data_type()) {
-                    (canonical_floats(&left)?, canonical_floats(&right)?)
-                } else {
-                    (left, right)
-                };
-                let distinct = arrow_ord::cmp::distinct(&left, &right);
-                distinct.map_err(|e| read_error(&e))?.values().clone()
-            }
+                (left, right)
+            };
+            let distinct = arrow_ord::cmp::distinct(&left, &right);
+            distinct.map_err(|e| read_error(&e))?.values().clone()
         }
         CellCompare::PerCell => {
             let mut mask = BooleanBufferBuilder::new(len);
@@ -9127,62 +9123,6 @@ mod mask_tests {
         types
     }
 
-    /// Mixed-type pairs and the arm each takes: a type change, or a lossless
-    /// drift in width, unit, scale, layout or zone name that is compared per cell.
-    fn mixed_pairs() -> Vec<(DataType, DataType, CellCompare)> {
-        let ts = |unit, tz: Option<&str>| DataType::Timestamp(unit, tz.map(Into::into));
-        let per_cell = [
-            (DataType::Int32, DataType::Int64),
-            (DataType::UInt64, DataType::Int64),
-            (DataType::Boolean, DataType::Int8),
-            (DataType::Int64, DataType::Float64),
-            (DataType::Float32, DataType::Float64),
-            (DataType::Float16, DataType::Float32),
-            (DataType::Decimal128(20, 2), DataType::Decimal128(20, 4)),
-            (DataType::Decimal32(9, 2), DataType::Decimal256(40, 2)),
-            (DataType::Utf8, DataType::LargeUtf8),
-            (DataType::Utf8View, DataType::Utf8),
-            (DataType::Binary, DataType::BinaryView),
-            (DataType::Date32, DataType::Date64),
-            (
-                DataType::Time32(TimeUnit::Millisecond),
-                DataType::Time64(TimeUnit::Microsecond),
-            ),
-            (
-                DataType::Duration(TimeUnit::Second),
-                DataType::Duration(TimeUnit::Millisecond),
-            ),
-            (
-                ts(TimeUnit::Microsecond, Some("UTC")),
-                ts(TimeUnit::Millisecond, Some("UTC")),
-            ),
-            (
-                ts(TimeUnit::Second, Some("UTC")),
-                ts(TimeUnit::Second, Some("+00:00")),
-            ),
-        ];
-        let type_change = [
-            (DataType::Utf8, DataType::Binary),
-            (DataType::Utf8, DataType::Int64),
-            (DataType::Null, DataType::Int64),
-            (DataType::Date32, ts(TimeUnit::Second, None)),
-            (
-                ts(TimeUnit::Microsecond, None),
-                ts(TimeUnit::Microsecond, Some("UTC")),
-            ),
-            (
-                DataType::Interval(IntervalUnit::DayTime),
-                DataType::Interval(IntervalUnit::MonthDayNano),
-            ),
-        ];
-        let tagged = |arm| move |(left, right)| (left, right, arm);
-        per_cell
-            .into_iter()
-            .map(tagged(CellCompare::PerCell))
-            .chain(type_change.into_iter().map(tagged(CellCompare::TypeChange)))
-            .collect()
-    }
-
     /// `dt`'s column over `picks`, dictionary-encoded when `dictionary` and arrow
     /// can encode the type.
     fn encoded(dt: &DataType, picks: &[Option<usize>], dictionary: bool) -> ArrayRef {
@@ -9256,19 +9196,25 @@ mod mask_tests {
     }
 
     #[test]
-    fn mixed_type_masks_equal_the_per_cell_decision() {
+    fn every_type_pair_mask_equals_the_per_cell_decision() {
         let hasher = RowHasher::new().unwrap();
-        for (left, right, expected) in mixed_pairs() {
-            let mut set = 0;
-            for seed in 0..300 {
-                let mut rng = Rng(seed);
-                let (arm, mask, reference) = both_masks(&mut rng, &hasher, &left, &right);
-                assert_eq!(arm, expected, "{left} vs {right}");
-                assert_eq!(mask, reference, "{left} vs {right}, seed {seed}");
-                set += mask.count_set_bits();
+        let types = hashable_types();
+        let mut arms = Vec::new();
+        for left in &types {
+            for right in types.iter().filter(|&right| right != left) {
+                let mut set = 0;
+                for seed in 0..40 {
+                    let mut rng = Rng(seed);
+                    let (arm, mask, reference) = both_masks(&mut rng, &hasher, left, right);
+                    assert_ne!(arm, CellCompare::Kernel, "{left} vs {right}");
+                    assert_eq!(mask, reference, "{left} vs {right}, seed {seed}");
+                    set += mask.count_set_bits();
+                    arms.push(arm);
+                }
+                assert!(set > 0, "{left} vs {right} never changed");
             }
-            assert!(set > 0, "{left} vs {right} never changed");
         }
+        assert!(arms.contains(&CellCompare::TypeChange) && arms.contains(&CellCompare::PerCell));
     }
 
     #[test]

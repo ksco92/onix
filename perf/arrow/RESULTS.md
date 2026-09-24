@@ -174,10 +174,10 @@ hashes per cell. The narrow pair changes 2% of its rows, so its cell pass was al
 peak RSS median lies inside the other build's run-to-run range (the largest move, narrow 1M's
 +19 MB, against a 1134 to 1226 MB spread over 0.13.0's five runs).
 
-The mask's own memory is one bit per row per column, plus, per worker, a copy of its row range of
-the one right column it is comparing (a float column widened to `Float64` on both sides), so at
-most one copy of a partition's widest column across all workers. `row_diff_rss` peak RSS,
-0.13.0 → 0.14.0, alternating builds, each cell the median with the run range in brackets (8 runs
+The mask's own memory is one bit per row per column, plus, per worker on a column whose two sides
+share a type, a copy of its row range of that right column (a float column widened to `Float64` on
+both sides), so at most one copy of a partition's widest such column across all workers.
+`row_diff_rss` peak RSS, 0.13.0 → 0.14.0, alternating builds, each cell the median with the run range in brackets (8 runs
 per build for `wide` 200k at 18 threads, 5 for `wide` 1M, 3 otherwise):
 
 | Shape (`row_diff_rss`, rows/side) | threads | 0.13.0 | 0.14.0 |
@@ -191,7 +191,15 @@ per build for `wide` 200k at 18 threads, 5 for `wide` 1M, 3 otherwise):
 | `manycols` 150k x 8 x 512 B | 64 | 2077 MB [1938-2092] | 2069 MB [2035-2072] |
 | `allchange` 1M | 18 | 350 MB [333-385] | 354 MB [344-361] |
 
-Every row's two ranges overlap, so the cell pass's memory term is unchanged. The `wide` 1M row sits
+Every row's two ranges overlap: in these shapes the copy, changed rows ÷ partitions × one `Utf8`
+column's width (1 KB or 512 B), falls inside the spread. A shape built to show it, 500k
+changed rows/side where only an `Int64` column differs and three equal 1 KB columns (`Utf8View`,
+`BinaryView`, `Utf8`) are compared, measures at 2 threads (two partitions of 250k rows, so one
+250k × 1 KB `Utf8` copy; the view columns copy only their 16 B views) 5.644 GB [5.007-6.338] on
+0.13.1 against 5.949 GB [5.549-6.814] on 0.14.0 (medians of 8 runs each), about +0.3 GB; at 18
+threads 2.671 GB [2.605-2.910] against 2.473 GB [2.458-2.927], and at 64 threads 2.032 GB
+[2.019-2.067] against 2.025 GB [2.009-2.057] (3 runs each), where partitions are smaller than the
+spread. Measured 2026-09-24T15:31Z to 15:34Z, load average 4 to 7. The `wide` 1M row sits
 above the 4.62 GB the fused-reads table records for 0.13.0 on both builds alike (re-measured at
 2026-09-24T15:19Z, load average 6), so the README now cites about 4.8 GB for that shape.
 
