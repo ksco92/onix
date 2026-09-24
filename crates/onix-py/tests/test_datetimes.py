@@ -106,9 +106,11 @@ def test_a_zoneinfo_datetime_round_trips_as_a_fixed_offset_timezone() -> None:
     """
     A named zone comes back as the fixed offset it was in force at, not as the zone.
 
-    Documented in README and `crates/onix-py/src/convert.rs`: onix stores a datetime's
-    UTC offset, not its `tzinfo` object. Nothing about the diff itself changes, since
-    DeepDiff compares datetimes by instant.
+    Documented in the top-level README and in `tests/golden/README.md`'s
+    "Normalized versus raw datetimes" section, its "Fixed-offset `tzinfo`
+    round-trip" point: onix stores a datetime's UTC offset, not its
+    `tzinfo` object. Nothing about the diff itself changes, since DeepDiff
+    compares datetimes by instant.
     """
     madrid = datetime.datetime(2024, 7, 1, 12, tzinfo=zoneinfo.ZoneInfo("Europe/Madrid"))
     result = OnixDeepDiff({}, {"t": madrid}).to_dict()

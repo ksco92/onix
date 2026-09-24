@@ -1,9 +1,7 @@
 //! Converts a live Python object graph into an [`onix_core::Value`] once, up
-//! front — the [`crate::deepdiff::DeepDiff`] class's "drop-in" layer diffs the
-//! converted value model natively; it never touches Python objects again
-//! after conversion. The compact value model is built *directly*: there is no
-//! intermediate `serde_json::Value` tree, so the two input trees only ever
-//! exist in the memory-frugal representation.
+//! front, so [`crate::deepdiff::DeepDiff`] never touches Python objects
+//! again — built *directly*, no intermediate `serde_json::Value` tree, so
+//! the two input trees only ever exist in this memory-frugal form.
 //!
 //! # Supported types (documented MVP scope)
 //!
@@ -14,187 +12,44 @@
 //! | `int` | `Number` | any magnitude — `i64`/`u64` fast path, arbitrary precision beyond it |
 //! | `float` | `Number` | `NaN`/`Infinity`/`-Infinity` included |
 //! | `str` | `Str` | UTF-8 the fast, common way; a lone surrogate code point survives too, see below |
-//! | `dict` (keys below), or a subclass | `Object` | a `str` key (including a surrogate one) interned across the whole walk |
+//! | `dict` (keys below), or a subclass | `Object` | a UTF-8 `str` key interned across the whole walk (a lone-surrogate key is not) |
 //! | `list`, or a subclass | `Array` | |
-//! | `tuple`, or a subclass (including a `namedtuple`) | `Tuple` | diffed positionally even for a `namedtuple`, see below |
+//! | `tuple`, or a subclass (including a `namedtuple`) | `Tuple` | diffed positionally even for a `namedtuple` — `tests/golden/README.md`'s "Known `DeepDiff` quirks" section, its "A `namedtuple` is diffed positionally" point |
 //! | `set`, or a subclass | `Set` | members restricted, see below |
 //! | `frozenset`, or a subclass | `FrozenSet` | members restricted, see below |
-//! | `datetime.datetime`, or a subclass (e.g. pandas `Timestamp`) | `DateTime` | naive or any `tzinfo`, see below |
+//! | `datetime.datetime`, or a subclass (e.g. pandas `Timestamp`) | `DateTime` | naive or any `tzinfo` — `tests/golden/README.md`'s "Normalized versus raw datetimes" section, its "Fixed-offset `tzinfo` round-trip" point |
 //! | `datetime.date`, or a subclass | `Date` | |
-//! | `datetime.time`, or a subclass | `Time` | naive or any `tzinfo`, see below |
+//! | `datetime.time`, or a subclass | `Time` | naive or any `tzinfo`, same point as `datetime.datetime` above |
 //! | `datetime.timedelta`, or a subclass | `TimeDelta` | |
 //! | any other object | `Object` (custom) | diffed by its attributes, see below |
 //!
-//! A subclass instance converts and compares exactly like the base type —
-//! see the "Subclasses" section below — except as a `set`/`frozenset`
-//! *member*, where only the exact `tuple`/`frozenset`/`datetime`/`date`/
-//! `time`/`timedelta` type is accepted (a `list`/`dict`/`set` subclass, or a
-//! `tuple`/`frozenset` subclass including a `namedtuple`, reaching a set
-//! member is refused the same way any other unsupported type is).
-//!
-//! An `int` of any magnitude converts: a value in `i64::MIN..=u64::MAX` takes
-//! the compact fast arm, and a larger one keeps its exact arbitrary-precision
-//! value (read through `int`'s own unbound `to_bytes`, never a subclass's own
-//! methods — see [`exact_big_int`]), matching real `DeepDiff`, which compares
-//! Python `int`s natively.
+//! Every subclass's classification and comparison rules (a `set`/`frozenset` member excepted,
+//! see below): `docs/design/value-model.md`'s and `docs/design/value-conversion.md`'s
+//! "Subclasses" sections. An `int` of any magnitude converts exactly through [`exact_big_int`],
+//! matching `DeepDiff`.
 //!
 //! Every other type raises a Python exception instead of converting:
 //!
-//! - A `dict` key may be `str` (including one holding a lone surrogate code
-//!   point — see below), `None`, `bool`, `int`, `float`, `datetime`,
-//!   `date`, or a `tuple` of those (never a nested `tuple`), or a
-//!   `tuple`/`datetime`/`date` subclass (including a `namedtuple`) — unlike
-//!   a `tuple` *value*, which keeps the exactness rule, since `DeepDiff`'s
-//!   own key matching is plain Python `==`/`hash` and never consults
-//!   `type(obj)`: a key subclass instance classifies as its exact base type
-//!   with no class name tracked (see [`ObjectKey`], which has no class-name
-//!   field). A key of any other type — including `time`/`timedelta`,
-//!   a custom object, or a `tuple` that nests another `tuple` — raises
-//!   [`PyTypeError`] naming the key's type and the path to the dict
-//!   containing it. Path rendering for a non-`str` key follows `DeepDiff`'s
-//!   own rule ([`onix_core::path::dict_key_repr`]): `repr()` for every kind
-//!   but `tuple`, which instead splits into one bracket group per element
-//!   (`root[1][2]`, never `root[(1, 2)]`). Two keys that are Python-equal
-//!   but not the same type (`1`/`1.0`/`True`) are matched as *one* key
-//!   between two dicts being diffed — real Python `dict`/`set` semantics —
-//!   even though this crate's own `Value` keeps them structurally distinct
-//!   everywhere else; see `crate::ignore_order::match_dict_keys`'s doc in
-//!   `onix-core`.
-//! - A `tzinfo` whose `utcoffset()` is not a whole number of seconds raises
-//!   [`PyValueError`]: the value model carries an offset in seconds. Applies
-//!   equally to a `datetime` and a `time`.
-//! - A `set`/`frozenset` member that is not one of the types this MVP allows
-//!   a set to hold (`None`, `bool`, `int`, `float`, `str`, `tuple`,
-//!   `frozenset`, `datetime`, `date`, `time`, `timedelta`, or a
-//!   `datetime`/`date`/`time`/`timedelta` subclass) raises [`PyTypeError`]
-//!   naming the member's type and its path. A plain `list` or `dict` cannot
-//!   reach a set member at all — Python itself refuses `{[1]}` with
-//!   `TypeError: unhashable type: 'list'` — but a `list`/`dict`/`set`
-//!   subclass that defines `__hash__` can, and real `DeepDiff` would report
-//!   it under that subclass's own name; a `tuple`/`frozenset` subclass
-//!   (including a `namedtuple`) has no such obstacle at all — so all of
-//!   these stay refused here, including nested inside an otherwise-allowed
-//!   container: `{(datetime(2024, 1, 1),)}` converts, but
-//!   `{(HashableList([1]),)}` does not, for a `list` subclass `HashableList`
-//!   defining `__hash__`.
-//! - A user-defined class instance (and an `Enum` member) is diffed as a
-//!   **custom object**, by its attributes, matching `DeepDiff`'s `_diff_obj`
-//!   (see [`object_attributes`] for the enumeration and
-//!   `tests/golden/README.md`'s "Custom objects" section for the divergences).
-//!   Reached only through [`object_strategy`]'s accept-list; a value
-//!   `DeepDiff` routes to a handler this MVP lacks raises [`PyTypeError`]
-//!   naming its type and path at the root, and below it becomes an [`opaque`]
-//!   token, never reshaped into an object. An `AttributeError` while reading
-//!   an object's attributes raises [`PyTypeError`] too. A custom object cannot
-//!   reach a `set`/`frozenset` member (it is refused there like any other
-//!   unsupported member type).
+//! - A `dict` key outside `str`/`None`/`bool`/`int`/`float`/`datetime`/`date`
+//!   (or a `tuple`/`datetime`/`date` subclass, or a `tuple` of those, never
+//!   nested) raises [`PyTypeError`] naming its type and path; see
+//!   [`ObjectKey`] and [`onix_core::path::dict_key_repr`].
+//! - A `tzinfo` whose `utcoffset()` is not whole seconds raises
+//!   [`PyValueError`] (`datetime`/`time` alike).
+//! - A `set`/`frozenset` member outside `None`/`bool`/`int`/`float`/`str`/
+//!   `tuple`/`frozenset`/`datetime`/`date`/`time`/`timedelta`, or a
+//!   subclass of the last four, raises [`PyTypeError`]; a `list`/`dict`/
+//!   `set` subclass defining `__hash__` can reach one and is refused too.
+//! - A user-defined class instance (an `Enum` member included) is diffed as
+//!   a **custom object** by its attributes — see [`object_strategy`] and
+//!   `tests/golden/README.md`'s "Custom objects" section. A value routed to
+//!   a handler this MVP lacks, or an `AttributeError` reading an attribute,
+//!   raises [`PyTypeError`] (at the root, else an [`opaque`] token).
 //!
-//! # Subclasses
-//!
-//! This conversion checks the *exact* type first, falling through to a
-//! second, non-exact `isinstance`-style cast that additionally records
-//! `type(obj).__name__` for a subclass — see
-//! `docs/design/value-model.md`'s "Subclasses" section for how that name
-//! flows through the rest of the value model and diff engine. A
-//! `namedtuple` is accepted as an ordinary `tuple` subclass and diffed
-//! **positionally** (`root[0][1]`), not by field (`root[0].y`) the way real
-//! `DeepDiff` does — a documented divergence (see `tests/golden/README.md`),
-//! not an approximation of the field-walking shape. A subclass instance of
-//! any type this conversion carries a class name for also cannot round-trip
-//! through [`crate::deepdiff::DeepDiff::to_dict`] as itself: it renders back
-//! as the plain base type its fields describe, the same simplification the
-//! `zoneinfo`/`pytz` round trip below already documents.
-//!
-//! # Datetimes and dates
-//!
-//! A `datetime` converts with its wall-clock fields and, when it is aware,
-//! the *fixed* offset its `tzinfo.utcoffset()` reports at that moment. A
-//! `zoneinfo`/`pytz` zone therefore round-trips through
-//! [`crate::deepdiff::DeepDiff::to_dict`] as a plain
-//! `datetime.timezone(timedelta(...))` carrying the same offset, not as the
-//! original zone object — which changes nothing about the diff, since
-//! `DeepDiff` compares datetimes by instant and reports a `values_changed`
-//! pair normalized to UTC regardless.
-//!
-//! The exact-type cast runs first: `datetime` is itself a `date` subclass,
-//! so an inexact check in either direction would misread one as the other,
-//! and checking `datetime` (both exact and subclass) before `date` is what
-//! keeps a `datetime`/`Timestamp` from ever being misclassified as a `date`.
-//!
-//! A `time` (or a subclass, the same exact-then-subclass cast as `datetime`)
-//! converts the same way a `datetime` does (wall-clock fields plus the fixed
-//! offset in force); unlike `datetime`, real `DeepDiff` never normalizes a
-//! `time` at report time, so onix reports it raw everywhere (see
-//! `docs/design/value-model.md`'s "Calendar types" section for the exact
-//! comparison and hashing rules — genuinely different from `datetime`'s). A
-//! `timedelta` (or a subclass) converts to its exact
-//! `(days, seconds, microseconds)`.
-//!
-//! A `tuple` converts to [`onix_core::Value::Tuple`], which the engine
-//! diffs positionally exactly like a list while still reporting a
-//! tuple-vs-list pairing as a `type_changes` — matching `DeepDiff`.
-//!
-//! A `set`/`frozenset` converts to [`onix_core::Value::Set`]/
-//! [`onix_core::Value::FrozenSet`]. Its members are compared, and rendered,
-//! without reference to the order they were iterated in — see
-//! [`onix_core::value::SetItems`], and `tests/golden/README.md`'s "Set
-//! iteration order" section for where that leaves `DeepDiff` behind.
-//!
-//! # Lone surrogate code points
-//!
-//! A Python `str` can legally hold an unpaired surrogate code point (e.g.
-//! `"\udc80"`), the one code point UTF-8 cannot encode. [`pystring_to_cstr`]
-//! reads every `str` through [`Bound::to_cow`] first — a zero-copy borrow
-//! that succeeds for the overwhelming common case and costs nothing beyond
-//! it — and only on that borrow's failure falls back to
-//! `str.encode('utf-8', 'surrogatepass')`, the `CPython` idiom that yields
-//! [WTF-8](https://simonsapin.github.io/wtf-8/) bytes: valid UTF-8 with each
-//! surrogate direct-encoded in the three-byte form strict UTF-8 forbids for
-//! that range. [`onix_core::value::Str`] stores exactly that split, so
-//! equality and ordering both follow Python code-point comparison, and
-//! [`wtf8_to_pyobject`] reverses the encoding (`bytes.decode('utf-8',
-//! 'surrogatepass')`) when rendering a report value or a dict key back to a
-//! live Python object. See `tests/golden/README.md` for the small,
-//! documented set of nuances this leaves relative to real `DeepDiff` (all in
-//! `to_dict()`'s structural key/path rendering, never in a reported value).
-//!
-//! # Key interning
-//!
-//! An object key that is plain UTF-8 (the overwhelming common case) is
-//! interned across the whole conversion via a single
-//! [`onix_core::value::Builder`] threaded through the walk: record-shaped
-//! data repeats a handful of keys across tens of thousands of objects, so
-//! each distinct key costs a single shared allocation rather than one per
-//! occurrence. A key holding a lone surrogate is never interned — see
-//! `onix_core::value::Key`'s own doc for why that shape isn't worth sharing.
-//!
-//! # Depth guard, and why this walk is iterative
-//!
-//! This conversion mirrors the Python object graph's own shape. A naive
-//! implementation would walk it via native recursion, exactly the
-//! stack-overflow class `onix_core`'s own diff engine eliminates for the
-//! *diff* itself. [`to_value`] uses the identical technique, an explicit
-//! `Vec`-backed stack of in-progress list/dict frames walked in a single
-//! loop, so peak *native* stack usage is `O(1)` regardless of how deeply the
-//! input is nested. The same has to hold for anything `onix_core` runs while
-//! a value is being built — a set sorts its members into canonical order at
-//! construction, and that comparison is iterative for exactly this reason
-//! (see `docs/design/value-model.md`'s "Stack safety" section). Because every step of
-//! the build is iterative and the compact [`onix_core::Value`]'s own `Drop`
-//! is iterative too, conversion — and the teardown of a partially built tree
-//! on any error path — is stack-safe on *any* thread at *any* depth, without
-//! a sized worker: only the natively recursive diff engine still needs one
-//! (see [`crate::guard`]).
-//!
-//! On top of that native-stack safety, [`to_value`] separately takes the
-//! same `max_depth` budget the diff itself will use and raises
-//! [`crate::errors::MaxDepthError`] once conversion would recurse past it.
-//! That check runs strictly *before* `onix_core::diff_with_options`'s own
-//! guard, using the identical depth-counting convention (the root value is
-//! depth `0`; stepping into a dict value or list element adds one). It is
-//! intentionally a little stricter than `onix_core::diff_with_max_depth`'s
-//! guarantee that two *equal* inputs of any depth always diff cleanly,
-//! because equality can't be known yet at conversion time.
+//! A `str` holding a lone surrogate code point converts and compares like any other `str` (see
+//! [`pystring_to_cstr`] and `tests/golden/README.md`'s lone-surrogate bullet); a repeated UTF-8
+//! `str` object key is interned once per walk (a lone-surrogate key is kept per occurrence)
+//! (`docs/design/value-conversion.md`'s "Key interning" section).
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -257,8 +112,8 @@ impl<'py> SeqIter<'py> {
     }
 
     /// Wraps this sequence's finished items in the matching value shape,
-    /// attaching `class_name` (`None` for the exact base type) — see the
-    /// module doc's "Subclasses" section.
+    /// attaching `class_name` (`None` for the exact base type) — see
+    /// `docs/design/value-model.md`'s "Subclasses" section.
     fn build(&self, items: Vec<CValue>, class_name: Option<Arc<str>>) -> CValue {
         match self {
             SeqIter::List(_) => {
@@ -297,12 +152,12 @@ enum Frame<'py> {
         /// Whether this sequence's elements are inside a set member, which
         /// restricts the types [`classify`] accepts for them. Transitive:
         /// true for a set's own members, and for the elements of any
-        /// container nested inside one (see the module doc).
+        /// container nested inside one — see [`classify`]'s own doc.
         restricted: bool,
         /// The subclass name this sequence's own container carries (`None`
-        /// for the exact base type) — see the module doc's "Subclasses"
-        /// section. Unrelated to `restricted`, which is about the
-        /// *elements*', not this container's own, type.
+        /// for the exact base type) — see `docs/design/value-model.md`'s
+        /// "Subclasses" section. Unrelated to `restricted`, which is about
+        /// the *elements*', not this container's own, type.
         class_name: Option<Arc<str>>,
     },
     Dict {
@@ -347,13 +202,13 @@ enum Step<'py> {
 /// itself under the line-count limit. `None` when `current` is none of
 /// these, so `classify` falls through to its remaining checks.
 ///
-/// `datetime` before `date`: see the module doc — every `datetime` is also a
-/// `date` at the C level, so checking `date` first would swallow every
-/// `datetime` too. Each type's exact-type branch runs first so the common
-/// case pays only one cast; a subclass (pandas' `Timestamp` is the common
-/// one) falls through to the second, non-exact branch and carries its own
-/// class name — see the module doc's "Subclasses" section. All four convert
-/// the same way whether or not they sit inside a set member.
+/// `datetime` before `date`: every `datetime` is also a `date` at the C
+/// level, so checking `date` first would swallow every `datetime` too.
+/// Each type's exact-type branch runs first so the common case pays only
+/// one cast; a subclass (pandas' `Timestamp` is the common one) falls
+/// through to the second, non-exact branch and carries its own class name
+/// — see `docs/design/value-model.md`'s "Subclasses" section. All four
+/// convert the same way whether or not they sit inside a set member.
 fn classify_temporal(current: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<Option<CValue>> {
     if current.cast_exact::<PyDateTime>().is_ok() {
         return Ok(Some(datetime_to_value(current, path, None)?));
@@ -424,12 +279,11 @@ fn classify_temporal(current: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResu
 ///
 /// A `tuple`/`frozenset` **subclass** — including a `namedtuple`, a `tuple`
 /// subclass — reaching a set member is refused the same way a `list`/`dict`
-/// subclass is: only the *exact* base type is accepted there (see the
-/// module doc's "Subclasses" section for why this member-position
-/// restriction is unaffected by the general subclass support this function
-/// otherwise adds). A `datetime`/`date` subclass has no such restriction —
-/// it converts identically whether or not it sits inside a set member,
-/// exactly like the base type already does.
+/// subclass is: only the *exact* base type is accepted there, unaffected
+/// by the general subclass support this function otherwise adds. A
+/// `datetime`/`date` subclass has no such restriction — it converts
+/// identically whether or not it sits inside a set member, exactly like
+/// the base type already does.
 ///
 /// A value `DeepDiff` routes to a handler onix lacks is refused at the root
 /// and becomes an opaque token anywhere below it (see [`opaque`]).
@@ -481,9 +335,8 @@ fn classify<'py>(
     }
     // Non-exact, unlike the branch above: a `tuple` subclass — including a
     // `namedtuple` — carries its own class name and compares as a plain
-    // `tuple` otherwise (see the module doc's "Subclasses" section), except
-    // as a set member, where only the exact type is accepted (see this
-    // function's own doc).
+    // `tuple` otherwise, except as a set member, where only the exact type
+    // is accepted (see this function's own doc).
     if !set_member && let Ok(tuple) = current.cast::<PyTuple>() {
         return Ok(seq_step(
             SeqIter::Tuple(tuple.iter()),
@@ -1377,26 +1230,28 @@ fn object_failure(
     token
 }
 
-/// Converts a Python object into an [`onix_core::Value`], recursing at most
-/// `max_depth` levels deep — see the module doc for the full conversion table
-/// and why this walk uses an explicit stack instead of native recursion.
+/// Converts a Python object into an [`onix_core::Value`] — see the module doc's type table. Walks
+/// via an explicit `Vec`-backed stack, never native recursion, and every `onix_core` step run
+/// while the value is being built is iterative too (a set's canonical ordering at construction,
+/// `Value`'s `Drop` — see `docs/design/value-model.md`'s "Stack safety" section), so peak native
+/// stack and error-path teardown stay `O(1)` at any depth; only the diff engine's own recursion
+/// needs a sized worker thread ([`crate::guard`]). Recurses at most `max_depth` levels, raising
+/// [`MaxDepthError`] before `onix_core::diff_with_options`'s own guard runs, at the identical
+/// depth-counting convention (root at depth `0`) — intentionally stricter, since equality between
+/// the two inputs isn't known yet (`docs/design/depth-budget.md`'s "Equal inputs of any depth").
 ///
 /// The second return value is whether this walk ever built a `Str::Wtf8`/
-/// `Key`-with-a-surrogate (see the module doc's "Lone surrogate code
-/// points" section) — a byproduct of this walk's own string handling, not a
-/// second pass over the result: [`crate::deepdiff::DeepDiff::new`] ORs the
-/// two sides' flags together and caches the result so
-/// [`crate::guard::serialize_value`] can skip
-/// [`onix_core::value::contains_wtf8`]'s own tree walk for the overwhelming
-/// common case (no surrogate anywhere), which otherwise doubles that
-/// function's cost on every `to_json()` call regardless of whether this
-/// feature is in use. `held` collects the objects the value's identities
-/// name, and must outlive the diff.
+/// `Key`-with-a-surrogate (see [`pystring_to_cstr`]), so
+/// [`crate::deepdiff::DeepDiff::new`] can OR the two sides' flags and let
+/// [`crate::guard::serialize_value`] skip
+/// [`onix_core::value::contains_wtf8`]'s own tree walk for the common case.
+/// `held` collects the objects the value's identities name, and must
+/// outlive the diff.
 ///
 /// # Errors
 ///
 /// Returns a Python `ValueError`/[`MaxDepthError`] or `TypeError` per the
-/// module doc's conversion table.
+/// module doc's type table.
 pub(crate) fn to_value(
     obj: &Bound<'_, PyAny>,
     max_depth: usize,
@@ -1545,7 +1400,7 @@ fn child_segment(set_member: bool, index: usize) -> PathSegment {
 /// classification has no path segment of its own to report. `builder`
 /// interns a `str` key exactly as every other object key in this walk is
 /// interned; a non-`str` key needs no interning (see the module doc's
-/// key-type table).
+/// dict-key bullet).
 fn next_dict_entry<'py>(
     iter: &mut BoundDictIterator<'py>,
     dict_path: &[PathSegment],
@@ -1561,15 +1416,15 @@ fn next_dict_entry<'py>(
 }
 
 /// Classifies one Python dict key into an [`ObjectKey`] — the `str` case
-/// (interned, as always — including a lone-surrogate one, see
+/// (a UTF-8 key interned, a lone-surrogate one kept per occurrence; see
 /// [`pystring_to_cstr`]) plus every other key `DeepDiff` also accepts:
 /// `None`, `bool`, `int`, `float`, `datetime`, `date`, or a `tuple` of those
-/// (never a nested `tuple` — see the module doc's key-type table and
+/// (never a nested `tuple` — see the module doc's dict-key bullet and
 /// [`classify_key_scalar`], which this delegates every non-`tuple` case to),
 /// or a subclass of `tuple`/`datetime`/`date` (including a `namedtuple`).
 /// `DeepDiff`'s own dict-key matching is plain Python `==`/`hash`, which
 /// never consults `type(obj)`, so — unlike a *value*, which carries its
-/// class name into a `type_changes` entry (see the module doc's
+/// class name into a `type_changes` entry (see `docs/design/value-model.md`'s
 /// "Subclasses" section) — a key subclass instance is classified as its
 /// exact base type with no name tracked at all: [`ObjectKey`] has no
 /// class-name field. A subclass key matches by its base type's *value*;
@@ -1633,9 +1488,10 @@ fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyR
     }
 
     // Non-exact, and `datetime` before `date` (every `datetime` is also a
-    // `date` at the C level — see the module doc): a `datetime`/`date`
-    // subclass key classifies as its base type with no class name tracked,
-    // see [`classify_dict_key`]'s own doc for why.
+    // `date` at the C level — see `classify_temporal`'s doc and
+    // `docs/design/value-conversion.md`): a `datetime`/`date` subclass key
+    // classifies as its base type with no class name tracked, see
+    // [`classify_dict_key`]'s own doc for why.
     if obj.cast::<PyDateTime>().is_ok() {
         return datetime_to_value(obj, dict_path, None);
     }
@@ -1707,7 +1563,7 @@ fn date_fields(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<CDate> 
 /// Converts a `datetime.datetime` (exact or a subclass) — see
 /// [`date_fields`] for why the fields are read as attributes. `class_name`
 /// is the subclass name to attach (`None` for the exact base type) — see
-/// the module doc's "Subclasses" section.
+/// `docs/design/value-model.md`'s "Subclasses" section.
 fn datetime_to_value(
     obj: &Bound<'_, PyAny>,
     path: &[PathSegment],
@@ -2011,7 +1867,8 @@ fn type_name(obj: &Bound<'_, PyAny>) -> String {
 }
 
 /// `type_name`, as the `Arc<str>` [`Typed`]/[`SetItems`]/`onix_core::value::Object`
-/// carry for a subclass instance — see the module doc's "Subclasses" section.
+/// carry for a subclass instance — see `docs/design/value-model.md`'s
+/// "Subclasses" section.
 fn class_name(obj: &Bound<'_, PyAny>) -> Arc<str> {
     Arc::from(type_name(obj))
 }
@@ -2061,8 +1918,8 @@ impl SeqKind {
             SeqKind::Tuple => PyTuple::new(py, items)?.into_py_any(py),
             // Every member of a `Value::Set`/`Value::FrozenSet` came through
             // `classify`'s transitive set-member restriction, which accepts
-            // only hashable kinds all the way down (see the module doc), so
-            // `PySet::new` cannot fail on one.
+            // only hashable kinds all the way down (see `classify`'s own
+            // doc), so `PySet::new` cannot fail on one.
             SeqKind::Set => PySet::new(py, items)?.into_py_any(py),
             SeqKind::FrozenSet => PyFrozenSet::new(py, items)?.into_py_any(py),
         }
@@ -2114,11 +1971,11 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                 CValue::Number(n) => RenderStep::Done(number_to_pyobject(py, n)?),
                 CValue::Str(s) => RenderStep::Done(wtf8_to_pyobject(py, s.as_bytes())?),
                 // Renders back as the plain base type, never the original
-                // subclass instance (there is nothing left to reconstruct
-                // one from once the value has passed through the compact
-                // model) — the same simplification the module doc's
-                // "Datetimes and dates" section already documents for a
-                // `zoneinfo`/`pytz` `tzinfo`.
+                // subclass instance — see docs/design/value-conversion.md's
+                // "Subclasses" section; tests/golden/README.md's
+                // "Normalized versus raw datetimes" section, its
+                // "Fixed-offset tzinfo round-trip" point, documents the
+                // same simplification for a `zoneinfo`/`pytz` `tzinfo`.
                 CValue::DateTime(value) => {
                     RenderStep::Done(datetime_to_pyobject(py, value.value())?)
                 }
@@ -2235,7 +2092,8 @@ fn date_to_pyobject(py: Python<'_>, value: CDate) -> PyResult<Py<PyAny>> {
 
 /// Rebuilds a `datetime.datetime`, aware values carrying a fixed-offset
 /// `datetime.timezone` (a zero offset is Python's own `timezone.utc`
-/// singleton) — see the module doc's note on the `zoneinfo` round trip.
+/// singleton) — see `tests/golden/README.md`'s "Normalized versus raw
+/// datetimes" section, its "Fixed-offset `tzinfo` round-trip" point.
 fn datetime_to_pyobject(py: Python<'_>, value: CDateTime) -> PyResult<Py<PyAny>> {
     let tzinfo = value
         .utc_offset_seconds()

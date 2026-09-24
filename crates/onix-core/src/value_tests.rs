@@ -28,7 +28,7 @@ use crate::test_support::{
 
 /// The WTF-8 bytes for one lone surrogate code point, matching `CPython`'s own
 /// `str.encode('utf-8', 'surrogatepass')` — see `crates/onix-py/src/convert.rs`'s
-/// module doc. `0xDC80` throughout these tests (an arbitrary low surrogate);
+/// `pystring_to_cstr` doc. `0xDC80` throughout these tests (an arbitrary low surrogate);
 /// [`wtf8_surrogate_bytes`] covers both halves and boundary values.
 fn wtf8_surrogate_bytes(code_point: u16) -> [u8; 3] {
     [

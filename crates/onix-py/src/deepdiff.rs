@@ -27,36 +27,35 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, seria
 ///
 /// `DeepDiff(t1, t2, ignore_order=False, max_depth=None)`:
 ///
-/// - `t1`/`t2`: any of `None`, `bool`, `int`, `float` (`NaN`/`Infinity`/
-///   `-Infinity` included), `str` (a lone, unpaired surrogate code point —
-///   legal in Python, not encodable as UTF-8 — is accepted and compared like
-///   any other `str`; see `crate::convert`'s module doc), `dict` (a key may
-///   be `str`, `None`, `bool`, `int`, `float`, `datetime.datetime`,
-///   `datetime.date`, or a `tuple` of those, never nested), `list`, `tuple`,
-///   `set`, `frozenset`, `datetime.datetime`, `datetime.date`,
+/// - `t1`/`t2`: any of `None`, `bool`, `int`, `float`
+///   (`NaN`/`Infinity`/`-Infinity` included), `str` (a lone, unpaired surrogate
+///   code point — legal in Python, not encodable as UTF-8 — is accepted and
+///   compared like any other `str`; see `tests/golden/README.md`'s lone-surrogate
+///   bullet), `dict` (a key may be `str`, `None`, `bool`, `int`, `float`,
+///   `datetime.datetime`, `datetime.date`, or a `tuple` of those, never nested),
+///   `list`, `tuple`, `set`, `frozenset`, `datetime.datetime`, `datetime.date`,
 ///   `datetime.time`, or `datetime.timedelta`, arbitrarily nested, and a
-///   *subclass* of the last nine (a `namedtuple`, a `set` subclass, a
-///   pandas `Timestamp`), which converts and compares as its base type but
-///   carries its own class name into a `type_changes` entry — because
-///   `DeepDiff` reports every value under its own type name — with one
-///   divergence: a `namedtuple` diffs positionally, not by field (see
-///   `crate::convert`'s module doc). A `set`/`frozenset` member is
-///   restricted further, to whichever of the above are hashable in Python —
-///   every type except `list`, `dict` and `set` — plus a
-///   `datetime`/`date`/`time`/`timedelta` subclass, but not a
-///   `tuple`/`frozenset` subclass or a `namedtuple`; the restriction is
+///   *subclass* of the last nine (a `namedtuple`, a `set` subclass, a pandas
+///   `Timestamp`), which converts and compares as its base type but carries its
+///   own class name into a `type_changes` entry — because `DeepDiff` reports
+///   every value under its own type name — with one divergence: a `namedtuple`
+///   diffs positionally, not by field (see `tests/golden/README.md`'s "Known
+///   `DeepDiff` quirks" section). A `set`/`frozenset` member is restricted further,
+///   to whichever of the above are hashable in Python — every type except `list`,
+///   `dict` and `set` — plus a `datetime`/`date`/`time`/`timedelta` subclass, but
+///   not a `tuple`/`frozenset` subclass or a `namedtuple`; the restriction is
 ///   transitive: a `list`, `dict` or `set` anywhere inside a set member is
-///   refused. A user-defined class instance (and an `Enum` member) is diffed as
-///   a **custom object**, by its attributes, matching `DeepDiff`'s `_diff_obj`
+///   refused. A user-defined class instance (and an `Enum` member) is diffed as a
+///   **custom object**, by its attributes, matching `DeepDiff`'s `_diff_obj`
 ///   (`attribute_added`/`attribute_removed`, `root.attr` paths, `type_changes`
-///   between classes; see `crate::convert`'s module doc for the enumeration and
-///   its documented divergences). Converted to `onix_core`'s value model
-///   exactly once, up front — see `crate::convert`'s module doc for the full
-///   conversion table and every error this can raise: `TypeError` for a value
-///   `DeepDiff` routes to a handler onix lacks (a number such as
+///   between classes; see `tests/golden/README.md`'s "Custom objects" section for
+///   the enumeration and its documented divergences). Converted to `onix_core`'s
+///   value model exactly once, up front — see `crate::convert`'s module doc for
+///   the full conversion table and every error this can raise: `TypeError` for a
+///   value `DeepDiff` routes to a handler onix lacks (a number such as
 ///   `complex`/`Decimal`, `bytes`/`bytearray` or any other iterable, `uuid`,
-///   `ipaddress`, a class object, a module, or a bare attribute-less object),
-///   for a `dict` key or `set` member of an unsupported type, or for a
+///   `ipaddress`, a class object, a module, or a bare attribute-less object), for
+///   a `dict` key or `set` member of an unsupported type, or for a
 ///   `tuple`/`frozenset` subclass as a set member; `ValueError` for an
 ///   out-of-range int, a non-finite float, or a sub-second UTC offset.
 /// - `ignore_order`: mirrors `DeepDiff(..., ignore_order=True)`.
@@ -222,10 +221,11 @@ impl DeepDiff {
     /// differences: type *names* in a `type_changes` entry stay strings
     /// here, where real `DeepDiff` returns the type objects themselves, and
     /// an aware datetime carries a fixed-offset `datetime.timezone` rather
-    /// than whatever `tzinfo` class it went in with. See `crate::convert`'s
-    /// module doc for the second. Conversion back to Python objects is
-    /// iterative (see `crate::convert::value_to_pyobject`), so it is safe on
-    /// the calling thread at any depth.
+    /// than whatever `tzinfo` class it went in with (see
+    /// `tests/golden/README.md`'s "Normalized versus raw datetimes" section,
+    /// its "Fixed-offset `tzinfo` round-trip" point).
+    /// Conversion back to Python objects is iterative
+    /// ([`crate::convert::value_to_pyobject`]), safe at any depth.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         value_to_pyobject(py, &self.report_value)
     }

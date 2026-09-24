@@ -128,7 +128,8 @@ def test_deep_equal_input_also_raises_at_conversion_time() -> None:
     `max_depth`), the bindings' Python-object-to-`Value` conversion runs
     before equality can be known and is bounded by the same `max_depth`
     budget on its own -- so an equal-but-adversarially-deep pair still
-    raises here (see `crates/onix-py/src/convert.rs`'s module doc).
+    raises here (see `crates/onix-py/src/convert.rs`'s `to_value` doc, and
+    `docs/design/depth-budget.md`'s "Equal inputs of any depth" section).
     """
     value = _nested_list(100_000, leaf=1)
 
