@@ -1296,3 +1296,17 @@ def test_a_class_attribute_of_a_natively_converted_type_is_rendered_in_a_whole_o
     assert sorted(old_value) == [
         "bag", "clock", "count", "day", "items", "mapping", "members", "none", "number", "pair", "span", "text",
     ]
+
+
+def test_an_object_holding_an_enum_against_a_bare_member_pairs_like_deepdiff_under_ignore_order() -> None:
+    """Under ignore_order an object and an Enum member pair by DeepDiff's lengths, so both report root[0]."""
+
+    class Holder:
+        def __init__(self, member: _Color) -> None:
+            self.member = member
+
+    onix = DeepDiff([Holder(_Color.RED)], [_Color.GREEN], ignore_order=True).to_dict()
+    real = RealDeepDiff([Holder(_Color.RED)], [_Color.GREEN], ignore_order=True, verbose_level=2).to_dict()
+    assert {category: sorted(entries) for category, entries in onix.items()} == {
+        category: sorted(entries) for category, entries in real.items()
+    } == {"values_changed": ["root[0]"]}
