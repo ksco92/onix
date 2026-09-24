@@ -8516,6 +8516,45 @@ mod fused_tests {
     }
 
     #[test]
+    fn hash_side_parallel_hands_each_batch_its_first_row_position() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch = |ids: Vec<i64>| {
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(ids))]).unwrap()
+        };
+        let prefix = vec![batch(vec![1, 2, 3])];
+        let rest = MemoryInput::new(schema.clone(), vec![batch(vec![4]), batch(vec![5, 6])]);
+        let hasher = super::RowHasher::new().unwrap();
+        let columns = super::SideColumns {
+            key: vec![0],
+            value: Vec::new(),
+        };
+        let config = super::HashConfig {
+            key_names: &["id"],
+            value_names: &[],
+            hasher: &hasher,
+            threads: 2,
+        };
+        let seen = std::sync::Mutex::new(Vec::new());
+        let hook = |at: u64, batch: &RecordBatch, _: &[(u128, u128, bool)]| {
+            seen.lock().unwrap().push((at, batch.num_rows()));
+            Ok(())
+        };
+        super::hash_side_parallel(
+            prefix,
+            rest.open().unwrap(),
+            &columns,
+            &config,
+            2,
+            &hook,
+            true,
+        )
+        .unwrap();
+        let mut seen = seen.into_inner().unwrap();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![(0, 3), (3, 1), (4, 2)]);
+    }
+
+    #[test]
     fn hash_side_parallel_without_pairs_keeps_only_null_keys() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
         let batch = RecordBatch::try_new(
