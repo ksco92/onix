@@ -322,6 +322,8 @@ shapes on both); a cell with several runs is their median:
 | `viewadded` 1M | 2 / 64 | 2171 / 2138 MB | 2242 / 2230 MB | 3 |
 | `viewaddedbyvalue` 1M (every row added, keyed on a 1 KB view column) | 1 / 2 | 2125 / 2174 MB | 2141 / 2243 MB | 3 |
 | `viewaddedbyvalue` 1M | 18 / 64 | 2110 / 2132 MB | 2191 / 2228 MB | 3 |
+| `viewaddedrepeat` 1M (every row added but one right-only repeat per batch) | 1 / 2 | 2125 / 2173 MB | 2125 / 2244 MB | 3 |
+| `viewaddedrepeat` 1M | 18 / 64 | 2110 / 2138 MB | 2192 / 2236 MB | 3 |
 | `viewsparse` 1M (one row in 10,000 removed) | 1 | 2176 MB | 2172 MB | 5 |
 | `viewsparse` 1M | 18 | 2166 MB | 1978 MB | 3 |
 | `duprightonce` 1M (500k left keys each twice on the right) | 1 / 18 | 1401 / 1368 MB | 1397 / 2320 MB | 3 |
@@ -348,6 +350,14 @@ column and a 30 B `Utf8View` column; an empty left) keyed on a 1 KB `Utf8View` c
 0.13.0, median of 3), the same as keyed on `id` (4217 → 4273 MB at 2 threads, 4212 → 4240 at 18,
 4225 → 4277 at 64): a candidate's key columns stay shared with its rows until a compaction copies
 those rows out.
+
+A spooled partial selection (`halfall`: a left of 980,000 keys; a right of 2,000 batches, each with
+510 keys the left lacks, 490 unchanged left keys and one repeat of the previous batch's first new
+key; columns `id` Int64, `w` 1 KB `Utf8`, `v` 64 B `Utf8View`) measures 4420 → 4684 MB at 2 threads
+and 4298 → 4483 MB at 64 (0.11.2 → 0.13.0, median of 3). The added rows are materialized one
+candidate at a time and each candidate is freed once its selection is taken; holding every candidate
+until the concatenation measured 5522 and 5403 MB. What remains is the map entry per key the left
+lacks.
 
 `chain` wall time at 18 threads (`row_diff_rss`, median of 3), 0.11.2 → 0.13.0: 2-row batches at
 100k / 200k / 400k rows 0.73 / 1.46 / 2.94 s → 0.65 / 1.22 / 2.55 s; 16-row batches at 1M / 2M / 4M
