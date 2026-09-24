@@ -15,6 +15,12 @@ in `crate::diff`, so `Clone` recursion is bounded by `max_depth`. A
 caller that clones untrusted input outside that guard rejects
 over-deep input first with `crate::exceeds_depth`.
 
+Construction and rendering (`From<serde_json::Value>` and
+`Value::to_serde_json`) also recurse with no guard, safe only on
+values already known to be depth-bounded; the streaming `Deserialize`
+path is instead bounded by `serde_json`'s own parser recursion limit
+(128 levels), which must stay enabled.
+
 ## Subclasses
 
 Every `Value` variant that can carry a subclass name wraps its
@@ -29,8 +35,8 @@ class name before recursing.
 
 `Date` (`datetime.date`) and `DateTime` (`datetime.datetime`, naive
 or fixed UTC offset) hold plain wall-clock fields; the only
-arithmetic is civil-date/day-number conversion (Howard Hinnant's
-`days_from_civil`/`civil_from_days`). `DateTime` compares by instant:
+arithmetic is civil-date/day-number conversion
+(`days_from_civil`/`civil_from_days`). `DateTime` compares by instant:
 an aware value normalizes through its own offset, a naive value is
 stamped as UTC, matching `datetime_normalize`. A `Date` never equals
 a `DateTime`. `Date`, `DateTime`, and `Time` render through
@@ -44,11 +50,11 @@ minus the calendar date; unlike `DateTime`, its equality is a plain
 an aware one, and two aware values compare by an offset-adjusted
 micros-of-day.
 
-`TimeDelta` (`datetime.timedelta`) stores Python's own normalized
-`(days, seconds, microseconds)` triple rather than a flattened
-microsecond count, which would overflow `i64` at Python's extreme
-`days=999_999_999`; it always compares and hashes by that exact
-value, with no naive/aware split.
+`TimeDelta` (`datetime.timedelta`) stores a signed `total_seconds`
+(`days*86_400 + seconds`) plus a non-negative `subsecond_microseconds`,
+rather than a flattened total-microsecond count, which would overflow
+`i64` at Python's extreme `days=999_999_999`; it always compares and
+hashes by that exact pair, with no naive/aware split.
 
 Under `ignore_order`, `Date`/`DateTime`/`TimeDelta` hash exactly, but
 `Time` hashes by `(hour*60+minute)*60+second`, dropping the

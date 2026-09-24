@@ -1461,7 +1461,8 @@ proptest! {
     /// The distance memo must change no decision: an `ignore_order` diff run
     /// with the memo enabled produces a byte-identical report to one run with
     /// it disabled, over generated nested shapes. This is the empirical
-    /// counterpart to the purity argument in `super::memo`'s module doc.
+    /// counterpart to the purity argument in `docs/design/ignore-order.md`'s
+    /// "Distance memo" section.
     #[test]
     fn memoized_and_unmemoized_reports_are_byte_identical(
         a in arb_nested(),

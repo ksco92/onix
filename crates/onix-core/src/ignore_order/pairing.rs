@@ -122,7 +122,8 @@ pub(crate) fn compute_pairs(
             // re-compute exponentially without a cache. `rough_distance` is a
             // pure function of the two subtrees' content on this path, so a
             // value cached under their exact `DistKey` pair is identical to a
-            // fresh one — see the `super::memo` module doc for the proof.
+            // fresh one — see `docs/design/ignore-order.md`'s "Distance
+            // memo" section for the proof.
             let distance = match (&removed_dist[removed_idx], &added_dist[added_idx]) {
                 (Some(removed_dist_key), Some(added_dist_key)) if memo.caching_enabled() => {
                     let key = (removed_dist_key.clone(), added_dist_key.clone());

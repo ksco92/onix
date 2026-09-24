@@ -2,9 +2,8 @@
 //! produced by a caller, into `DeepDiff`-compatible reports.
 //!
 //! - **Dispatch**: `diff_at` recurses by type under a shared depth budget.
-//! - **Container comparison**: ordered/LCS matching
-//!   (`docs/design/list-diff.md`) or, under `ignore_order`, hashed
-//!   pairing (`docs/design/ignore-order.md`).
+//! - **Container comparison**: ordered/LCS matching, or hashed pairing
+//!   under `ignore_order` — `docs/design/list-diff.md`/`docs/design/ignore-order.md`.
 //! - **Report**: findings accumulate into a [`Report`], keyed by path.
 //! - **Render**: [`Report::to_json_value`] renders `DeepDiff` JSON.
 
@@ -31,6 +30,14 @@ pub use value::{Builder, Number, Value};
 /// itself is depth `0`). Iterative — an explicit heap work-stack, safe on
 /// any input depth — and returns as soon as one node past `limit` is
 /// seen. See [`diff_with_max_depth`]'s doc for the depth budget it backs.
+///
+/// ```
+/// use onix_core::Value;
+/// use serde_json::json;
+///
+/// assert!(!onix_core::exceeds_depth(&Value::from(json!([1, 2, 3])), 1));
+/// assert!(onix_core::exceeds_depth(&Value::from(json!([[[1]]])), 2));
+/// ```
 #[must_use]
 pub fn exceeds_depth(value: &Value, limit: usize) -> bool {
     diff::deeper_than(value, limit)
@@ -55,7 +62,6 @@ mod tests {
 
     #[test]
     fn exceeds_depth_delegates_to_the_core_depth_check() {
-        // `[[[1]]]` is depth 3: exceeds limit 2, not limit 3.
         assert!(exceeds_depth(&Value::from(json!([[[1]]])), 2));
         assert!(!exceeds_depth(&Value::from(json!([[[1]]])), 3));
     }

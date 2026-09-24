@@ -34,10 +34,9 @@ embed it.
 ## Distance memo
 
 Container candidate-pair distances are cached for the whole diff,
-keyed by each side's exact structural identity: the pairing above
-would otherwise re-run a full trial diff on the same subtree pair
-once per candidate that embeds it, compounding across nesting
-levels; the cache bounds that to one computation per distinct pair.
+keyed by each side's exact structural identity, bounding a subtree
+pair's own trial diff to one computation regardless of how many
+candidates embed it.
 
 Caching changes no decision: on this path `rough_distance` depends
 only on the two values' content (the structural trial's own depth

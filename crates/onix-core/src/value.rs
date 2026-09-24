@@ -314,8 +314,8 @@ impl fmt::Display for Str {
 /// A compact JSON value: the memory-frugal counterpart of
 /// [`serde_json::Value`].
 ///
-/// See the [module documentation](self) for the representation choices and
-/// their rationale. Six of the variants mirror JSON's own shapes; objects
+/// See the [module documentation](self) for the representation choices.
+/// Six of the variants mirror JSON's own shapes; objects
 /// are held as an [`Object`] (a sorted, exactly-sized entry slice) and
 /// numbers as a [`Number`] preserving the `i64`/`u64`/`f64` distinction.
 ///
@@ -355,7 +355,8 @@ pub enum Value {
     /// A Python `datetime.datetime` — see [`DateTime`], and this type's own
     /// doc for why it is a variant rather than a pre-rendered string. Wrapped
     /// in [`Typed`] so a `datetime` subclass (e.g. pandas `Timestamp`)
-    /// carries its own class name — see this module's "Subclasses" section.
+    /// carries its own class name — see `docs/design/value-model.md`'s
+    /// "Subclasses" section.
     DateTime(Typed<DateTime>),
     /// A Python `datetime.date` — see [`Date`]. See [`Value::DateTime`]'s
     /// doc for the [`Typed`] wrapper.
@@ -367,25 +368,25 @@ pub enum Value {
     /// [`Value::DateTime`]'s doc for the [`Typed`] wrapper.
     TimeDelta(Typed<TimeDelta>),
     /// An array, stored as an exactly-sized `Box<[Value]>` — wrapped in
-    /// [`Typed`] for a `list` subclass, see this module's "Subclasses"
-    /// section.
+    /// [`Typed`] for a `list` subclass, see `docs/design/value-model.md`'s
+    /// "Subclasses" section.
     Array(Typed<Box<[Value]>>),
     /// A Python tuple, stored exactly like [`Value::Array`] but kept as a
     /// distinct variant — see this type's own doc for why. Also carries a
     /// [`Typed`] class name for a `tuple` subclass, including a
-    /// `namedtuple` — see this module's "Subclasses" section for
-    /// how a `namedtuple` is diffed.
+    /// `namedtuple` — see `docs/design/value-model.md`'s "Subclasses"
+    /// section for how a `namedtuple` is diffed.
     Tuple(Typed<Box<[Value]>>),
     /// A Python `set`, stored as canonically ordered [`SetItems`], which
-    /// carries its own optional class name for a `set` subclass — see this
-    /// module's "Subclasses" section.
+    /// carries its own optional class name for a `set` subclass — see
+    /// `docs/design/value-model.md`'s "Subclasses" section.
     Set(SetItems),
     /// A Python `frozenset`, stored exactly like [`Value::Set`] but kept as
     /// a distinct variant — see this type's own doc for why.
     FrozenSet(SetItems),
     /// An object: key-sorted, exactly-sized entries (see [`Object`]), which
-    /// carries its own optional class name for a `dict` subclass — see this
-    /// module's "Subclasses" section.
+    /// carries its own optional class name for a `dict` subclass — see
+    /// `docs/design/value-model.md`'s "Subclasses" section.
     Object(Object),
 }
 
@@ -473,7 +474,7 @@ fn object_key_cmp(a: &ObjectKey, b: &ObjectKey) -> std::cmp::Ordering {
 /// Wraps a value with the source Python class name, when it differs from
 /// the base type this [`Value`] variant represents (`None` for the exact
 /// base type). [`PartialEq`] compares only the wrapped value, ignoring the
-/// class name — see the [module documentation](self)'s "Subclasses"
+/// class name — see `docs/design/value-model.md`'s "Subclasses"
 /// section, and `diff_at`'s class-name check (`crate::diff`) for where the
 /// name is checked instead.
 #[derive(Debug, Clone)]
@@ -593,8 +594,8 @@ pub(crate) fn same_class(a: &Value, b: &Value) -> bool {
 
 /// Delegates to the iterative `structural_eq`. The result is exactly what a
 /// derived `PartialEq` produces, verified by a differential property test
-/// against the derive before it was replaced. See the [module
-/// documentation](self)'s "Stack safety" section for why equality is
+/// against the derive before it was replaced. See
+/// `docs/design/value-model.md`'s "Stack safety" section for why equality is
 /// iterative.
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
@@ -729,7 +730,7 @@ pub fn object_key_json_string(key: &ObjectKey) -> String {
 /// Whether `value` — or, transitively, any [`Object`] key inside it, down
 /// through an [`ObjectKey::Other`] tuple's own elements — holds a
 /// [`Str::Wtf8`]/[`Key::Wtf8`] (a lone surrogate code point). Iterative (see
-/// the [module documentation](self)'s "Stack safety" section): a heap
+/// `docs/design/value-model.md`'s "Stack safety" section): a heap
 /// work-stack, so an adversarially deep report cannot overflow the native
 /// stack checking this.
 ///
@@ -860,7 +861,7 @@ fn from_serde(value: serde_json::Value, interner: &mut Interner) -> Value {
 /// finds nothing to recurse into — teardown of arbitrarily deep input uses
 /// `O(1)` native stack and `O(nodes)` heap, rather than the `O(depth)`
 /// native frames a derived recursive `Drop` (like [`serde_json::Value`]'s)
-/// would need. See the [module documentation](self)'s "Stack safety" note.
+/// would need. See `docs/design/value-model.md`'s "Stack safety" section.
 impl Drop for Value {
     fn drop(&mut self) {
         let mut stack: Vec<Value> = Vec::new();
@@ -911,7 +912,7 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
 /// Sets compare like arrays, element-wise in stored order — which is
 /// canonical (see [`SetItems`]), so two sets built from the same members in
 /// any order do compare equal. See
-/// the [module documentation](self)'s "Stack safety" section for why it is
+/// `docs/design/value-model.md`'s "Stack safety" section for why it is
 /// iterative rather than recursive.
 fn structural_eq(a: &Value, b: &Value) -> bool {
     let mut stack: Vec<(&Value, &Value)> = vec![(a, b)];
@@ -1018,9 +1019,6 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
 /// [`serde_json::Number`] ([`Value::to_serde_json`] falls back to `null` for
 /// one that can't, the same collapse the streaming parse path already used
 /// for a non-finite value arriving some other way).
-///
-/// See the [module documentation](self) for why this int/float distinction
-/// is load-bearing for byte-compatible output.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Number {
     repr: NumberRepr,
@@ -1299,8 +1297,8 @@ pub struct SetItems {
     /// ascending [`canonical_cmp`] order, and no two structurally equal.
     items: Box<[Value]>,
     /// The `set`/`frozenset` subclass name this value came from, or `None`
-    /// for the exact base type — see the module documentation's "Subclasses"
-    /// section (this field is that same concept, plain rather than wrapped,
+    /// for the exact base type — see `docs/design/value-model.md`'s
+    /// "Subclasses" section (this field is that same concept, plain rather than wrapped,
     /// since [`SetItems::new`] already has its own constructor function to
     /// hide it behind).
     type_name: Option<Arc<str>>,
@@ -1598,8 +1596,8 @@ fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
 /// case, or, for a key containing a lone surrogate code point, WTF-8 bytes
 /// held in their own,
 /// un-interned allocation. Interning shares one allocation across the
-/// handful of keys a record-shaped payload repeats thousands of times (see
-/// the [module documentation](self)); a surrogate-bearing key is never that
+/// handful of keys a record-shaped payload repeats thousands of times;
+/// a surrogate-bearing key is never that
 /// shape in practice, so it costs its own small allocation instead of
 /// complicating the interner for a case that would not benefit from it.
 ///
@@ -1728,8 +1726,7 @@ impl ObjectKind {
 /// ascending-key iteration.
 ///
 /// See the [module documentation](self) for why entries are sorted and
-/// `str` keys interned (byte-identical rendering and small-map footprint),
-/// and [`ObjectKey`]'s own doc for why every other key kind is a second,
+/// `str` keys interned, and [`ObjectKey`]'s own doc for why every other key kind is a second,
 /// additive case rather than a change to that representation. A custom
 /// object's attributes reuse this same storage, distinguished only by
 /// [`Object::kind`] — see [`ObjectKind`].
@@ -2123,8 +2120,8 @@ impl ExactSizeIterator for Entries<'_> {}
 /// A single [`Interner`] is threaded through one whole conversion or parse
 /// (see [`from_serde`] and the [`Deserialize`] impl); it exists only during
 /// construction, and the finished [`Value`] holds the shared handles while
-/// the lookup table is dropped. See the [module documentation](self) for the
-/// key-interning footprint rationale.
+/// the lookup table is dropped. See the [module documentation](self) for
+/// how keys are interned.
 #[derive(Debug, Default)]
 struct Interner {
     seen: HashSet<Arc<str>>,
@@ -2248,7 +2245,7 @@ impl Builder {
     /// subclass's `(name, identity)` (`None` for the exact base `dict`) — the
     /// entry point `onix-py`'s converter uses for every `dict` subclass,
     /// whether or not its keys are all `str`. See [`Object::with_dict_class`]
-    /// for the name-versus-identity split and the module documentation's
+    /// for the name-versus-identity split and `docs/design/value-model.md`'s
     /// "Subclasses" section.
     #[must_use]
     pub fn object_with_keys_and_class(

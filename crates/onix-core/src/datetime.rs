@@ -116,8 +116,8 @@ impl Date {
 /// microsecond precision, and an optional fixed UTC offset in whole seconds
 /// (`None` is a *naive* datetime).
 ///
-/// See the [module documentation](self) for the instant-comparison rule and
-/// the exact `isoformat()` reproduction.
+/// See `docs/design/value-model.md`'s "Calendar types" section for the
+/// instant-comparison rule and the exact `isoformat()` reproduction.
 ///
 /// # Examples
 ///
@@ -215,7 +215,7 @@ impl DateTime {
 
     /// This value's instant, as microseconds from `1970-01-01T00:00:00Z`,
     /// with a naive value counted as UTC — `DeepDiff`'s comparison key (see
-    /// the [module documentation](self)).
+    /// `docs/design/value-model.md`'s "Calendar types" section).
     ///
     /// Exact across the whole Python-representable range: year `9999`'s
     /// microsecond count is under `2.6e17`, three orders of magnitude inside
@@ -276,7 +276,8 @@ impl DateTime {
 
     /// Python's `datetime.isoformat()`: `YYYY-MM-DDTHH:MM:SS`, plus
     /// `.ffffff` when the microsecond is non-zero and an offset suffix when
-    /// the value is aware — see the [module documentation](self).
+    /// the value is aware — see `docs/design/value-model.md`'s "Calendar
+    /// types" section.
     #[must_use]
     pub fn isoformat(self) -> String {
         self.rendered('T')
@@ -351,9 +352,9 @@ fn render_time_fields(
 }
 
 /// A Python `datetime.time`: a wall-clock time to microsecond precision plus
-/// an optional fixed UTC offset in whole seconds (`None` is naive) — see the
-/// [module documentation](self) for how its equality and hashing genuinely
-/// diverge from [`DateTime`]'s.
+/// an optional fixed UTC offset in whole seconds (`None` is naive) — see
+/// `docs/design/value-model.md`'s "Calendar types" section for how its
+/// equality and hashing genuinely diverge from [`DateTime`]'s.
 ///
 /// # Examples
 ///
@@ -469,8 +470,8 @@ impl Time {
     /// The whole seconds-of-day `(hour*60+minute)*60+second`, dropping the
     /// microsecond and any offset entirely — real `DeepHash`'s own
     /// `time_to_seconds`, the quantity a `time` hashes and is ranked by
-    /// under `ignore_order` (see the [module documentation](self) and
-    /// `crate::ignore_order::hash`).
+    /// under `ignore_order` (see `docs/design/value-model.md`'s "Calendar
+    /// types" section and `crate::ignore_order::hash`).
     #[must_use]
     pub fn hash_seconds_of_day(self) -> i64 {
         (i64::from(self.hour) * 60 + i64::from(self.minute)) * 60 + i64::from(self.second)
@@ -478,7 +479,7 @@ impl Time {
 
     /// Python's `time.isoformat()`, which is also `str(time)` — the same
     /// `render_time_fields` rendering [`DateTime::isoformat`]'s time portion
-    /// shares (see the [module documentation](self)).
+    /// shares (see `docs/design/value-model.md`'s "Calendar types" section).
     #[must_use]
     pub fn isoformat(self) -> String {
         let mut rendered = String::new();
@@ -503,7 +504,8 @@ impl Time {
     }
 }
 
-/// `time.__eq__`'s exact rule (see the [module documentation](self)): a
+/// `time.__eq__`'s exact rule (see `docs/design/value-model.md`'s
+/// "Calendar types" section): a
 /// naive value is never equal to an aware one; two naive values compare by
 /// wall-clock fields; two aware values compare by their offset-adjusted
 /// micros-of-day. This is the *only* equality [`Time`] has — unlike
@@ -528,8 +530,8 @@ pub(crate) fn times_equal(a: Time, b: Time) -> bool {
 /// Python's own internal normalized form (`timedelta.days`/`.seconds`/
 /// `.microseconds`, `.seconds` and `.microseconds` both folded to be
 /// non-negative, every sign living in `days`/`total_seconds`), so both `==`
-/// and `total_seconds()` read it directly with no re-derivation (see the
-/// [module documentation](self)).
+/// and `total_seconds()` read it directly with no re-derivation (see
+/// `docs/design/value-model.md`'s "Calendar types" section).
 ///
 /// # Examples
 ///
@@ -628,7 +630,8 @@ impl TimeDelta {
     /// microsecond suffix only when non-zero — verified against real Python
     /// across zero, negative, sub-day and multi-day durations. There is no
     /// `timedelta.isoformat()` to mirror for `to_json()`, so this is the
-    /// chosen documented superset (see the [module documentation](self)).
+    /// chosen documented superset (see `docs/design/value-model.md`'s
+    /// "Calendar types" section).
     #[must_use]
     pub fn python_str(self) -> String {
         let (days, seconds, microseconds) = (self.days(), self.seconds(), self.microseconds());
