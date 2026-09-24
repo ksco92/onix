@@ -4,33 +4,13 @@
 # ///
 """Diff a fixture pair with real DeepDiff, self-instrumented.
 
-Usage::
+Usage: `uv run perf/run_deepdiff.py <a.json> <b.json> [--ignore-order]`
 
-    uv run perf/run_deepdiff.py <a.json> <b.json> [--ignore-order]
-
-Prints `DeepDiff(t1, t2, verbose_level=2[, ignore_order=True]).to_json()` to
-**stdout** (used by `run_bench.sh`'s correctness pre-check and, for the
-timed runs, discarded/redirected — this harness's own fairness rule
-requires both tools pay a comparable "write the full report" cost).
-
-Prints exactly one line of JSON to **stderr**:
-
-```
-{"parse_ns": N, "diff_ns": N, "tracemalloc_peak_bytes": N,
- "tracemalloc_total_bytes": N, "ru_maxrss_before_bytes": N,
- "ru_maxrss_after_bytes": N, "ru_maxrss_delta_bytes": N}
-```
-
-- `parse_ns` times only the two `json.load` calls (perf_counter_ns).
-- `diff_ns` times only the `DeepDiff(...)` construction call, after both
-  files are already loaded — the headline "diff-only" metric.
-- `tracemalloc_*_bytes` is Python allocator traffic during the diff call
-  only (tracemalloc started immediately before, stopped immediately after).
-- `ru_maxrss_*_bytes` is `resource.getrusage(RUSAGE_SELF).ru_maxrss` sampled
-  before and after the diff call, isolating "data already loaded" memory
-  from "diff overhead" memory. **macOS reports `ru_maxrss` in bytes** (Linux
-  reports kB) — this script assumes the macOS convention of the benchmark's
-  target platform; a Linux port would need to multiply by 1024.
+Prints `DeepDiff(...).to_json()` to stdout, and one line of JSON to stderr:
+`{"parse_ns": N, "diff_ns": N, "tracemalloc_peak_bytes": N,
+"tracemalloc_total_bytes": N, "ru_maxrss_before_bytes": N,
+"ru_maxrss_after_bytes": N, "ru_maxrss_delta_bytes": N}`
+(`ru_maxrss` is bytes on macOS but kB on Linux; this script assumes macOS).
 """
 
 import argparse
@@ -46,14 +26,7 @@ from deepdiff import DeepDiff
 
 
 def load_pair(a_path: Path, b_path: Path) -> tuple[tuple[JsonValue, JsonValue], int]:
-    """
-    Load both fixture files as JSON, timing only the two `json.load` calls.
-
-    :param a_path: Path to the first fixture file.
-    :param b_path: Path to the second fixture file.
-    :return: A `((t1, t2), parse_ns)` tuple: the two parsed values and the
-        nanoseconds spent in `json.load` for both.
-    """
+    """Load both fixture files as JSON, timing only the two `json.load` calls."""
     start = time.perf_counter_ns()
 
     with a_path.open(encoding="utf-8") as f:
@@ -68,16 +41,7 @@ def load_pair(a_path: Path, b_path: Path) -> tuple[tuple[JsonValue, JsonValue], 
 
 
 def run_diff(t1: JsonValue, t2: JsonValue, ignore_order: bool) -> tuple[DeepDiff, dict[str, int]]:
-    """
-    Run `DeepDiff` once, self-instrumented for diff-only time, tracemalloc
-    peak/total allocation, and the `ru_maxrss` before/after delta.
-
-    :param t1: The first (already-parsed) value.
-    :param t2: The second (already-parsed) value.
-    :param ignore_order: Passed through to `DeepDiff(..., ignore_order=...)`
-        — see the module doc's `--ignore-order` flag.
-    :return: The `DeepDiff` result and its measurement dict.
-    """
+    """Run `DeepDiff` once, self-instrumented for diff time, tracemalloc, and `ru_maxrss` before/after."""
     ru_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     tracemalloc.start()
 

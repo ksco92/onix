@@ -1,24 +1,12 @@
 """Regression + differential coverage for signed-zero hashing under ignore_order.
 
-Directed regression cases plus two signed-zero-biased differential batches,
-both reusing ``test_differential_fuzz``'s generators and both-engines
-comparators with a biased scalar alphabet: one over plain lists (the
-pre-existing ``ignore_order`` hashing fix), one building sets and frozensets
-directly (issue #46), through ``_diverges_with_sets`` (which tolerates
-DeepDiff's own hash-order instability and the documented
-`list(a_set) == some_list` coercion class -- see tests/golden/README.md's
-"Set iteration order" section for the mechanism). A real Python `set`/`frozenset` can never
-hold both `-0.0` and `0.0` -- `set(...)`/`frozenset(...)` collapse the pair to
-one member before the value ever reaches onix -- so this batch, run through
-the bindings, pins that a genuine single-representative signed-zero set
-matches real DeepDiff at fuzz scale; it cannot exercise `SetItems::new`'s own
-dedup of a *two-zero* set, which only a directly-built value can produce and
-which is guarded instead by
-`value_tests::set_items_dedup_signed_zero_like_a_real_python_set` and
-`ignore_order::tests::dist_key_hash_agrees_with_equality_on_tricky_equal_values`
-(crates/onix-core). See ``ignore_order::hash::item_key``'s float branch and
-``onix_core::value::number_cmp`` (crates/onix-core) for why signed zeros are
-normalized.
+Directed regression cases plus two differential batches, reusing
+``test_differential_fuzz``'s generators: one over plain lists, one over
+sets/frozensets directly (issue #46). A real `set`/`frozenset` can never
+hold both `-0.0` and `0.0` (the pair collapses before reaching onix), so
+the set batch pins the single-representative case; the two-zero dedup is
+guarded instead by onix-core's own tests (``ignore_order::hash::item_key``,
+``onix_core::value::number_cmp``).
 """
 
 import json
@@ -95,20 +83,8 @@ def test_signed_zero_biased_differential_matches_real_deepdiff() -> None:
 
 
 def _gen_biased_set(rng: random.Random) -> set[object] | frozenset[object]:
-    """
-    Generate a random set or frozenset of bare members drawn from `_BIASED_SCALARS`.
-
-    Bare scalars only, deliberately: a tuple or frozenset *member* of a set
-    hits a different, already-documented divergence (DeepHash's
-    order-/repetition-insensitive member hashing, `tests/golden/README.md`'s
-    "Set iteration order" section) far more readily once the alphabet itself
-    is full of repeated-by-value entries, which would swamp this batch with
-    unrelated known noise instead of exercising the signed-zero dedup this
-    issue is about.
-
-    :param rng: Seeded RNG.
-    :return: A `set` most of the time, a `frozenset` otherwise.
-    """
+    """Generate a random set or frozenset of bare `_BIASED_SCALARS` members (a container member would hit the
+    unrelated, already-documented DeepHash member-hashing divergence instead)."""
     members = [_gen_scalar(rng, _BIASED_SCALARS) for _ in range(rng.randint(0, 6))]
     return frozenset(members) if rng.random() < 0.3 else set(members)
 
@@ -116,16 +92,7 @@ def _gen_biased_set(rng: random.Random) -> set[object] | frozenset[object]:
 def _mutate_biased_set(
     rng: random.Random, value: set[object] | frozenset[object]
 ) -> set[object] | frozenset[object]:
-    """
-    Build a related-but-different copy of a biased set, keeping its kind.
-
-    Mirrors `_mutate_set_value`'s set/frozenset branch, drawing replacement
-    members from `_BIASED_SCALARS` instead of the general-purpose alphabet.
-
-    :param rng: Seeded RNG.
-    :param value: The set or frozenset to derive a mutated copy from.
-    :return: A structurally related, partially mutated copy of the same kind.
-    """
+    """Build a related-but-different copy of a biased set, keeping its kind."""
     members = [
         _gen_scalar(rng, _BIASED_SCALARS) if rng.random() < 0.4 else member
         for member in _deterministic_members(value)
