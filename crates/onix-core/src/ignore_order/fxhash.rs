@@ -1,116 +1,68 @@
-//! `FxHash`: a small, fast, non-cryptographic hasher used for this module's
-//! `HashMap`/`HashSet`s ([`HashedList::info`](super::hash::HashedList),
-//! `AddedCandidates::buckets`, the
-//! pairing/`used` sets in [`compute_pairs`](super::pairing::compute_pairs),
-//! and the [`IgnoreOrderMemo`](super::memo::IgnoreOrderMemo) cache) —
-//! chosen for speed at the cost of hash-flooding resistance. Some of these
-//! maps key on attacker-controlled data, so this is a deliberate,
-//! measured `DoS` trade-off, not a free choice; see [`FxHasher`]'s own doc for
-//! the exact threat model, the measured cost of the safe alternative, and
-//! why the trade is accepted here.
+//! `FxHash`: a small, fast, non-cryptographic hasher for this module's `HashMap`/`HashSet`s.
+//! See [`FxHasher`]'s doc for the accepted `DoS` trade-off and which tables carry it.
 
 use std::hash::BuildHasherDefault;
 
-/// A [`std::collections::HashMap`] keyed by this module's own types
-/// ([`ItemKey`](super::hash::ItemKey), [`Distance`](super::distance::Distance)), using [`FxHasher`] instead of the standard
-/// library's default (`SipHash`) — see that type's doc for the trade-off.
+/// This module's [`HashMap`](std::collections::HashMap), keyed with [`FxHasher`].
 pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<FxHasher>>;
 /// The [`HashMap`] equivalent for [`std::collections::HashSet`].
 pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxHasher>>;
 
-/// A small, non-cryptographic hasher (the `FxHash` algorithm — the same one
-/// `rustc` itself uses internally for compiler-hot-path hash maps, chosen
-/// for its "add-rotate-multiply" simplicity, not merely because it is
-/// endorsed elsewhere) implemented from scratch rather than pulled in as a
-/// dependency: this crate's own quality bar has no new-dependency budget
-/// for this port, and the algorithm is a handful of lines.
+/// The `FxHash` algorithm (the one `rustc` itself uses for compiler-hot-path hash maps),
+/// implemented from scratch.
 ///
 /// # `DoS` trade-off (this hasher is *not* collision-resistant)
 ///
-/// `FxHash` uses a fixed, public seed ([`FX_SEED`]) and an invertible step, so
-/// an adversary who controls the hashed values can compute keys that all fall
-/// in one bucket and degrade any `FxHash` `HashMap`/`HashSet` from `O(1)` to
-/// `O(n)` per operation — worst case pushing
-/// [`HashedList::build`](super::hash::HashedList::build) from `O(n)` to
-/// `O(n²)` on a crafted all-colliding list, on top of the module's already
-/// `O(N²)` pairing (see README's `ignore_order` Known-limitations bullet).
+/// `FxHash` uses a fixed, public seed ([`FX_SEED`]) and an invertible step: a crafted
+/// collision degrades an `FxHash` map or set from `O(1)` to `O(n)` per operation, pushing
+/// [`HashedList::build`](super::hash::HashedList::build) from `O(n)` to `O(n²)` on an
+/// all-colliding list, on top of the module's `O(N²)` pairing.
+/// [`HashedList`](super::hash::HashedList), `AddedCandidates`, the pairing/`used` sets and
+/// its result maps (`most_in_common_pairs`, `pairs`), `consumed_removed`, and the distance
+/// memo are `FxHash`-keyed and reached only under `ignore_order=true`: an accepted,
+/// documented `DoS` trade-off — `SipHash` there cost a measured per-call penalty on the
+/// pairing hot path (PR #4). [`IgnoreOrderMemo`](super::memo::IgnoreOrderMemo)'s `tuple_ids`
+/// is `FxHash`-keyed too but not `ignore_order`-only: on the Python-object path (JSON has no
+/// sets or tuples), a set member that is a custom object holding a tuple-keyed dict entry
+/// reaches it on the default path, through `set_member_digest` -> `tuple_keyed` ->
+/// `tuple_digest` — a pre-existing gap tracked in issue #136, the same as the key-union set
+/// below. The key-union `HashSet<&[u8]>` in
+/// [`is_below_threshold_to_diff_deeper`](super::distance::is_below_threshold_to_diff_deeper)
+/// is likewise default-path reachable, called by `object_diff` for every unequal dict pair,
+/// and tracked in the same issue. Bound untrusted input against the module's `O(N²)` pairing
+/// regardless of hasher.
 ///
-/// **Scope: which tables are collision-immune, and why.** The set-member
-/// interning tables in [`IgnoreOrderMemo`](super::memo::IgnoreOrderMemo)
-/// (`node_table`, `member_content`) are deliberately **not** `FxHash` — they are
-/// [`BTreeMap`](std::collections::BTreeMap)s. They are keyed by
-/// attacker-controlled member content *and* reached for every set/frozenset
-/// comparison, **including with the default `ignore_order=false`**, so an
-/// `FxHash` table there would be a crafted-collision `DoS` on the ordinary
-/// path; a `BTreeMap` has no hash to attack (`O(log n)` worst case, always,
-/// though each of those comparisons is a full walk of the probed key —
-/// `member_content`'s `MemberContent::UnhashableDict` key is itself keyed by
-/// each dict key's own `ItemKey` tree, not a flat string, since a dict key
-/// may be a `tuple`). See `docs/design/ignore-order.md`'s "Distance memo"
-/// section. Every remaining `FxHash` table
-/// in this module — `HashedList`, `AddedCandidates`,
-/// the pairing/`used` sets, and the distance memo — is reached **only** under
-/// `ignore_order=true`, the pairing hot path already bounded by the `O(N²)`
-/// caveat below; those keep `FxHash`, and their float-carrying keys
-/// ([`ItemKey`](super::hash::ItemKey), [`ScalarKey`](crate::lcs::ScalarKey),
-/// and the distance memo's [`DistKey`](super::hash::DistKey)) mix their bits
-/// first ([`mix_float_bits`](crate::lcs::mix_float_bits)) — `DistKey`'s
-/// encoding routes every float through `number_key`, hence `ItemKey::Float`,
-/// hence `mix_float_bits`, so the hazard does not reach the new key either — a
-/// *non-adversarial* run of integral/half-integer floats, whose raw bit
-/// patterns share ~50 trailing zeros, does not accidentally collide.
-/// `ItemKey::Float` additionally maps *every* `NaN`, regardless of its own
-/// bits, onto one fixed representative (`deephash_float_bits`, matching
-/// `DeepHash`'s `str(obj)`-based digest — see that function's own doc): a
-/// deliberate full key collapse, not merely a hash collision, so a run of
-/// `NaN`s in one of these tables costs *less* than the equivalent run of
-/// distinct floats would (they fold to a single entry), not more — this
-/// changes which values these tables treat as the same item, not their
-/// per-lookup cost.
+/// Every `FxHash`-keyed type carrying a float ([`ItemKey`](super::hash::ItemKey),
+/// [`ScalarKey`](crate::lcs::ScalarKey), and the distance memo's
+/// [`DistKey`](super::hash::DistKey) via `number_key`) mixes its bits first
+/// ([`mix_float_bits`](crate::lcs::mix_float_bits)), so integral and half-integer floats —
+/// whose raw bit patterns share many trailing zeros — do not collide by accident. Every `NaN`
+/// additionally folds onto one fixed key, matching `DeepHash`'s `str()`-based digest: this
+/// changes which values these tables treat as the same item, not their per-lookup cost.
 ///
-/// An integer beyond `i128` is carried as `ItemKey::BigInt` (hence a
-/// `DistKey` leaf, via `number_key`) and, inside a hashable tuple, as
-/// [`ScalarKey::Big`](crate::lcs::ScalarKey) reaching the `tuple_ids` memo key
-/// through `PyHashPart::Scalar`; both hash and compare by its magnitude digits,
-/// which carry ample entropy and so need no `mix_float_bits` treatment, but at
-/// `O(digits)` rather than `O(1)` per lookup — a cost proportional to that one
-/// operand's *digit length* (the number of machine words in its magnitude),
-/// which the `ignore_order` element-count cap does not bound: a single
-/// astronomically large integer costs its own digit length per hash and per
-/// comparison regardless of how few elements the diff holds.
+/// `node_table` and `member_content` in `IgnoreOrderMemo` are `BTreeMap`s instead, since they
+/// are keyed by attacker-controlled member content and reached on the default path too, with
+/// no `Hash` derive: `O(log n)` worst case, always, though each comparison still walks the
+/// whole probed key — `member_content`'s `MemberContent::UnhashableDict` key is itself keyed
+/// by each dict key's own `ItemKey` tree, not a flat string.
 ///
-/// A custom object's [`ItemKey::Object`](super::hash::ItemKey) costs
-/// `ItemKey::Dict`'s full walk plus one class-name comparison; the class
-/// `__name__` tag keeps it apart from a `dict`, but same-named distinct classes
-/// share a bucket. An opaque token's `ItemKey::Opaque` costs one identity
-/// string comparison.
-///
-/// For those remaining `ignore_order`-only tables the trade is deliberate and
-/// measured. Re-keying them to `SipHash` (`RandomState`) added a material,
-/// measured double-digit-percentage per-call cost on the pairing-heavy
-/// `ignore_order` benchmark shapes (`change_n` ≈500 on each side → ~250,000
-/// candidate pairs, each touching several of these maps) — a permanent cost on
-/// the module's common case to defend a worst case that (a) mirrors upstream
-/// `DeepDiff`'s own un-bounded `O(N²)` behavior and (b) only matters for callers
-/// feeding untrusted input, who must already bound input *size* against that
-/// `O(N²)` pairing regardless of hasher. A caller processing untrusted JSON
-/// should cap input size before enabling `ignore_order` (the size bound that
-/// tames the `O(N²)` pairing also tames this). Upstream `DeepDiff` hashes
-/// `str`/`bytes` with a per-process-random `SipHash` seed (`PYTHONHASHSEED`);
-/// the default-reachable set-member path now matches that resistance via
-/// `BTreeMap`.
+/// An integer beyond `i128` (`ItemKey::BigInt`) hashes and compares by its magnitude digits,
+/// `O(digits)` not `O(1)` per lookup — inside a hashable tuple it reaches the same cost via
+/// `ScalarKey::Big` and `tuple_ids`, through `PyHashPart::Scalar` — a cost the `ignore_order`
+/// element-count cap does not bound: one huge integer costs its own digit length regardless
+/// of element count. A custom object's `ItemKey::Object` costs `ItemKey::Dict`'s full walk
+/// plus one class-name comparison, and two distinct classes sharing a `__name__` share its
+/// bucket; `ItemKey::Opaque` costs one identity string comparison.
 #[derive(Default)]
 pub(crate) struct FxHasher {
     pub(crate) hash: u64,
 }
 
-/// `FxHash`'s seed constant (the golden-ratio-derived odd constant the
-/// reference implementation uses).
+/// `FxHash`'s seed constant (golden-ratio-derived odd constant).
 pub(crate) const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
 
 impl FxHasher {
-    /// Folds one 64-bit word into the running hash: rotate, xor, multiply —
-    /// `FxHash`'s entire mixing step.
+    /// Folds one word into the hash: rotate, xor, multiply — `FxHash`'s mixing step.
     pub(crate) fn add_to_hash(&mut self, word: u64) {
         self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
     }
