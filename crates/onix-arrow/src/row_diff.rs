@@ -8032,6 +8032,51 @@ mod fused_tests {
     }
 
     #[test]
+    fn parallel_right_only_duplicates_match_with_the_key_after_a_value_column() {
+        let schema = |key_first: bool| {
+            let (id, v) = (
+                Field::new("id", DataType::Int64, true),
+                Field::new("v", DataType::Utf8View, true),
+            );
+            Arc::new(Schema::new(if key_first {
+                vec![id, v]
+            } else {
+                vec![v, id]
+            }))
+        };
+        let batch = |schema: &SchemaRef, ids: &[i64], key_first: bool| {
+            let id: ArrayRef = Arc::new(Int64Array::from(ids.to_vec()));
+            let v: ArrayRef = Arc::new(
+                ids.iter()
+                    .map(|&i| Some(long("v", i)))
+                    .collect::<StringViewArray>(),
+            );
+            let columns = if key_first { vec![id, v] } else { vec![v, id] };
+            RecordBatch::try_new(schema.clone(), columns).unwrap()
+        };
+        let (left_schema, right_schema) = (schema(true), schema(false));
+        let left = IpcInput::new(&left_schema, &[batch(&left_schema, &[1, 2, 3], true)]);
+        // 11 and 12 are right-only keys, each twice; 13 is added.
+        let right_batches = [
+            batch(&right_schema, &[1, 11, 11, 12], false),
+            batch(&right_schema, &[2, 12, 13], false),
+        ];
+        let right = IpcInput::new(&right_schema, &right_batches);
+        super::MIN_PARALLEL_ROWS_OVERRIDE.with(|gate| gate.set(Some(0)));
+        let sequential = diff_at(&left, &right, 1);
+        assert_eq!(sequential.counts.duplicate_keys, 2);
+        for threads in [2, 4] {
+            let parallel = diff_at(&left, &right, threads);
+            assert_eq!(
+                output_bytes(&parallel),
+                output_bytes(&sequential),
+                "threads={threads}"
+            );
+        }
+        super::MIN_PARALLEL_ROWS_OVERRIDE.with(|gate| gate.set(None));
+    }
+
+    #[test]
     fn parallel_path_reads_the_right_once_and_the_left_twice() {
         let rows: [&[(Option<i64>, i64)]; 2] = [&[(Some(1), 1), (Some(2), 2)], &[(Some(3), 3)]];
         let changed: [&[(Option<i64>, i64)]; 2] = [&[(Some(1), 9), (Some(2), 2)], &[(Some(4), 4)]];
@@ -8276,20 +8321,30 @@ mod fused_tests {
             .unwrap();
         fuse.visit(3, &second, &[(2, 22, false), (1, 10, false)])
             .unwrap();
+        // Key 1 repeats in a later batch with a differing row hash; its first
+        // row was unchanged, and a repeated key is a duplicate, so no spill.
+        fuse.visit(5, &second, &[(1, 11, false), (2, 23, false)])
+            .unwrap();
         assert_eq!(fuse.spill.finish().unwrap().key_hashes, vec![vec![2]]);
     }
 
     /// Visits, at each `(position, key)`, a one-row `view_keyed` batch whose
     /// key hash is 7, a key the (empty) left does not hold.
     fn visit_absent_key(fuse: &super::RightFuse<'_>, rows: &[(u64, &str)]) {
-        for &(at, key) in rows {
+        let hashed: Vec<(u64, &str, u128)> = rows.iter().map(|&(at, key)| (at, key, 7)).collect();
+        visit_absent_keys(fuse, &hashed);
+    }
+
+    /// [`visit_absent_key`] with a key hash per row.
+    fn visit_absent_keys(fuse: &super::RightFuse<'_>, rows: &[(u64, &str, u128)]) {
+        for &(at, key, hash) in rows {
             let batch = view_keyed(&[key], 0)
                 .open()
                 .unwrap()
                 .next()
                 .unwrap()
                 .unwrap();
-            fuse.visit(at, &batch, &[(7, 0, false)]).unwrap();
+            fuse.visit(at, &batch, &[(hash, 0, false)]).unwrap();
         }
     }
 
@@ -8303,13 +8358,42 @@ mod fused_tests {
         let index = KeyIndex::build(vec![Vec::new()]).unwrap();
         let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
         let fuse = right_fuse(&index, &value_schema);
-        let rows: Vec<(u64, &str)> = (0..10).map(|at| (at, "x")).collect();
+        visit_absent_key(&fuse, &[(0, "x"), (1, "x")]);
+        assert_eq!(kept(&fuse.candidates.lock().unwrap()), vec![(0, true)]);
+        let rows: Vec<(u64, &str)> = (2..10).map(|at| (at, "x")).collect();
         visit_absent_key(&fuse, &rows);
         let store = fuse.candidates.into_inner().unwrap();
         assert_eq!((kept(&store), store.rows), (vec![(0, true)], 0));
         assert_eq!(store.batches[0].batch.num_columns(), 1);
         let absent = fuse.absent[0].lock().unwrap();
         assert_eq!((absent[&7].at, absent[&7].count), (0, 10));
+    }
+
+    #[test]
+    fn right_side_compacts_once_repeats_outnumber_half_the_kept_rows() {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
+        // Two kept keys and one repeat: one stale row against two kept rows
+        // leaves the store as it is.
+        let fuse = right_fuse(&index, &value_schema);
+        visit_absent_keys(&fuse, &[(0, "a", 1), (1, "b", 2), (2, "a", 1)]);
+        {
+            let store = fuse.candidates.lock().unwrap();
+            assert_eq!(
+                (kept(&store), store.rows, store.stale),
+                (vec![(0, false), (1, false)], 2, 1)
+            );
+        }
+        // A repeat that is also an earlier row supersedes the kept one: the
+        // compaction drops it, reduces the repeated key to its key columns, and
+        // keeps the unrepeated key's row at full width.
+        let fuse = right_fuse(&index, &value_schema);
+        visit_absent_keys(&fuse, &[(5, "a", 1), (3, "b", 2), (1, "b", 2)]);
+        let store = fuse.candidates.lock().unwrap();
+        assert_eq!(
+            (kept(&store), store.rows, store.stale),
+            (vec![(5, false), (1, true)], 1, 0)
+        );
     }
 
     #[test]
