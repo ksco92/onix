@@ -9199,7 +9199,7 @@ mod mask_tests {
     fn every_type_pair_mask_equals_the_per_cell_decision() {
         let hasher = RowHasher::new().unwrap();
         let types = hashable_types();
-        let mut arms = Vec::new();
+        let (mut saw_type_change, mut saw_per_cell) = (false, false);
         for left in &types {
             for right in types.iter().filter(|&right| right != left) {
                 let mut set = 0;
@@ -9209,12 +9209,13 @@ mod mask_tests {
                     assert_ne!(arm, CellCompare::Kernel, "{left} vs {right}");
                     assert_eq!(mask, reference, "{left} vs {right}, seed {seed}");
                     set += mask.count_set_bits();
-                    arms.push(arm);
+                    saw_type_change |= arm == CellCompare::TypeChange;
+                    saw_per_cell |= arm == CellCompare::PerCell;
                 }
                 assert!(set > 0, "{left} vs {right} never changed");
             }
         }
-        assert!(arms.contains(&CellCompare::TypeChange) && arms.contains(&CellCompare::PerCell));
+        assert!(saw_type_change && saw_per_cell);
     }
 
     #[test]

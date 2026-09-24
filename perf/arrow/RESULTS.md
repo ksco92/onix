@@ -177,8 +177,8 @@ peak RSS median lies inside the other build's run-to-run range (the largest move
 The mask's own memory is one bit per row per column, plus, per worker on a column whose two sides
 share a type, a copy of its row range of that right column (a float column widened to `Float64` on
 both sides), so at most one copy of a partition's widest such column across all workers.
-`row_diff_rss` peak RSS, 0.13.0 → 0.14.0, alternating builds, each cell the median with the run range in brackets (8 runs
-per build for `wide` 200k at 18 threads, 5 for `wide` 1M, 3 otherwise):
+`row_diff_rss` peak RSS, 0.13.0 → 0.14.0, alternating builds, each cell the median with the run
+range in brackets (8 runs per build for `wide` 200k at 18 threads, 5 for `wide` 1M, 3 otherwise):
 
 | Shape (`row_diff_rss`, rows/side) | threads | 0.13.0 | 0.14.0 |
 | --- | --- | --- | --- |
@@ -192,15 +192,16 @@ per build for `wide` 200k at 18 threads, 5 for `wide` 1M, 3 otherwise):
 | `allchange` 1M | 18 | 350 MB [333-385] | 354 MB [344-361] |
 
 Every row's two ranges overlap: in these shapes the copy, changed rows ÷ partitions × one `Utf8`
-column's width (1 KB or 512 B), falls inside the spread. A shape built to show it, 500k
-changed rows/side where only an `Int64` column differs and three equal 1 KB columns (`Utf8View`,
-`BinaryView`, `Utf8`) are compared, measures at 2 threads (two partitions of 250k rows, so one
-250k × 1 KB `Utf8` copy; the view columns copy only their 16 B views) 5.644 GB [5.007-6.338] on
-0.13.1 against 5.949 GB [5.549-6.814] on 0.14.0 (medians of 8 runs each), about +0.3 GB; at 18
+column's width (1 KB or 512 B), falls inside the spread. A shape built to show it, 500k changed
+rows/side where only an `Int64` column differs and three equal 1 KB columns (`Utf8View`,
+`BinaryView`, `Utf8`) are compared, measures at 2 threads (two partitions of 250k rows, so one 250k
+× 1 KB copy of whichever column a worker is on; byte-view columns are compared as their spilled
+large-offset type, so they copy in full) 5.644 GB [5.007-6.338] on 0.13.1 (identical to 0.13.0 on
+this path) against 5.949 GB [5.549-6.814] on 0.14.0 (medians of 8 runs each), about +0.3 GB; at 18
 threads 2.671 GB [2.605-2.910] against 2.473 GB [2.458-2.927], and at 64 threads 2.032 GB
 [2.019-2.067] against 2.025 GB [2.009-2.057] (3 runs each), where partitions are smaller than the
-spread. Measured 2026-09-24T15:31Z to 15:34Z, load average 4 to 7. The `wide` 1M row sits
-above the 4.62 GB the fused-reads table records for 0.13.0 on both builds alike (re-measured at
+spread. Measured 2026-09-24T15:31Z to 15:34Z, load average 4 to 7. The `wide` 1M row sits above the
+4.62 GB the fused-reads table records for 0.13.0 on both builds alike (re-measured at
 2026-09-24T15:19Z, load average 6), so the README now cites about 4.8 GB for that shape.
 
 ## Thread-count scaling
@@ -229,14 +230,14 @@ so the 50,000-row threshold runs the workers only where they win.
 
 Measured on `deepdiff-rs` 0.14.0 from 2026-09-24T14:49Z to 14:58Z, same machine as the Environment
 table above, each process alternating with one of 0.13.0's, while other jobs ran on it (load average
-21 at the start, 40 at its peak during the `narrow full` column and 19 at the last process). The numbers
-come from the committed `row_diff_profile` example (built with the `profile` feature; the commands
-are in `perf/arrow/README.md`'s "Profiling" section and the method in the example's module
+21 at the start, 40 at its peak during the `narrow full` column and 19 at the last process). The
+numbers come from the committed `row_diff_profile` example (built with the `profile` feature; the
+commands are in `perf/arrow/README.md`'s "Profiling" section and the method in the example's module
 docstring). Every figure is the median of independent processes (**11 at 1M, 5 at full**, the file's
 convention), each row's median taken on its own, so a column's rows need not add up exactly, and
 each pass's share of the net wall is likewise the median of the per-process shares rather than a
-ratio of two medians. Each process runs a discarded warm-up diff, a timed uninstrumented diff, and an
-instrumented diff:
+ratio of two medians. Each process runs a discarded warm-up diff, a timed uninstrumented diff, and
+an instrumented diff:
 
 - `total wall (uninstrumented run)` is the uninstrumented diff's wall.
 - Every other row is the instrumented diff: a pass cell is `wall s (peak RSS MB)`, where the peak is
@@ -292,8 +293,8 @@ render`, which also renders the cells the masks select.
 
 Against 0.13.0's medians in the same alternation, `cell: compare and render` falls from 0.257 to
 0.118 s on `wide 1M` and from 3.946 to 2.412 s on `wide full`: its median share of the net wall
-drops from 26.7% to 14.7% and from 29.0% to 20.1%. The uninstrumented wall falls from 0.976 to 0.831 s
-on `wide 1M` and from 14.012 to 12.050 s on `wide full`, and from 0.112 to 0.105 s on `narrow 1M`.
+drops from 26.7% to 14.7% and from 29.0% to 20.1%. The uninstrumented wall falls from 0.976 to 0.831
+s on `wide 1M` and from 14.012 to 12.050 s on `wide full`, and from 0.112 to 0.105 s on `narrow 1M`.
 `narrow full` reads 2.424 s on 0.13.0 against 2.727 s here, the whole gap in `hash and classify`, a
 pass the change does not touch: in each pair 0.13.0 ran first while the load rose. Five more pairs
 with 0.14.0 first (2026-09-24T14:59Z to 15:00Z, load average 8 to 21) give 2.291 s against 2.312 s.
