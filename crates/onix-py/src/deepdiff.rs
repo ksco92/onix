@@ -4,10 +4,14 @@
 //! doc for the full, documented MVP surface.
 
 use onix_core::Value;
+use onix_core::diff::Resolution;
 use pyo3::prelude::*;
 
-use crate::convert::{to_value, value_to_pyobject};
-use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
+use crate::convert::{
+    Held, objects_by_identity, render_report, resolve_token, to_value, token_error,
+    value_to_pyobject,
+};
+use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, serialize_value};
 
 /// A drop-in subset of `deepdiff.DeepDiff`.
 ///
@@ -42,11 +46,19 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 ///   `datetime`/`date`/`time`/`timedelta` subclass, but not a
 ///   `tuple`/`frozenset` subclass or a `namedtuple`; the restriction is
 ///   transitive: a `list`, `dict` or `set` anywhere inside a set member is
-///   refused. Converted to `onix_core`'s value model exactly once, up
-///   front — see `crate::convert`'s module doc for the full conversion table
-///   and every unsupported-type error this can raise (`TypeError` for an
-///   unsupported type, `ValueError` for an out-of-range int, a non-finite
-///   float, or a sub-second UTC offset).
+///   refused. A user-defined class instance (and an `Enum` member) is diffed as
+///   a **custom object**, by its attributes, matching `DeepDiff`'s `_diff_obj`
+///   (`attribute_added`/`attribute_removed`, `root.attr` paths, `type_changes`
+///   between classes; see `crate::convert`'s module doc for the enumeration and
+///   its documented divergences). Converted to `onix_core`'s value model
+///   exactly once, up front — see `crate::convert`'s module doc for the full
+///   conversion table and every error this can raise: `TypeError` for a value
+///   `DeepDiff` routes to a handler onix lacks (a number such as
+///   `complex`/`Decimal`, `bytes`/`bytearray` or any other iterable, `uuid`,
+///   `ipaddress`, a class object, a module, or a bare attribute-less object),
+///   for a `dict` key or `set` member of an unsupported type, or for a
+///   `tuple`/`frozenset` subclass as a set member; `ValueError` for an
+///   out-of-range int, a non-finite float, or a sub-second UTC offset.
 /// - `ignore_order`: mirrors `DeepDiff(..., ignore_order=True)`.
 /// - `max_depth`: caller-chosen recursion-depth bound; defaults to
 ///   `onix_core::DEFAULT_MAX_DEPTH` (512) when omitted. Exceeding it —
@@ -99,19 +111,74 @@ impl DeepDiff {
         // deep) legal value, the `?` drops `a` here on the early return — its
         // iterative `Drop` cannot overflow the calling thread, so no
         // sized-worker hand-off is needed for it.
-        let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth)?;
-        let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth)?;
+        let mut held = Held::new(opts.max_depth);
+        let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth, &mut held)?;
+        let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth, &mut held)?;
         // The diff is natively recursive: it runs inline when both inputs are
         // shallow, else on the stack-sized worker (GIL released). The report
         // comes back in the same compact value model the inputs use, so it can
         // carry a tuple all the way out to `to_dict`.
-        let report_value = diff_to_value(py, a, b, opts)?;
+        // A class attribute stays an opaque token until the report compares
+        // it; each such token is converted and the diff run again.
+        // A class-attribute or cycle token is resolved by the diff the first
+        // time it compares one: a cycle target is lent from the inputs, a
+        // class attribute converted once under the GIL.
+        let mut index = None;
+        let mut deep = false;
+        let report_value = loop {
+            let report_value = {
+                let held = &mut held;
+                let index = &mut index;
+                let (a, b) = (&a, &b);
+                let mut resolver = |identity: &str| {
+                    if held.cycle_targets.contains(identity) {
+                        let index = index.get_or_insert_with(|| objects_by_identity(&[a, b]));
+                        if let Some(value) = index.get(identity) {
+                            return Some(Resolution::Borrowed(value));
+                        }
+                    }
+                    Python::attach(|py| resolve_token(py, identity, held, !deep))
+                        .map(Resolution::Shared)
+                };
+                diff_to_value(py, a, b, opts, &mut resolver, deep)?
+            };
+            if held.needs_worker && !deep {
+                deep = true;
+                continue;
+            }
+            break report_value;
+        };
+        if let Some(err) = held.interrupt(py) {
+            return Err(err);
+        }
+        let report_value = if held.needs_render {
+            let rendered = if is_deep(&report_value) {
+                run_on_worker(py, || render_report(&report_value))?
+            } else {
+                render_report(&report_value)
+            };
+            match rendered {
+                Ok(rendered) => rendered,
+                Err(tokens) => {
+                    let token = &tokens[0];
+                    return Err(token_error(
+                        py,
+                        &token.identity,
+                        &token.type_name,
+                        &token.path,
+                        &held,
+                    ));
+                }
+            }
+        } else {
+            report_value
+        };
         let report_is_deep = is_deep(&report_value);
         // A conservative upper bound: the report only ever carries values
         // (or coerced copies, which coercion always renders as plain UTF-8
         // — see `crate::guard`) that already existed in `t1`/`t2`, so
         // neither input holding one guarantees the report holds none.
-        let may_have_wtf8 = a_may_have_wtf8 || b_may_have_wtf8;
+        let may_have_wtf8 = a_may_have_wtf8 || b_may_have_wtf8 || held.saw_wtf8;
 
         Ok(Self {
             report_value,

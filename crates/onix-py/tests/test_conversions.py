@@ -6,10 +6,17 @@ conversion table this pins) and `deepdiff_rs.diff_json`'s JSON-parse error
 path.
 """
 
+import abc
 import collections
+import dataclasses
 import datetime
+import gc
 import json
+import logging
 import math
+import re
+import threading
+import time
 
 import pytest
 from conftest import _normalize_types, require_deepdiff
@@ -18,7 +25,7 @@ require_deepdiff()
 
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import DeepDiff, diff_json
+from deepdiff_rs import DeepDiff, MaxDepthError, diff_json
 
 
 # int range
@@ -554,32 +561,45 @@ def test_sub_second_utc_offset_raises_value_error() -> None:
         DeepDiff(datetime.datetime(2024, 1, 1, tzinfo=tz), datetime.datetime(2024, 1, 2))
 
 
-def test_custom_object_raises_type_error() -> None:
-    """An arbitrary custom object raises TypeError naming its class."""
+def test_custom_object_diffs_by_its_attributes() -> None:
+    """A custom object diffs by its attributes (issue #66), matching DeepDiff's `_diff_obj`."""
 
     class Custom:
-        pass
+        def __init__(self, x: int, y: int) -> None:
+            self.x = x
+            self.y = y
 
-    with pytest.raises(TypeError, match="Custom"):
-        DeepDiff(Custom(), Custom())
-
-
-def test_unsupported_type_is_reported_even_when_nested() -> None:
-    """An unsupported type nested inside an otherwise-supported dict raises with its exact path."""
-    with pytest.raises(TypeError, match=r"complex at root\['a'\]\['b'\]\[1\]"):
-        DeepDiff({"a": {"b": [1, 1j]}}, {"a": {"b": [1, 2j]}})
+    assert json.loads(DeepDiff(Custom(1, 2), Custom(1, 3)).to_json()) == {
+        "values_changed": {"root.y": {"new_value": 3, "old_value": 2}}
+    }
 
 
-def test_unsupported_type_nested_in_a_tuple_reports_its_path() -> None:
-    """A tuple is walked like a list, so an unsupported element inside one reports its index."""
-    with pytest.raises(TypeError, match=r"complex at root\['a'\]\[1\]"):
-        DeepDiff({"a": (1, 1j)}, {"a": (1, 2j)})
+def test_two_different_classes_report_a_type_change() -> None:
+    """Two instances of different classes are a `type_changes`, named by class (issue #66)."""
+
+    class A:
+        def __init__(self) -> None:
+            self.x = 1
+
+    class B:
+        def __init__(self) -> None:
+            self.x = 1
+
+    report = json.loads(DeepDiff(A(), B()).to_json())
+    assert report["type_changes"]["root"]["old_type"] == "A"
+    assert report["type_changes"]["root"]["new_type"] == "B"
 
 
-def test_unsupported_type_at_root_reports_bare_root_path() -> None:
-    """A top-level unsupported value reports the bare `root` path."""
-    with pytest.raises(TypeError, match=r"complex at root;"):
-        DeepDiff(1j, 2j)
+def test_a_custom_object_nested_in_a_dict_reports_its_attribute_path() -> None:
+    """A custom object nested inside a dict keeps the dict subscript then a dotted attribute (issue #66)."""
+
+    class Custom:
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+    assert json.loads(DeepDiff({"a": {"b": Custom(1)}}, {"a": {"b": Custom(2)}}).to_json()) == {
+        "values_changed": {"root['a']['b'].x": {"new_value": 2, "old_value": 1}}
+    }
 
 
 def test_unsupported_dict_key_error_reports_path_to_the_dict() -> None:
@@ -718,3 +738,1122 @@ def test_diff_json_valid_input_round_trips() -> None:
     """Sanity check: diff_json parses, diffs, and serializes valid JSON."""
     result = diff_json('{"a": 1}', '{"a": 2}')
     assert result == '{"values_changed":{"root[\'a\']":{"new_value":2,"old_value":1}}}'
+
+
+# --- Object fallback: types DeepDiff routes elsewhere must raise, not {} (issue #66) ---
+
+
+import array as _array  # noqa: E402
+import decimal  # noqa: E402
+import enum as _enum  # noqa: E402
+import fractions  # noqa: E402
+import io as _io  # noqa: E402
+import ipaddress  # noqa: E402
+import uuid  # noqa: E402
+
+
+class _IterOnly:
+    """An object that is iterable but carries attributes -- DeepDiff iterates it."""
+
+    def __init__(self, items: object) -> None:
+        self.items = items
+
+    def __iter__(self) -> object:
+        return iter(self.items)
+
+
+class _Color(_enum.Enum):
+    RED = 1
+    GREEN = 2
+
+
+@pytest.mark.parametrize(
+    "value_factory",
+    [
+        lambda: b"hello",
+        lambda: bytearray(b"hi"),
+        lambda: range(3),
+        lambda: 1 + 2j,
+        object,
+        lambda: memoryview(b"a"),
+        lambda: _io.BytesIO(b"a"),
+        lambda: _array.array("i", [1]),
+        lambda: collections.deque([1]),
+        lambda: decimal.Decimal("1.5"),
+        lambda: fractions.Fraction(1, 2),
+        lambda: uuid.UUID(int=1),
+        lambda: ipaddress.ip_address("1.1.1.1"),
+        lambda: _IterOnly([1, 2]),
+        lambda: int,  # a class object
+    ],
+    ids=[
+        "bytes", "bytearray", "range", "complex", "object", "memoryview",
+        "BytesIO", "array", "deque", "decimal", "fraction", "uuid",
+        "ipaddress", "iter_only", "class_object",
+    ],
+)
+def test_types_deepdiff_routes_elsewhere_raise_rather_than_reporting_empty(value_factory) -> None:
+    """
+    A value DeepDiff sends to a handler onix lacks (an iterable, an attribute-less
+    builtin, a class object) raises TypeError, never silently reports {} for two
+    unequal values -- the invariant the object fallback must keep (issue #66).
+    """
+    a, b = value_factory(), value_factory()
+    with pytest.raises(TypeError):
+        DeepDiff(a, b)
+
+
+def test_bytes_does_not_silently_compare_equal() -> None:
+    """The headline defect: two different bytes must not report {} (a false negative)."""
+    with pytest.raises(TypeError):
+        DeepDiff(b"hello", b"world")
+
+
+def test_a_dict_subclass_and_a_same_named_object_are_a_type_change_like_deepdiff() -> None:
+    """A dict subclass and a custom object sharing a __name__ are a type_changes (issue #66)."""
+    foo_dict = type("Foo", (dict,), {})
+    foo_obj = type("Foo", (), {})
+
+    for x_a, x_b in ((1, 1), (1, 2)):
+        a = foo_dict({"x": x_a})
+        b = foo_obj()
+        b.x = x_b
+        assert json.loads(DeepDiff(a, b).to_json()) == json.loads(RealDeepDiff(a, b, verbose_level=2).to_json())
+        assert "type_changes" in json.loads(DeepDiff(a, b).to_json())
+
+
+def test_same_named_classes_from_different_modules_are_a_type_change_like_deepdiff() -> None:
+    """Two objects whose classes share a __name__ but differ by module are a type_changes (issue #66)."""
+    cls_a = type("User", (), {})
+    cls_a.__module__ = "package_a.models"
+    cls_b = type("User", (), {})
+    cls_b.__module__ = "package_b.models"
+
+    for i_a, i_b in ((1, 1), (1, 2)):
+        a = cls_a()
+        a.i = i_a
+        b = cls_b()
+        b.i = i_b
+        assert json.loads(DeepDiff(a, b).to_json()) == json.loads(RealDeepDiff(a, b, verbose_level=2).to_json())
+        assert "type_changes" in json.loads(DeepDiff(a, b).to_json())
+
+
+def test_same_class_objects_diff_by_attribute_not_type_change() -> None:
+    """The control: two instances of one class diff by attribute, not type_changes (issue #66)."""
+
+    class Same:
+        def __init__(self, i: int) -> None:
+            self.i = i
+
+    assert json.loads(DeepDiff(Same(1), Same(2)).to_json()) == {
+        "values_changed": {"root.i": {"new_value": 2, "old_value": 1}}
+    }
+
+
+def test_a_property_raising_non_attribute_error_propagates_at_the_path() -> None:
+    """A @property getter raising ValueError propagates as ValueError, never swallowed (issue #66)."""
+
+    class HasBadProperty:
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+        @property
+        def bad(self) -> int:
+            raise ValueError("boom")
+
+    with pytest.raises(ValueError, match="boom"):
+        DeepDiff(HasBadProperty(1), HasBadProperty(2))
+
+
+def test_a_property_raising_attribute_error_is_refused_where_deepdiff_reports_unprocessed() -> None:
+    """A @property raising AttributeError refuses the object with the path, where DeepDiff reports it unprocessed."""
+
+    class HasLazyProperty:
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+        @property
+        def lazy(self) -> int:
+            if self.x == 2:
+                raise AttributeError("not yet")
+            return self.x
+
+    assert "unprocessed" in RealDeepDiff(HasLazyProperty(1), HasLazyProperty(2))
+    with pytest.raises(TypeError, match=r"HasLazyProperty at root\['k'\]: AttributeError: not yet"):
+        DeepDiff({"k": HasLazyProperty(1)}, {"k": HasLazyProperty(2)})
+
+
+def test_an_unset_slot_beside_a_dict_is_refused_where_deepdiff_reports_unprocessed() -> None:
+    """An unset slot on a class that also has a __dict__ refuses the object, where DeepDiff reports it unprocessed."""
+
+    class SlotAndDict:
+        __slots__ = ("a", "__dict__")
+
+    a, b = SlotAndDict(), SlotAndDict()
+    b.a = 1
+    assert "unprocessed" in RealDeepDiff(a, b)
+    with pytest.raises(TypeError, match="SlotAndDict at root: AttributeError"):
+        DeepDiff(a, b)
+
+
+def test_a_property_mutating_the_instance_dict_does_not_panic() -> None:
+    """A @property that mutates __dict__ mid-walk must not panic pyo3's dict iterator (issue #66)."""
+
+    class SelfMutating:
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+        @property
+        def sneaky(self) -> int:
+            self.__dict__["injected"] = 99
+            return 1
+
+    # Completes without a PanicException; the snapshot copy makes the walk safe.
+    assert "values_changed" in json.loads(DeepDiff(SelfMutating(1), SelfMutating(2)).to_json())
+
+
+# --- Object attribute enumeration strategies match DeepDiff (issue #66) ---
+
+
+def _canonical(a: object, b: object) -> tuple[object, object]:
+    """Both engines' to_json, parsed, for a live-DeepDiff equality assertion."""
+    return json.loads(DeepDiff(a, b).to_json()), json.loads(RealDeepDiff(a, b, verbose_level=2).to_json())
+
+
+def test_slots_only_object_matches_deepdiff() -> None:
+    """A slots-only class is diffed by its slot values, matching `_dict_from_slots` (issue #66)."""
+
+    class Slots:
+        __slots__ = ("a", "b")
+
+        def __init__(self, a: int, b: int) -> None:
+            self.a = a
+            self.b = b
+
+    onix, real = _canonical(Slots(1, 2), Slots(1, 3))
+    assert onix == real == {"values_changed": {"root.b": {"new_value": 3, "old_value": 2}}}
+
+
+def test_mixed_dict_and_slots_object_matches_deepdiff() -> None:
+    """A class mixing __slots__ and __dict__ is diffed across both, matching DeepDiff (issue #66)."""
+
+    class Mixed:
+        __slots__ = ("a", "__dict__")
+
+        def __init__(self, a: int, b: int) -> None:
+            self.a = a  # slot
+            self.b = b  # __dict__
+
+    onix, real = _canonical(Mixed(1, 2), Mixed(1, 3))
+    assert onix == real
+
+
+def test_dataclass_with_default_factory_matches_deepdiff() -> None:
+    """A dataclass (including a default_factory list field) is diffed by its attributes (issue #66)."""
+    import dataclasses
+
+    @dataclasses.dataclass
+    class Rec:
+        x: int
+        tags: list = dataclasses.field(default_factory=list)
+
+    onix, real = _canonical(Rec(1, ["a"]), Rec(2, ["a", "b"]))
+    assert onix == real
+
+
+def test_name_mangled_private_attribute_matches_deepdiff() -> None:
+    """A name-mangled `_Cls__x` attribute is kept and diffed, matching detailed__dict__ (issue #66)."""
+
+    class Mangled:
+        def __init__(self, v: int) -> None:
+            self.__secret = v  # stored as _Mangled__secret
+
+    onix, real = _canonical(Mangled(1), Mangled(2))
+    assert onix == real
+    assert "root._Mangled__secret" in onix["values_changed"]
+
+
+def test_property_and_class_attribute_object_matches_deepdiff() -> None:
+    """An unchanged @property and class attribute stay out of the diff, matching DeepDiff (issue #66)."""
+
+    class WithComputed:
+        kls = "shared"
+
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+        @property
+        def doubled(self) -> int:
+            return self.x * 10
+
+    # x changes; the property (equal-shaped) and class attribute do not, so only
+    # `root.x` and the property's derived `root.doubled` (which tracks x) appear
+    # -- both engines agree.
+    onix, real = _canonical(WithComputed(1), WithComputed(2))
+    assert onix == real
+
+
+class _Planet(_enum.Enum):
+    MERCURY = (3.303e23, 2.4397e6)
+    EARTH = (5.976e24, 6.37814e6)
+
+    def __init__(self, mass: float, radius: float) -> None:
+        self.mass = mass
+        self.radius = radius
+
+    @property
+    def surface_gravity(self) -> float:
+        return self.mass / (self.radius**2)
+
+
+def test_an_enum_with_its_own_attributes_reports_only_name_and_value_like_deepdiff() -> None:
+    """An Enum member's own attributes and properties stay out, as _diff_enum reads only name and value."""
+    onix, real = _canonical(_Planet.MERCURY, _Planet.EARTH)
+    assert onix == real
+    assert sorted(onix["values_changed"]) == ["root.name", "root.value[0]", "root.value[1]"]
+
+
+def test_enum_member_matches_deepdiff_via_name_and_value() -> None:
+    """An Enum member is diffed by its name/value, matching DeepDiff's _diff_enum (issue #66)."""
+    onix = json.loads(DeepDiff(_Color.RED, _Color.GREEN).to_json())
+    real = json.loads(RealDeepDiff(_Color.RED, _Color.GREEN, verbose_level=2).to_json())
+    assert onix == real == {
+        "values_changed": {
+            "root.name": {"new_value": "GREEN", "old_value": "RED"},
+            "root.value": {"new_value": 2, "old_value": 1},
+        }
+    }
+
+
+# --- Accept-list: concrete-type predicates and the getmembers strategy (issue #66) ---
+
+
+def test_numbers_number_registered_class_diffs_by_attributes_like_deepdiff() -> None:
+    """A class registered with numbers.Number is outside DeepDiff's concrete number tuple, so it diffs by attributes."""
+    import numbers
+
+    class Registered:
+        def __init__(self, amount: int) -> None:
+            self.amount = amount
+
+    numbers.Number.register(Registered)
+    assert json.loads(DeepDiff(Registered(1), Registered(2)).to_json()) == json.loads(
+        RealDeepDiff(Registered(1), Registered(2), verbose_level=2).to_json()
+    )
+
+
+def test_c_type_with_getmembers_attributes_diffs_like_deepdiff() -> None:
+    """A C-implemented type with no __dict__/__slots__ (re.Pattern) diffs by its getmembers attributes."""
+    import re
+
+    a, b = re.compile("a"), re.compile("b")
+    assert json.loads(DeepDiff(a, b).to_json()) == json.loads(
+        RealDeepDiff(a, b, verbose_level=2).to_json()
+    )
+
+
+def test_two_classes_same_qualname_distinct_type_objects_are_a_type_change() -> None:
+    """Two classes created under one qualified name are distinct type objects -> type_changes (issue #66)."""
+    e1 = type("E", (), {})
+    e2 = type("E", (), {})
+    a = e1()
+    a.v = 1
+    b = e2()
+    b.v = 1
+    assert "type_changes" in json.loads(DeepDiff(a, b).to_json())
+    assert json.loads(DeepDiff(a, b).to_json()) == json.loads(
+        RealDeepDiff(a, b, verbose_level=2).to_json()
+    )
+    # Distinct type objects never pair under ignore_order either.
+    assert json.loads(DeepDiff([e1()], [e2()], ignore_order=True).to_json()) == json.loads(
+        RealDeepDiff([e1()], [e2()], ignore_order=True, verbose_level=2).to_json()
+    )
+
+
+def test_local_classes_of_the_same_name_are_a_type_change() -> None:
+    """A class defined in a function body is a fresh type object each call -> type_changes (issue #66)."""
+
+    def make(v: int) -> object:
+        class Local:
+            def __init__(self, x: int) -> None:
+                self.x = x
+
+        return Local(v)
+
+    for a, b in ((make(1), make(1)), (make(1), make(2))):
+        assert "type_changes" in json.loads(DeepDiff(a, b).to_json())
+        assert json.loads(DeepDiff(a, b).to_json()) == json.loads(
+            RealDeepDiff(a, b, verbose_level=2).to_json()
+        )
+
+
+def test_a_property_mutating_the_containing_dict_does_not_panic() -> None:
+    """A getter that inserts into the dict being converted must not panic pyo3's iterator (issue #66)."""
+    holder: dict = {}
+
+    class MutHolder:
+        def __init__(self, v: int) -> None:
+            self.v = v
+
+        @property
+        def p(self) -> int:
+            holder[f"injected{len(holder)}"] = 1
+            return 1
+
+    holder.update({"a": MutHolder(1), "b": 2, "c": 3, "d": 4})
+    other = {"a": MutHolder(2), "b": 2, "c": 3, "d": 4}
+    assert json.loads(DeepDiff(holder, other).to_json()) == {
+        "values_changed": {"root['a'].v": {"new_value": 2, "old_value": 1}}
+    }
+
+
+def test_a_property_mutating_a_dict_two_levels_up_does_not_panic() -> None:
+    """The snapshot holds at every dict level: a getter mutating an outer dict still cannot panic (issue #66)."""
+    outer: dict = {}
+
+    class Mut:
+        def __init__(self, v: int) -> None:
+            self.v = v
+
+        @property
+        def p(self) -> int:
+            outer[f"x{len(outer)}"] = 1
+            return 1
+
+    outer.update({"lvl": {"a": Mut(1), "b": 2, "c": 3, "d": 4}, "k": 5})
+    other = {"lvl": {"a": Mut(2), "b": 2, "c": 3, "d": 4}, "k": 5}
+    assert json.loads(DeepDiff(outer, other).to_json()) == {
+        "values_changed": {"root['lvl']['a'].v": {"new_value": 2, "old_value": 1}}
+    }
+
+
+def test_a_dict_property_returning_a_non_dict_raises_with_the_path() -> None:
+    """An object whose __dict__ is not a mapping raises the typed, path-naming error (issue #66)."""
+
+    class BadDict:
+        @property
+        def __dict__(self) -> object:  # type: ignore[override]
+            return [1, 2]
+
+    with pytest.raises(TypeError, match=r"BadDict at root\['k'\]"):
+        DeepDiff({"k": BadDict()}, {"k": BadDict()})
+
+
+# --- Values DeepDiff never reaches: shared class attributes and identical objects (issue #66) ---
+
+
+class _AbcBased(abc.ABC):
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+class _WithLogger:
+    log = logging.getLogger("onix-test")
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+class _WithLock:
+    lock = threading.Lock()
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+class _WithDecimal:
+    rate = decimal.Decimal("1.5")
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+@pytest.mark.parametrize("cls", [_AbcBased, _WithLogger, _WithLock, _WithDecimal])
+@pytest.mark.parametrize("x_b", [1, 2])
+def test_a_shared_class_attribute_is_skipped_like_deepdiff(cls: type, x_b: int) -> None:
+    """A class attribute both instances share is never diffed, as DeepDiff's `t1 is t2` check skips it."""
+    onix, real = _canonical(cls(1), cls(x_b))
+    assert onix == real
+
+
+def test_the_same_unsupported_object_on_both_sides_reports_nothing_like_deepdiff() -> None:
+    """One unsupported object reached on both sides is equal, as DeepDiff's `t1 is t2` check makes it."""
+    shared = decimal.Decimal("1.5")
+    onix, real = _canonical({"k": shared, "n": 1}, {"k": shared, "n": 2})
+    assert onix == real
+
+
+@pytest.mark.parametrize("ignore_order", [False, True])
+def test_different_unsupported_objects_raise_with_the_path(ignore_order: bool) -> None:
+    """Two different unsupported objects at one position raise the path-naming TypeError, never {}."""
+    with pytest.raises(TypeError, match=r"Decimal at root\[0\]\['k'\]"):
+        DeepDiff([{"k": decimal.Decimal("1")}], [{"k": decimal.Decimal("1")}], ignore_order=ignore_order)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda np, v: np.int64(v),
+        lambda np, v: np.float32(v + 0.5),
+        lambda np, v: np.bool_(v == 2),
+        lambda np, v: np.datetime64(f"202{v}-01-01"),
+    ],
+    ids=["int64", "float32", "bool", "datetime64"],
+)
+def test_a_numpy_scalar_is_refused_rather_than_reshaped(make) -> None:
+    """A numpy scalar, which DeepDiff routes to its number, boolean or datetime handler, raises TypeError."""
+    np = pytest.importorskip("numpy")
+    with pytest.raises(TypeError, match="unsupported type for diffing"):
+        DeepDiff(make(np, 1), make(np, 2))
+
+
+def test_a_class_identity_stays_unique_when_a_getter_frees_its_type() -> None:
+    """Each side's fresh class is held for the diff, so a freed type's address cannot make two classes equal."""
+
+    class Fresh:
+        @property
+        def p(self) -> object:
+            gc.collect()
+            return type("T", (), {})()
+
+    onix, real = _canonical(Fresh(), Fresh())
+    assert onix == real
+    assert "root.p" in onix["type_changes"]
+
+
+def test_a_metaclass_interrupt_while_reading_slots_propagates() -> None:
+    """A KeyboardInterrupt raised reading a base's __slots__ propagates rather than being skipped."""
+
+    class Meta(type):
+        def __getattribute__(cls, name: str) -> object:
+            if name == "__slots__":
+                raise KeyboardInterrupt
+            return super().__getattribute__(name)
+
+    class Slotted(metaclass=Meta):
+        __slots__ = ("a",)
+
+        def __init__(self, a: int) -> None:
+            self.a = a
+
+    with pytest.raises(KeyboardInterrupt):
+        DeepDiff(Slotted(1), Slotted(2))
+
+
+def test_a_dict_whose_copy_returns_itself_is_still_iterated_as_a_snapshot() -> None:
+    """A __dict__ whose copy() hands back the live dict cannot panic when a key's __hash__ inserts into it."""
+
+    class LiveCopy(dict):
+        def copy(self) -> "LiveCopy":
+            return self
+
+    class Key(str):
+        live: LiveCopy | None = None
+
+        def __hash__(self) -> int:
+            if Key.live is not None:
+                Key.live[f"k{len(Key.live)}"] = 0
+            return str.__hash__(self)
+
+    class Holder:
+        def __init__(self, v: int) -> None:
+            self.live = LiveCopy()
+            self.live[Key("v")] = v
+
+        @property
+        def __dict__(self) -> LiveCopy:  # type: ignore[override]
+            return self.live
+
+    a, b = Holder(1), Holder(2)
+    Key.live = a.live
+    assert "root.v" in json.loads(DeepDiff(a, b).to_json())["values_changed"]
+
+
+def test_an_object_holding_an_enum_against_a_bare_member_pairs_like_deepdiff_under_ignore_order() -> None:
+    """Under ignore_order an object and an Enum member pair by DeepDiff's lengths, so both report root[0]."""
+
+    class Holder:
+        def __init__(self, member: _Color) -> None:
+            self.member = member
+
+    onix = DeepDiff([Holder(_Color.RED)], [_Color.GREEN], ignore_order=True).to_dict()
+    real = RealDeepDiff([Holder(_Color.RED)], [_Color.GREEN], ignore_order=True, verbose_level=2).to_dict()
+    assert {category: sorted(entries) for category, entries in onix.items()} == {
+        category: sorted(entries) for category, entries in real.items()
+    } == {"values_changed": ["root[0]"]}
+
+
+# --- Class attributes in reports, shadowed class defaults, and refused models (issue #66) ---
+
+
+class _Pair(abc.ABC):
+    def __init__(self, x: int, y: int) -> None:
+        self.x = x
+        self.y = y
+
+
+@dataclasses.dataclass
+class _AbcRecord(abc.ABC):
+    x: int
+
+
+class _WithEnumDefault:
+    color = _Color.RED
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+class _WithPatternDefault:
+    pat = re.compile("a")
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "ignore_order"),
+    [
+        ([_AbcBased(1)], [_AbcBased(1), _AbcBased(2)], False),
+        ({"a": _AbcBased(1)}, {}, False),
+        (_AbcBased(1), 5, False),
+        ([_AbcRecord(1)], [_AbcRecord(1), _AbcRecord(2)], False),
+        ([_WithEnumDefault(1)], [_WithEnumDefault(1), _WithEnumDefault(2)], False),
+        ([_WithPatternDefault(1)], [_WithPatternDefault(1), _WithPatternDefault(2)], False),
+        ([_Pair(1, 1), _Pair(2, 2), _Pair(3, 3), 7], [_Pair(1, 9), _Pair(9, 2), _Pair(3, 9), 8], True),
+    ],
+    ids=["added", "removed", "type_change", "abc_dataclass", "enum_default", "pattern_default", "ignore_order"],
+)
+def test_a_whole_object_value_leaves_out_class_attributes_like_deepdiff(a: object, b: object, ignore_order: bool) -> None:
+    """A whole object in a report shows no class attribute, as DeepDiff's to_json render shows none."""
+    onix = json.loads(DeepDiff(a, b, ignore_order=ignore_order).to_json())
+    real = json.loads(RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2).to_json())
+    assert onix == real
+
+
+def test_an_unsupported_instance_attribute_in_a_reported_object_is_refused_with_its_path() -> None:
+    """An instance attribute onix does not convert is refused wherever a report would show it."""
+
+    class Priced:
+        def __init__(self, price: decimal.Decimal) -> None:
+            self.price = price
+
+    with pytest.raises(TypeError, match=r"Decimal at root\[1\]\.price"):
+        DeepDiff([Priced(decimal.Decimal(1))], [Priced(decimal.Decimal(1)), Priced(decimal.Decimal(2))])
+
+
+class _Item:
+    color = _Color.RED
+
+    def __init__(self, n: int, color: _Color | None = None) -> None:
+        self.n = n
+        if color is not None:
+            self.color = color
+
+
+class _Cfg:
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+class _Svc:
+    config = _Cfg(1)
+
+    def __init__(self, config: _Cfg | None = None) -> None:
+        if config is not None:
+            self.config = config
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        (_Item(1, _Color.RED), _Item(1)),
+        (_Item(1, _Color.GREEN), _Item(1)),
+        (_Svc(_Cfg(1)), _Svc()),
+        (_Svc(_Cfg(2)), _Svc()),
+    ],
+    ids=["enum_same", "enum_changed", "object_equal", "object_changed"],
+)
+def test_an_instance_value_against_its_class_default_diffs_like_deepdiff(a: object, b: object) -> None:
+    """An instance attribute shadowing a class default is compared with the default's own value."""
+    onix, real = _canonical(a, b)
+    assert onix == real
+
+
+@pytest.mark.parametrize(
+    ("default", "shadow"),
+    [
+        (None, 1),
+        (True, False),
+        (1, 2),
+        (1.5, 2.5),
+        ("a", "b"),
+        (datetime.datetime(2020, 1, 1), datetime.datetime(2021, 1, 1)),
+        (datetime.date(2020, 1, 1), datetime.date(2021, 1, 1)),
+        (datetime.time(1), datetime.time(2)),
+        (datetime.timedelta(1), datetime.timedelta(2)),
+        ([1], [2]),
+        ((1,), (2,)),
+        ({1}, {2}),
+        (frozenset({1}), frozenset({2})),
+        ({"k": 1}, {"k": 2}),
+    ],
+)
+def test_a_natively_converted_class_default_diffs_against_its_shadow_like_deepdiff(default: object, shadow: object) -> None:
+    """Every type onix converts natively, as a class default, diffs against an instance value that shadows it."""
+    holder = type("Holder", (), {"value": default})
+    shadowed = holder()
+    shadowed.value = shadow
+    onix = _normalize_types(DeepDiff(shadowed, holder()).to_dict())
+    real = _normalize_types(RealDeepDiff(shadowed, holder(), verbose_level=2).to_dict())
+    assert onix == real
+
+
+def test_a_metaclass_interrupt_while_checking_for_a_class_attribute_propagates() -> None:
+    """A KeyboardInterrupt from the class lookup that detects a class attribute propagates."""
+
+    class Meta(type):
+        def __getattribute__(cls, name: str) -> object:
+            if name == "shared":
+                raise KeyboardInterrupt
+            return super().__getattribute__(name)
+
+    class Guarded(metaclass=Meta):
+        shared = 1
+
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+    with pytest.raises(KeyboardInterrupt):
+        DeepDiff(Guarded(1), Guarded(2))
+
+
+def test_a_pydantic_model_is_refused_where_deepdiff_diffs_it() -> None:
+    """A pydantic model, which DeepDiff diffs by attributes but hashes as an iterable, raises TypeError."""
+    pydantic = pytest.importorskip("pydantic")
+
+    class Model(pydantic.BaseModel):
+        a: int
+        b: str
+
+    assert "values_changed" in RealDeepDiff(Model(a=1, b="x"), Model(a=1, b="y"))
+    with pytest.raises(TypeError, match="unsupported type for diffing: Model at root"):
+        DeepDiff(Model(a=1, b="x"), Model(a=1, b="y"))
+
+
+class _CountingEnumType(_enum.EnumType):
+    iterations = 0
+
+    def __iter__(cls):  # type: ignore[override]
+        _CountingEnumType.iterations += 1
+        return super().__iter__()
+
+
+def test_an_enum_class_is_iterated_once_per_diff() -> None:
+    """Converting every member of an Enum iterates the class once, not once per member."""
+    namespace = _CountingEnumType.__prepare__("Counted", (_enum.Enum,))
+    for i in range(50):
+        namespace[f"M{i}"] = i
+    counted = _CountingEnumType("Counted", (_enum.Enum,), namespace)
+    members = [counted[f"M{i}"] for i in range(50)]
+    _CountingEnumType.iterations = 0
+    DeepDiff(members, members[:-1])
+    assert _CountingEnumType.iterations == 1
+
+
+def _nest(value: object, levels: int) -> object:
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def test_a_chain_of_deep_class_attributes_diffs_like_deepdiff() -> None:
+    """Sixty classes whose class attribute nests the previous class 500 levels deep diff without a crash."""
+    previous = type("C0", (), {})
+    roots = []
+    for i in range(1, 61):
+        cls = type(f"C{i}", (), {"a": _nest(previous(), 500)})
+        roots.append(cls())
+        previous = cls
+    onix, real = _canonical(roots, roots[:-1])
+    assert onix == real
+
+
+def test_two_class_attributes_nesting_each_other_12000_levels_deep_diff_without_a_crash() -> None:
+    """Two classes whose class attribute nests the previous class 12,000 levels deep diff at max_depth=20000."""
+    previous = type("C0", (), {})
+    roots = []
+    for i in range(1, 3):
+        cls = type(f"C{i}", (), {"a": _nest(previous(), 12000)})
+        roots.append(cls())
+        previous = cls
+    assert json.loads(DeepDiff(roots, roots[:-1], max_depth=20000).to_json()) == {
+        "iterable_item_removed": {"root[1]": {}}
+    }
+
+
+def test_a_deep_class_attribute_converts_on_a_small_thread() -> None:
+    """A class attribute nested 2,000 levels deep diffs on a 512 KiB thread without overflowing it."""
+    holder = type("Holder", (), {"a": _nest(1, 2000)})
+    outcome: list[object] = []
+
+    def run() -> None:
+        outcome.append(json.loads(DeepDiff([holder()], [holder(), holder()], max_depth=5000).to_json()))
+
+    previous = threading.stack_size(512 * 1024)
+    try:
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+    finally:
+        threading.stack_size(previous)
+    assert outcome == [{"iterable_item_added": {"root[1]": {}}}]
+
+
+def test_a_deep_class_attribute_reached_shallow_and_deep_but_never_compared_reports_nothing_for_it() -> None:
+    """A 12,000-deep class attribute reached at depth 1 and again 10,000 levels deeper is never walked."""
+    holder = type("Holder", (), {"a": _nest(1, 12000)})
+    report = json.loads(DeepDiff([holder(), _nest(holder(), 10000)], [holder()], max_depth=20000).to_json())
+    assert list(report) == ["iterable_item_removed"]
+    assert list(report["iterable_item_removed"]) == ["root[1]"]
+
+
+def test_a_class_attribute_shadowed_at_one_position_and_shared_at_a_deeper_one_diffs_like_deepdiff() -> None:
+    """A class attribute compared where it is shadowed and shared 15 levels deep reports what DeepDiff reports."""
+
+    class E:
+        shared = {"k": [[[[1]]]]}
+
+        def __init__(self, shared: object = None) -> None:
+            if shared is not None:
+                self.shared = shared
+
+    a, b = [E({"k": [[[[1]]]]}), _nest(E(), 14)], [E(), _nest(E(), 14)]
+    assert json.loads(DeepDiff(a, b, max_depth=20).to_json()) == json.loads(
+        RealDeepDiff(a, b, verbose_level=2).to_json()
+    )
+
+
+def _class_attribute_chain(levels: int) -> tuple[object, object]:
+    """An instance whose defaults nest `levels` classes deep, and one that shadows every level but the last."""
+    classes = [type("K0", (), {"leaf": 1})]
+    for i in range(1, levels + 1):
+        classes.append(type(f"K{i}", (), {"child": classes[-1]()}))
+    shadowed = node = classes[levels]()
+    for i in range(levels - 1, 0, -1):
+        node.child = classes[i]()
+        node = node.child
+    return classes[levels](), shadowed
+
+
+@pytest.mark.parametrize("levels", [16, 17, 40])
+def test_a_shadowed_chain_of_class_attribute_defaults_diffs_like_deepdiff(levels: int) -> None:
+    """An instance shadowing every default but the innermost of a chain of class attributes reports nothing."""
+    onix, real = _canonical(*_class_attribute_chain(levels))
+    assert onix == real == {}
+
+
+# --- Identity and cycles: DeepDiff's `t1 is t2` and `parents_ids` rules (issue #66) ---
+
+
+class _Service:
+    def __init__(self, v: int) -> None:
+        self.v = v
+        self.log = logging.getLogger("my.own.module")
+
+
+def test_an_instance_attribute_holding_a_shared_logger_reports_only_the_changed_value() -> None:
+    """A logger both instances hold is the identical object and never walked, so only root.v changes."""
+    onix, real = _canonical(_Service(1), _Service(2))
+    assert onix == real == {"values_changed": {"root.v": {"new_value": 2, "old_value": 1}}}
+
+
+class _Node:
+    def __init__(self, value: int, parent: "_Node | None" = None) -> None:
+        self.value = value
+        self.parent = parent
+        self.children: list[_Node] = []
+        if parent is not None:
+            parent.children.append(self)
+
+
+def _tree(leaf_value: int) -> _Node:
+    root = _Node(0)
+    for i in range(3):
+        child = _Node(i + 1, root)
+        _Node(leaf_value if i == 2 else 10 + i, child)
+    return root
+
+
+def test_a_parent_pointer_tree_with_one_changed_leaf_diffs_like_deepdiff() -> None:
+    """A child pointing back at an ancestor is skipped, as DeepDiff's parents_ids skips it."""
+    onix, real = _canonical(_tree(5), _tree(6))
+    assert onix == real
+    assert list(onix["values_changed"]) == ["root.children[2].children[0].value"]
+
+
+def test_a_self_referential_object_diffs_like_deepdiff() -> None:
+    """An object holding itself reports its other changes and nothing for the cycle."""
+
+    class Recursive:
+        def __init__(self, x: int) -> None:
+            self.x = x
+            self.self_ref = self
+
+    onix, real = _canonical(Recursive(1), Recursive(2))
+    assert onix == real == {"values_changed": {"root.x": {"new_value": 2, "old_value": 1}}}
+
+
+class _Deep:
+    a = _nest(1, 600)
+    b = _nest(1, 505)
+
+    def __init__(self, a: object = None) -> None:
+        if a is not None:
+            self.a = a
+
+
+def test_a_class_attribute_deeper_than_max_depth_raises_where_it_is_compared() -> None:
+    """A 600-deep class attribute compared against a shadowing value raises MaxDepthError at its path."""
+    with pytest.raises(MaxDepthError, match=r"at root\.a"):
+        DeepDiff(_Deep(1), _Deep())
+
+
+def test_class_attributes_deeper_than_max_depth_report_nothing_when_never_compared() -> None:
+    """A 505-deep and a 600-deep class attribute ten levels down, never compared, report nothing."""
+    assert json.loads(DeepDiff(_nest(_Deep(), 9), _nest(_Deep(), 9)).to_json()) == {}
+
+
+_COUNTED_READS: list[int] = []
+
+
+class _Counted:
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+    @property
+    def watched(self) -> int:
+        _COUNTED_READS.append(self.v)
+        return self.v
+
+
+class _WithCountedDefault:
+    default = _Counted(1)
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+def test_a_shared_class_attribute_is_never_converted() -> None:
+    """A class attribute both instances share is never walked, as DeepDiff's `t1 is t2` check never walks it."""
+    _COUNTED_READS.clear()
+    onix = json.loads(DeepDiff(_WithCountedDefault(1), _WithCountedDefault(2)).to_json())
+    assert _COUNTED_READS == []
+    assert onix == json.loads(RealDeepDiff(_WithCountedDefault(1), _WithCountedDefault(2), verbose_level=2).to_json())
+
+
+def _structure(report: dict) -> dict[str, object]:
+    """A `to_dict()` report reduced to its categories, paths and `type_changes` type names."""
+    return {
+        category: sorted(
+            (path, getattr(e["old_type"], "__name__", e["old_type"]), getattr(e["new_type"], "__name__", e["new_type"]))
+            for path, e in entries.items()
+        )
+        if category == "type_changes"
+        else sorted(entries)
+        for category, entries in report.items()
+    }
+
+
+def _same_structure(a: object, b: object, **options: object) -> None:
+    """Assert both engines report the same categories, paths and type names."""
+    onix = _structure(DeepDiff(a, b, **options).to_dict())
+    assert onix == _structure(RealDeepDiff(a, b, verbose_level=2, **options).to_dict())
+
+
+class _Looped:
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+def _looped(v: int, me: object = None) -> _Looped:
+    node = _Looped(v)
+    node.me = node if me is None else me
+    return node
+
+
+def test_a_value_against_a_second_side_cycle_is_a_type_change_like_deepdiff() -> None:
+    """A cycle only on the second side is compared, as DeepDiff's parents_ids holds first-side ids only."""
+    _same_structure(_looped(1, 5), _looped(1))
+
+
+def test_an_object_against_a_second_side_cycle_is_compared_with_the_ancestor_like_deepdiff() -> None:
+    """An object facing a second-side cycle is diffed against the object the cycle points back at."""
+    _same_structure(_looped(1, _Looped(99)), _looped(1))
+
+
+def test_a_list_item_against_a_second_side_cycle_is_a_type_change_like_deepdiff() -> None:
+    """A list item facing a second-side cycle reports the type change."""
+    looped = _Looped(1)
+    looped.items = [looped]
+    plain = _Looped(1)
+    plain.items = ["other"]
+    _same_structure(plain, looped)
+
+
+def test_a_second_side_cycle_under_ignore_order_is_compared_like_deepdiff() -> None:
+    """Under ignore_order a pair with a cycle on the second side only still reports its change."""
+    _same_structure([_looped(1, 5)], [_looped(1)], ignore_order=True)
+
+
+class _Raising:
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+    @property
+    def p(self) -> int:
+        raise ValueError("boom")
+
+
+def test_an_object_whose_attributes_cannot_be_read_is_skipped_where_it_is_the_same_object() -> None:
+    """The same unreadable object on both sides reports nothing, and a sibling change is still reported."""
+    shared = _Raising(1)
+    _same_structure({"k": shared}, {"k": shared})
+    _same_structure({"k": shared, "n": 1}, {"k": shared, "n": 2})
+
+
+def test_an_unreadable_object_hashes_by_its_instance_dict_under_ignore_order() -> None:
+    """Under ignore_order two unreadable objects with equal instance dicts match without reading them."""
+    _same_structure([_Raising(1), 1], [_Raising(1), 2], ignore_order=True)
+
+
+class _Wrap:
+    def __init__(self, inner: object, n: int) -> None:
+        self.inner = inner
+        self.n = n
+
+
+def test_a_shared_unreadable_object_inside_compared_objects_is_skipped() -> None:
+    """An unreadable object both wrappers hold is the token, so the wrappers diff by their other attributes."""
+    shared = _Raising(3)
+    _same_structure(_Wrap(shared, 1), _Wrap(shared, 2))
+
+
+@pytest.mark.parametrize("keys", [[(1, 2j), "x"], ["x", (1, 2j)]], ids=["bad_key_first", "bad_key_last"])
+def test_an_unsupported_dict_key_inside_an_object_is_lazy_in_either_key_order(keys: list) -> None:
+    """An unsupported key raises only where its object is compared, whichever position it holds."""
+    holder = _Wrap({key: 1 for key in keys}, 0)
+    _same_structure({"h": holder, "n": 1}, {"h": holder, "n": 2})
+    with pytest.raises(TypeError, match="unsupported type for a dict key: complex"):
+        DeepDiff({"h": _Wrap({key: 1 for key in keys}, 0)}, {"h": _Wrap({key: 1 for key in keys}, 0)})
+
+
+def test_an_unreadable_object_that_is_compared_raises_its_error() -> None:
+    """Two different unreadable objects at one position raise the error reading them raised."""
+    with pytest.raises(ValueError, match="boom"):
+        DeepDiff({"k": _Raising(1)}, {"k": _Raising(1)})
+
+
+def test_a_shadowed_class_attribute_is_converted_once_per_diff() -> None:
+    """A default compared against fifty shadowing values is converted once for the diff."""
+    cls = type("Shadowed", (), {"default": _Counted(1), "__init__": lambda self, v: setattr(self, "default", _Counted(v))})
+    a = [cls(2 + i) for i in range(50)]
+    b = [cls.__new__(cls) for _ in range(50)]
+    _COUNTED_READS.clear()
+    onix = DeepDiff(a, b)
+    assert _COUNTED_READS.count(1) == 1
+    assert json.loads(onix.to_json()) == json.loads(RealDeepDiff(a, b, verbose_level=2).to_json())
+
+
+class _Good:
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        (_Raising(1), 5),
+        (_Raising(1), _Good(1)),
+        ({"k": _Raising(1)}, {"k": None}),
+        ({"k": _Raising(1)}, {}),
+        ([], [_Raising(1)]),
+    ],
+    ids=["type_change", "other_class", "dict_value_type_change", "removed", "added"],
+)
+def test_an_unreadable_object_shown_whole_renders_its_instance_attributes_like_deepdiff(a: object, b: object) -> None:
+    """An unreadable object a report shows whole renders what could be read, as DeepDiff's render does."""
+    onix = DeepDiff(a, b)
+    assert _structure(onix.to_dict()) == _structure(RealDeepDiff(a, b, verbose_level=2).to_dict())
+    assert json.loads(onix.to_json()) == json.loads(RealDeepDiff(a, b, verbose_level=2).to_json())
+
+
+class _Node2:
+    def __init__(self, v: int, me: object = None) -> None:
+        self.v = v
+        self.me = me
+
+    @property
+    def p(self) -> int:
+        if self.v == 7:
+            raise ValueError("boom")
+        return self.v
+
+
+def test_a_second_side_cycle_whose_target_is_unreadable_diffs_like_deepdiff() -> None:
+    """A second-side cycle pointing back at an unreadable object compares against it like DeepDiff."""
+    looped = _Node2(7)
+    looped.me = looped
+    holder_a = {"n": _Node2(1, 5)}
+    holder_b = {"n": _Node2(1, looped)}
+    _same_structure(holder_a, holder_b)
+
+
+def _back_pointing(size: int) -> tuple[object, object]:
+    """A root whose `size` attributes point back at it, and one whose attributes hold integers."""
+    looped = _Looped(0)
+    plain = _Looped(0)
+    for i in range(size):
+        setattr(looped, f"a{i}", looped)
+        setattr(plain, f"a{i}", i)
+    return plain, looped
+
+
+def test_attributes_pointing_back_at_the_root_render_as_stubs_like_deepdiff_reports_them() -> None:
+    """Many attributes pointing back at the root report one type change each, rendered as a bounded stub."""
+    plain, looped = _back_pointing(50)
+    _same_structure(plain, looped)
+    assert json.loads(DeepDiff(plain, looped).to_json())["type_changes"]["root.a3"]["new_value"] == {}
+
+
+def test_a_deep_shadowed_class_attribute_resolves_on_a_small_thread() -> None:
+    """A 2,000-level class attribute compared against its shadow resolves without overflowing a 512 KiB thread."""
+    holder = type("Holder", (), {"a": _nest(1, 2000)})
+    shadow = holder()
+    shadow.a = _nest(2, 2000)
+    outcome: list[object] = []
+
+    def run() -> None:
+        outcome.append(list(json.loads(DeepDiff([shadow], [holder()], max_depth=5000).to_json())["values_changed"]))
+
+    previous = threading.stack_size(512 * 1024)
+    try:
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+    finally:
+        threading.stack_size(previous)
+    assert outcome == [["root[0].a" + "[0]" * 2000]]
+
+
+def test_a_chain_of_back_pointing_ancestors_reports_one_stub_per_level() -> None:
+    """A chain whose every level points back at its parent reports a bounded type change per level."""
+    plain_root = plain = _Looped(0)
+    looped_root = looped = _Looped(0)
+    for i in range(1, 300):
+        plain.child, looped.child = _Looped(i), _Looped(i)
+        plain.child.up, looped.child.up = 0, looped
+        plain, looped = plain.child, looped.child
+    report = json.loads(DeepDiff(plain_root, looped_root, max_depth=20000).to_json())
+    assert len(report["type_changes"]) == 299
+    assert all(entry["new_value"] == {} for entry in report["type_changes"].values())

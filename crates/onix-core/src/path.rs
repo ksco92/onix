@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::datetime::{SECONDS_PER_DAY, div_rem_euclid};
-use crate::value::{Number, ObjectKey, Str, Value, Wtf8Char, Wtf8Chars};
+use crate::value::{Number, ObjectKey, ObjectKind, Str, Value, Wtf8Char, Wtf8Chars};
 
 /// One step in a path: a dict key, a list index, or a set item.
 ///
@@ -46,6 +46,14 @@ pub enum PathSegment {
     /// that splits it into several bracket groups, so [`render_path`] wraps
     /// it in exactly one outer pair, same as any other key).
     KeyRepr(String),
+    /// A custom object's attribute access, e.g. the `x` in `root.x` — a
+    /// [`Str`] for the same reason [`PathSegment::Key`] is (a distinct
+    /// structural identity per name). Rendered `.name` with no brackets and
+    /// no quoting, matching `DeepDiff`'s `AttributeRelationship`
+    /// (`param_repr_format=".{}"`, no `quote_str`); an attribute name read
+    /// from an object's `__dict__`/`__slots__` is a Python identifier, so
+    /// nothing it can hold needs escaping.
+    Attribute(Str),
     /// A list index access, e.g. the `3` in `root[3]`.
     Index(usize),
     /// A set item, e.g. the `1` in `root[1]` for the set `{1}` — carrying
@@ -104,6 +112,10 @@ pub fn render_path(segments: &[PathSegment]) -> Str {
                 rendered.push(b'[');
                 rendered.extend_from_slice(key.as_bytes());
                 rendered.push(b']');
+            }
+            PathSegment::Attribute(name) => {
+                rendered.push(b'.');
+                rendered.extend_from_slice(name.as_bytes());
             }
             PathSegment::Index(index) => {
                 rendered.push(b'[');
@@ -313,6 +325,20 @@ pub fn object_key_path_segment(key: &ObjectKey) -> PathSegment {
     match key {
         ObjectKey::Str(s) => PathSegment::Key(s.into()),
         ObjectKey::Other(value) => PathSegment::KeyRepr(dict_key_repr(value)),
+    }
+}
+
+/// The path segment one entry of an [`Object`](crate::value::Object) of
+/// `kind` contributes: [`object_key_path_segment`] for a `dict`, a dotted
+/// [`PathSegment::Attribute`] (`root.name`) for a custom object's `str` key.
+#[must_use]
+pub fn entry_path_segment(kind: ObjectKind, key: &ObjectKey) -> PathSegment {
+    match (kind, key) {
+        (
+            ObjectKind::CustomObject | ObjectKind::Opaque | ObjectKind::Cycle | ObjectKind::Failed,
+            ObjectKey::Str(s),
+        ) => PathSegment::Attribute(s.into()),
+        _ => object_key_path_segment(key),
     }
 }
 
@@ -750,10 +776,11 @@ pub(crate) fn python_float_repr(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        PathSegment, escape_non_printable, python_repr, quote_key, render_path, set_item_repr,
+        PathSegment, entry_path_segment, escape_non_printable, python_repr, quote_key, render_path,
+        set_item_repr,
     };
     use crate::test_support::{cdate, cdt_at, ctime, ctimedelta};
-    use crate::value::{Builder, Number, SetItems, Value};
+    use crate::value::{Builder, Number, ObjectKey, ObjectKind, SetItems, Value};
 
     #[test]
     fn empty_path_renders_as_root() {
@@ -1270,5 +1297,28 @@ mod tests {
         expected.push('\'');
 
         assert_eq!(quote_key(&key.as_str().into()).to_string(), expected);
+    }
+
+    #[test]
+    fn entry_path_segment_renders_an_attribute_for_an_object_and_a_subscript_for_a_dict() {
+        let key = ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x")));
+        let rendered = |kind| render_path(&[entry_path_segment(kind, &key)]).to_string();
+        assert_eq!(
+            [
+                rendered(ObjectKind::CustomObject),
+                rendered(ObjectKind::Opaque),
+                rendered(ObjectKind::Dict),
+            ],
+            ["root.x", "root.x", "root['x']"]
+        );
+    }
+
+    #[test]
+    fn entry_path_segment_renders_a_non_str_object_key_as_a_subscript() {
+        let key = ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1))));
+        assert_eq!(
+            render_path(&[entry_path_segment(ObjectKind::CustomObject, &key)]).to_string(),
+            "root[1]"
+        );
     }
 }

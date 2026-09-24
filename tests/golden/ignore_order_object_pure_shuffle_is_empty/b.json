@@ -1,0 +1,18 @@
+[
+  {
+    "$object": {
+      "attrs": {
+        "x": 2
+      },
+      "class": "A"
+    }
+  },
+  {
+    "$object": {
+      "attrs": {
+        "x": 1
+      },
+      "class": "A"
+    }
+  }
+]

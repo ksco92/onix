@@ -1,8 +1,8 @@
 //! The public API surface: [`DiffOptions`], [`DEFAULT_MAX_DEPTH`], and the
-//! three entry points ([`diff()`], [`diff_with_options()`],
-//! [`diff_with_max_depth()`]) — all thin wrappers around
-//! `super::dispatch`'s recursive [`super::diff_at`], differing only in how
-//! much of [`DiffOptions`] the caller controls.
+//! four entry points ([`diff()`], [`diff_with_options()`],
+//! [`diff_with_max_depth()`], [`diff_with_resolver()`]) — all thin wrappers
+//! around `super::dispatch`'s recursive [`super::diff_at`], differing in how
+//! much of [`DiffOptions`] the caller controls and whether tokens resolve.
 
 use crate::value::Value;
 
@@ -112,6 +112,53 @@ pub fn diff_with_options(a: &Value, b: &Value, opts: &DiffOptions) -> Result<Rep
     // `ignore_order` container-pair distances (see `crate::ignore_order`'s
     // `memo` module); for an ordered diff it is threaded but never consulted.
     diff_with_options_memo(a, b, opts, &crate::ignore_order::IgnoreOrderMemo::new())
+}
+
+/// A value the diff compares in place of a token: shared with the caller, or
+/// borrowed from a value that outlives the diff.
+#[derive(Clone)]
+pub enum Resolution<'r> {
+    /// A value the caller converted for the token.
+    Shared(std::sync::Arc<Value>),
+    /// A value the caller already holds, such as the object a cycle token
+    /// points back at.
+    Borrowed(&'r Value),
+}
+
+impl std::ops::Deref for Resolution<'_> {
+    type Target = Value;
+
+    fn deref(&self) -> &Value {
+        match self {
+            Resolution::Shared(value) => value,
+            Resolution::Borrowed(value) => value,
+        }
+    }
+}
+
+/// What the diff calls with a token's identity the first time it compares the
+/// token with anything but itself; `None` leaves the token as it is.
+pub type Resolver<'r> = dyn FnMut(&str) -> Option<Resolution<'r>> + Send + 'r;
+
+/// [`diff_with_options`], comparing each token `resolver` resolves as its
+/// value. A cycle token is compared that way only against an object of the
+/// class it points back at, and otherwise stays a token.
+///
+/// # Errors
+///
+/// Same as [`diff_with_options`].
+pub fn diff_with_resolver<'r>(
+    a: &Value,
+    b: &Value,
+    opts: &DiffOptions,
+    resolver: &'r mut Resolver<'r>,
+) -> Result<Report, Error> {
+    diff_with_options_memo(
+        a,
+        b,
+        opts,
+        &crate::ignore_order::IgnoreOrderMemo::with_resolver(resolver),
+    )
 }
 
 /// The shared body of [`diff_with_options`], taking an explicit

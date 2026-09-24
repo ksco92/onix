@@ -86,6 +86,8 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
+use crate::path::{PathSegment, entry_path_segment};
+
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -635,6 +637,20 @@ pub(crate) fn class_name(value: &Value) -> Option<&str> {
     }
 }
 
+/// Whether `a` and `b` are the same Python class, the single identity check
+/// `diff_at` (`crate::diff::dispatch`) and [`Value`]'s own structural equality
+/// both use so they cannot drift. Two [`Object`]s compare by class identity
+/// *and* kind (see [`Object::same_class`]). Every other variant compares by
+/// the subclass `__name__` alone, so two same-named `list` subclasses from
+/// different modules compare equal (issue #119).
+#[must_use]
+pub(crate) fn same_class(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => x.same_class(y),
+        _ => class_name(a) == class_name(b),
+    }
+}
+
 /// Delegates to the iterative `structural_eq`. The result is exactly what a
 /// derived `PartialEq` produces, verified by a differential property test
 /// against the derive before it was replaced. See the [module
@@ -962,12 +978,12 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
     while let Some((a, b)) = stack.pop() {
         // `DeepDiff` reports a subclass-vs-base pair as a `type_changes`
         // finding even when every field matches (see [`Typed`]'s doc), so
-        // two otherwise-identical values with different class names are not
-        // structurally equal — checked once here rather than per-arm below,
-        // since it applies identically to every variant that can carry a
-        // class name (see `same_class`'s doc, `crate::diff::dispatch`, for
-        // the exact list) and is a no-op (`None == None`) for the rest.
-        if class_name(a) != class_name(b) {
+        // two values that are not the same class are not structurally equal —
+        // checked once here rather than per-arm below through the one shared
+        // [`same_class`] definition `diff_at` also uses (an [`Object`] compares
+        // by class identity plus kind, every other variant by render name),
+        // a no-op (both `None`) for a variant that carries no class at all.
+        if !same_class(a, b) {
             return false;
         }
 
@@ -1029,6 +1045,11 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
                 stack.extend(x.iter().zip(y.iter()));
             }
             (Value::Object(x), Value::Object(y)) => {
+                if (x.kind() == ObjectKind::Failed || y.kind() == ObjectKind::Failed)
+                    && !x.same_instance(y)
+                {
+                    return false;
+                }
                 if x.entries.len() != y.entries.len() {
                     return false;
                 }
@@ -1716,6 +1737,51 @@ impl Key {
     }
 }
 
+/// What an [`Object`]'s entries represent: a Python `dict` (mapping) or a
+/// custom object's attributes.
+///
+/// Both share [`Object`]'s key-sorted storage — a custom object's attributes
+/// are `str`-keyed entries exactly like a `dict`'s `str` keys — but they
+/// render two different ways, matching `DeepDiff`: a `dict` entry is a
+/// subscript (`root['key']`, `dictionary_item_added`/`removed`), a custom
+/// object's attribute is a dotted access (`root.attr`,
+/// `attribute_added`/`removed`). `crate::diff::object_diff` reads this to
+/// choose the path segment and report category; `crate::ignore_order`'s
+/// hashing and distance read it to keep a custom object from ever
+/// hash-matching or pairing with a plain `dict` (`DeepDiff`'s own `DeepHash`
+/// tags an object with its class name and a `dict` with the bare word
+/// `dict`, so the two never share a bucket).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectKind {
+    /// A Python `dict` (or a `dict` subclass), rendered with subscript paths.
+    Dict,
+    /// A custom object diffed by its attributes, rendered with dotted paths.
+    CustomObject,
+    /// A value onix cannot diff, held by the identity of its Python object: it
+    /// has no entries and equals only a token for the same object.
+    Opaque,
+    /// An object already on the conversion path above this position: the
+    /// diff reports nothing where it is on the first side, as `DeepDiff`'s
+    /// `parents_ids` skips it.
+    Cycle,
+    /// A custom object whose attributes could not be read, holding its instance
+    /// `__dict__` entries: equal only to the same object, and walked against
+    /// an object of its class as a finding whose opaque token's identity is
+    /// its instance address in lowercase hex.
+    Failed,
+}
+
+impl ObjectKind {
+    /// The kind whose walk this kind shares: a failed object is walked as the
+    /// custom object it is.
+    fn walked(self) -> ObjectKind {
+        match self {
+            ObjectKind::Failed => ObjectKind::CustomObject,
+            kind => kind,
+        }
+    }
+}
+
 /// A JSON object: key-sorted, exactly-sized entries backed by a single
 /// `Box<[(ObjectKey, Value)]>`, with binary-search lookup
 /// ([`get`](Object::get)/[`contains_key`](Object::contains_key)) and
@@ -1724,7 +1790,9 @@ impl Key {
 /// See the [module documentation](self) for why entries are sorted and
 /// `str` keys interned (byte-identical rendering and small-map footprint),
 /// and [`ObjectKey`]'s own doc for why every other key kind is a second,
-/// additive case rather than a change to that representation.
+/// additive case rather than a change to that representation. A custom
+/// object's attributes reuse this same storage, distinguished only by
+/// [`Object::kind`] — see [`ObjectKind`].
 #[derive(Debug, Clone)]
 pub struct Object {
     /// Key-sorted, duplicate-free entries. Invariant: strictly ascending by
@@ -1732,10 +1800,68 @@ pub struct Object {
     /// every [`ObjectKey::Str`] entry before every [`ObjectKey::Other`] one,
     /// so [`Object::has_non_str_keys`] can check the last entry alone.
     entries: Box<[(ObjectKey, Value)]>,
-    /// The `dict` subclass name this value came from, or `None` for the
-    /// exact base type — see [`SetItems`]'s own `type_name` field doc; the
-    /// same reasoning applies here.
-    type_name: Option<Arc<str>>,
+    /// The subclass name and kind, or `None` for a plain `dict` (the
+    /// overwhelming common case, so it costs one null pointer, not an inline
+    /// name-plus-kind). Boxed rather than an inline
+    /// `Option<Arc<str>>`-plus-kind so [`Value`] stays within its
+    /// frame-budget size cap (`value_is_compact`): a plain `dict` pays a
+    /// single pointer here, and only a `dict` subclass or a custom object —
+    /// both rare — pays the one small heap allocation. See the `ObjectClass` struct.
+    class: Option<Box<ObjectClass>>,
+}
+
+/// A non-plain-`dict` [`Object`]'s class: the class name, an identity,
+/// and whether the entries are a `dict`'s items or a custom object's
+/// attributes. Held behind [`Object::class`]'s `Box` so a plain `dict` carries
+/// none of it.
+#[derive(Debug, Clone)]
+struct ObjectClass {
+    /// The Python class *name* (`__name__`): a `dict` subclass's name, or a
+    /// custom object's class — the name `DeepDiff` renders in `old_type`/
+    /// `new_type`. Used only for *rendering*, never for identity: two
+    /// different classes can share a `__name__`.
+    name: Arc<str>,
+    /// The class *identity*, which decides whether two objects are the same
+    /// class. `DeepDiff` compares the `type` objects themselves, so the caller
+    /// keys it on the type object's address and keeps that object alive for
+    /// the whole diff; for an [`ObjectKind::Opaque`] token it is the address of
+    /// the value itself.
+    identity: Arc<str>,
+    /// Whether these entries are a `dict`'s items or a custom object's
+    /// attributes.
+    kind: ObjectKind,
+    lengths: ObjectLengths,
+    /// The sorted names of the entries read from the class rather than the
+    /// instance, which a whole-object render leaves out.
+    class_attributes: Box<[Arc<str>]>,
+    /// The address of the Python object a custom object was converted from,
+    /// held alive for the diff: two equal addresses at one position are the
+    /// identical object, which `DeepDiff` never walks.
+    instance: Option<usize>,
+}
+
+/// The lengths `DeepDiff`'s `ignore_order` distance reads off a custom object
+/// that its attributes do not carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectLengths {
+    /// `len(obj.__dict__)`, `0` without one: `_get_item_length` of the object.
+    pub dict_len: usize,
+    /// What `DeepHash` counts for the `__dict__` entries that are not
+    /// attributes.
+    pub hidden_count: usize,
+    /// `_get_item_length(type(obj))`: `1` for a class, the sum of its
+    /// members' `__dict__` lengths for an `Enum` class, which is iterable.
+    pub type_len: usize,
+}
+
+impl Default for ObjectLengths {
+    fn default() -> Self {
+        Self {
+            dict_len: 0,
+            hidden_count: 0,
+            type_len: 1,
+        }
+    }
 }
 
 impl Object {
@@ -1760,24 +1886,174 @@ impl Object {
         }
         Self {
             entries: entries.into_boxed_slice(),
-            type_name: None,
+            class: None,
         }
     }
 
-    /// Attaches a `dict` subclass name (`None` for the exact base type), for
-    /// a caller (`onix-py`'s converter) that already has a built [`Object`]
-    /// and knows which concrete class it came from.
+    /// Attaches a `dict` subclass's `name` and `identity` (`None`
+    /// for the exact base `dict`), for a caller (`onix-py`'s converter) that
+    /// already has a built [`Object`] and knows which concrete class it came
+    /// from. See the `ObjectClass` struct for the name-versus-identity split.
     #[must_use]
-    pub fn with_type_name(mut self, type_name: Option<Arc<str>>) -> Self {
-        self.type_name = type_name;
+    pub fn with_dict_class(mut self, class: Option<(Arc<str>, Arc<str>)>) -> Self {
+        self.class = class.map(|(name, identity)| {
+            Box::new(ObjectClass {
+                name,
+                identity,
+                kind: ObjectKind::Dict,
+                lengths: ObjectLengths::default(),
+                class_attributes: Box::default(),
+                instance: None,
+            })
+        });
         self
     }
 
-    /// The subclass name this object carries, or `None` for the exact base
-    /// type.
+    /// Marks these entries as `kind`'s (a custom object's attributes, or an
+    /// opaque token's none) under class `name`, `identity`, `lengths`,
+    /// `class_attributes` and `instance` — see [`ObjectKind`] and the
+    /// `ObjectClass` struct.
+    #[must_use]
+    pub fn into_class(
+        mut self,
+        kind: ObjectKind,
+        name: Arc<str>,
+        identity: Arc<str>,
+        lengths: ObjectLengths,
+        mut class_attributes: Vec<Arc<str>>,
+        instance: Option<usize>,
+    ) -> Self {
+        class_attributes.sort_unstable();
+        self.class = Some(Box::new(ObjectClass {
+            name,
+            identity,
+            kind,
+            lengths,
+            class_attributes: class_attributes.into_boxed_slice(),
+            instance,
+        }));
+        self
+    }
+
+    /// The address of the Python object a custom object was converted from.
+    #[must_use]
+    pub fn instance(&self) -> Option<usize> {
+        self.class.as_ref().and_then(|class| class.instance)
+    }
+
+    /// Whether this is an [`ObjectKind::Cycle`] token.
+    #[must_use]
+    pub fn is_cycle(&self) -> bool {
+        self.kind() == ObjectKind::Cycle
+    }
+
+    /// Whether `self` and `other` stand for the identical Python object: two
+    /// custom objects converted from one address, or two tokens for one.
+    #[must_use]
+    pub fn same_instance(&self, other: &Object) -> bool {
+        match (self.class.as_ref(), other.class.as_ref()) {
+            (Some(a), Some(b)) if a.instance.is_some() => a.instance == b.instance,
+            (Some(a), Some(b)) if a.kind == b.kind && a.kind != ObjectKind::CustomObject => {
+                a.kind != ObjectKind::Dict && a.identity == b.identity
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `key` names an entry read from the class rather than the
+    /// instance.
+    #[must_use]
+    pub fn is_class_attribute(&self, key: &ObjectKey) -> bool {
+        self.class.as_ref().is_some_and(|class| {
+            key.as_str().is_some_and(|name| {
+                class
+                    .class_attributes
+                    .binary_search_by(|a| a.as_ref().cmp(name))
+                    .is_ok()
+            })
+        })
+    }
+
+    /// The class *name* (`__name__`) this object carries, or `None` for the
+    /// exact base type — the name for *rendering*, not identity (see
+    /// [`Object::same_class`]).
     #[must_use]
     pub fn type_name(&self) -> Option<&str> {
-        self.type_name.as_deref()
+        self.class.as_ref().map(|class| class.name.as_ref())
+    }
+
+    /// Whether `self` and `other` are the same Python class: same class
+    /// identity *and* same kind. `DeepDiff` reports `type_changes` between two
+    /// values whose `type()` objects are not identical, so a `dict` subclass
+    /// and a custom object sharing a `__name__`, or two same-named classes from
+    /// different modules, are *not* the same class here — matched by the
+    /// `ObjectClass::identity` proxy, not the render name. Two plain `dict`s
+    /// (no class) are the same class.
+    #[must_use]
+    pub fn same_class(&self, other: &Object) -> bool {
+        match (self.class.as_ref(), other.class.as_ref()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.kind.walked() == b.kind.walked() && a.identity == b.identity,
+            _ => false,
+        }
+    }
+
+    /// The opaque token a walk reports for an [`ObjectKind::Failed`] object,
+    /// `None` for anything else.
+    #[must_use]
+    pub fn failure_token(&self) -> Option<Value> {
+        let class = self
+            .class
+            .as_ref()
+            .filter(|class| class.kind == ObjectKind::Failed)?;
+        let identity = format!("{:x}", class.instance?);
+        Some(Builder::new().opaque(class.name.clone(), Arc::from(identity)))
+    }
+
+    /// Whether these entries are a `dict`'s items or a custom object's
+    /// attributes — see [`ObjectKind`]. A plain `dict` (no class) is
+    /// [`ObjectKind::Dict`].
+    #[must_use]
+    pub fn kind(&self) -> ObjectKind {
+        self.class
+            .as_ref()
+            .map_or(ObjectKind::Dict, |class| class.kind)
+    }
+
+    /// Whether these entries are a custom object's attributes.
+    #[must_use]
+    pub fn is_custom_object(&self) -> bool {
+        matches!(self.kind(), ObjectKind::CustomObject)
+    }
+
+    /// The identity of an [`ObjectKind::Opaque`] token, which a report cannot
+    /// show, `None` otherwise.
+    #[must_use]
+    pub fn opaque_identity(&self) -> Option<&str> {
+        self.class
+            .as_ref()
+            .filter(|class| class.kind == ObjectKind::Opaque)
+            .map(|class| class.identity.as_ref())
+    }
+
+    /// The identity of any token: [`Object::opaque_identity`], or a
+    /// [`ObjectKind::Cycle`] token's.
+    #[must_use]
+    pub fn token_identity(&self) -> Option<&str> {
+        self.opaque_identity().or_else(|| {
+            self.class
+                .as_ref()
+                .filter(|class| class.kind == ObjectKind::Cycle)
+                .map(|class| class.identity.as_ref())
+        })
+    }
+
+    /// The custom object's [`ObjectLengths`], the default for anything else.
+    #[must_use]
+    pub fn lengths(&self) -> ObjectLengths {
+        self.class
+            .as_ref()
+            .map_or_else(ObjectLengths::default, |class| class.lengths)
     }
 
     /// Returns the value for `key`, or `None` if the object has no such key.
@@ -2029,17 +2305,168 @@ impl Builder {
     }
 
     /// [`Builder::object_with_keys`], additionally attaching a `dict`
-    /// subclass name (`None` for the exact base type) — the entry point
-    /// `onix-py`'s converter uses for every `dict` subclass, whether or not
-    /// its keys are all `str`, see [`Object::with_type_name`] and the module
-    /// documentation's "Subclasses" section.
+    /// subclass's `(name, identity)` (`None` for the exact base `dict`) — the
+    /// entry point `onix-py`'s converter uses for every `dict` subclass,
+    /// whether or not its keys are all `str`. See [`Object::with_dict_class`]
+    /// for the name-versus-identity split and the module documentation's
+    /// "Subclasses" section.
     #[must_use]
-    pub fn object_with_keys_and_type_name(
+    pub fn object_with_keys_and_class(
         &mut self,
         entries: Vec<(ObjectKey, Value)>,
-        type_name: Option<Arc<str>>,
+        class: Option<(Arc<str>, Arc<str>)>,
     ) -> Value {
-        Value::Object(Object::from_pairs(entries).with_type_name(type_name))
+        Value::Object(Object::from_pairs(entries).with_dict_class(class))
+    }
+
+    /// Builds a custom object [`Value`] from its attribute `entries` (all
+    /// `str`-keyed), with the class parts [`Object::into_class`] takes — see
+    /// [`ObjectKind::CustomObject`] and [`Object::same_class`].
+    #[must_use]
+    pub fn custom_object(
+        &mut self,
+        entries: Vec<(ObjectKey, Value)>,
+        name: Arc<str>,
+        identity: Arc<str>,
+        lengths: ObjectLengths,
+        class_attributes: Vec<Arc<str>>,
+        instance: Option<usize>,
+    ) -> Value {
+        Value::Object(Object::from_pairs(entries).into_class(
+            ObjectKind::CustomObject,
+            name,
+            identity,
+            lengths,
+            class_attributes,
+            instance,
+        ))
+    }
+
+    /// Builds an [`ObjectKind::Opaque`] token for a value of type `name` whose
+    /// Python object is identified by `identity`.
+    #[must_use]
+    pub fn opaque(&mut self, name: Arc<str>, identity: Arc<str>) -> Value {
+        Value::Object(Object::from_pairs(Vec::new()).into_class(
+            ObjectKind::Opaque,
+            name,
+            identity,
+            ObjectLengths::default(),
+            Vec::new(),
+            None,
+        ))
+    }
+
+    /// Builds an [`ObjectKind::Failed`] object of type `name` from its instance
+    /// `__dict__` `entries`, for the Python object at `instance` identified by
+    /// `identity`.
+    #[must_use]
+    pub fn failed_object(
+        &mut self,
+        entries: Vec<(ObjectKey, Value)>,
+        name: Arc<str>,
+        identity: Arc<str>,
+        instance: usize,
+    ) -> Value {
+        Value::Object(Object::from_pairs(entries).into_class(
+            ObjectKind::Failed,
+            name,
+            identity,
+            ObjectLengths::default(),
+            Vec::new(),
+            Some(instance),
+        ))
+    }
+
+    /// Builds an [`ObjectKind::Cycle`] token for the object of type `name`
+    /// identified by `identity`.
+    #[must_use]
+    pub fn cycle(&mut self, name: Arc<str>, identity: Arc<str>) -> Value {
+        Value::Object(Object::from_pairs(Vec::new()).into_class(
+            ObjectKind::Cycle,
+            name,
+            identity,
+            ObjectLengths::default(),
+            Vec::new(),
+            None,
+        ))
+    }
+}
+
+/// A copy of `value` as a report shows it: every custom object's class
+/// attributes left out, at any depth, as `DeepDiff`'s whole-object render leaves them out.
+///
+/// Recurses natively over `value`'s nesting; a caller runs a deep value on a
+/// sized stack.
+///
+/// # Errors
+///
+/// Returns every opaque token left in the render, in render order.
+pub fn rendered(value: &Value) -> Result<Value, Vec<Unrendered>> {
+    let mut unrendered = Vec::new();
+    let rendered = rendered_at(value, &mut Vec::new(), &mut unrendered);
+    if unrendered.is_empty() {
+        Ok(rendered)
+    } else {
+        Err(unrendered)
+    }
+}
+
+/// An opaque token a report would have to show: its path below the rendered
+/// value, its type name and its identity.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Unrendered {
+    /// The token's path below the rendered value.
+    pub path: Vec<PathSegment>,
+    /// The type name of the value the token stands for.
+    pub type_name: String,
+    /// The token's identity.
+    pub identity: String,
+}
+
+fn rendered_at(
+    value: &Value,
+    path: &mut Vec<PathSegment>,
+    unrendered: &mut Vec<Unrendered>,
+) -> Value {
+    let (items, tuple) = match value {
+        Value::Object(map) => {
+            if let Some(identity) = map.opaque_identity() {
+                unrendered.push(Unrendered {
+                    path: path.clone(),
+                    type_name: map.type_name().unwrap_or_default().to_string(),
+                    identity: identity.to_string(),
+                });
+                return value.clone();
+            }
+            let mut kept = Vec::with_capacity(map.entries.len());
+            for (key, child) in map {
+                if map.is_class_attribute(key) {
+                    continue;
+                }
+                path.push(entry_path_segment(map.kind(), key));
+                kept.push((key.clone(), rendered_at(child, path, unrendered)));
+                path.pop();
+            }
+            return Value::Object(Object {
+                entries: kept.into_boxed_slice(),
+                class: map.class.clone(),
+            });
+        }
+        Value::Array(items) => (items, false),
+        Value::Tuple(items) => (items, true),
+        other => return other.clone(),
+    };
+    let mut kept = Vec::with_capacity(items.inner.len());
+    for (index, child) in items.inner.iter().enumerate() {
+        path.push(PathSegment::Index(index));
+        kept.push(rendered_at(child, path, unrendered));
+        path.pop();
+    }
+    let items = Typed::with_class_name(kept.into_boxed_slice(), items.class_name.clone());
+    if tuple {
+        Value::Tuple(items)
+    } else {
+        Value::Array(items)
     }
 }
 

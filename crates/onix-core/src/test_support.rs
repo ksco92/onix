@@ -124,6 +124,37 @@ pub(crate) fn cobj(map: &serde_json::Map<String, serde_json::Value>) -> Object {
     )
 }
 
+/// Compact custom-object [`Value`] from a `serde_json` map of attributes and
+/// a class name — the shape a JSON literal cannot express (an instance of a
+/// user-defined class, diffed by its attributes). See
+/// [`crate::value::ObjectKind::CustomObject`].
+pub(crate) fn ccustom(class: &str, map: &serde_json::Map<String, serde_json::Value>) -> Value {
+    // The class name doubles as its identity; `ccustom_id` sets a distinct one.
+    ccustom_id(class, class, map)
+}
+
+/// [`ccustom`] with an explicit `identity` distinct from the render
+/// `class` name — for pinning that two objects sharing a `__name__` but not an
+/// identity (a different class object, or a `dict` subclass versus an object) are a
+/// `type_changes`, never equal. See [`crate::value::Object::same_class`].
+pub(crate) fn ccustom_id(
+    class: &str,
+    identity: &str,
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Value {
+    Value::Object(cobj(map).into_class(
+        crate::value::ObjectKind::CustomObject,
+        std::sync::Arc::from(class),
+        std::sync::Arc::from(identity),
+        crate::value::ObjectLengths {
+            dict_len: map.len(),
+            ..Default::default()
+        },
+        Vec::new(),
+        None,
+    ))
+}
+
 /// Compact [`Number`] from a `serde_json` number.
 pub(crate) fn cnum(n: &serde_json::Number) -> Number {
     if let Some(u) = n.as_u64() {

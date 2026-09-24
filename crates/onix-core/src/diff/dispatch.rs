@@ -6,7 +6,7 @@
 //! See the parent `diff` module's doc for the full recursion-depth hardening
 //! (its "Hardening" section) this file implements.
 
-use crate::value::{Object, Value, class_name};
+use crate::value::{Object, ObjectKind, Value, same_class};
 
 use crate::error::Error;
 use crate::ignore_order::IgnoreOrderMemo;
@@ -17,18 +17,6 @@ use super::{
     DiffOptions, array_diff, datetime_diff, numeric_diff, object_diff, scalar_diff, set_diff,
     type_change_report,
 };
-
-/// Whether `a` and `b` — already known to be the same [`Value`] variant —
-/// carry different subclass names, per [`class_name`]. `diff_at` checks
-/// this before recursing into any of the eight variants that can carry one
-/// (`DateTime`, `Date`, `Time`, `TimeDelta`, `Array`, `Tuple`,
-/// `Set`/`FrozenSet`, `Object`): a mismatch means `DeepDiff` would report
-/// `type_changes` here even though the values are the same JSON-ish shape —
-/// see [`crate::value::Typed`]'s doc for why (and why every other matching
-/// identity in the crate stays class-agnostic instead).
-fn same_class(a: &Value, b: &Value) -> bool {
-    class_name(a) == class_name(b)
-}
 
 /// The recursive core of [`diff_with_max_depth()`](super::diff_with_max_depth): identical dispatch, but
 /// carrying the path and depth accumulated so far, so that nested findings
@@ -118,11 +106,58 @@ pub(crate) fn diff_at(
                 type_change_report(path, a, b, depth, opts.max_depth)
             }
         }
-        (Value::Object(old), Value::Object(new)) => {
+        (Value::Object(old), Value::Object(new))
+            if old.kind() == ObjectKind::Dict && new.kind() == ObjectKind::Dict =>
+        {
             if same_class(a, b) {
                 object_diff(path, old, new, depth, opts, memo)
             } else {
                 type_change_report(path, a, b, depth, opts.max_depth)
+            }
+        }
+        (Value::Object(_), _) | (_, Value::Object(_)) => {
+            object_pair_diff(path, a, b, depth, opts, memo)
+        }
+        _ => type_change_report(path, a, b, depth, opts.max_depth),
+    }
+}
+
+/// [`diff_at`] for a pair with a custom object or token on either side, kept
+/// off its frame: nothing for a pair [`IgnoreOrderMemo::skips`], a resolved
+/// token's value through [`diff_at`] again, a finding carrying a failed
+/// object's token where a walk meets it, else the object walk or a
+/// `type_changes`.
+#[inline(never)]
+fn object_pair_diff(
+    path: &mut Vec<PathSegment>,
+    a: &Value,
+    b: &Value,
+    depth: usize,
+    opts: &DiffOptions,
+    memo: &IgnoreOrderMemo,
+) -> Result<Report, Error> {
+    if IgnoreOrderMemo::skips(a, b) {
+        return Ok(Report::new());
+    }
+    let resolved_a = memo.resolve(a, b, false);
+    let resolved_b = memo.resolve(b, resolved_a.as_deref().unwrap_or(a), false);
+    if resolved_a.is_some() || resolved_b.is_some() {
+        let a = resolved_a.as_deref().unwrap_or(a);
+        let b = resolved_b.as_deref().unwrap_or(b);
+        return diff_at(path, a, b, depth, opts, memo);
+    }
+    match (a, b) {
+        (Value::Object(old), Value::Object(new)) if same_class(a, b) => {
+            match (old.failure_token(), new.failure_token()) {
+                (None, None) => object_diff(path, old, new, depth, opts, memo),
+                (old_token, new_token) => scalar_diff(
+                    path,
+                    false,
+                    old_token.as_ref().unwrap_or(a),
+                    new_token.as_ref().unwrap_or(b),
+                    depth,
+                    opts.max_depth,
+                ),
             }
         }
         _ => type_change_report(path, a, b, depth, opts.max_depth),

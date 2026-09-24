@@ -1,11 +1,13 @@
 """Differential fuzz test: onix's Python bindings vs real DeepDiff on live objects.
 
 Runs through `deepdiff_rs.DeepDiff`, exercising the Python-object-to-`Value`
-conversion layer. Twelve batches of seeded cases run twice (ordered and
-`ignore_order=True`), comparing `to_json()` (parsed) and `to_dict()`. The
-big-integer batch (issue #65) draws its big ints as bare scalars only, never
-inside a tuple/set, so it stays on the arbitrary-precision property under
-test rather than surfacing the pre-existing container-hashing divergence a
+conversion layer. Fifteen batches of seeded cases run twice (ordered and
+`ignore_order=True`), comparing `to_json()` (parsed) and `to_dict()`; the
+custom-object batch compares `to_json()` alone and the enum and class-attribute
+batches the report structure alone, since DeepDiff renders a whole object from
+other views. The big-integer batch (issue #65) draws its big ints as bare scalars
+only, never inside a tuple/set, so it stays on the arbitrary-precision property
+under test rather than surfacing the pre-existing container-hashing divergence a
 biased alphabet inside a hashable container would otherwise trigger.
 """
 
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import collections
 import datetime
+import enum
 import json
 import random
 import time
@@ -444,6 +447,7 @@ def _run_batch(
     calendar: bool = False,
     dict_keys: bool = False,
     case_fn: Callable[[int], tuple[JsonValue, JsonValue]] | None = None,
+    diverge_fn: Callable[[JsonValue, JsonValue, bool], tuple[JsonValue, JsonValue] | None] = _diverges,
 ) -> list[tuple[int, bool, JsonValue, JsonValue, JsonValue, JsonValue]]:
     """Run one batch of seeded cases through both engines, ordered and `ignore_order`."""
     build_case = case_fn or (
@@ -455,7 +459,7 @@ def _run_batch(
         a, b = build_case(seed)
 
         for ignore_order in (False, True):
-            divergence = _diverges(a, b, ignore_order)
+            divergence = diverge_fn(a, b, ignore_order)
 
             if divergence is not None:
                 expected, actual = divergence
@@ -1294,4 +1298,208 @@ def test_differential_fuzz_with_surrogate_strings_matches_real_deepdiff() -> Non
     assert not mismatches, (
         f"{len(mismatches)} of {SEED_COUNT} surrogate-string fuzz cases diverged from "
         f"real DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+# The custom-object batches (issue #66) draw attribute values from bare
+# scalars, nested objects, lists and dicts, never a tuple or set, to stay off
+# the container-hashing divergence.
+OBJECT_SEED_BASE: Final[int] = 12_000_000
+ENUM_OBJECT_SEED_BASE: Final[int] = 13_000_000
+CLASS_ATTRIBUTE_SEED_BASE: Final[int] = 14_000_000
+_OBJECT_ATTR_NAMES: Final[list[str]] = ["p", "q", "r", "s"]
+
+
+def _set_attributes(self: object, **attrs: object) -> None:
+    """Set each keyword argument as an attribute: the shared constructor of the object batch's classes."""
+    for key, value in attrs.items():
+        setattr(self, key, value)
+
+
+class _Shade(enum.Enum):
+    RED = 1
+    GREEN = 2
+    BLUE = "blue"
+
+
+_OBJECT_CLASSES: Final[list[type]] = [
+    type(name, (), {"__init__": _set_attributes}) for name in ("_Obj1", "_Obj2", "_Obj3")
+]
+
+
+def _gen_object_attr(rng: random.Random, depth: int) -> object:
+    """Generate one attribute value: a scalar, or with depth budget a nested object, list or dict."""
+    roll = rng.random()
+    if depth > 0 and roll < 0.12:
+        return _gen_object(rng, depth - 1)
+    if depth > 0 and roll < 0.24:
+        return [_gen_object_attr(rng, depth - 1) for _ in range(rng.randint(0, 3))]
+    if depth > 0 and roll < 0.34:
+        return {
+            key: _gen_object_attr(rng, depth - 1)
+            for key in rng.sample(DICT_KEYS, rng.randint(0, 2))
+        }
+    return _gen_scalar(rng)
+
+
+def _gen_object(rng: random.Random, depth: int) -> object:
+    """Generate one instance of a random pool class with a random subset of attributes."""
+    cls = rng.choice(_OBJECT_CLASSES)
+    names = rng.sample(_OBJECT_ATTR_NAMES, rng.randint(0, len(_OBJECT_ATTR_NAMES)))
+    return cls(**{name: _gen_object_attr(rng, depth) for name in names})
+
+
+def _gen_object_top(rng: random.Random, depth: int) -> object:
+    """Generate a top-level value: a bare object, or a list, dict or tuple of them."""
+    roll = rng.random()
+    if roll < 0.55 or depth <= 0:
+        return _gen_object(rng, depth)
+    if roll < 0.75:
+        return [_gen_object_top(rng, depth - 1) for _ in range(rng.randint(0, 4))]
+    if roll < 0.9:
+        return {key: _gen_object_top(rng, depth - 1) for key in rng.sample(DICT_KEYS, rng.randint(0, 3))}
+    return tuple(_gen_object_top(rng, depth - 1) for _ in range(rng.randint(0, 3)))
+
+
+def _mutate_object(rng: random.Random, obj: object) -> object:
+    """Rebuild `obj` with attributes changed, added or removed, or its class swapped."""
+    cls = rng.choice(_OBJECT_CLASSES) if rng.random() < 0.15 else type(obj)
+    attrs = dict(vars(obj))
+    if attrs and rng.random() < 0.3:
+        del attrs[rng.choice(list(attrs))]
+    if rng.random() < 0.3:
+        attrs[rng.choice(_OBJECT_ATTR_NAMES)] = _gen_scalar(rng)
+    for key in list(attrs):
+        if rng.random() < 0.4:
+            attrs[key] = _mutate_object_value(rng, attrs[key])
+    return cls(**attrs)
+
+
+def _mutate_object_value(rng: random.Random, value: object) -> object:
+    """Recursively mutate a value drawn from the object batch."""
+    if isinstance(value, tuple(_OBJECT_CLASSES)):
+        return _mutate_object(rng, value)
+    if isinstance(value, list):
+        shuffled = list(value)
+        rng.shuffle(shuffled)
+        return [_mutate_object_value(rng, item) for item in shuffled]
+    if isinstance(value, dict):
+        return {key: _mutate_object_value(rng, item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_mutate_object_value(rng, item) for item in value)
+    return _gen_scalar(rng) if rng.random() < 0.5 else value
+
+
+def _generate_object_case(seed: int) -> tuple[object, object]:
+    """Generate one custom-object case: a graph and a mutation of it, or an unrelated graph."""
+    rng = random.Random(seed)
+    a = _gen_object_top(rng, 3)
+    b = _mutate_object_value(rng, a) if rng.random() < 0.9 else _gen_object_top(rng, 3)
+    return a, b
+
+
+def _object_diverges(a: object, b: object, ignore_order: bool) -> tuple[object, object] | None:
+    """Diff `a`/`b` with both engines and return both parsed `to_json()` reports if they disagree."""
+    expected = json.loads(RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2).to_json())
+    actual = json.loads(OnixDeepDiff(a, b, ignore_order=ignore_order).to_json())
+    return None if expected == actual else (expected, actual)
+
+
+def test_differential_fuzz_with_custom_objects_matches_real_deepdiff() -> None:
+    """Runs a SEED_COUNT-case batch of custom-object graphs, ordered and ignore_order=True (issue #66)."""
+    seeds = range(OBJECT_SEED_BASE, OBJECT_SEED_BASE + SEED_COUNT)
+    mismatches = _run_batch(seeds, case_fn=_generate_object_case, diverge_fn=_object_diverges)
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} custom-object fuzz cases diverged from real "
+        f"DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+def _gen_enum_object_item(rng: random.Random) -> object:
+    """Generate a bare Enum member, or a pool-class instance whose attributes are bare scalars or members."""
+    if rng.random() < 0.3:
+        return rng.choice(list(_Shade))
+    names = rng.sample(_OBJECT_ATTR_NAMES, rng.randint(0, len(_OBJECT_ATTR_NAMES)))
+    return rng.choice(_OBJECT_CLASSES)(
+        **{name: rng.choice(list(_Shade)) if rng.random() < 0.4 else _gen_scalar(rng) for name in names}
+    )
+
+
+def _generate_enum_object_case(seed: int) -> tuple[list[object], list[object]]:
+    """Generate a list of objects and Enum members, and a copy with items replaced, dropped or added."""
+    rng = random.Random(seed)
+    a = [_gen_enum_object_item(rng) for _ in range(rng.randint(0, 5))]
+    b = [item if rng.random() < 0.5 else _gen_enum_object_item(rng) for item in a if rng.random() < 0.9]
+    b += [_gen_enum_object_item(rng) for _ in range(rng.randint(0, 2))]
+    rng.shuffle(b)
+    return a, b
+
+
+def _type_name(value: object) -> object:
+    """A `type_changes` type as its name: DeepDiff reports the type, onix the name."""
+    return getattr(value, "__name__", value)
+
+
+def _report_structure(report: dict) -> dict[str, object]:
+    """A `to_dict()` report reduced to its categories, paths and `type_changes` type names."""
+    return {
+        category: sorted(
+            (path, _type_name(entry["old_type"]), _type_name(entry["new_type"])) for path, entry in entries.items()
+        )
+        if category == "type_changes"
+        else sorted(entries)
+        for category, entries in report.items()
+    }
+
+
+def _structure_diverges(a: object, b: object, ignore_order: bool) -> tuple[object, object] | None:
+    """Diff `a`/`b` with both engines and return both report structures if they disagree."""
+    expected = _report_structure(RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2).to_dict())
+    actual = _report_structure(OnixDeepDiff(a, b, ignore_order=ignore_order).to_dict())
+    return None if expected == actual else (expected, actual)
+
+
+def test_differential_fuzz_with_enum_members_and_objects_matches_real_deepdiff() -> None:
+    """Runs a SEED_COUNT-case batch of lists mixing objects and Enum members, ordered and ignore_order=True."""
+    seeds = range(ENUM_OBJECT_SEED_BASE, ENUM_OBJECT_SEED_BASE + SEED_COUNT)
+    mismatches = _run_batch(seeds, case_fn=_generate_enum_object_case, diverge_fn=_structure_diverges)
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} enum-and-object fuzz cases diverged from real "
+        f"DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+_DEFAULT_CLASSES: Final[list[type]] = [
+    type(f"_Default{i}", (), {"d": default, "__init__": _set_attributes})
+    for i, default in enumerate([1, "a", [1, 2], {"k": 1}])
+]
+
+
+def _gen_default_item(rng: random.Random) -> object:
+    """Generate an instance of a class with a `d` default, shadowing it half the time."""
+    attrs: dict[str, object] = {"x": rng.randint(0, 3)}
+    if rng.random() < 0.5:
+        attrs["d"] = rng.choice([1, 2, "a", "b", [1, 2], [1, 3], {"k": 1}, {"k": 2}])
+    return rng.choice(_DEFAULT_CLASSES)(**attrs)
+
+
+def _generate_class_attribute_case(seed: int) -> tuple[list[object], list[object]]:
+    """Generate two lists of instances whose class-attribute defaults are shadowed or shared."""
+    rng = random.Random(seed)
+    return (
+        [_gen_default_item(rng) for _ in range(rng.randint(0, 4))],
+        [_gen_default_item(rng) for _ in range(rng.randint(0, 4))],
+    )
+
+
+def test_differential_fuzz_with_class_attribute_defaults_matches_real_deepdiff() -> None:
+    """Runs a SEED_COUNT-case batch of instances shadowing or sharing class defaults, ordered and ignore_order=True."""
+    seeds = range(CLASS_ATTRIBUTE_SEED_BASE, CLASS_ATTRIBUTE_SEED_BASE + SEED_COUNT)
+    mismatches = _run_batch(seeds, case_fn=_generate_class_attribute_case, diverge_fn=_structure_diverges)
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} class-attribute fuzz cases diverged from real "
+        f"DeepDiff (showing up to 3): {mismatches[:3]}"
     )

@@ -130,6 +130,9 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use crate::diff::{Resolution, Resolver};
+use crate::value::Value;
+
 use super::fxhash::HashMap;
 use super::hash::{
     DistKey, ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId,
@@ -161,10 +164,14 @@ type DistanceKey = (DistKey, DistKey);
 /// that is an integer beyond `i128` is keyed by an [`ItemKey::BigInt`] (in the
 /// `cache`'s `DistKey`s and, when a set member, in `member_content`), hashed
 /// and compared by its magnitude at `O(digit length)` — a per-lookup cost the
-/// element-count bounds above do not cap (see `super::fxhash`'s doc).
+/// element-count bounds above do not cap (see `super::fxhash`'s doc). A custom
+/// object keys as an [`ItemKey::Object`] and is memoized like a `dict` (see
+/// [`is_container`]); an opaque token keys as an `ItemKey::Opaque` and is
+/// never memoized. `super::fxhash`'s doc states both per-lookup costs.
 ///
 /// [`rough_distance`]: super::distance::rough_distance
-pub(crate) struct IgnoreOrderMemo {
+/// [`is_container`]: super::memo::is_container
+pub(crate) struct IgnoreOrderMemo<'r> {
     cache: RefCell<HashMap<DistanceKey, f64>>,
     /// Interns each distinct hashable-tuple identity to its place in
     /// `tuple_digests`, so a nested tuple can be named by one [`TupleId`]
@@ -197,6 +204,10 @@ pub(crate) struct IgnoreOrderMemo {
     /// keyed by each of the dict's own keys' `ItemKey` trees (a `tuple`
     /// dict key included), not a cheap string ordering.
     member_content: RefCell<BTreeMap<MemberContent, RepId>>,
+    /// The caller's resolver (see [`crate::diff::diff_with_resolver`]), and
+    /// what it returned for each token identity it was called with.
+    resolver: RefCell<Option<&'r mut Resolver<'r>>>,
+    resolutions: RefCell<BTreeMap<Box<str>, Option<Resolution<'r>>>>,
     enabled: bool,
     /// Total number of times [`Self::put`] has actually run — every distance
     /// *recomputation*, not just the distinct entries it leaves behind (a
@@ -209,7 +220,7 @@ pub(crate) struct IgnoreOrderMemo {
     puts: std::cell::Cell<usize>,
 }
 
-impl IgnoreOrderMemo {
+impl<'r> IgnoreOrderMemo<'r> {
     /// A live cache (production path).
     pub(crate) fn new() -> Self {
         Self {
@@ -218,6 +229,8 @@ impl IgnoreOrderMemo {
             tuple_digests: RefCell::new(Vec::new()),
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),
+            resolver: RefCell::new(None),
+            resolutions: RefCell::new(BTreeMap::new()),
             enabled: true,
             #[cfg(test)]
             puts: std::cell::Cell::new(0),
@@ -235,9 +248,63 @@ impl IgnoreOrderMemo {
             tuple_digests: RefCell::new(Vec::new()),
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),
+            resolver: RefCell::new(None),
+            resolutions: RefCell::new(BTreeMap::new()),
             enabled: false,
             puts: std::cell::Cell::new(0),
         }
+    }
+
+    /// A live memo that compares a token as the value `resolver` returns for
+    /// it.
+    pub(crate) fn with_resolver(resolver: &'r mut Resolver<'r>) -> Self {
+        IgnoreOrderMemo {
+            resolver: RefCell::new(Some(resolver)),
+            ..IgnoreOrderMemo::new()
+        }
+    }
+
+    /// Whether the pair `(a, b)` reports nothing without a walk: the identical
+    /// Python object on both sides, or a cycle token on the first, as
+    /// `DeepDiff`'s `t1 is t2` and `parents_ids` checks skip them.
+    pub(crate) fn skips(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Object(x), Value::Object(y)) if x.same_instance(y) => true,
+            (Value::Object(x), _) => x.is_cycle(),
+            _ => false,
+        }
+    }
+
+    /// The value the diff compares in place of the token `value` against
+    /// `other`, `None` when `value` is not a token or stays one. A cycle token
+    /// resolves only against an object of the class it points back at, unless
+    /// `any_other` is set.
+    pub(crate) fn resolve(
+        &self,
+        value: &Value,
+        other: &Value,
+        any_other: bool,
+    ) -> Option<Resolution<'r>> {
+        let Value::Object(token) = value else {
+            return None;
+        };
+        let identity = token.token_identity()?;
+        let known = self.resolutions.borrow().get(identity).cloned();
+        let resolution = known.unwrap_or_else(|| {
+            let resolution = self
+                .resolver
+                .borrow_mut()
+                .as_mut()
+                .and_then(|resolver| resolver(identity));
+            self.resolutions
+                .borrow_mut()
+                .insert(Box::from(identity), resolution.clone());
+            resolution
+        })?;
+        if token.is_cycle() && !any_other && !crate::value::same_class(&resolution, other) {
+            return None;
+        }
+        Some(resolution)
     }
 
     /// Whether distance memoization is live for this run. A candidate pair is
@@ -356,9 +423,12 @@ impl IgnoreOrderMemo {
     }
 }
 
-/// Whether `key` is a container (list/tuple/dict) rather than a scalar — the
-/// variants whose distance is computed by a recursive trial diff, and so the
-/// only ones worth memoizing.
+/// Whether `key` is a container (list/tuple/dict/custom object) rather than a
+/// scalar — the variants whose distance is computed by a recursive trial
+/// diff, and so the only ones worth memoizing.
 pub(crate) fn is_container(key: &ItemKey) -> bool {
-    matches!(key, ItemKey::List(_) | ItemKey::Tuple(_) | ItemKey::Dict(_))
+    matches!(
+        key,
+        ItemKey::List(_) | ItemKey::Tuple(_) | ItemKey::Dict(_) | ItemKey::Object(..)
+    )
 }

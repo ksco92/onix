@@ -1,0 +1,16 @@
+{
+  "values_changed": {
+    "root.name": {
+      "new_value": "EARTH",
+      "old_value": "MERCURY"
+    },
+    "root.value[0]": {
+      "new_value": 5.976e+24,
+      "old_value": 3.303e+23
+    },
+    "root.value[1]": {
+      "new_value": 6378140.0,
+      "old_value": 2439700.0
+    }
+  }
+}

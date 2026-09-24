@@ -1,0 +1,14 @@
+{
+  "$object": {
+    "attrs": {
+      "name": "MERCURY",
+      "value": {
+        "$tuple": [
+          3.303e+23,
+          2439700.0
+        ]
+      }
+    },
+    "class": "Planet"
+  }
+}

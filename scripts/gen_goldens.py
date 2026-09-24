@@ -37,6 +37,7 @@ See ``tests/golden/README.md`` for the pinned versions and any documented,
 out-of-scope DeepDiff quirk excluded from this corpus.
 """
 
+import enum
 import json
 import random
 import unicodedata
@@ -45,9 +46,31 @@ from pathlib import Path
 from typing import Final
 
 from deepdiff import DeepDiff
-from golden_tags import TaggedValue, canonical_report, decode_tags, encode_tags
+from golden_tags import (
+    GoldenEnum,
+    GoldenObject,
+    TaggedValue,
+    canonical_report,
+    decode_tags,
+    encode_tags,
+)
 
 UTC: Final[timezone] = timezone.utc
+
+
+class Planet(enum.Enum):
+    MERCURY = (3.303e23, 2.4397e6)
+    EARTH = (5.976e24, 6.37814e6)
+
+    def __init__(self, mass: float, radius: float) -> None:
+        self.mass = mass
+        self.radius = radius
+
+    @property
+    def surface_gravity(self) -> float:
+        return self.mass / (self.radius**2)
+
+
 PLUS_TWO: Final[timezone] = timezone(timedelta(hours=2))
 MINUS_FIVE: Final[timezone] = timezone(timedelta(hours=-5))
 # An offset that is not a whole number of minutes, which widens `isoformat()`'s
@@ -800,6 +823,52 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
         "\n".join(["P"] * 200 + ["u%d" % i for i in range(50)] + ["tail_a"]),
         "\n".join(["head_b"] + ["P"] * 200 + ["u%d" % i for i in range(50)]),
     ),
+    # Custom objects (issue #66): diffed by their attributes, matching
+    # DeepDiff's `_diff_obj`. `A`/`B`/`Inner`/`Outer` are plain
+    # attribute-only classes (see `golden_tags.GoldenObject`), so their
+    # enumerated attributes are exactly their `__dict__`.
+    "object_attribute_changed": (
+        GoldenObject("A", {"x": 1, "y": 2}),
+        GoldenObject("A", {"x": 1, "y": 3}),
+    ),
+    "object_attribute_added_and_removed": (
+        GoldenObject("A", {"x": 1, "y": 2}),
+        GoldenObject("A", {"x": 1, "z": 9}),
+    ),
+    "object_type_change_between_classes": (
+        GoldenObject("A", {"x": 1, "y": 2}),
+        GoldenObject("B", {"x": 1, "y": 2}),
+    ),
+    "object_vs_dict_is_a_type_change": (
+        GoldenObject("A", {"x": 1}),
+        {"x": 1},
+    ),
+    "object_nested_attribute_changed": (
+        GoldenObject("Outer", {"inner": GoldenObject("Inner", {"v": 1})}),
+        GoldenObject("Outer", {"inner": GoldenObject("Inner", {"v": 2})}),
+    ),
+    "object_inside_a_list": (
+        [GoldenObject("A", {"x": 1})],
+        [GoldenObject("A", {"x": 2})],
+    ),
+    "object_inside_a_dict": (
+        {"k": GoldenObject("A", {"x": 1})},
+        {"k": GoldenObject("A", {"x": 2})},
+    ),
+    "object_with_a_private_attribute_changed": (
+        GoldenObject("A", {"_x": 1, "value": 1}),
+        GoldenObject("A", {"_x": 2, "value": 1}),
+    ),
+    # An Enum member's own attributes and properties stay out: `_diff_enum`
+    # reads `name` and `value` only.
+    "object_enum_member_reports_name_and_value_only": (
+        GoldenEnum(Planet.MERCURY),
+        GoldenEnum(Planet.EARTH),
+    ),
+    "object_equal_reports_nothing": (
+        GoldenObject("A", {"x": 1, "y": 2}),
+        GoldenObject("A", {"x": 1, "y": 2}),
+    ),
 }
 
 
@@ -1392,6 +1461,28 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
         [{1.0: "a"}],
         {"ignore_order": True},
     ),
+    # Custom objects under ignore_order (issue #66): pairing uses DeepHash's
+    # class-tagged object hash and the distance function's object rules.
+    "ignore_order_object_reorder_plus_attribute_change": (
+        [GoldenObject("A", {"x": 1, "y": 1}), GoldenObject("A", {"x": 2, "y": 2})],
+        [GoldenObject("A", {"x": 2, "y": 2}), GoldenObject("A", {"x": 1, "y": 9})],
+        {"ignore_order": True},
+    ),
+    "ignore_order_object_added": (
+        [GoldenObject("A", {"x": 1, "y": 0})],
+        [GoldenObject("A", {"x": 1, "y": 0}), GoldenObject("A", {"x": 2, "y": 0})],
+        {"ignore_order": True},
+    ),
+    "ignore_order_object_different_classes": (
+        [GoldenObject("A", {"x": 1})],
+        [GoldenObject("B", {"x": 1})],
+        {"ignore_order": True},
+    ),
+    "ignore_order_object_pure_shuffle_is_empty": (
+        [GoldenObject("A", {"x": 1}), GoldenObject("A", {"x": 2})],
+        [GoldenObject("A", {"x": 2}), GoldenObject("A", {"x": 1})],
+        {"ignore_order": True},
+    ),
 }
 
 # Cases where real DeepDiff *raises* rather than returning a diff. Per the
@@ -1510,6 +1601,39 @@ def write_case_inputs(name: str, a: TaggedValue, b: TaggedValue, ignore_order: b
     return case_dir
 
 
+def _contains_object(value: TaggedValue) -> bool:
+    """
+    Whether `value` holds a :class:`GoldenObject` marker anywhere inside it.
+
+    :param value: A case input.
+    :return: ``True`` if a custom-object marker is present at any depth.
+    """
+    if isinstance(value, GoldenObject):
+        return True
+    if isinstance(value, dict):
+        return any(_contains_object(item) for item in value.values()) or any(
+            _contains_object(key) for key in value
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_contains_object(item) for item in value)
+    return False
+
+
+def _live(value: TaggedValue) -> TaggedValue:
+    """
+    A case input with its :class:`GoldenObject` markers turned into live custom
+    objects, so DeepDiff diffs them as the objects they stand for. A value with
+    no marker is returned unchanged (the round-trip is identity for every other
+    supported type, but is skipped anyway to keep the untouched cases exact).
+
+    :param value: A case input.
+    :return: The input with markers realized as live instances.
+    """
+    if isinstance(value, GoldenEnum):
+        return value.member
+    return decode_tags(encode_tags(value)) if _contains_object(value) else value
+
+
 def main() -> None:
     """Regenerate every case directory under tests/golden/ from every case dict above."""
     # Pinned to 3.14, Unicode 16.0.0; see tests/golden/README.md, Pinned versions.
@@ -1535,9 +1659,11 @@ def main() -> None:
     for name, (a, b, kwargs) in all_cases.items():
         case_dir = write_case_inputs(name, a, b, bool(kwargs.get("ignore_order", False)))
 
+        # A case holding a `GoldenObject` marker is diffed as the live custom
+        # object it stands for (see `golden_tags`), never the marker itself.
         write_json(
             case_dir / "expected.json",
-            canonical_report(DeepDiff(a, b, verbose_level=2, **kwargs)),
+            canonical_report(DeepDiff(_live(a), _live(b), verbose_level=2, **kwargs)),
         )
 
     for name, (a, b, kwargs, exception_name, onix_report) in DEEPDIFF_RAISES_CASES.items():

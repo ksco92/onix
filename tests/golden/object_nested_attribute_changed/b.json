@@ -1,0 +1,15 @@
+{
+  "$object": {
+    "attrs": {
+      "inner": {
+        "$object": {
+          "attrs": {
+            "v": 2
+          },
+          "class": "Inner"
+        }
+      }
+    },
+    "class": "Outer"
+  }
+}

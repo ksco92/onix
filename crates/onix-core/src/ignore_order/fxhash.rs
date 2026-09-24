@@ -79,6 +79,12 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// astronomically large integer costs its own digit length per hash and per
 /// comparison regardless of how few elements the diff holds.
 ///
+/// A custom object's [`ItemKey::Object`](super::hash::ItemKey) costs
+/// `ItemKey::Dict`'s full walk plus one class-name comparison; the class
+/// `__name__` tag keeps it apart from a `dict`, but same-named distinct classes
+/// share a bucket. An opaque token's `ItemKey::Opaque` costs one identity
+/// string comparison.
+///
 /// For those remaining `ignore_order`-only tables the trade is deliberate and
 /// measured. Re-keying them to `SipHash` (`RandomState`) added a material,
 /// measured double-digit-percentage per-call cost on the pairing-heavy

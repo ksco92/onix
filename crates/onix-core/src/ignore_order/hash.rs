@@ -11,7 +11,7 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 
 use crate::lcs::{ScalarKey, mix_float_bits, python_scalar_key};
-use crate::value::Value;
+use crate::value::{ObjectKind, Value};
 
 use super::IgnoreOrderMemo;
 use super::fxhash::HashMap;
@@ -132,6 +132,11 @@ fn hash_value<H: Hasher>(root: &Value, state: &mut H) {
             }
             Value::Object(map) => {
                 map.len().hash(state);
+                // Tags a custom object apart from a `dict` by kind and class
+                // `__name__`, as `ItemKey` does; two same-named distinct
+                // classes share this hash and are told apart by equality.
+                map.is_custom_object().hash(state);
+                map.type_name().hash(state);
                 // A `str` key carries the association and is hashed here
                 // directly, in sorted order; a non-`str` key's own `Value`
                 // is pushed onto the same work-stack the values use below,
@@ -273,6 +278,15 @@ pub(crate) enum ItemKey {
     /// runs on a value) and, via [`ItemKey::Str`]'s own WTF-8 bytes, a
     /// `str` key holding a lone surrogate code point too.
     Dict(BTreeMap<ItemKey, ItemKey>),
+    /// A custom object diffed by its attributes: keyed like [`ItemKey::Dict`]
+    /// but tagged by the class `__name__`, as `DeepHash._prep_obj` tags it, so
+    /// it never matches a `dict`; two distinct classes sharing a `__name__`
+    /// share the tag and match when their attributes do. Per-lookup cost is
+    /// [`ItemKey::Dict`]'s plus the one class-name string comparison.
+    Object(Box<str>, BTreeMap<ItemKey, ItemKey>),
+    /// An [`ObjectKind::Opaque`](crate::value::ObjectKind) token, keyed by the
+    /// identity of its Python object: one string comparison per lookup.
+    Opaque(Box<str>),
 }
 
 /// Hand-written to run the `Float` arm through [`mix_float_bits`] before
@@ -299,6 +313,11 @@ impl std::hash::Hash for ItemKey {
             Self::List(items) | Self::Set(items) | Self::FrozenSet(items) => items.hash(state),
             Self::Tuple(items) => items.hash(state),
             Self::Dict(map) => map.hash(state),
+            Self::Opaque(identity) => identity.hash(state),
+            Self::Object(class, map) => {
+                class.hash(state);
+                map.hash(state);
+            }
         }
     }
 }
@@ -807,14 +826,25 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
             ItemKey::FrozenSet(items.iter().map(|i| item_key(i, memo)).collect()),
             None,
         ),
-        Value::Object(map) => (
-            ItemKey::Dict(
-                map.iter()
-                    .map(|(k, v)| (object_key_item_key(k, memo), item_key(v, memo)))
-                    .collect(),
-            ),
-            None,
-        ),
+        Value::Object(map) => {
+            if let Some(identity) = map
+                .opaque_identity()
+                .filter(|_| map.kind() == ObjectKind::Opaque)
+            {
+                return (ItemKey::Opaque(Box::from(identity)), None);
+            }
+            let attrs = map
+                .iter()
+                .map(|(k, v)| (object_key_item_key(k, memo), item_key(v, memo)))
+                .collect();
+            // A `dict` subclass keys as a bare `dict`, as `DeepHash` digests it.
+            let key = if matches!(map.kind(), ObjectKind::CustomObject | ObjectKind::Failed) {
+                ItemKey::Object(Box::from(map.type_name().unwrap_or_default()), attrs)
+            } else {
+                ItemKey::Dict(attrs)
+            };
+            (key, None)
+        }
     }
 }
 

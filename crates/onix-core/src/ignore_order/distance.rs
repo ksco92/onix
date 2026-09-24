@@ -5,7 +5,7 @@
 //! (`super::hash`) at all — every function here operates directly on the
 //! crate's compact [`Value`].
 
-use crate::value::{Number, Object, ObjectKey, Value};
+use crate::value::{Number, Object, ObjectKey, ObjectKind, Value};
 
 use crate::diff::DiffOptions;
 
@@ -215,7 +215,14 @@ pub(crate) fn rough_length(value: &Value) -> usize {
         Value::Set(items) | Value::FrozenSet(items) => {
             1 + items.iter().map(rough_length).sum::<usize>()
         }
-        Value::Object(map) => 1 + map.values().map(|v| 1 + rough_length(v)).sum::<usize>(),
+        Value::Object(map) => {
+            1 + map.lengths().hidden_count
+                + map
+                    .iter()
+                    .filter(|(key, _)| !map.is_class_attribute(key))
+                    .map(|(_, v)| 1 + rough_length(v))
+                    .sum::<usize>()
+        }
     }
 }
 
@@ -247,7 +254,10 @@ pub(crate) fn item_length(value: &Value) -> usize {
         | Value::TimeDelta(_) => 1,
         Value::Array(items) | Value::Tuple(items) => items.iter().map(item_length).sum(),
         Value::Set(items) | Value::FrozenSet(items) => items.iter().map(item_length).sum(),
-        Value::Object(map) => item_length_of_map(map),
+        // `_get_item_length`'s `__dict__` branch counts a custom object's
+        // `__dict__` keys and never recurses into their values.
+        Value::Object(map) if map.kind() == ObjectKind::Dict => item_length_of_map(map),
+        Value::Object(map) => map.lengths().dict_len,
     }
 }
 
@@ -307,6 +317,16 @@ pub(crate) fn count_diff_leaves(
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
 ) -> usize {
+    if IgnoreOrderMemo::skips(a, b) {
+        return 0;
+    }
+    let resolved_a = memo.resolve(a, b, true);
+    let resolved_b = memo.resolve(b, resolved_a.as_deref().unwrap_or(a), true);
+    if resolved_a.is_some() || resolved_b.is_some() {
+        let a = resolved_a.as_deref().unwrap_or(a);
+        let b = resolved_b.as_deref().unwrap_or(b);
+        return count_diff_leaves(a, b, depth, opts, memo);
+    }
     match (a, b) {
         (Value::Null, Value::Null) => 0,
         (Value::Bool(x), Value::Bool(y)) => usize::from(x != y),
@@ -337,7 +357,15 @@ pub(crate) fn count_diff_leaves(
         (Value::Set(x), Value::Set(y)) | (Value::FrozenSet(x), Value::FrozenSet(y)) => {
             count_set_diff_leaves(x, y, memo)
         }
-        (Value::Object(x), Value::Object(y)) => count_object_diff_leaves(x, y, depth, opts, memo),
+        // Two objects of the *same* class ([`Object::same_class`], class
+        // identity plus kind) diff by their entries; a `dict` and a custom
+        // object, or two different classes, are a `type_changes` here exactly
+        // as `diff_at` treats them — so a candidate pair's distance reflects
+        // the whole-value change `DeepDiff` would report, not a spurious
+        // near-zero attribute diff.
+        (Value::Object(x), Value::Object(y)) if x.same_class(y) => {
+            count_object_diff_leaves(x, y, depth, opts, memo)
+        }
         _ => type_change_leaf_length(a, b),
     }
 }
@@ -359,10 +387,15 @@ pub(crate) fn count_diff_leaves(
 /// doc for the exact coercion matrix implemented and its documented,
 /// narrow scope.
 pub(crate) fn type_change_leaf_length(old_value: &Value, new_value: &Value) -> usize {
+    // `new_type`'s own length: an `Enum` class is iterable.
+    let type_len = match new_value {
+        Value::Object(map) => map.lengths().type_len,
+        _ => 1,
+    };
     if new_value_reproduced_by_coercion(old_value, new_value) {
-        1
+        type_len
     } else {
-        1 + item_length(new_value)
+        type_len + item_length(new_value)
     }
 }
 
@@ -901,7 +934,13 @@ pub(crate) fn count_object_diff_leaves(
     memo: &IgnoreOrderMemo,
 ) -> usize {
     if is_below_threshold_to_diff_deeper(a, b) {
-        return item_length_of_map(b);
+        // The collapse is one wholesale `values_changed` whose new value is
+        // the whole object `b` (see [`item_length`]).
+        return if b.is_custom_object() {
+            b.lengths().dict_len
+        } else {
+            item_length_of_map(b)
+        };
     }
 
     // Dispatched to a separate function, kept off this frame for the
