@@ -36,8 +36,12 @@ use super::{
 ///
 /// # Stack-footprint note
 ///
-/// The scalar-only branch's locals live in [`lcs_or_positional_array_diff`],
-/// not here, so this frame's size stays within the depth guard's budget — see `docs/design/depth-budget.md`.
+/// In an unoptimized build a function's stack frame is sized for every local
+/// it declares, so keeping the scalar-branch's two [`Report`] locals in
+/// `array_diff` would enlarge every frame of the nested-list recursion
+/// below. Keeping them in [`lcs_or_positional_array_diff`] instead is what
+/// lets `DEFAULT_MAX_DEPTH` traversal fit an ordinary 2 MiB thread — see
+/// `docs/design/depth-budget.md`.
 pub(crate) fn array_diff(
     path: &mut Vec<PathSegment>,
     a: &[Value],
