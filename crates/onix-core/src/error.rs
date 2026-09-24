@@ -5,30 +5,10 @@ use std::fmt;
 /// Errors that can occur while diffing two values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// Diffing `a`/`b` (without the two inputs resolving as fully equal
-    /// first) would need more native recursion than the configured maximum
-    /// depth allows ([`crate::diff::diff_with_max_depth`]'s `max_depth`,
-    /// default [`crate::diff::DEFAULT_MAX_DEPTH`]). This fires for either
-    /// of two related reasons, both measured against the *same* `max_depth`
-    /// budget so their native stack usage can never add up to more than
-    /// `max_depth` frames total (see
-    /// [`crate::diff::diff_with_max_depth`]'s doc for the exact contract):
-    ///
-    /// - the traversal itself would need to recurse past `max_depth` just
-    ///   to *reach* a difference, with no finding's value even in play yet,
-    ///   or
-    /// - a difference *was* reached, but the value it would record (added,
-    ///   removed, changed, or type-changed) is, combined with how deep its
-    ///   path already is, nested past the `max_depth` budget remaining at
-    ///   that path.
-    ///
-    /// This is a deliberate, safe stop either way: it replaces a stack
-    /// overflow (uncatchable, aborts the process) on adversarial
-    /// deeply-nested input with an ordinary, recoverable error. This bound
-    /// is temporary scaffolding — see
-    /// [`crate::diff::diff_with_max_depth`]'s doc for why: once the
-    /// recursive engine is replaced by an iterative work-stack, this
-    /// practical depth limit goes away entirely.
+    /// Diffing `a`/`b` would need more native recursion than the shared
+    /// `max_depth` budget allows — either the traversal itself, or a
+    /// found value's own nesting once combined with its path depth. See
+    /// `docs/design/depth-budget.md` for the exact budget rule.
     MaxDepthExceeded {
         /// The DeepDiff-style path (e.g. `"root['a']['b']"`) at which the
         /// bound was exceeded — either where the traversal gave up, or

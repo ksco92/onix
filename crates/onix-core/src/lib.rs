@@ -29,7 +29,7 @@ pub use value::{Builder, Number, Value};
 /// Whether `value` nests strictly deeper than `limit` levels (`value`
 /// itself is depth `0`). Iterative — an explicit heap work-stack, safe on
 /// any input depth — and returns as soon as one node past `limit` is
-/// seen. See [`diff_with_max_depth`]'s doc for the depth budget it backs.
+/// seen. See `docs/design/depth-budget.md` for the depth budget it backs.
 ///
 /// ```
 /// use onix_core::Value;

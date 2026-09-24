@@ -355,7 +355,7 @@ fn lcs_array_diff(
 /// exactly like [`object_diff`](super::object_diff)'s added/removed leaf clones: a surplus
 /// element can itself be an arbitrarily deep value, so the same combined
 /// path-depth-plus-value-depth budget applies here too (see
-/// [`diff_with_max_depth`](super::diff_with_max_depth)'s doc for the full contract).
+/// `docs/design/depth-budget.md` for the full contract).
 ///
 /// `path` is the single buffer shared across the whole traversal (see
 /// [`diff_at`]'s doc): each iteration below runs its work through

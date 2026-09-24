@@ -26,9 +26,9 @@ use super::{DiffOptions, check_map_depth, check_value_depth, diff_at, scoped};
 /// finding (via `array_diff`), all surface with their own deep path.
 ///
 /// This always recurses, even for a key whose value is unchanged — it does
-/// not re-check [`values_equal`](super::values_equal) per key. That single top-level check in
-/// [`diff_with_max_depth`](super::diff_with_max_depth) is enough for its documented guarantee (fully
-/// equal *whole* inputs never hit the bound); re-running it per key would
+/// not re-check [`values_equal`](super::values_equal) per key. That single top-level check is
+/// enough for the equal-inputs-of-any-depth guarantee (`docs/design/depth-budget.md`:
+/// fully equal *whole* inputs never hit the bound); re-running it per key would
 /// only rescue one specific edge case (an equal subtree nested arbitrarily
 /// deep under an unrelated shallow change) at the cost of an extra full
 /// subtree walk on every recursion step, and — because it can only be

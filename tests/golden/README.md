@@ -818,8 +818,8 @@ documented divergence, unchanged here.
   a vanishingly rare edge case. `crates/onix-core/tests/golden.rs` checks
   this case with its own dedicated test (no panic, valid `DeepDiff`-shaped
   output, onix's own deterministic survivor) instead of exact-matching
-  `expected.json`; see that test and `crate::report`'s module doc for the
-  full mechanics (structural- vs. rendered-path keying).
+  `expected.json`; see that test for the mechanics (structural- vs.
+  rendered-path keying, which `crate::report`'s module doc also states).
 
 - **`[1]` vs `[1.0]` inside a list diffs to nothing at all.** This is
   *not* a divergence — it is `DeepDiff`'s own real, faithfully-reproduced

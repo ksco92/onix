@@ -1,41 +1,9 @@
-//! The [`Report`] type: a DeepDiff-compatible diff result.
-//!
-//! `DeepDiff` groups findings into named categories (`values_changed`,
-//! `type_changes`, and others) keyed by path string within each
-//! category. `Report` mirrors that shape with one `BTreeMap` per category,
-//! which keeps output deterministic (sorted by path) without any extra
-//! sorting step. Empty categories are omitted from [`Report::to_json_value`],
-//! matching `DeepDiff`'s own `to_json()` behavior.
-//!
-//! # Structural keys, not rendered strings
-//!
-//! Each category is keyed by the *structural* path (`Vec<PathSegment>`) the
-//! traversal visited, not by [`render_path`]'s rendered `String`. This
-//! matters because [`render_path`]/[`crate::path::quote_key`] are **not** injective on
-//! adversarial input: a dict key whose own text happens to contain `']['`-
-//! shaped syntax can render identically to an unrelated, differently-nested
-//! path (confirmed against real `DeepDiff`, which has the same property —
-//! see `tests/golden/README.md`'s "known `DeepDiff` quirk" section for a
-//! worked example). Keying by the structural path instead means:
-//!
-//! - `insert_checked`'s duplicate-path guard only ever fires on a genuine
-//!   *engine* bug (the same node visited twice in one traversal) — never on
-//!   two legitimately different nodes whose rendered strings happen to
-//!   collide. The old string-keyed version could `debug_assert`-panic on
-//!   that legitimate input; that was the bug this module fixes.
-//! - The one-true-collision-handling step moves to serialization time:
-//!   [`Report::to_json_value`] renders each structural key and inserts into
-//!   a fresh per-category map, so two structural paths that render
-//!   identically collapse into a single JSON entry — the *same* outcome
-//!   `DeepDiff` itself has (its `to_json()` is also a string-keyed dict, so
-//!   a rendering collision collapses there too). Which of the colliding
-//!   findings survives is an internal, structural-order tie-break (see
-//!   [`PathSegment`]'s doc) that is not guaranteed to match `DeepDiff`'s own
-//!   (insertion-order-dependent) survivor choice on such input — an
-//!   accepted, documented divergence rather than a bug to chase, since
-//!   matching it would require threading original JSON key order through
-//!   the whole engine for a vanishingly rare edge case. See
-//!   `tests/golden/README.md`.
+//! The [`Report`] type: a DeepDiff-compatible diff result, one
+//! `BTreeMap` per finding category keyed by the *structural* path
+//! (`Vec<PathSegment>`) the traversal visited, not [`render_path`]'s
+//! rendered `String` (not injective on adversarial input). See
+//! `tests/golden/README.md`'s "Known `DeepDiff` quirks" section for the
+//! collision this avoids and its survivor rule.
 
 use std::collections::BTreeMap;
 
@@ -51,37 +19,13 @@ pub struct ValuesChangedEntry {
     pub old_value: Value,
     /// The value after the change.
     pub new_value: Value,
-    /// The *structural* path this finding would sit at if keyed by the
-    /// *new* value's position instead of the old one, when the two differ
-    /// — rendered to a string only at serialization (`to_json_value`) time.
-    ///
-    /// `DeepDiff` renders every finding's path from the *old* (`t1`) side by
-    /// default; at `verbose_level=2` it additionally reports `new_path`
-    /// whenever the new-side path would differ. This is `None` whenever old
-    /// and new paths coincide — a dict key never moves, and index-aligned
-    /// list comparison always pairs same-index elements. It becomes `Some`
-    /// for a
-    /// `values_changed`/`type_changes` pair matched by the list-LCS path
-    /// (see `docs/design/list-diff.md`) at two *different* absolute
-    /// indices, e.g. a value that shifted from index `5` to index `3`
-    /// because of an earlier insert/delete elsewhere in the same list.
-    ///
-    /// Kept as structural segments (not a pre-rendered `String`) so
-    /// `Report::retag_new_path` (crate-private) can *compose* more than one independent
-    /// index substitution (one per `ignore_order` list level a doubly- or
-    /// triply-nested pairing crosses) by mutating a single segment in
-    /// place, rather than needing to re-parse an already-rendered path
-    /// string — see that method's own doc for the case this fixes.
+    /// The *structural* path for the new value's position, when it
+    /// differs from the old one (only under list-LCS matching, see
+    /// `docs/design/list-diff.md`); `None` when they coincide.
     pub new_path: Option<Vec<PathSegment>>,
-    /// The unified diff `DeepDiff` attaches at `verbose_level=2` when both
-    /// values are strings and one of them contains a newline
-    /// (`_diff_str` -> `difflib.unified_diff`; the port lives in the
-    /// crate-private `unified_diff` module). `None` for every non-string
-    /// change and for a string change with no newline — and, deliberately,
-    /// for a `values_changed` produced by the `merge_mutual_add_removes`
-    /// pass, whose `DeepDiff` counterpart is a post-hoc tree merge that never
-    /// runs `_diff_str` (confirmed empirically: such an entry carries no
-    /// `diff`).
+    /// The unified diff `DeepDiff` attaches at `verbose_level=2` for a
+    /// string change containing a newline (`unified_diff` module);
+    /// `None` otherwise, including for a `merge_mutual_add_removes` entry.
     pub diff: Option<String>,
 }
 

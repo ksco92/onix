@@ -97,11 +97,15 @@ The code is best read in this order, each step building on the last:
    [`crates/onix-core/src/ignore_order/mod.rs`](crates/onix-core/src/ignore_order/mod.rs),
    then into [`docs/design/list-diff.md`](docs/design/list-diff.md) and
    [`docs/design/ignore-order.md`](docs/design/ignore-order.md) for the two
-   algorithms those modules implement, and
+   algorithms those modules implement,
    [`crates/onix-core/src/value.rs`](crates/onix-core/src/value.rs)/
    [`crates/onix-core/src/datetime.rs`](crates/onix-core/src/datetime.rs)
    into [`docs/design/value-model.md`](docs/design/value-model.md) for the
-   value model those two modules implement.
+   value model those two modules implement, and
+   [`crates/onix-core/src/diff/options.rs`](crates/onix-core/src/diff/options.rs)/
+   [`crates/onix-core/src/diff/dispatch.rs`](crates/onix-core/src/diff/dispatch.rs)
+   into [`docs/design/depth-budget.md`](docs/design/depth-budget.md) for the
+   recursion-depth guard both enforce.
 3. [`tests/golden/README.md`](tests/golden/README.md): what the compatibility
    corpus pins down, and the documented DeepDiff quirks it deliberately does
    not chase.
