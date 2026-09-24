@@ -223,7 +223,8 @@ def _gen_non_str_dict_key(rng: random.Random) -> JsonValue:
         return value if kind < 0.7 else value.date()
 
     # Never the empty tuple: a real, narrow DeepDiff bug, not reproduced --
-    # see tests/golden/README.md's empty-tuple-key section.
+    # see tests/golden/README.md's empty-tuple dict-key bullet, Known
+    # DeepDiff quirks.
     length = rng.randint(1, 2)
 
     return tuple(rng.choice(NON_STR_KEY_TUPLE_LEAVES) for _ in range(length))
