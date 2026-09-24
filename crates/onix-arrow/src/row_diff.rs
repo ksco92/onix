@@ -1,152 +1,12 @@
-//! Keyed row diff: which rows were added, removed, or changed between two
-//! tables, matched by a required primary key, in memory proportional to the
-//! row count rather than the data size.
+//! Keyed row diff: which rows were added, removed, or changed between two tables, matched
+//! by a required primary key, in memory proportional to the row count rather than the data
+//! size. See `docs/design/row-diff.md` for the algorithm, hashing, and value-semantics detail.
 //!
-//! # Algorithm
-//!
-//! Three passes, so the full decoded tables never sit in memory at once:
-//!
-//! 1. **Hash pass.** Each side is opened and streamed batch by batch. Every row
-//!    yields a keyed 128-bit hash of its key columns and a keyed 128-bit hash of
-//!    its non-key columns (the value semantics are in [`hash_cell`]). The pairs
-//!    are collected into one `(key_hash, row_hash)` vector per side — 32 bytes
-//!    per row, the only per-row state that grows with the input — while the
-//!    batches themselves are dropped as they are consumed. Set arithmetic on the
-//!    two sorted vectors then classifies every key: only on the left (removed),
-//!    only on the right (added), on both with different row hashes (changed), on
-//!    both with equal row hashes (unchanged, never materialized), or appearing
-//!    more than once on either side (a duplicate key, excluded from the other
-//!    three and reported with its per-side counts).
-//! 2. **Materialize pass.** Each side is read again (a [`TableInput`] is
-//!    re-openable) and filtered to the rows whose keys landed in the added /
-//!    removed sets, plus one row per duplicate key for the duplicate-key report.
-//!    Only the differing rows are ever built into an output batch, and a kept
-//!    selection copies any buffer it shares with its decoded input batch (see
-//!    [`unshared`]).
-//! 3. **Cell pass.** The rows whose key is in the *changed* set are paired by
-//!    key hash and every common non-key column is compared cell by cell, one
-//!    output record per differing cell (see [`diff_cells`]).
-//!
-//! Single-threaded, every pass re-reads both sides and the cell pass holds both
-//! sides' changed rows at once. The parallel path reads the right side once: the
-//! left is hashed and indexed first ([`KeyIndex`]), so the right's hash pass
-//! tallies each row against the left key it matches instead of keeping its
-//! hashes ([`classify_indexed`]), keeps its added candidates, and spills its
-//! changed value rows by key-hash partition to anonymous temporary IPC files
-//! ([`RightFuse`]); one re-read of the left then materializes it and spills its
-//! changed rows ([`reread_left`]), and the cell pass compares and renders one
-//! partition at a time across the workers ([`diff_cells_streaming`]), holding one
-//! partition plus the output.
-//!
-//! # Parallelism
-//!
-//! By default the diff runs across `TableDiffOptions::threads` workers (the
-//! machine's available parallelism, capped at [`crate::MAX_THREADS`]): the hash
-//! passes hash each batch on a worker and append its rows straight into shared
-//! per-key-hash partition buffers, the classify step merge-joins each partition
-//! on its own worker, the left re-read classifies and routes each batch on a
-//! worker while the order-dependent filtering runs in batch order, and the cell
-//! pass renders each partition across the workers. The partition count is
-//! capped independently of the worker count (see [`partition_count`] and
-//! [`MAX_PARTITIONS`]). Every partitioning is by key hash and every reduction is
-//! order-independent or reordered back to batch order, so the output is
-//! byte-identical at any thread count; `threads == 1` runs the single-threaded
-//! path. The choice is made by peeking up to [`MIN_PARALLEL_ROWS`] rows or
-//! [`MAX_PEEK_BYTES`] of each side (whichever comes first) before spawning: a
-//! diff whose sides both fit under that bound runs single-threaded, and the peek
-//! reads the left side first so a large left never also buffers the right.
-//!
-//! Per-row state: 32 bytes a row per side single-threaded; in parallel, 32 on
-//! the left plus an 8-byte tally and under a byte of bucket directory, and a
-//! 32-byte map entry (first-row position and count) per right key absent from
-//! the left. Beyond that: in-flight batches (workers times batch size), buffer
-//! slack, the size gate's peek (at most [`MAX_PEEK_BYTES`] plus one producer
-//! batch per side), and every distinct duplicated key's values. In parallel, a
-//! key the left lacks keeps its first right row at full width until the key
-//! repeats, and each right batch holding such a row keeps a candidate record of
-//! those rows' key columns (shared with the rows until compaction copies them).
-//! The first right row of a key the left holds once with another row hash is
-//! spilled unless its batch repeats the key. A selection kept past its scan
-//! keeps its whole input batch resident, per side, if it keeps over half of it;
-//! a smaller one copies its buffers out, but byte-view data buffers reach the
-//! output whole, so its view data stays. The duplicate-key report always copies
-//! its key columns out. The cell pass holds a spill of every common value
-//! column of every changed row, both sides (resident where written temp pages
-//! count), and about twice the `cells_changed` output, not bounded by the
-//! changed *cell* count. The README's Known-limitations bullet has the figures.
-//!
-//! # Hashing
-//!
-//! Row identity is a single keyed 128-bit SipHash-1-3 ([`siphasher`]), keyed
-//! from 16 bytes of OS randomness ([`getrandom`]) drawn once per diff. Both
-//! sides of one diff share the key, so their hashes are comparable; a different
-//! diff draws a fresh key. Because the key is secret and random per run, the
-//! row-matching table cannot be forced into collisions by chosen input, and no
-//! unkeyed content hash table is used on this default (no-flag) path. Two
-//! distinct keys colliding to the same 128-bit hash — the only way this can
-//! misclassify — has probability on the order of `n² / 2¹²⁸`, negligible for
-//! any real table.
-//!
-//! # Value semantics
-//!
-//! Cell hashing largely matches how onix's core compares scalars: integers and
-//! integral floats within `±2⁵³` fold to one integer form (so `1`, `1.0`,
-//! `-0.0`, and a dictionary-encoded `1` all hash equal), other floats hash by
-//! their bit pattern, decimals (128- and 256-bit) hash by their exact value with
-//! trailing zeros removed (so `1.00` equals `1.0000`), timestamps hash by their
-//! UTC instant in nanoseconds (so the same instant at microsecond and
-//! millisecond precision hashes equal), times and durations likewise normalize
-//! to nanoseconds (so the same clock time or elapsed span at different units
-//! hashes equal), and a null is a distinct value that equals only another null —
-//! the `IS DISTINCT FROM` semantics the `DuckDB` oracle uses. One rule is this
-//! crate's own, not `onix-core`'s (which refuses NaN at conversion): every NaN
-//! folds to one canonical NaN, so no NaN-payload difference is a change, because
-//! the renderer cannot show two NaN payloads apart.
-//!
-//! # Per-cell changes
-//!
-//! [`diff_cells`] reports, for every changed row, which cells differ, as one
-//! output row per differing cell: the key columns, then `column`, `old_value`,
-//! `new_value`, and `change` (see [`diff_cells`] for the exact output order).
-//! A cell is reported changed **if and only if its [`hash_cell`] contribution
-//! differs** between the two matched rows — the same helper the row hash is
-//! built from, so the cell list and the row-changed decision can never drift.
-//! Each reported cell is labelled:
-//!
-//! - `became_null`/`became_non_null` when exactly one side is null;
-//! - `type_changed` when both are non-null and the two sides' types are not
-//!   losslessly comparable — their [`value_domain`]s differ (a number becoming a
-//!   string, a timestamp becoming a date), both are timestamps but one is
-//!   zone-aware and the other naive (different meaning at the same instant), or
-//!   both are intervals of different variants (which are not one span);
-//! - `value_changed` otherwise: the same value domain, differing in value over
-//!   the hash's lossless normalization. This covers a lossless type change —
-//!   `Int32`→`Int64`, a float width change, a time/duration unit change, a
-//!   decimal scale change — whose equal values hash equal and so are *not*
-//!   reported at all, and are `value_changed` only when the value genuinely
-//!   differs.
-//!
-//! A column present on only one side is a schema change and never a cell change.
-//! `old_value`/`new_value` are a canonical string rendering
-//! ([`arrow_cast::display`]), null for a null cell, produced so that a
-//! `value_changed` record can never carry two equal renderings: numbers of
-//! differing width render at the wider type (an `f32` `0.1` shows as
-//! `0.10000000149011612` against an `f64` `0.1`), a timestamp renders as its UTC
-//! instant with its zone appended when aware (so an aware and a naive timestamp
-//! of the same instant differ), a decimal renders at its native scale, a string
-//! verbatim (decimals and strings match the `DuckDB` oracle), a duration
-//! renders as an ISO 8601 `PT<seconds>S` string computed from its value — never
-//! through the Arrow formatter, whose second/millisecond duration formatter can
-//! emit a `<invalid>` sentinel while still succeeding — and a cross-variant
-//! interval renders with its variant appended, so two variants whose human
-//! form would otherwise coincide stay distinct (see [`prepare_render`]). As a
-//! construction guard, a `value_changed` record whose two renderings are
-//! nonetheless equal is a
-//! [`TableDiffError::EqualRenderings`], not a silent row. There is no typed
-//! old/new
-//! column: a long-format table mixes every compared column's type in one column,
-//! so a single typed column cannot represent them and the string rendering is
-//! the uniform form.
+//! - **Hash pass** — hashes every row's key and non-key columns; classifies keys by presence
+//!   and hash equality across the two sides.
+//! - **Materialize pass** — re-reads each side, keeping only added/removed rows and one row
+//!   per duplicate key.
+//! - **Cell pass** — pairs changed rows by key hash and reports each differing cell.
 //!
 //! # Which column types are hashed, refused, or skipped
 //!
@@ -172,11 +32,6 @@
 //!   non-key column (`List` and its variants, `FixedSizeList`, `Struct`, `Map`,
 //!   `Union`), which is out of scope for the row diff. A nested *key* column is
 //!   refused.
-//!
-//! [`hash_cell`] itself is non-recursive; the two recursive walks here —
-//! [`is_hashable`] and [`value_domain`], each over a dictionary value type — are
-//! bounded by the [`crate::MAX_NESTING_DEPTH`] depth check
-//! [`crate::diff_schemas`] runs before any row is read.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
