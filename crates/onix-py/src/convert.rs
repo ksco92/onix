@@ -1067,7 +1067,8 @@ type Pending<'py> = (Bound<'py, PyAny>, usize, bool);
 /// happens next: either `frame` has another child to convert
 /// (`Advance::NeedsChild`, with `path` extended for it), or `frame` is fully
 /// built (`Advance::Done`). `path` must already have had the finished child's
-/// own segment popped by the caller — see [`to_value`].
+/// own segment popped by the caller — see [`to_value`]. A finished custom
+/// object leaves `on_path`.
 ///
 /// On a bad dict key mid-frame the error just propagates: `built` (its
 /// completed entries, possibly including a deep subtree) drops here
@@ -1079,6 +1080,7 @@ fn advance_frame<'py>(
     value: CValue,
     path: &mut Vec<PathSegment>,
     builder: &mut Builder,
+    on_path: &mut Vec<usize>,
 ) -> PyResult<Advance<'py>> {
     match frame {
         Frame::Seq {
@@ -1117,7 +1119,11 @@ fn advance_frame<'py>(
         } => {
             built.push((current_key, value));
 
-            match next_dict_entry(&mut remaining, path, builder)? {
+            let next = next_dict_entry(&mut remaining, path, builder)?;
+            if next.is_none() && class.as_ref().is_some_and(|class| class.instance.is_some()) {
+                on_path.pop();
+            }
+            match next {
                 Some((key, next_value)) => {
                     path.push(entry_path_segment(kind, &key));
                     Ok(Advance::NeedsChild {
@@ -1177,30 +1183,6 @@ fn frame_object(frame: &Frame<'_>) -> Option<(Arc<str>, usize)> {
             .map(|instance| (class.name.clone(), instance)),
         _ => None,
     }
-}
-
-/// [`advance_frame`], turning a custom object whose next entry fails with an
-/// `Exception` into [`object_failure`]'s token, and taking a finished custom
-/// object off the walk's path.
-fn advance_or_fail<'py>(
-    py: Python<'_>,
-    frame: Frame<'py>,
-    value: CValue,
-    path: &mut Vec<PathSegment>,
-    builder: &mut Builder,
-    held: &mut Held,
-) -> PyResult<Advance<'py>> {
-    let object = frame_object(&frame);
-    let advanced = match advance_frame(frame, value, path, builder) {
-        Err(err) if object.is_some() && err.is_instance_of::<PyException>(py) => Advance::Done(
-            object_failure(err, object.clone().expect("checked above"), held, builder),
-        ),
-        advanced => advanced?,
-    };
-    if object.is_some() && matches!(advanced, Advance::Done(_)) {
-        held.on_path.pop();
-    }
-    Ok(advanced)
 }
 
 /// After `err`, unwinds the walk to the innermost custom object still being
@@ -1365,7 +1347,7 @@ pub(crate) fn to_value(
             None => return Ok((value, saw_wtf8)),
             Some(frame) => {
                 path.pop();
-                match advance_or_fail(obj.py(), frame, value, &mut path, &mut builder, held)? {
+                match advance_frame(frame, value, &mut path, &mut builder, &mut held.on_path)? {
                     Advance::NeedsChild {
                         pending: next_pending,
                         frame,
