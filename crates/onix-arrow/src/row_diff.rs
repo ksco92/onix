@@ -175,7 +175,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::hash::Hasher;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -1255,7 +1255,7 @@ fn hash_parallel(
         config,
         partitions,
         &no_hook,
-        &[],
+        true,
     )?;
     let index = accum!("index left keys", KeyIndex::build(left.parts)?);
 
@@ -1270,11 +1270,11 @@ fn hash_parallel(
         value_schema: &value_schema,
         spill: SpillSink::open(partitions, &value_schema)?,
         candidates: Mutex::new(Vec::new()),
+        absent: Mutex::new(Vec::new()),
     };
     let hook = |idx: usize, batch: &RecordBatch, pairs: &[(u128, u128, bool)]| {
         fuse.visit(idx, batch, pairs)
     };
-    let reserve = index.reserve_for_other_side();
     let right_parts = hash_side_parallel(
         prefix,
         reader,
@@ -1282,7 +1282,7 @@ fn hash_parallel(
         config,
         partitions,
         &hook,
-        &reserve,
+        false,
     )?;
     let capture = RightCapture {
         candidates: fuse
@@ -1291,13 +1291,14 @@ fn hash_parallel(
             .unwrap_or_else(PoisonError::into_inner),
         spill: fuse.spill.finish()?,
     };
+    let absent = fuse
+        .absent
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner);
 
     let mut null_keys = left.null_keys;
     null_keys.extend(right_parts.null_keys);
-    let classified = accum!(
-        "classify",
-        classify_parallel(index.parts, right_parts.parts)?
-    );
+    let classified = accum!("classify", classify_indexed(index, absent)?);
     Ok((null_keys, classified, Hashed::Parallel(capture)))
 }
 
@@ -1393,9 +1394,9 @@ struct SharedSink {
 /// hash. Only the fixed-size hashes are retained (one copy per side), plus at
 /// most one batch's rows buffered per worker before each flush — the parallel
 /// path's only memory term over the single-threaded hash vectors. `hook` runs
-/// on the worker with each batch's input index and row hashes; `reserve[p]`
-/// presizes partition `p`'s buffer (capacity never written is not resident).
-/// Joins every worker on every exit path (including a read error) so a concurrent worker
+/// on the worker with each batch's input index and row hashes; with
+/// `keep_pairs` false only the null keys are kept. Joins every worker on every
+/// exit path (including a read error) so a concurrent worker
 /// panic surfaces as [`TableDiffError::WorkerPanicked`], never an abort.
 fn hash_side_parallel(
     prefix: Vec<RecordBatch>,
@@ -1404,7 +1405,7 @@ fn hash_side_parallel(
     config: &HashConfig<'_>,
     partitions: usize,
     hook: &BatchHook<'_>,
-    reserve: &[usize],
+    keep_pairs: bool,
 ) -> Result<SidePartitions, TableDiffError> {
     #[cfg(test)]
     PARALLEL_HASH_PASSES.with(|count| count.set(count.get() + 1));
@@ -1413,9 +1414,7 @@ fn hash_side_parallel(
     let key_names = config.key_names;
     let value_names = config.value_names;
     let sink = SharedSink {
-        parts: (0..partitions)
-            .map(|p| Mutex::new(Vec::with_capacity(reserve.get(p).copied().unwrap_or(0))))
-            .collect(),
+        parts: (0..partitions).map(|_| Mutex::new(Vec::new())).collect(),
         null_keys: Mutex::new(HashSet::new()),
     };
 
@@ -1449,7 +1448,9 @@ fn hash_side_parallel(
                         if key_is_null {
                             local_nulls.insert(key_hash);
                         }
-                        local[partition_of(key_hash, partitions)].push((key_hash, row_hash));
+                        if keep_pairs {
+                            local[partition_of(key_hash, partitions)].push((key_hash, row_hash));
+                        }
                     }
                     for (partition, rows) in local.iter_mut().enumerate() {
                         if rows.is_empty() {
@@ -1517,28 +1518,6 @@ fn hash_side_parallel(
         .collect();
     let null_keys = sink.null_keys.into_inner().unwrap_or_default();
     Ok(SidePartitions { parts, null_keys })
-}
-
-/// Classifies every partition on its own worker and unions the per-partition
-/// results. Partitions are disjoint by key, so the unions never conflict.
-fn classify_parallel(
-    left_parts: Vec<HashPartition>,
-    right_parts: Vec<HashPartition>,
-) -> Result<Classified, TableDiffError> {
-    let jobs: Vec<(HashPartition, HashPartition)> =
-        left_parts.into_iter().zip(right_parts).collect();
-
-    let partials = std::thread::scope(|scope| -> Result<Vec<Classified>, TableDiffError> {
-        let mut handles = Vec::with_capacity(jobs.len());
-        for (left, right) in jobs {
-            handles.push(scope.spawn(move || -> Result<Classified, TableDiffError> {
-                Ok(classify(left, right))
-            }));
-        }
-        join_results(handles)
-    })?;
-
-    Ok(combine_classified(partials))
 }
 
 /// Unions the per-partition classifications. Because partitions are disjoint by
@@ -3102,21 +3081,30 @@ fn concat_decoded_column(
 /// Target rows per bucket of a [`KeyIndex`] directory.
 const INDEX_BUCKET_ROWS: usize = 8;
 
+/// A [`KeyIndex`] count's flag bit: some other-side row of this key had a
+/// different row hash. The low bits count the other side's rows of the key.
+const ROW_DIFFERS: u64 = 1 << 63;
+
 /// One side's `(key_hash, row_hash)` rows sorted per partition, with a directory
 /// per partition from a hash's top `bits` bits to its bucket's first row, so a
-/// lookup binary-searches a bucket of about [`INDEX_BUCKET_ROWS`] rows.
+/// lookup binary-searches a bucket of about [`INDEX_BUCKET_ROWS`] rows; and, at
+/// each key's first row, a count of the other side's rows of that key.
 struct KeyIndex {
     parts: Vec<HashPartition>,
     dirs: Vec<Vec<usize>>,
     bits: Vec<u32>,
+    counts: Vec<Vec<AtomicU64>>,
 }
 
-/// How often a key occurs on the indexed side, with its row hash when once.
+/// How [`KeyIndex::tally`] found an other-side row's key.
 #[derive(Debug, PartialEq)]
-enum KeyMatch {
+enum Tally {
+    /// The key is not on the indexed side.
     Absent,
-    Unique(u128),
-    Duplicated,
+    /// The key is on the indexed side once, with a different row hash.
+    Changed,
+    /// Any other key on the indexed side.
+    Present,
 }
 
 impl KeyIndex {
@@ -3138,7 +3126,8 @@ impl KeyIndex {
                         for bucket in 1..dir.len() {
                             dir[bucket] += dir[bucket - 1];
                         }
-                        Ok((part, dir, bits))
+                        let counts = (0..part.len()).map(|_| AtomicU64::new(0)).collect();
+                        Ok((part, dir, bits, counts))
                     })
                 })
                 .collect();
@@ -3148,35 +3137,38 @@ impl KeyIndex {
             parts: Vec::with_capacity(built.len()),
             dirs: Vec::with_capacity(built.len()),
             bits: Vec::with_capacity(built.len()),
+            counts: Vec::with_capacity(built.len()),
         };
-        for (part, dir, bits) in built {
+        for (part, dir, bits, counts) in built {
             index.parts.push(part);
             index.dirs.push(dir);
             index.bits.push(bits);
+            index.counts.push(counts);
         }
         Ok(index)
     }
 
-    /// Per partition, a buffer size for the other side's rows: a quarter more
-    /// than this side's, so a similar-sized side never regrows its buffers.
-    fn reserve_for_other_side(&self) -> Vec<usize> {
-        self.parts
-            .iter()
-            .map(|part| part.len() + part.len() / 4)
-            .collect()
-    }
-
-    fn lookup(&self, key: u128) -> KeyMatch {
+    /// Counts one other-side row of `key` against the key's first indexed row
+    /// and reports how the key was found.
+    fn tally(&self, key: u128, row_hash: u128) -> Tally {
         let partition = partition_of(key, self.parts.len());
         let (dir, bucket) = (&self.dirs[partition], bucket_of(key, self.bits[partition]));
-        let rows = &self.parts[partition][dir[bucket]..dir[bucket + 1]];
-        match &rows[rows.partition_point(|&(k, _)| k < key)..] {
-            [(k, row_hash), rest @ ..] if *k == key => match rest.first() {
-                Some(&(next, _)) if next == key => KeyMatch::Duplicated,
-                _ => KeyMatch::Unique(*row_hash),
-            },
-            _ => KeyMatch::Absent,
+        let start = dir[bucket];
+        let rows = &self.parts[partition][start..dir[bucket + 1]];
+        let at = rows.partition_point(|&(k, _)| k < key);
+        let [(k, indexed_hash), rest @ ..] = &rows[at..] else {
+            return Tally::Absent;
+        };
+        if *k != key {
+            return Tally::Absent;
         }
+        let count = &self.counts[partition][start + at];
+        count.fetch_add(1, Ordering::Relaxed);
+        if rest.first().is_some_and(|&(next, _)| next == key) || *indexed_hash == row_hash {
+            return Tally::Present;
+        }
+        count.fetch_or(ROW_DIFFERS, Ordering::Relaxed);
+        Tally::Changed
     }
 }
 
@@ -3185,6 +3177,68 @@ impl KeyIndex {
 #[allow(clippy::cast_possible_truncation)]
 fn bucket_of(key: u128, bits: u32) -> usize {
     key.checked_shr(128 - bits).unwrap_or(0) as usize
+}
+
+/// Classifies every key from the indexed left and the right's tallies, one
+/// partition per worker: a left key's right count is its tally, and a right key
+/// absent from the left is counted from `absent` (every such right row's key).
+fn classify_indexed(index: KeyIndex, absent: Vec<u128>) -> Result<Classified, TableDiffError> {
+    let partitions = index.parts.len();
+    let mut absent_parts: Vec<Vec<u128>> = vec![Vec::new(); partitions];
+    for key in absent {
+        absent_parts[partition_of(key, partitions)].push(key);
+    }
+    let jobs = index.parts.into_iter().zip(index.counts).zip(absent_parts);
+    let partials = std::thread::scope(|scope| {
+        let handles: Vec<_> = jobs
+            .map(|((left, counts), absent)| {
+                scope.spawn(move || -> Result<Classified, TableDiffError> {
+                    Ok(classify_partition(&left, counts, absent))
+                })
+            })
+            .collect();
+        join_results(handles)
+    })?;
+    Ok(combine_classified(partials))
+}
+
+/// [`classify_indexed`]'s work for one partition, by [`classify`]'s rules.
+fn classify_partition(
+    left: &[(u128, u128)],
+    counts: Vec<AtomicU64>,
+    mut absent: Vec<u128>,
+) -> Classified {
+    let mut result = Classified {
+        added: HashSet::new(),
+        removed: HashSet::new(),
+        changed: Vec::new(),
+        duplicates: HashMap::new(),
+    };
+    let counts: Vec<u64> = counts.into_iter().map(AtomicU64::into_inner).collect();
+    let mut start = 0;
+    while start < left.len() {
+        let key = left[start].0;
+        let end = start + left[start..].partition_point(|&(k, _)| k == key);
+        let (left_count, tally) = (end - start, counts[start]);
+        let right_count = usize::try_from(tally & !ROW_DIFFERS).unwrap_or(usize::MAX);
+        if left_count > 1 || right_count > 1 {
+            result.duplicates.insert(key, (left_count, right_count));
+        } else if right_count == 0 {
+            result.removed.insert(key);
+        } else if tally & ROW_DIFFERS != 0 {
+            result.changed.push(key);
+        }
+        start = end;
+    }
+    absent.sort_unstable();
+    for run in absent.chunk_by(|a, b| a == b) {
+        if run.len() > 1 {
+            result.duplicates.insert(run[0], (0, run.len()));
+        } else {
+            result.added.insert(run[0]);
+        }
+    }
+    result
 }
 
 /// A right-side batch's added candidates, captured by the parallel hash pass so
@@ -3211,6 +3265,8 @@ struct RightFuse<'a> {
     value_schema: &'a SchemaRef,
     spill: SpillSink,
     candidates: Mutex<Vec<Candidate>>,
+    /// The key of every right row whose key is absent from the left.
+    absent: Mutex<Vec<u128>>,
 }
 
 impl RightFuse<'_> {
@@ -3221,14 +3277,25 @@ impl RightFuse<'_> {
         pairs: &[(u128, u128, bool)],
     ) -> Result<(), TableDiffError> {
         let mut changed = vec![false; pairs.len()];
-        let mut added = Vec::new();
+        let (mut added, mut absent) = (Vec::new(), Vec::new());
         let mut seen = HashSet::new();
         for (row, &(key_hash, row_hash, _)) in pairs.iter().enumerate() {
-            match self.index.lookup(key_hash) {
-                KeyMatch::Absent if seen.insert(key_hash) => added.push(row),
-                KeyMatch::Unique(left_hash) if left_hash != row_hash => changed[row] = true,
-                _ => {}
+            match self.index.tally(key_hash, row_hash) {
+                Tally::Absent => {
+                    absent.push(key_hash);
+                    if seen.insert(key_hash) {
+                        added.push(row);
+                    }
+                }
+                Tally::Changed => changed[row] = true,
+                Tally::Present => {}
             }
+        }
+        if !absent.is_empty() {
+            self.absent
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .append(&mut absent);
         }
         if !added.is_empty() {
             let mut mask = vec![false; pairs.len()];
@@ -7144,7 +7211,7 @@ mod tests {
             &config,
             4,
             &|_, _, _| Ok(()),
-            &[],
+            true,
         );
         assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
     }
@@ -7187,7 +7254,7 @@ mod tests {
             &config,
             4,
             &|_, _, _| Ok(()),
-            &[],
+            true,
         );
         assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
     }
@@ -7623,9 +7690,7 @@ mod type_coverage_tests {
 
 #[cfg(test)]
 mod fused_tests {
-    use super::{
-        KeyIndex, KeyMatch, MemoryInput, Routed, RowDiff, TableInput, bucket_of, unshared,
-    };
+    use super::{KeyIndex, MemoryInput, Routed, RowDiff, TableInput, Tally, bucket_of, unshared};
     use crate::error::TableDiffError;
     use arrow_array::builder::{ListBuilder, StringViewBuilder};
     use arrow_array::types::Int32Type;
@@ -7977,6 +8042,7 @@ mod fused_tests {
             value_schema: &value_schema,
             spill: super::SpillSink::open(1, &value_schema).unwrap(),
             candidates: std::sync::Mutex::new(Vec::new()),
+            absent: std::sync::Mutex::new(Vec::new()),
         };
         let pairs: Vec<(u128, u128, bool)> = (1..=3).map(|k| (k, k, false)).collect();
         fuse.visit(0, &batch, &pairs).unwrap();
@@ -7998,6 +8064,7 @@ mod fused_tests {
             value_schema: &value_schema,
             spill: super::SpillSink::open(1, &value_schema).unwrap(),
             candidates: std::sync::Mutex::new(Vec::new()),
+            absent: std::sync::Mutex::new(Vec::new()),
         };
         // Key 1 keeps its left row hash (unchanged); key 2's differs.
         fuse.visit(0, &batch, &[(1, 10, false), (2, 21, false)])
@@ -8058,15 +8125,16 @@ mod fused_tests {
         let part = |rows: u128| (0..rows).map(|i| (i << 100, i)).collect::<Vec<_>>();
         let index = KeyIndex::build(vec![part(3), part(800), part(1_000)]).unwrap();
         assert_eq!(index.bits, vec![0, 6, 6]);
-        assert_eq!(index.reserve_for_other_side(), vec![3, 1_000, 1_250]);
     }
 
     #[test]
-    fn hash_side_parallel_presizes_each_partition() {
+    fn hash_side_parallel_without_pairs_keeps_only_null_keys() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
-        let batch =
-            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
-                .unwrap();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![Some(1), None]))],
+        )
+        .unwrap();
         let input = MemoryInput::new(schema, vec![batch]);
         let hasher = super::RowHasher::new().unwrap();
         let columns = super::SideColumns {
@@ -8079,45 +8147,86 @@ mod fused_tests {
             hasher: &hasher,
             threads: 2,
         };
-        let parts = super::hash_side_parallel(
+        let side = super::hash_side_parallel(
             Vec::new(),
             input.open().unwrap(),
             &columns,
             &config,
             2,
             &|_, _, _| Ok(()),
-            &[100, 300],
+            false,
         )
-        .unwrap()
-        .parts;
-        assert!(parts[0].capacity() >= 100 && parts[1].capacity() >= 300);
+        .unwrap();
+        assert!(side.parts.iter().all(Vec::is_empty));
+        assert_eq!(side.null_keys.len(), 1);
     }
 
     #[test]
-    fn key_index_counts_each_key_like_a_naive_scan() {
+    fn key_index_tallies_each_row_like_a_naive_scan() {
         let partitions = 3;
-        // Partition sizes from one row up to a few hundred, so the directory
-        // runs with zero and with several bits.
+        // Partition sizes up to a few hundred, so the directory runs with zero and
+        // with several bits.
         let mut parts: Vec<Vec<(u128, u128)>> = vec![Vec::new(); partitions];
         let key = |i: u128| (i + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835);
         for i in 0..900u128 {
             let k = key(i % 700);
             parts[super::partition_of(k, partitions)].push((k, i));
         }
-        let lone = key(5_000);
         let index = KeyIndex::build(parts).unwrap();
         assert!(index.bits.iter().any(|&bits| bits > 0));
         for i in 0..700u128 {
-            let expected = if i < 200 {
-                KeyMatch::Duplicated
+            // Keys under 200 are on the left twice; the rest once, row hash `i`.
+            let expected = if i >= 200 && i % 2 == 1 {
+                Tally::Changed
             } else {
-                KeyMatch::Unique(i)
+                Tally::Present
             };
-            assert_eq!(index.lookup(key(i)), expected, "key {i}");
+            let row_hash = if i % 2 == 1 { i + 1 } else { i };
+            assert_eq!(index.tally(key(i), row_hash), expected, "key {i}");
         }
-        assert_eq!(index.lookup(lone), KeyMatch::Absent);
-        assert_eq!(index.lookup(0), KeyMatch::Absent);
-        assert_eq!(index.lookup(u128::MAX), KeyMatch::Absent);
+        for absent in [key(5_000), 0, u128::MAX] {
+            assert_eq!(index.tally(absent, 0), Tally::Absent);
+        }
+        let tallied: u64 = index
+            .counts
+            .iter()
+            .flatten()
+            .map(|count| count.load(std::sync::atomic::Ordering::Relaxed) & !super::ROW_DIFFERS)
+            .sum();
+        assert_eq!(tallied, 700);
+    }
+
+    fn sorted<T: Ord>(mut items: Vec<T>) -> Vec<T> {
+        items.sort();
+        items
+    }
+
+    proptest::proptest! {
+        // The tally-based classification of the parallel path equals the
+        // merge-join `classify` over the same rows, duplicates included.
+        #[test]
+        fn classify_indexed_matches_classify(
+            left in proptest::collection::vec((0u128..12, 0u128..3), 0..40usize),
+            right in proptest::collection::vec((0u128..12, 0u128..3), 0..40usize),
+            partitions in 1usize..5,
+        ) {
+            let mut parts = vec![Vec::new(); partitions];
+            for &(k, r) in &left {
+                parts[super::partition_of(k, partitions)].push((k, r));
+            }
+            let index = KeyIndex::build(parts).unwrap();
+            let absent: Vec<u128> = right
+                .iter()
+                .filter(|&&(k, r)| index.tally(k, r) == Tally::Absent)
+                .map(|&(k, _)| k)
+                .collect();
+            let indexed = super::classify_indexed(index, absent).unwrap();
+            let merged = super::classify(left, right);
+            proptest::prop_assert_eq!(&indexed.added, &merged.added);
+            proptest::prop_assert_eq!(&indexed.removed, &merged.removed);
+            proptest::prop_assert_eq!(&indexed.duplicates, &merged.duplicates);
+            proptest::prop_assert_eq!(sorted(indexed.changed), sorted(merged.changed));
+        }
     }
 
     #[test]
@@ -8194,7 +8303,7 @@ mod fused_tests {
             &config,
             4,
             &|_, _, _| -> Result<(), TableDiffError> { panic!("hook boom") },
-            &[],
+            true,
         );
         assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
     }
