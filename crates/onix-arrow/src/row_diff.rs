@@ -1273,8 +1273,10 @@ fn hash_parallel(
         value_columns: &right_columns.value,
         value_schema: &value_schema,
         spill: SpillSink::open(partitions, &value_schema)?,
-        candidates: Mutex::new(Vec::new()),
-        absent: Mutex::new(Vec::new()),
+        candidates: Mutex::new(CandidateStore::default()),
+        absent: (0..partitions)
+            .map(|_| Mutex::new(HashMap::new()))
+            .collect(),
     };
     let hook = |idx: usize, batch: &RecordBatch, pairs: &[(u128, u128, bool)]| {
         fuse.visit(idx, batch, pairs)
@@ -1292,13 +1294,11 @@ fn hash_parallel(
         candidates: fuse
             .candidates
             .into_inner()
-            .unwrap_or_else(PoisonError::into_inner),
+            .unwrap_or_else(PoisonError::into_inner)
+            .batches,
         spill: fuse.spill.finish()?,
     };
-    let absent = fuse
-        .absent
-        .into_inner()
-        .unwrap_or_else(PoisonError::into_inner);
+    let absent = fuse.absent;
 
     let mut null_keys = left.null_keys;
     null_keys.extend(right_parts.null_keys);
@@ -1817,14 +1817,19 @@ fn push_filtered(
     let selected = arrow_select::filter::filter_record_batch(batch, &BooleanArray::from(mask))
         .map_err(|e| read_error(&e))?;
     if selected.num_rows() > 0 {
-        out.push(owned_batch(selected)?);
+        out.push(owned_batch(selected, batch.num_rows())?);
     }
     Ok(())
 }
 
-/// `batch` with each column passed through [`unshared`], so a selection held
-/// past its scan does not keep the decoded input batch it came from alive.
-fn owned_batch(batch: RecordBatch) -> Result<RecordBatch, TableDiffError> {
+/// `batch`, a selection from a `source_rows`-row batch, with each column passed
+/// through [`unshared`] when it keeps at most half the source's rows, so a small
+/// selection held past its scan does not keep its input batch alive; a larger
+/// one is kept as is, since the copy would cost more than it frees.
+fn owned_batch(batch: RecordBatch, source_rows: usize) -> Result<RecordBatch, TableDiffError> {
+    if batch.num_rows() * 2 > source_rows {
+        return Ok(batch);
+    }
     let mut columns = Vec::with_capacity(batch.num_columns());
     let mut copied = false;
     for column in batch.columns() {
@@ -2061,6 +2066,7 @@ fn dup_key_batch(
     owned_batch(
         RecordBatch::try_new(ctx.key_only_schema.clone(), key_columns)
             .map_err(|e| read_error(&e))?,
+        batch.num_rows(),
     )
 }
 
@@ -3105,7 +3111,8 @@ struct KeyIndex {
 enum Tally {
     /// The key is not on the indexed side.
     Absent,
-    /// The key is on the indexed side once, with a different row hash.
+    /// The key is on the indexed side once, with a different row hash, and this
+    /// is the other side's first row of it.
     Changed,
     /// Any other key on the indexed side.
     Present,
@@ -3167,8 +3174,11 @@ impl KeyIndex {
             return Tally::Absent;
         }
         let count = &self.counts[partition][start + at];
-        count.fetch_add(1, Ordering::Relaxed);
-        if rest.first().is_some_and(|&(next, _)| next == key) || *indexed_hash == row_hash {
+        let earlier = count.fetch_add(1, Ordering::Relaxed) & !ROW_DIFFERS;
+        if earlier > 0
+            || rest.first().is_some_and(|&(next, _)| next == key)
+            || *indexed_hash == row_hash
+        {
             return Tally::Present;
         }
         count.fetch_or(ROW_DIFFERS, Ordering::Relaxed);
@@ -3185,19 +3195,17 @@ fn bucket_of(key: u128, bits: u32) -> usize {
 
 /// Classifies every key from the indexed left and the right's tallies, one
 /// partition per worker: a left key's right count is its tally, and a right key
-/// absent from the left is counted from `absent` (every such right row's key).
-fn classify_indexed(index: KeyIndex, absent: Vec<u128>) -> Result<Classified, TableDiffError> {
-    let partitions = index.parts.len();
-    let mut absent_parts: Vec<Vec<u128>> = vec![Vec::new(); partitions];
-    for key in absent {
-        absent_parts[partition_of(key, partitions)].push(key);
-    }
-    let jobs = index.parts.into_iter().zip(index.counts).zip(absent_parts);
+/// absent from the left is counted in `absent`.
+fn classify_indexed(index: KeyIndex, absent: AbsentKeys) -> Result<Classified, TableDiffError> {
+    let absent = absent
+        .into_iter()
+        .map(|part| part.into_inner().unwrap_or_else(PoisonError::into_inner));
+    let jobs = index.parts.into_iter().zip(index.counts).zip(absent);
     let partials = std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
             .map(|((left, counts), absent)| {
                 scope.spawn(move || -> Result<Classified, TableDiffError> {
-                    Ok(classify_partition(&left, counts, absent))
+                    Ok(classify_partition(&left, counts, &absent))
                 })
             })
             .collect();
@@ -3210,7 +3218,7 @@ fn classify_indexed(index: KeyIndex, absent: Vec<u128>) -> Result<Classified, Ta
 fn classify_partition(
     left: &[(u128, u128)],
     counts: Vec<AtomicU64>,
-    mut absent: Vec<u128>,
+    absent: &HashMap<u128, FirstRow>,
 ) -> Classified {
     let mut result = Classified {
         added: HashSet::new(),
@@ -3234,21 +3242,40 @@ fn classify_partition(
         }
         start = end;
     }
-    absent.sort_unstable();
-    for run in absent.chunk_by(|a, b| a == b) {
-        if run.len() > 1 {
-            result.duplicates.insert(run[0], (0, run.len()));
+    for (&key, first) in absent {
+        if first.count > 1 {
+            result.duplicates.insert(key, (0, first.count));
         } else {
-            result.added.insert(run[0]);
+            result.added.insert(key);
         }
     }
     result
 }
 
+/// A right key absent from the left: the `(batch, row)` of its first row seen
+/// so far, and how many right rows carry it.
+struct FirstRow {
+    at: (usize, usize),
+    count: usize,
+}
+
+/// Per key-hash partition, every right key absent from the left.
+type AbsentKeys = Vec<Mutex<HashMap<u128, FirstRow>>>;
+
 /// A right-side batch's added candidates, captured by the parallel hash pass so
-/// the right is never read again: the batch's input index, the batch filtered to
-/// the first row of each key absent from the left, and those rows' key hashes.
-type Candidate = (usize, RecordBatch, Vec<u128>);
+/// the right is never read again: the batch's input index, the batch filtered
+/// to the rows kept for keys absent from the left, and those rows' indices in
+/// the input batch and key hashes.
+type Candidate = (usize, RecordBatch, Vec<usize>, Vec<u128>);
+
+/// The kept candidates, the rows among them, and how many of those were
+/// superseded by an earlier row of the same key found later.
+#[derive(Default)]
+struct CandidateStore {
+    batches: Vec<Candidate>,
+    rows: usize,
+    superseded: usize,
+}
 
 /// The right side's rows captured during its only read on the parallel path.
 struct RightCapture {
@@ -3258,20 +3285,17 @@ struct RightCapture {
 
 /// The per-batch step of the right side's parallel hash pass, run on the
 /// workers against the indexed left, where every row is tallied (see
-/// [`KeyIndex::tally`]). A row whose key is absent from the left is an added
-/// candidate (whether it is a right-only duplicate is known only once the pass
-/// ends, so the first row per batch of each such key is kept for the duplicate
-/// report); a row whose key is on the left once with a different row hash is
-/// spilled for the cell pass; any other row is unchanged, or a duplicate whose
-/// key the left side captures.
+/// [`KeyIndex::tally`]). A key absent from the left is counted in `absent`, and
+/// its first right row (lowest batch, then row) is kept as an added candidate;
+/// the first right row of a key the left holds once with a different row hash
+/// is spilled for the cell pass; any other row is unchanged, or a duplicate.
 struct RightFuse<'a> {
     index: &'a KeyIndex,
     value_columns: &'a [usize],
     value_schema: &'a SchemaRef,
     spill: SpillSink,
-    candidates: Mutex<Vec<Candidate>>,
-    /// The key of every right row whose key is absent from the left.
-    absent: Mutex<Vec<u128>>,
+    candidates: Mutex<CandidateStore>,
+    absent: AbsentKeys,
 }
 
 impl RightFuse<'_> {
@@ -3281,46 +3305,99 @@ impl RightFuse<'_> {
         batch: &RecordBatch,
         pairs: &[(u128, u128, bool)],
     ) -> Result<(), TableDiffError> {
+        let partitions = self.absent.len();
         let mut changed = vec![false; pairs.len()];
-        let (mut added, mut absent) = (Vec::new(), Vec::new());
-        let mut seen = HashSet::new();
+        let mut absent_rows: Vec<Vec<usize>> = vec![Vec::new(); partitions];
         for (row, &(key_hash, row_hash, _)) in pairs.iter().enumerate() {
             match self.index.tally(key_hash, row_hash) {
-                Tally::Absent => {
-                    absent.push(key_hash);
-                    if seen.insert(key_hash) {
-                        added.push(row);
-                    }
-                }
+                Tally::Absent => absent_rows[partition_of(key_hash, partitions)].push(row),
                 Tally::Changed => changed[row] = true,
                 Tally::Present => {}
             }
         }
-        if !absent.is_empty() {
-            self.absent
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .append(&mut absent);
+        let (mut kept, mut superseded) = (Vec::new(), 0);
+        for (part, rows) in self.absent.iter().zip(&absent_rows) {
+            if rows.is_empty() {
+                continue;
+            }
+            let mut part = part.lock().unwrap_or_else(PoisonError::into_inner);
+            for &row in rows {
+                let at = (idx, row);
+                match part.entry(pairs[row].0) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(FirstRow { at, count: 1 });
+                        kept.push(row);
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        let first = entry.get_mut();
+                        first.count += 1;
+                        if at < first.at {
+                            first.at = at;
+                            kept.push(row);
+                            superseded += 1;
+                        }
+                    }
+                }
+            }
         }
-        if !added.is_empty() {
+        drop(absent_rows);
+        if !kept.is_empty() {
+            kept.sort_unstable();
             let mut mask = vec![false; pairs.len()];
-            for &row in &added {
+            for &row in &kept {
                 mask[row] = true;
             }
-            let kept = arrow_select::filter::filter_record_batch(batch, &BooleanArray::from(mask))
+            let rows = arrow_select::filter::filter_record_batch(batch, &BooleanArray::from(mask))
                 .map_err(|e| read_error(&e))
-                .and_then(owned_batch)?;
-            let hashes = added.iter().map(|&row| pairs[row].0).collect();
-            self.candidates
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push((idx, kept, hashes));
+                .and_then(|rows| owned_batch(rows, pairs.len()))?;
+            let hashes = kept.iter().map(|&row| pairs[row].0).collect();
+            self.keep((idx, rows, kept, hashes), superseded)?;
         }
-        let partitions = self.spill.parts.len();
         let mut routed = Routed::group(partitions, &changed, |row| pairs[row].0)?;
         drop(changed);
         routed.take_values(batch, self.value_columns, self.value_schema)?;
         self.spill.write(&routed)
+    }
+
+    /// Stores `candidate`, and once superseded rows outnumber the rest, drops
+    /// every kept row that is no longer its key's first, so the store holds at
+    /// most about two rows per distinct absent key.
+    fn keep(&self, candidate: Candidate, superseded: usize) -> Result<(), TableDiffError> {
+        let mut store = self
+            .candidates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        store.rows += candidate.2.len();
+        store.superseded += superseded;
+        store.batches.push(candidate);
+        if store.superseded * 2 <= store.rows {
+            return Ok(());
+        }
+        let partitions = self.absent.len();
+        let mut rows = 0;
+        for (idx, batch, kept, hashes) in &mut store.batches {
+            let first: Vec<bool> = kept
+                .iter()
+                .zip(hashes.iter())
+                .map(|(&row, &hash)| {
+                    let part = self.absent[partition_of(hash, partitions)]
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    part.get(&hash).is_some_and(|first| first.at == (*idx, row))
+                })
+                .collect();
+            let mut at = first.iter();
+            kept.retain(|_| at.next().copied().unwrap_or(false));
+            let mut at = first.iter();
+            hashes.retain(|_| at.next().copied().unwrap_or(false));
+            *batch = arrow_select::filter::filter_record_batch(batch, &BooleanArray::from(first))
+                .map_err(|e| read_error(&e))?;
+            rows += kept.len();
+        }
+        store.batches.retain(|(_, _, kept, _)| !kept.is_empty());
+        store.rows = rows;
+        store.superseded = 0;
+        Ok(())
     }
 }
 
@@ -3333,9 +3410,9 @@ fn materialize_candidates(
     added: &HashSet<u128>,
     pending_dups: &mut HashSet<u128>,
 ) -> Result<(RecordBatch, DupCapture), TableDiffError> {
-    candidates.sort_unstable_by_key(|&(idx, _, _)| idx);
+    candidates.sort_unstable_by_key(|candidate| candidate.0);
     let mut out = MaterializeOut::default();
-    for (_, batch, hashes) in &candidates {
+    for (_, batch, _, hashes) in &candidates {
         let mask = hashes.iter().map(|h| added.contains(h)).collect();
         materialize_batch(
             batch,
@@ -3721,7 +3798,7 @@ fn diff_members_parallel<L: TableInput, R: TableInput>(
     right_capture: RightCapture,
 ) -> Result<[RecordBatch; 4], TableDiffError> {
     // The output addresses each changed left row by a `u32` scan-order index.
-    if changed.len() > u32::MAX as usize {
+    if u32::try_from(changed.len()).is_err() {
         return Err(TableDiffError::TooManyChangedRows {
             rows: changed.len(),
         });
@@ -7953,6 +8030,24 @@ mod fused_tests {
     }
 
     #[test]
+    fn owned_batch_copies_a_selection_of_at_most_half_its_source() {
+        let source = read_back(Arc::new(Int64Array::from((0..100).collect::<Vec<i64>>())));
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Int64, true)]));
+        // A slice shares the IPC message body, so a copy shows as new buffers.
+        let kept_shared = |rows: usize| {
+            let selection =
+                RecordBatch::try_new(schema.clone(), vec![source.slice(0, rows)]).unwrap();
+            let owned = super::owned_batch(selection.clone(), 100).unwrap();
+            owned
+                .column(0)
+                .to_data()
+                .ptr_eq(&selection.column(0).to_data())
+        };
+        assert!(!kept_shared(50));
+        assert!(kept_shared(51));
+    }
+
+    #[test]
     fn unshared_leaves_owned_columns_and_dictionary_values_alone() {
         let ints = read_back(Arc::new(Int64Array::from((0..100).collect::<Vec<i64>>())));
         let mut keep = vec![false; 100];
@@ -8035,46 +8130,91 @@ mod fused_tests {
         super::MIN_PARALLEL_ROWS_OVERRIDE.with(|gate| gate.set(None));
     }
 
+    /// A right-side fuse over `index` with one spill partition per index
+    /// partition, spilling value column 1.
+    fn right_fuse<'a>(index: &'a KeyIndex, value_schema: &'a SchemaRef) -> super::RightFuse<'a> {
+        let partitions = index.parts.len();
+        super::RightFuse {
+            index,
+            value_columns: &[1],
+            value_schema,
+            spill: super::SpillSink::open(partitions, value_schema).unwrap(),
+            candidates: std::sync::Mutex::new(super::CandidateStore::default()),
+            absent: (0..partitions)
+                .map(|_| std::sync::Mutex::new(std::collections::HashMap::new()))
+                .collect(),
+        }
+    }
+
     #[test]
     fn right_side_candidates_do_not_keep_their_input_batches_alive() {
         let right = view_keyed(&["a", "b", "c"], 0);
         let batch = right.open().unwrap().next().unwrap().unwrap();
-        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let index = KeyIndex::build(vec![vec![(1, 1), (2, 2)]]).unwrap();
         let value_schema = super::spill_schema(&right.schema, &[1]);
-        let fuse = super::RightFuse {
-            index: &index,
-            value_columns: &[1],
-            value_schema: &value_schema,
-            spill: super::SpillSink::open(1, &value_schema).unwrap(),
-            candidates: std::sync::Mutex::new(Vec::new()),
-            absent: std::sync::Mutex::new(Vec::new()),
-        };
+        let fuse = right_fuse(&index, &value_schema);
         let pairs: Vec<(u128, u128, bool)> = (1..=3).map(|k| (k, k, false)).collect();
         fuse.visit(0, &batch, &pairs).unwrap();
-        let candidates = fuse.candidates.into_inner().unwrap();
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].1.num_rows(), 3);
-        assert_owned(&candidates[0].1);
+        let store = fuse.candidates.into_inner().unwrap();
+        assert_eq!(store.batches.len(), 1);
+        assert_eq!(store.batches[0].1.num_rows(), 1);
+        assert_owned(&store.batches[0].1);
     }
 
     #[test]
-    fn right_side_spills_only_rows_whose_left_row_hash_differs() {
-        let right = view_keyed(&["a", "b"], 0);
+    fn right_side_spills_only_the_first_row_of_a_changed_key() {
+        let right = view_keyed(&["a", "b", "c"], 0);
         let batch = right.open().unwrap().next().unwrap().unwrap();
         let index = KeyIndex::build(vec![vec![(1, 10), (2, 20)]]).unwrap();
         let value_schema = super::spill_schema(&right.schema, &[1]);
-        let fuse = super::RightFuse {
-            index: &index,
-            value_columns: &[1],
-            value_schema: &value_schema,
-            spill: super::SpillSink::open(1, &value_schema).unwrap(),
-            candidates: std::sync::Mutex::new(Vec::new()),
-            absent: std::sync::Mutex::new(Vec::new()),
-        };
-        // Key 1 keeps its left row hash (unchanged); key 2's differs.
-        fuse.visit(0, &batch, &[(1, 10, false), (2, 21, false)])
+        let fuse = right_fuse(&index, &value_schema);
+        // Key 1 keeps its left row hash (unchanged); key 2's differs, and the
+        // right repeats key 2, so only its first row is spilled.
+        fuse.visit(0, &batch, &[(1, 10, false), (2, 21, false), (2, 22, false)])
             .unwrap();
         assert_eq!(fuse.spill.finish().unwrap().key_hashes, vec![vec![2]]);
+    }
+
+    /// One-row batches of the `view_keyed` shape, all carrying key hash 7,
+    /// which the (empty) left does not hold.
+    fn visit_absent_key(fuse: &super::RightFuse<'_>, order: &[usize]) {
+        let right = view_keyed(&["x"], 0);
+        let batch = right.open().unwrap().next().unwrap().unwrap();
+        for &idx in order {
+            fuse.visit(idx, &batch, &[(7, 0, false)]).unwrap();
+        }
+    }
+
+    #[test]
+    fn right_side_keeps_one_candidate_per_absent_key_across_batches() {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        visit_absent_key(&fuse, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let store = fuse.candidates.into_inner().unwrap();
+        let kept: Vec<usize> = store.batches.iter().map(|candidate| candidate.0).collect();
+        assert_eq!(kept, vec![0]);
+        let absent = fuse.absent[0].lock().unwrap();
+        assert_eq!((absent[&7].at, absent[&7].count), ((0, 0), 10));
+    }
+
+    #[test]
+    fn right_side_compacts_candidates_superseded_by_earlier_batches() {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        // Batches 3 and 2 are kept and superseded in turn; batch 1 makes the
+        // superseded rows outnumber the rest, so only batch 1's row remains.
+        visit_absent_key(&fuse, &[3, 2, 1]);
+        {
+            let store = fuse.candidates.lock().unwrap();
+            let kept: Vec<usize> = store.batches.iter().map(|candidate| candidate.0).collect();
+            assert_eq!((kept, store.rows, store.superseded), (vec![1], 1, 0));
+        }
+        visit_absent_key(&fuse, &[0]);
+        let store = fuse.candidates.into_inner().unwrap();
+        let kept: Vec<usize> = store.batches.iter().map(|candidate| candidate.0).collect();
+        assert_eq!((kept, store.rows, store.superseded), (vec![1, 0], 2, 1));
     }
 
     #[test]
@@ -8220,11 +8360,17 @@ mod fused_tests {
                 parts[super::partition_of(k, partitions)].push((k, r));
             }
             let index = KeyIndex::build(parts).unwrap();
-            let absent: Vec<u128> = right
-                .iter()
-                .filter(|&&(k, r)| index.tally(k, r) == Tally::Absent)
-                .map(|&(k, _)| k)
+            let absent: Vec<_> = (0..partitions)
+                .map(|_| std::sync::Mutex::new(std::collections::HashMap::new()))
                 .collect();
+            for (row, &(k, r)) in right.iter().enumerate() {
+                if index.tally(k, r) == Tally::Absent {
+                    let mut part = absent[super::partition_of(k, partitions)].lock().unwrap();
+                    part.entry(k)
+                        .or_insert(super::FirstRow { at: (0, row), count: 0 })
+                        .count += 1;
+                }
+            }
             let indexed = super::classify_indexed(index, absent).unwrap();
             let merged = super::classify(left, right);
             proptest::prop_assert_eq!(&indexed.added, &merged.added);

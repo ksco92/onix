@@ -10,7 +10,9 @@
 
 use std::sync::Arc;
 
-use arrow_array::{ArrayRef, Int64Array, RecordBatch, RecordBatchReader, StringArray};
+use arrow_array::{
+    ArrayRef, Int64Array, RecordBatch, RecordBatchReader, StringArray, StringViewArray,
+};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use onix_arrow::{TableDiffError, TableInput};
 
@@ -50,6 +52,35 @@ pub enum Shape {
         width: usize,
         first_fill: u8,
     },
+    /// `(id, v0, v1)`, two `width`-byte `Utf8View` columns starting with `fill`;
+    /// `keys` maps row `i` to its id, or omits it.
+    View {
+        width: usize,
+        fill: u8,
+        keys: ViewKeys,
+    },
+}
+
+/// How a [`Shape::View`] side keys its rows.
+#[derive(Clone, Copy)]
+pub enum ViewKeys {
+    /// Id `i`, omitting every row when `omit_every` is 1, every
+    /// `omit_every`-th row when above 1, and none when 0.
+    Plain { omit_every: i64 },
+    /// Id `offset + i / 2`, so each id appears twice.
+    Twice { offset: i64 },
+    /// Id `i`, except every `every`-th row, whose id is `-1`.
+    RepeatAbsent { every: i64 },
+}
+
+impl ViewKeys {
+    fn id(self, i: i64) -> Option<i64> {
+        match self {
+            ViewKeys::Plain { omit_every } => (omit_every == 0 || i % omit_every != 0).then_some(i),
+            ViewKeys::Twice { offset } => Some(offset + i / 2),
+            ViewKeys::RepeatAbsent { every } => Some(if i % every == 0 { -1 } else { i }),
+        }
+    }
 }
 
 /// A generated two-sided case, with its size parameters already defaulted by
@@ -70,6 +101,21 @@ pub enum Case {
     ManyCols { ncols: usize, width: usize },
     /// Every `key_width`-byte string key appearing twice on each side.
     Dup(usize),
+    /// Two `width`-byte view columns; every left row removed (right empty).
+    ViewRemoved(usize),
+    /// [`Case::ViewRemoved`] mirrored: every right row added (left empty).
+    ViewAdded(usize),
+    /// Two `width`-byte view columns, equal sides except every `every`-th left
+    /// row, which the right lacks.
+    ViewSparse { width: usize, every: i64 },
+    /// Left ids once; the right repeats the first half of them twice each, with
+    /// different values, so each is a duplicate key.
+    DupRightOnce(usize),
+    /// Left ids once; the right holds ids the left lacks, each twice.
+    DupRightAbsent(usize),
+    /// Equal sides except every `every`-th right row, keyed by one id the left
+    /// lacks.
+    RepeatAbsent { width: usize, every: i64 },
 }
 
 impl Case {
@@ -129,6 +175,35 @@ impl Case {
                     shape(b'b'),
                     "id",
                 )
+            }
+            Case::ViewRemoved(width)
+            | Case::ViewAdded(width)
+            | Case::ViewSparse { width, .. }
+            | Case::DupRightOnce(width)
+            | Case::DupRightAbsent(width)
+            | Case::RepeatAbsent { width, .. } => {
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new("id", DataType::Int64, false),
+                    Field::new("v0", DataType::Utf8View, false),
+                    Field::new("v1", DataType::Utf8View, false),
+                ]));
+                let view = |fill, keys| Shape::View { width, fill, keys };
+                let all = ViewKeys::Plain { omit_every: 0 };
+                let (left, right) = match self {
+                    Case::ViewRemoved(_) => (all, ViewKeys::Plain { omit_every: 1 }),
+                    Case::ViewAdded(_) => (ViewKeys::Plain { omit_every: 1 }, all),
+                    Case::ViewSparse { every, .. } => (all, ViewKeys::Plain { omit_every: every }),
+                    Case::DupRightOnce(_) => (all, ViewKeys::Twice { offset: 0 }),
+                    Case::DupRightAbsent(_) => (all, ViewKeys::Twice { offset: rows }),
+                    Case::RepeatAbsent { every, .. } => (all, ViewKeys::RepeatAbsent { every }),
+                    _ => unreachable!("only view cases reach this arm"),
+                };
+                let right_fill = if matches!(self, Case::DupRightOnce(_)) {
+                    b'b'
+                } else {
+                    b'a'
+                };
+                (schema, view(b'a', left), view(right_fill, right), "id")
             }
             Case::Dup(key_width) => {
                 let schema = Arc::new(Schema::new(vec![
@@ -230,6 +305,22 @@ impl Iterator for GenReader {
                     columns.push(Arc::new(values));
                 }
                 columns
+            }
+            Shape::View { width, fill, keys } => {
+                let (ids, rows): (Vec<i64>, Vec<i64>) = (self.next..end)
+                    .filter_map(|i| keys.id(i).map(|id| (id, i)))
+                    .unzip();
+                let cell = |column: u8| {
+                    let cells: StringViewArray = rows
+                        .iter()
+                        .map(|&i| {
+                            let pad = width.saturating_sub(2);
+                            Some(format!("{}{column}{i:0>pad$}", char::from(fill)))
+                        })
+                        .collect();
+                    Arc::new(cells) as ArrayRef
+                };
+                vec![Arc::new(Int64Array::from(ids)), cell(0), cell(1)]
             }
         };
         self.next = end;
