@@ -24,14 +24,17 @@ type DistanceKey = (DistKey, DistKey);
 /// "Distance memo" section: pairwise container distances, tuple
 /// digests, and set-member digests, scoped to one diff run. `DistKey`
 /// keys hash and compare by a full-tree walk; `MemberContent` keys
-/// compare by one (it has no `Hash`). A big-integer leaf costs
+/// compare by one (it has no `Hash`); a `PyHashKey` lookup makes `O(log n)`
+/// comparisons, each `O(the probed key's element bytes)`, a nested tuple
+/// comparing as one id. A big-integer leaf costs
 /// `O(digits)` per lookup; `super::fxhash`'s doc enumerates each key's cost.
 pub(crate) struct IgnoreOrderMemo<'r> {
     cache: RefCell<HashMap<DistanceKey, f64>>,
     /// Interns each hashable-tuple identity to its digest, shared
     /// across the run — see `docs/design/ignore-order.md`'s "Distance
-    /// memo" section.
-    tuple_ids: RefCell<HashMap<PyHashKey, TupleId>>,
+    /// memo" section. A `BTreeMap`, reached on the default path through a
+    /// set member's tuple dict keys; its key type carries no `Hash` derive.
+    tuple_ids: RefCell<BTreeMap<PyHashKey, TupleId>>,
     /// The digest assigned to each interned identity, indexed by
     /// [`TupleId::index`].
     tuple_digests: RefCell<Vec<ItemKey>>,
@@ -60,7 +63,7 @@ impl<'r> IgnoreOrderMemo<'r> {
     pub(crate) fn new() -> Self {
         Self {
             cache: RefCell::new(HashMap::default()),
-            tuple_ids: RefCell::new(HashMap::default()),
+            tuple_ids: RefCell::new(BTreeMap::new()),
             tuple_digests: RefCell::new(Vec::new()),
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),
@@ -78,7 +81,7 @@ impl<'r> IgnoreOrderMemo<'r> {
     pub(crate) fn disabled() -> Self {
         Self {
             cache: RefCell::new(HashMap::default()),
-            tuple_ids: RefCell::new(HashMap::default()),
+            tuple_ids: RefCell::new(BTreeMap::new()),
             tuple_digests: RefCell::new(Vec::new()),
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),

@@ -329,7 +329,7 @@ impl std::hash::Hash for ItemKey {
 /// Referring to a nested tuple by id rather than by its whole identity is
 /// what keeps this `O(arity)` per node: `((((1,),),),)` is four one-element
 /// identities, not four identities of size 1, 2, 3 and 4.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PyHashPart {
     Scalar(ScalarKey),
     Tuple(TupleId),
@@ -345,12 +345,12 @@ pub(crate) enum PyHashPart {
 /// ([`python_scalar_key`], which makes `1`, `1.0` and `True` one key), and a
 /// list or dict is unhashable, which also makes any tuple containing one
 /// unhashable.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct PyHashKey(Box<[PyHashPart]>);
 
 /// A hashable tuple identity's place in the run's interning table — see
 /// [`super::IgnoreOrderMemo::tuple_digest`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct TupleId(usize);
 
 impl TupleId {

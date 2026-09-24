@@ -948,6 +948,36 @@ fn count_object_diff_leaves_ratio_at_exactly_the_threshold_does_not_collapse() {
 }
 
 #[test]
+fn mixed_key_union_sums_shared_and_one_sided_keys() {
+    // Three Python-equal shared keys (`1` matches `1.0`) and three one-sided keys per side:
+    // 3 / 9 is the threshold itself, so no collapse; a product of any two counts collapses.
+    let object = |keys: [serde_json::Value; 6]| {
+        crate::value::Object::from_pairs(
+            keys.iter()
+                .map(|key| (ObjectKey::Other(Box::new(cv(key))), cv(&json!(0))))
+                .collect(),
+        )
+    };
+    let a = object([
+        json!(1),
+        json!(2),
+        json!(3),
+        json!(10),
+        json!(11),
+        json!(12),
+    ]);
+    let b = object([
+        json!(1.0),
+        json!(2),
+        json!(3),
+        json!(20),
+        json!(21),
+        json!(22),
+    ]);
+    assert!(!super::is_below_threshold_to_diff_deeper(&a, &b));
+}
+
+#[test]
 fn count_object_diff_leaves_shared_key_recursion_depth_boundary_is_exact() {
     // Shared key "x" holds arrays whose one element (a dict) needs 3
     // levels of recursion (array-element -> dict "a" -> dict "b") to
@@ -3843,4 +3873,154 @@ fn an_object_reports_the_address_it_was_converted_from() {
         ),
         (Some(7), None)
     );
+}
+
+// --- default-path hash flooding (issue #136) ---
+
+/// `n` distinct 16-byte UTF-8 keys that drive `FxHasher` to one final state once `prefix` (the
+/// words hashed before the key's bytes) is written: an 8-byte ASCII word, then a second word
+/// solved so the state before the last multiply is zero.
+fn fx_colliding_keys(n: usize, prefix: &[u64]) -> Vec<String> {
+    use std::hash::Hasher;
+    let mut keys = Vec::with_capacity(n);
+    for counter in 0u64.. {
+        if keys.len() == n {
+            break;
+        }
+        let first: u64 = (0..8).fold(0, |word, nibble| {
+            word | ((u64::from(b'a') + ((counter >> (4 * nibble)) & 0xf)) << (8 * nibble))
+        });
+        let mut hasher = FxHasher::default();
+        for &word in prefix {
+            hasher.write_u64(word);
+        }
+        hasher.add_to_hash(first);
+        let second = hasher.hash.rotate_left(5);
+        if let Ok(key) = String::from_utf8([first.to_ne_bytes(), second.to_ne_bytes()].concat()) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+/// What a `&[u8]` dict key hashes before its bytes: its length.
+const DICT_KEY_PREFIX: [u64; 1] = [16];
+/// What a one-string tuple's `PyHashKey` hashes before the string's bytes: the tuple length, the
+/// `PyHashPart::Scalar` and `ScalarKey::Str` discriminants, the string length.
+const TUPLE_KEY_PREFIX: [u64; 4] = [1, 0, 1, 16];
+
+/// `n` keys `key000…` of `len` bytes, differing only in their trailing digits.
+fn distinct_keys(n: usize, len: usize) -> Vec<String> {
+    let width = len - 3;
+    (0..n).map(|i| format!("key{i:0width$}")).collect()
+}
+
+/// `{k: value}` over every key in `keys`.
+fn str_keyed_dict(keys: &[String], value: i64) -> CValue {
+    CValue::Object(crate::value::Object::from_pairs(
+        keys.iter()
+            .map(|key| {
+                let key = crate::value::Key::Utf8(std::sync::Arc::from(key.as_str()));
+                (ObjectKey::Str(key), cv(&json!(value)))
+            })
+            .collect(),
+    ))
+}
+
+/// A one-member set: a custom object whose `d` attribute maps `(k,)` to `value` for every key.
+fn set_of_tuple_keyed_object(keys: &[String], value: i64) -> CValue {
+    let d = crate::value::Object::from_pairs(
+        keys.iter()
+            .map(|key| {
+                let key = ObjectKey::Other(Box::new(ctuple(vec![cv(&json!(key))])));
+                (key, cv(&json!(value)))
+            })
+            .collect(),
+    );
+    let attribute = crate::value::Key::Utf8(std::sync::Arc::from("d"));
+    let object =
+        crate::value::Object::from_pairs(vec![(ObjectKey::Str(attribute), CValue::Object(d))])
+            .into_class(
+                crate::value::ObjectKind::CustomObject,
+                std::sync::Arc::from("C"),
+                std::sync::Arc::from("C"),
+                crate::value::ObjectLengths {
+                    dict_len: 1,
+                    ..Default::default()
+                },
+                Vec::new(),
+                None,
+            );
+    CValue::Set(SetItems::new(vec![CValue::Object(object)]))
+}
+
+/// The fastest of three default-options diffs of `build(keys, 1)` against `build(keys, 2)`.
+fn fastest_default_diff(
+    build: fn(&[String], i64) -> CValue,
+    keys: &[String],
+) -> std::time::Duration {
+    let (a, b) = (build(keys, 1), build(keys, 2));
+    (0..3)
+        .map(|_| {
+            let start = std::time::Instant::now();
+            crate::diff::diff(&a, &b).expect("two shallow values are far under the depth bound");
+            start.elapsed()
+        })
+        .min()
+        .expect("three runs")
+}
+
+#[test]
+fn fx_colliding_dict_keys_share_one_hash() {
+    use std::hash::BuildHasher;
+    let fx = std::hash::BuildHasherDefault::<FxHasher>::default();
+    let keys = fx_colliding_keys(64, &DICT_KEY_PREFIX);
+    let hashes: std::collections::BTreeSet<u64> =
+        keys.iter().map(|key| fx.hash_one(key.as_bytes())).collect();
+    let distinct: std::collections::BTreeSet<&String> = keys.iter().collect();
+    assert_eq!((distinct.len(), hashes.len()), (64, 1));
+}
+
+#[test]
+fn colliding_dict_keys_cost_what_distinct_keys_cost_with_default_options() {
+    let n = 10_000;
+    let colliding = fastest_default_diff(str_keyed_dict, &fx_colliding_keys(n, &DICT_KEY_PREFIX));
+    let distinct = fastest_default_diff(str_keyed_dict, &distinct_keys(n, 15));
+    assert!(
+        colliding < distinct * 4,
+        "colliding {colliding:?} vs distinct {distinct:?}"
+    );
+}
+
+#[test]
+fn colliding_tuple_keys_in_a_set_member_cost_what_distinct_keys_cost_with_default_options() {
+    let n = 10_000;
+    let build = set_of_tuple_keyed_object;
+    let colliding = fastest_default_diff(build, &fx_colliding_keys(n, &TUPLE_KEY_PREFIX));
+    let distinct = fastest_default_diff(build, &distinct_keys(n, 15));
+    assert!(
+        colliding < distinct * 4,
+        "colliding {colliding:?} vs distinct {distinct:?}"
+    );
+}
+
+#[test]
+#[ignore = "measurement: cargo test --release -p onix-core --lib default_path_key_curves -- --ignored --nocapture (about 5 s in release; about 4 minutes with FxHash-keyed default-path tables)"]
+fn default_path_key_curves() {
+    for n in [5_000, 10_000, 20_000, 40_000, 80_000] {
+        let seconds = |build, prefix: &[u64]| {
+            [
+                distinct_keys(n, 15),
+                distinct_keys(n, 16),
+                fx_colliding_keys(n, prefix),
+            ]
+            .map(|keys| format!("{:.3}", fastest_default_diff(build, &keys).as_secs_f64()))
+            .join(" / ")
+        };
+        println!(
+            "{n}\tdict {}\ttuple {}",
+            seconds(str_keyed_dict, &DICT_KEY_PREFIX),
+            seconds(set_of_tuple_keyed_object, &TUPLE_KEY_PREFIX)
+        );
+    }
 }

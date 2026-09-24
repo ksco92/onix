@@ -11,8 +11,6 @@ use crate::diff::DiffOptions;
 
 use super::IgnoreOrderMemo;
 
-use super::fxhash::HashSet;
-
 /// A total-ordering wrapper for the non-negative, always-finite distances
 /// [`rough_distance`] computes, so they can key a [`BTreeMap`](std::collections::BTreeMap) (ascending
 /// iteration, for [`compute_pairs`](super::pairing::compute_pairs)'s greedy loop) and group candidates by
@@ -872,7 +870,9 @@ pub(crate) fn match_dict_keys<'a>(a: &'a Object, b: &'a Object) -> DictKeyMatch<
 /// The shared `threshold_to_diff_deeper` ratio check backing both
 /// [`count_object_diff_leaves`] (the count-only distance mirror) and
 /// `crate::diff::object_diff`'s own unconditional collapse — see
-/// [`THRESHOLD_TO_DIFF_DEEPER`]'s own doc for why both exist.
+/// [`THRESHOLD_TO_DIFF_DEEPER`]'s own doc for why both exist. All-`str` keys
+/// are counted by a merge of the two ascending key sequences: one key
+/// comparison per step, no hashing.
 pub(crate) fn is_below_threshold_to_diff_deeper(a: &Object, b: &Object) -> bool {
     let (union_len, intersect_len) = if a.has_non_str_keys() || b.has_non_str_keys() {
         let matched = match_dict_keys(a, b);
@@ -881,28 +881,24 @@ pub(crate) fn is_below_threshold_to_diff_deeper(a: &Object, b: &Object) -> bool 
             matched.shared.len(),
         )
     } else {
-        // Every key here is an `ObjectKey::Str`, so structural and
-        // python-equality matching coincide. Counted by WTF-8 bytes, not
-        // `ObjectKey::as_str` (which is `None` for a lone-surrogate key —
-        // `ObjectKey` has no `Hash` impl at all, see its own doc, so this
-        // is also the only way to put one in a `HashSet` here), so a
-        // surrogate key is counted correctly instead of silently dropped.
-        fn key_bytes(key: &ObjectKey) -> &[u8] {
-            match key {
-                ObjectKey::Str(s) => s.as_bytes(),
-                ObjectKey::Other(_) => {
-                    unreachable!("has_non_str_keys() is false on both sides in this branch")
+        let (mut a_keys, mut b_keys) = (a.keys().peekable(), b.keys().peekable());
+        let mut intersect_len = 0;
+        while let (Some(a_key), Some(b_key)) = (a_keys.peek(), b_keys.peek()) {
+            match a_key.cmp(b_key) {
+                std::cmp::Ordering::Less => {
+                    a_keys.next();
+                }
+                std::cmp::Ordering::Greater => {
+                    b_keys.next();
+                }
+                std::cmp::Ordering::Equal => {
+                    intersect_len += 1;
+                    a_keys.next();
+                    b_keys.next();
                 }
             }
         }
-        let union_len = a
-            .keys()
-            .map(key_bytes)
-            .chain(b.keys().map(key_bytes))
-            .collect::<HashSet<_>>()
-            .len();
-        let intersect_len = a.keys().filter(|key| b.contains_key(key)).count();
-        (union_len, intersect_len)
+        (a.len() + b.len() - intersect_len, intersect_len)
     };
     #[allow(
         clippy::cast_precision_loss,

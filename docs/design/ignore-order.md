@@ -52,6 +52,8 @@ Two further tables share the memo's lifetime and key the same way
   diff, so the first Python-equal tuple hashed in the run fixes the
   digest every later Python-equal one inherits. An unhashable tuple
   (holding a list or dict) keeps its own type-strict digest instead.
+  The table is a `BTreeMap`: a set member's tuple dict keys reach it
+  on the default path.
 - **Set-member digests** — each member reduces to a Python-equality id
   (first-Python-equal-wins, so `1` and `1.0` inside an otherwise-equal
   container collapse) and a content id (collapsing naive/aware
