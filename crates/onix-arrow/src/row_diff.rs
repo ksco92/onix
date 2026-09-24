@@ -1301,7 +1301,7 @@ fn hash_parallel(
             .candidates
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner)
-            .batches,
+            .into_candidates(),
         spill: fuse.spill.finish()?,
     };
     let absent = fuse.absent;
@@ -3283,7 +3283,7 @@ type AbsentKeys = Vec<Mutex<HashMap<u128, FirstRow>>>;
 /// A right-side batch's added candidates, captured by the parallel hash pass so
 /// the right is never read again: the position of the batch's first row, the
 /// key columns of the rows kept for keys absent from the left with those rows'
-/// indices and key hashes, and, at full width, the kept rows marked `in_full`
+/// indices and key hashes, and, at full width, the kept rows at `full_rows`
 /// (those whose key had not repeated when last compacted).
 struct Candidate {
     at: u64,
@@ -3291,17 +3291,26 @@ struct Candidate {
     rows: Vec<usize>,
     hashes: Vec<u128>,
     full: RecordBatch,
-    in_full: Vec<bool>,
+    full_rows: Vec<usize>,
 }
 
-/// The kept candidates, their full-width rows, and how many kept rows have
-/// since been superseded by an earlier row of their key or seen their key
+/// The kept candidates, split into those still holding full-width rows and
+/// those holding key columns only; the full-width rows; and how many of those
+/// have since been superseded by an earlier row of their key or seen their key
 /// repeated.
 #[derive(Default)]
 struct CandidateStore {
-    batches: Vec<Candidate>,
+    live: Vec<Candidate>,
+    settled: Vec<Candidate>,
     rows: usize,
     stale: usize,
+}
+
+impl CandidateStore {
+    fn into_candidates(mut self) -> Vec<Candidate> {
+        self.live.append(&mut self.settled);
+        self.live
+    }
 }
 
 /// The right side's rows captured during its only read on the parallel path.
@@ -3393,7 +3402,7 @@ impl RightFuse<'_> {
             let candidate = Candidate {
                 at,
                 keys: rows.project(self.key_columns).map_err(|e| read_error(&e))?,
-                in_full: vec![true; kept.len()],
+                full_rows: (0..kept.len()).collect(),
                 rows: kept,
                 hashes,
                 full: rows,
@@ -3415,7 +3424,7 @@ impl RightFuse<'_> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         store.rows += candidate.rows.len();
-        store.batches.push(candidate);
+        store.live.push(candidate);
         self.compact_if_stale(&mut store, stale)
     }
 
@@ -3428,8 +3437,8 @@ impl RightFuse<'_> {
         self.compact_if_stale(&mut store, stale)
     }
 
-    /// Once stale rows outnumber half the full-width ones, drops every kept row
-    /// that is no longer its key's first and every full-width row whose key has
+    /// Once stale rows outnumber half the full-width ones, drops every
+    /// full-width row that is no longer its key's first or whose key has
     /// repeated, so full-width rows are held for at most about twice the keys
     /// that could still be added.
     fn compact_if_stale(
@@ -3443,46 +3452,34 @@ impl RightFuse<'_> {
         }
         let partitions = self.absent.len();
         let mut rows = 0;
-        for candidate in &mut store.batches {
-            let (mut first, mut full_mask) = (Vec::new(), Vec::new());
-            for (i, (&row, &hash)) in candidate.rows.iter().zip(&candidate.hashes).enumerate() {
+        for mut candidate in std::mem::take(&mut store.live) {
+            let before = candidate.full_rows.len();
+            let mut full_mask = Vec::with_capacity(before);
+            for &i in &candidate.full_rows {
+                let hash = candidate.hashes[i];
                 let part = self.absent[partition_of(hash, partitions)]
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
-                let entry = part.get(&hash);
-                let is_first = entry.is_some_and(|e| e.at == candidate.at + row as u64);
-                first.push(is_first);
-                if candidate.in_full[i] {
-                    let addable = is_first && entry.is_some_and(|e| e.count == 1);
-                    full_mask.push(addable);
-                    candidate.in_full[i] = addable;
-                }
+                let at = candidate.at + candidate.rows[i] as u64;
+                full_mask.push(part.get(&hash).is_some_and(|e| e.at == at && e.count == 1));
             }
-            candidate.full = arrow_select::filter::filter_record_batch(
+            let mut keep = full_mask.iter();
+            candidate
+                .full_rows
+                .retain(|_| keep.next().copied().unwrap_or(false));
+            let full = arrow_select::filter::filter_record_batch(
                 &candidate.full,
                 &BooleanArray::from(full_mask),
             )
             .map_err(|e| read_error(&e))?;
-            let mut keep = first.iter();
-            candidate
-                .rows
-                .retain(|_| keep.next().copied().unwrap_or(false));
-            let mut keep = first.iter();
-            candidate
-                .hashes
-                .retain(|_| keep.next().copied().unwrap_or(false));
-            let mut keep = first.iter();
-            candidate
-                .in_full
-                .retain(|_| keep.next().copied().unwrap_or(false));
-            candidate.keys = arrow_select::filter::filter_record_batch(
-                &candidate.keys,
-                &BooleanArray::from(first),
-            )
-            .map_err(|e| read_error(&e))?;
-            rows += candidate.in_full.iter().filter(|&&full| full).count();
+            candidate.full = owned_batch(full, before)?;
+            rows += candidate.full_rows.len();
+            if candidate.full_rows.is_empty() {
+                store.settled.push(candidate);
+            } else {
+                store.live.push(candidate);
+            }
         }
-        store.batches.retain(|c| !c.rows.is_empty());
         store.rows = rows;
         store.stale = 0;
         Ok(())
@@ -3513,11 +3510,10 @@ fn materialize_candidates(
             pending_dups,
             &mut out,
         )?;
-        let mask = hashes
+        let mask = candidate
+            .full_rows
             .iter()
-            .zip(&candidate.in_full)
-            .filter(|&(_, &full)| full)
-            .map(|(h, _)| added.contains(h))
+            .map(|&i| added.contains(&hashes[i]))
             .collect();
         push_filtered(&candidate.full, mask, &mut out.selected)?;
     }
@@ -8307,9 +8303,9 @@ mod fused_tests {
         let pairs: Vec<(u128, u128, bool)> = (1..=3).map(|k| (k, k, false)).collect();
         fuse.visit(0, &batch, &pairs).unwrap();
         let store = fuse.candidates.into_inner().unwrap();
-        assert_eq!(store.batches.len(), 1);
-        assert_eq!(store.batches[0].full.num_rows(), 1);
-        assert_owned(&store.batches[0].full);
+        assert_eq!(store.live.len(), 1);
+        assert_eq!(store.live[0].full.num_rows(), 1);
+        assert_owned(&store.live[0].full);
     }
 
     #[test]
@@ -8357,13 +8353,16 @@ mod fused_tests {
         }
     }
 
-    /// The kept candidates' positions and full-width row counts.
+    /// The kept candidates' positions and full-width row counts, by position.
     fn kept(store: &super::CandidateStore) -> Vec<(u64, usize)> {
-        store
-            .batches
+        let mut kept: Vec<(u64, usize)> = store
+            .live
             .iter()
+            .chain(&store.settled)
             .map(|c| (c.at, c.full.num_rows()))
-            .collect()
+            .collect();
+        kept.sort_unstable();
+        kept
     }
 
     #[test]
@@ -8377,7 +8376,7 @@ mod fused_tests {
         visit_absent_key(&fuse, &rows);
         let store = fuse.candidates.into_inner().unwrap();
         assert_eq!((kept(&store), store.rows), (vec![(0, 0)], 0));
-        assert_eq!(store.batches[0].keys.num_columns(), 1);
+        assert_eq!(store.settled[0].keys.num_columns(), 1);
         let absent = fuse.absent[0].lock().unwrap();
         assert_eq!((absent[&7].at, absent[&7].count), (0, 10));
     }
@@ -8405,7 +8404,7 @@ mod fused_tests {
         let store = fuse.candidates.lock().unwrap();
         assert_eq!(
             (kept(&store), store.rows, store.stale),
-            (vec![(5, 1), (1, 0)], 1, 0)
+            (vec![(1, 0), (3, 0), (5, 1)], 1, 0)
         );
     }
 
@@ -8433,7 +8432,7 @@ mod fused_tests {
             (kept(&store), store.rows),
             (vec![(0, 1), (2, 1), (5, 2)], 4)
         );
-        let keys: Vec<usize> = store.batches.iter().map(|c| c.keys.num_rows()).collect();
+        let keys: Vec<usize> = store.live.iter().map(|c| c.keys.num_rows()).collect();
         assert_eq!(keys, vec![2, 2, 2]);
     }
 
@@ -8458,7 +8457,7 @@ mod fused_tests {
         let fuse = right_fuse(&index, &value_schema);
         // Later positions arrive first; each earlier one supersedes the last.
         visit_absent_key(&fuse, &[(3, "d"), (2, "c"), (1, "b"), (0, "a")]);
-        let candidates = fuse.candidates.into_inner().unwrap().batches;
+        let candidates = fuse.candidates.into_inner().unwrap().into_candidates();
         assert!(candidates.iter().all(|c| c.full.num_rows() == 0));
         assert!(candidates.iter().any(|c| c.at == 0));
         let hasher = super::RowHasher::new().unwrap();
