@@ -23,9 +23,8 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, seria
 #[pyclass(module = "deepdiff_rs")]
 pub(crate) struct DeepDiff {
     report_value: Value,
-    /// Whether `report_value` must render on the sized worker thread rather
-    /// than inline; computed once so `to_json` never re-walks it.
-    /// See `crate::guard::is_deep`.
+    /// Whether `report_value` needs the worker thread to render; computed once
+    /// so `to_json` never re-walks it. See `crate::guard::is_deep`.
     report_is_deep: bool,
     /// Whether either input held a lone surrogate code point, found during
     /// conversion; lets `to_json` skip its own WTF-8 tree walk when `false`.
