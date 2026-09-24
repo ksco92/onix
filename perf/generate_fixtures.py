@@ -4,29 +4,13 @@
 # ///
 """Generate onix's deterministic benchmark fixture matrix.
 
-Writes one directory per fixture under ``perf/fixtures/`` (gitignored — never
-commit fixture data), each holding ``a.json``/``b.json``: a pair of JSON
-values with a controlled mutation rate between them (see ``VALUE_CHANGE_RATE``
-/ ``ADD_RATE`` / ``REMOVE_RATE`` below), plus a top-level ``manifest.json``
-(``{"base_seed": ..., "fixtures": [...]}``) recording the seed plus every
-fixture's name and byte sizes — the single source of truth both
-``perf/run_bench.sh`` and ``perf/summarize_results.py`` read the fixture
-list and seed from, rather than hardcoding either.
+Writes one directory per fixture under ``perf/fixtures/`` (gitignored), each
+holding ``a.json``/``b.json`` plus a top-level ``manifest.json`` recording
+the seed and every fixture's name and byte sizes.
 
-**Determinism is the whole point of this file.** Every fixture derives its
-own `random.Random` instance from `BASE_SEED` (recorded here, never from
-wall-clock or process state), dict/list insertion order is always
-construction order (never a set or unordered structure), and every JSON file
-is written with fixed `json.dump` settings (compact separators, no
-``ensure_ascii`` reordering). Two runs of ``uv run perf/generate_fixtures.py``
-on any machine must produce byte-identical fixture files. To prove it:
-
-    uv run perf/generate_fixtures.py && find perf/fixtures -type f | sort | xargs shasum -a 256 > /tmp/run1.txt
-    uv run perf/generate_fixtures.py && find perf/fixtures -type f | sort | xargs shasum -a 256 > /tmp/run2.txt
-    diff /tmp/run1.txt /tmp/run2.txt   # empty diff
-
-This is a scalable subset of the full benchmark fixture matrix; see
-``perf/RESULTS.md``'s "Deferred work" section for what's cut and why.
+Every fixture derives its own `random.Random` from `BASE_SEED` and is written
+with fixed `json.dump` settings, so two runs are byte-identical: verify with
+two generator runs, `shasum -a 256` over `perf/fixtures`, and an empty `diff`.
 """
 
 import copy
@@ -99,17 +83,7 @@ def mutate_dict(
     change_value: Callable[[random.Random], JsonValue],
     add_value: Callable[[random.Random], JsonValue],
 ) -> dict[str, JsonValue]:
-    """
-    Build a mutated copy of a flat dict: ~5% of values changed, ~2% of keys
-    removed, ~2% new keys added, all three groups disjoint.
-
-    :param base: The original dict; not mutated in place.
-    :param rng: Seeded random source (mutated in place by use, as `Random`
-        instances always are).
-    :param change_value: Produces a replacement value for a changed key.
-    :param add_value: Produces a value for a newly added key.
-    :return: The mutated copy.
-    """
+    """Build a mutated copy of `base`: changed, removed, and added keys are disjoint, at the module's rates."""
     keys = list(base.keys())
     shuffled = keys[:]
     rng.shuffle(shuffled)
@@ -143,22 +117,7 @@ def mutate_list(
     change_item: Callable[[JsonValue, random.Random], JsonValue],
     new_item: Callable[[int, random.Random], JsonValue],
 ) -> list[JsonValue]:
-    """
-    Build a mutated copy of a list: ~5% of items changed in place (any
-    index), removals truncate the tail, additions extend it.
-
-    Keeping adds and removes tail-only preserves a realistic mutation shape:
-    a mid-list deletion would instead shift every following index and turn
-    the diff into an avalanche of removal+addition pairs.
-
-    :param base: The original list; not mutated in place.
-    :param rng: Seeded random source.
-    :param change_item: Given the current value and the RNG, returns its
-        replacement.
-    :param new_item: Given the new absolute index and the RNG, returns the
-        value for a tail-appended item.
-    :return: The mutated copy.
-    """
+    """Build a mutated copy of `base`: items change in place; removals/additions are tail-only (no index-shift avalanche)."""
     n = len(base)
     change_n = int(n * VALUE_CHANGE_RATE)
     remove_n = int(n * REMOVE_RATE)
@@ -179,22 +138,12 @@ def mutate_list(
 
 
 def _changed_int(rng: random.Random) -> int:
-    """
-    Draw a "changed" integer, guaranteed disjoint from `_ORIGINAL_INT_RANGE`.
-
-    :param rng: Seeded random source.
-    :return: The drawn integer.
-    """
+    """Draw a "changed" integer, disjoint from `_ORIGINAL_INT_RANGE`."""
     return rng.randint(*_CHANGED_INT_RANGE)
 
 
 def _added_int(rng: random.Random) -> int:
-    """
-    Draw an "added" integer, guaranteed disjoint from the other two ranges.
-
-    :param rng: Seeded random source.
-    :return: The drawn integer.
-    """
+    """Draw an "added" integer, disjoint from the other two ranges."""
     return rng.randint(*_ADDED_INT_RANGE)
 
 
@@ -206,14 +155,7 @@ def _added_int(rng: random.Random) -> int:
 
 
 def build_flat_dict(size: int, seed: int) -> tuple[JsonValue, JsonValue]:
-    """
-    Build a flat (1-level) dict pair of `size` keys with the standard
-    mutation rate applied.
-
-    :param size: Number of keys in `a`.
-    :param seed: RNG seed for this fixture.
-    :return: The `(a, b)` pair.
-    """
+    """Build a flat dict pair of `size` keys at the module's mutation rate."""
     rng = random.Random(seed)
     a: dict[str, JsonValue] = {f"key_{i:07d}": rng.randint(*_ORIGINAL_INT_RANGE) for i in range(size)}
     b = mutate_dict(a, rng, _changed_int, _added_int)
@@ -222,14 +164,7 @@ def build_flat_dict(size: int, seed: int) -> tuple[JsonValue, JsonValue]:
 
 
 def build_flat_list(size: int, seed: int) -> tuple[JsonValue, JsonValue]:
-    """
-    Build a flat (1-level) list pair of `size` scalar items with the
-    standard mutation rate applied.
-
-    :param size: Number of items in `a`.
-    :param seed: RNG seed for this fixture.
-    :return: The `(a, b)` pair.
-    """
+    """Build a flat list pair of `size` items at the module's mutation rate."""
     rng = random.Random(seed)
     a: list[JsonValue] = [rng.randint(*_ORIGINAL_INT_RANGE) for _ in range(size)]
     b = mutate_list(a, rng, lambda _value, r: _changed_int(r), lambda _idx, r: _added_int(r))
@@ -238,15 +173,7 @@ def build_flat_list(size: int, seed: int) -> tuple[JsonValue, JsonValue]:
 
 
 def _build_tree(rng: random.Random, depth: int, branch: int) -> JsonValue:
-    """
-    Recursively build a uniform tree: `branch` children at every level down
-    to `depth` levels, with a scalar leaf at depth 0.
-
-    :param rng: Seeded random source.
-    :param depth: Remaining levels of dict nesting before a leaf.
-    :param branch: Number of children per dict level.
-    :return: The built subtree (a dict, or a leaf scalar when `depth == 0`).
-    """
+    """Recursively build a uniform tree: `branch` children per level down to `depth`, with a scalar leaf at depth 0."""
     if depth == 0:
         return rng.randint(*_ORIGINAL_INT_RANGE)
 
@@ -254,16 +181,7 @@ def _build_tree(rng: random.Random, depth: int, branch: int) -> JsonValue:
 
 
 def _decode_path(index: int, length: int, branch: int) -> list[int]:
-    """
-    Decode `index` into `length` base-`branch` digits (most significant
-    first) — a bijection between `range(branch ** length)` and every
-    distinct path of that length through the tree `_build_tree` produces.
-
-    :param index: The value to decode, in `[0, branch ** length)`.
-    :param length: Number of digits (tree levels) to decode.
-    :param branch: The tree's branching factor.
-    :return: The decoded path, one branch index per level.
-    """
+    """Decode `index` into `length` base-`branch` digits, most significant first."""
     digits: list[int] = []
 
     for _ in range(length):
@@ -276,13 +194,7 @@ def _decode_path(index: int, length: int, branch: int) -> list[int]:
 
 
 def _descend(tree: JsonValue, digits: list[int]) -> JsonValue:
-    """
-    Walk `tree` down `digits`, one `f"b{d}"` dict hop per digit.
-
-    :param tree: The tree (or subtree) to walk.
-    :param digits: The path to follow.
-    :return: The node reached after following every digit.
-    """
+    """Walk `tree` down `digits`, one `f"b{d}"` dict hop per digit."""
     node = tree
 
     for d in digits:
@@ -293,21 +205,7 @@ def _descend(tree: JsonValue, digits: list[int]) -> JsonValue:
 
 
 def build_nested_uniform(depth: int, branch: int, seed: int) -> tuple[JsonValue, JsonValue]:
-    """
-    Build a uniform-tree pair (`branch` children per level, `depth` levels,
-    `branch ** depth` leaves) with the standard mutation rate applied at
-    leaf granularity: ~5% of leaves get a changed value; ~2% of "leaf
-    groups" (the dicts one level above the leaves) each gain one new leaf
-    key; a disjoint ~2% of leaf groups each lose one existing leaf key —
-    together totalling ~2% of leaves added/removed, matching the flat-dict
-    rate at a coarser (per-group) granularity, since adding/removing
-    individual scalar leaves needs a container to add/remove them from.
-
-    :param depth: Tree depth (dict levels before a leaf).
-    :param branch: Branching factor per level.
-    :param seed: RNG seed for this fixture.
-    :return: The `(a, b)` pair.
-    """
+    """Build a uniform-tree pair at the module's mutation rate, applied to leaves; adds/removes fold into whole leaf-groups."""
     rng = random.Random(seed)
     a = _build_tree(rng, depth, branch)
     b = copy.deepcopy(a)
@@ -343,15 +241,7 @@ def build_nested_uniform(depth: int, branch: int, seed: int) -> tuple[JsonValue,
 
 
 def build_deep_nesting(depth: int, seed: int) -> tuple[JsonValue, JsonValue]:
-    """
-    Build a single-chain (branch-1) nested dict pair `depth` levels deep,
-    with one changed leaf value at the bottom. `depth` is capped by
-    `DEEP_NESTING_DEPTH` (see its comment for which ceiling binds).
-
-    :param depth: Number of dict-nesting levels above the leaf.
-    :param seed: RNG seed for this fixture.
-    :return: The `(a, b)` pair.
-    """
+    """Build a single-chain nested dict pair `depth` levels deep, with one changed leaf value."""
     rng = random.Random(seed)
     original_leaf = rng.randint(*_ORIGINAL_INT_RANGE)
     changed_leaf = _changed_int(rng)
@@ -367,15 +257,7 @@ def build_deep_nesting(depth: int, seed: int) -> tuple[JsonValue, JsonValue]:
 
 
 def _make_record(index: int, rng: random.Random) -> dict[str, JsonValue]:
-    """
-    Build one heterogeneous "API payload" record: a realistic mix of
-    scalars, a nested object, and nested lists — representative of a JSON
-    API response list rather than a synthetic uniform shape.
-
-    :param index: The record's position (used for its `id`/`uuid`).
-    :param rng: Seeded random source.
-    :return: The built record.
-    """
+    """Build one heterogeneous "API payload" record: a realistic mix of scalars, a nested object, and nested lists."""
     tag_count = rng.randint(0, 5)
     history_count = rng.randint(0, 3)
 
@@ -412,15 +294,7 @@ def _make_record(index: int, rng: random.Random) -> dict[str, JsonValue]:
 
 
 def _mutate_record(record: dict[str, JsonValue], rng: random.Random) -> dict[str, JsonValue]:
-    """
-    Mutate a single API-payload record for a "value changed" fixture entry:
-    a new score, flipped `active`, and one appended tag (itself an
-    `iterable_item_added` inside a nested list — realistic for this shape).
-
-    :param record: The original record; not mutated in place.
-    :param rng: Seeded random source.
-    :return: The mutated copy.
-    """
+    """Mutate one API-payload record: a new score, flipped `active`, and one appended tag."""
     tags = record["tags"]
     assert isinstance(tags, list)
     mutated = dict(record)
@@ -432,17 +306,7 @@ def _mutate_record(record: dict[str, JsonValue], rng: random.Random) -> dict[str
 
 
 def build_api_payloads(record_count: int, seed: int) -> tuple[JsonValue, JsonValue]:
-    """
-    Build the "real world" heterogeneous API-payload fixture: a list of
-    `record_count` records (see `_make_record`) with the standard mutation
-    rate applied at record granularity (changed records get `_mutate_record`
-    applied; added/removed records are whole new/dropped records at the
-    tail, per `mutate_list`'s index-aligned + tail-surplus semantics).
-
-    :param record_count: Number of records in `a`.
-    :param seed: RNG seed for this fixture.
-    :return: The `(a, b)` pair.
-    """
+    """Build the "API payload" fixture: `record_count` heterogeneous records, mutated at record granularity."""
     rng = random.Random(seed)
     a: list[JsonValue] = [_make_record(i, rng) for i in range(record_count)]
 
@@ -461,16 +325,7 @@ def build_api_payloads(record_count: int, seed: int) -> tuple[JsonValue, JsonVal
 
 
 def build_ignore_order_list(size: int, seed: int) -> tuple[JsonValue, JsonValue]:
-    """
-    Build the `ignore_order_10k` fixture: `b` is a shuffled, ~5%-mutated
-    copy of `a` — the headline `ignore_order=True` comparison, diffed by
-    both tools with `--ignore-order` (see
-    `crates/onix-core/src/ignore_order/mod.rs`).
-
-    :param size: Number of items in `a`.
-    :param seed: RNG seed for this fixture.
-    :return: The `(a, b)` pair.
-    """
+    """Build the `ignore_order_10k` fixture: `b` is a shuffled, mutated copy of `a`."""
     rng = random.Random(seed)
     a: list[JsonValue] = [rng.randint(*_ORIGINAL_INT_RANGE) for _ in range(size)]
     b = list(a)
@@ -492,14 +347,7 @@ def build_ignore_order_list(size: int, seed: int) -> tuple[JsonValue, JsonValue]
 
 
 def write_json(path: Path, value: JsonValue) -> int:
-    """
-    Write `value` as compact, deterministic JSON (no pretty-printing —
-    these fixtures are machine-only and are not committed).
-
-    :param path: File to write.
-    :param value: The JSON-serializable value to write.
-    :return: The number of bytes written.
-    """
+    """Write `value` as compact JSON (no pretty-printing; fixtures aren't committed)."""
     text = json.dumps(value, separators=(",", ":"), sort_keys=False, ensure_ascii=True)
     path.write_text(text, encoding="utf-8")
 
@@ -507,14 +355,7 @@ def write_json(path: Path, value: JsonValue) -> int:
 
 
 def write_fixture(name: str, pair: tuple[JsonValue, JsonValue]) -> dict[str, JsonValue]:
-    """
-    Write one fixture's `a.json`/`b.json` under `perf/fixtures/<name>/` and
-    return its manifest entry.
-
-    :param name: Fixture directory name.
-    :param pair: The `(a, b)` value pair.
-    :return: The manifest entry for this fixture.
-    """
+    """Write one fixture's `a.json`/`b.json` and return its manifest entry."""
     fixture_dir = FIXTURES_ROOT / name
     fixture_dir.mkdir(parents=True, exist_ok=True)
     a_bytes = write_json(fixture_dir / "a.json", pair[0])
@@ -598,10 +439,7 @@ def main() -> None:
     )
 
     def entry_size(entry: dict[str, JsonValue]) -> int:
-        """
-        :param entry: One manifest entry.
-        :return: Its total `a_bytes + b_bytes`.
-        """
+        """Sum one manifest entry's `a_bytes` and `b_bytes`."""
         a_bytes, b_bytes = entry["a_bytes"], entry["b_bytes"]
         assert isinstance(a_bytes, int)
         assert isinstance(b_bytes, int)

@@ -1,48 +1,12 @@
 """The bindings benchmark: real DeepDiff vs deepdiff_rs on live Python objects.
 
-This is the headline number this benchmark exists to produce: `perf/RESULTS.md`
-compares onix-core against pure Python on already-parsed JSON, a
-structurally flattering upper bound. This script instead times the actual
-product surface a Python caller uses — live Python objects in, going
-through this crate's own Python-object-to-`Value` conversion — and reports
-that conversion cost as part of the number rather than hiding it.
+Times the product surface a caller actually uses -- live Python objects
+through the Python-object-to-`Value` conversion -- reporting wall time,
+peak RSS, and CPU seconds per side, each the median of `RUNS` independent,
+no-warmup subprocess runs (`ru_maxrss` is a whole-process peak).
 
-Each case reports three metrics per side (deepdiff and deepdiff_rs): wall
-time, peak resident memory (RSS), and CPU seconds (user + system).
-
-# How the three metrics are measured
-
-Every measurement runs in its own short-lived subprocess — one per tool, per
-case, per run — with all three metrics taken from that same run:
-
-1. Why a subprocess: `resource.getrusage`'s `ru_maxrss` is a whole-process
-   high-water mark, so a single interpreter running both tools back to back
-   could never attribute peak memory to a side. One diff per process fixes it.
-2. Matched shape: each subprocess imports both libraries and builds the same
-   fixture deterministically from a fixed seed, then times only the diff. That
-   shared interpreter + libraries + fixture baseline cancels in the deepdiff /
-   deepdiff_rs ratio, so peak RSS reflects the diff's *incremental* footprint,
-   not a from-zero measurement.
-3. No warmup: each subprocess is a cold start, so the reported figure is the
-   median of `RUNS` independent subprocesses (an in-process warmup is
-   meaningless when every run is a fresh process).
-
-Wall time and CPU seconds are the delta across the diff call alone; peak RSS
-is the process high-water mark. See `_normalize_maxrss` for the byte/kilobyte
-platform normalization.
-
-Usage (from `crates/onix-py/`, after building the extension in release
-mode — a debug build understates onix's numbers by an order of magnitude
-or more):
-
-    uv sync --group test
-    uv run --group test maturin develop --release
-    uv run --group test python benchmarks/bench_bindings.py
-
-The run prints a human-readable summary, the conversion-overhead proxy, and a
-ready-to-paste Markdown table (the exact README table, every shape with its
-peak-RSS and CPU-seconds sub-rows) so the published numbers are regenerated
-by re-running this script, with no hand-transcription.
+Usage: `uv run --group test python benchmarks/bench_bindings.py` (after
+`maturin develop --release`; a debug build understates onix's numbers).
 """
 
 import copy
@@ -103,22 +67,12 @@ _TAG_POOL: Final[tuple[str, ...]] = ("alpha", "beta", "gamma", "delta", "epsilon
 
 
 def _mutation_indices(count: int, rng: random.Random) -> list[int]:
-    """
-    Sample the indices to mutate for a `VALUE_CHANGE_RATE` batch.
-
-    :param count: Total element count to sample from.
-    :param rng: Seeded random source.
-    :return: The indices to mutate.
-    """
+    """Sample the indices to mutate for a `VALUE_CHANGE_RATE` batch."""
     return rng.sample(range(count), int(count * VALUE_CHANGE_RATE))
 
 
 def build_ignore_order_case() -> tuple[JsonValue, JsonValue]:
-    """
-    Build the `ignore_order_10k` shape: a shuffled, ~5%-mutated int list.
-
-    :return: The `(a, b)` pair, as live Python lists.
-    """
+    """Build the `ignore_order_10k` shape: a shuffled, ~5%-mutated int list."""
     rng = random.Random(SEED)
     a: list[JsonValue] = [rng.randint(*_ORIGINAL_INT_RANGE) for _ in range(IGNORE_ORDER_SIZE)]
     b = list(a)
@@ -131,22 +85,7 @@ def build_ignore_order_case() -> tuple[JsonValue, JsonValue]:
 
 
 def _make_record(index: int, rng: random.Random) -> dict[str, JsonValue]:
-    """
-    Build one heterogeneous "API payload" record: a realistic mix of
-    scalars, a nested object, and nested lists.
-
-    This is an intentionally self-contained, narrower copy of
-    `perf/generate_fixtures.py`'s `_make_record` — it drops that fixture's
-    `uuid`/`created_at`/`history` fields and its `metadata.flags` list. The
-    two are kept as independent copies rather than shared through a common
-    module so this benchmark stays a single standalone script with no
-    cross-tree import; the shapes only need to be representative, not
-    byte-identical, and this narrower field set is deliberate.
-
-    :param index: The record's position (used for its `id`).
-    :param rng: Seeded random source.
-    :return: The built record.
-    """
+    """Build one heterogeneous "API payload" record; a narrower, standalone copy of `generate_fixtures.py`'s `_make_record`."""
     tag_count = rng.randint(0, 5)
 
     return {
@@ -170,13 +109,7 @@ def _make_record(index: int, rng: random.Random) -> dict[str, JsonValue]:
 
 
 def _mutate_record(record: dict[str, JsonValue], rng: random.Random) -> dict[str, JsonValue]:
-    """
-    Mutate one record for a "value changed" entry.
-
-    :param record: The original record; not mutated in place.
-    :param rng: Seeded random source.
-    :return: The mutated copy.
-    """
+    """Mutate one record for a "value changed" entry."""
     mutated = dict(record)
     mutated["score"] = round(rng.uniform(0, 100), 4)
     mutated["active"] = not record["active"]
@@ -185,22 +118,8 @@ def _mutate_record(record: dict[str, JsonValue], rng: random.Random) -> dict[str
 
 
 def build_api_payloads_case() -> tuple[JsonValue, JsonValue]:
-    """
-    Build the `api_payloads` shape: `RECORD_COUNT` heterogeneous records,
-    ~5% value-changed at record granularity.
-
-    `b` is a `copy.deepcopy` of `a`, not a shallow `list(a)`: a shallow copy
-    leaves every *unchanged* record (~95% of them) identity-shared between
-    `a` and `b` (`b[i] is a[i]`), which real `DeepDiff` fast-paths via its
-    own `t1 is t2` identity check (`diff.py`) -- a shortcut no realistic
-    caller benefits from, since two independently fetched/deserialized API
-    responses are never identity-shared at any level. `copy.deepcopy`
-    guarantees every record (and everything nested inside it) is a fresh
-    object, structurally equal but never identity-shared, in both the
-    unchanged 95% and the freshly-rebuilt mutated 5% alike.
-
-    :return: The `(a, b)` pair, as live Python lists of dicts.
-    """
+    """Build the `api_payloads` shape, ~5% record-changed; `b` is `copy.deepcopy(a)` so unchanged
+    records stay non-identity-shared, avoiding DeepDiff's `t1 is t2` fast path."""
     rng = random.Random(SEED + 1)
     a: list[JsonValue] = [_make_record(i, rng) for i in range(RECORD_COUNT)]
     b = copy.deepcopy(a)
@@ -214,15 +133,7 @@ def build_api_payloads_case() -> tuple[JsonValue, JsonValue]:
 
 
 def _make_typed_record(index: int, rng: random.Random) -> TypedRecord:
-    """
-    Build one record whose fields exercise 0.4.0's typed-conversion path: a
-    datetime (naive or aware), a numeric-pair tuple, and a small string set.
-
-    :param index: The record's position (used for its `id` and to alternate
-        naive/aware).
-    :param rng: Seeded random source.
-    :return: The built record.
-    """
+    """Build one record exercising the typed-conversion path: a datetime, a numeric-pair tuple, a string set."""
     coordinate: tuple[int, int] | tuple[float, float]
 
     if rng.random() < 0.5:
@@ -254,16 +165,7 @@ def _make_typed_record(index: int, rng: random.Random) -> TypedRecord:
 
 
 def _mutate_typed_record(record: TypedRecord, rng: random.Random) -> TypedRecord:
-    """
-    Mutate one typed record for a "value changed" entry: shift its datetime
-    and add a tag drawn from the pool. The tag draw is a no-op when the
-    record already holds that tag, so the datetime always changes but only
-    roughly 70% of mutated records also gain a set change.
-
-    :param record: The original record; not mutated in place.
-    :param rng: Seeded random source.
-    :return: The mutated copy.
-    """
+    """Mutate one typed record: shift its datetime and add a pool tag (a no-op ~30% of the time, since the tag may repeat)."""
     mutated = dict(record)
     created_at = record["created_at"]
     tags = record["tags"]
@@ -276,20 +178,7 @@ def _mutate_typed_record(record: TypedRecord, rng: random.Random) -> TypedRecord
 
 
 def build_typed_records_case(*, shuffle: bool = False) -> tuple[list[TypedRecord], list[TypedRecord]]:
-    """
-    Build the `typed_records` shape: `TYPED_RECORD_COUNT` records, each
-    carrying a datetime, a tuple coordinate, and a string-set tags field,
-    ~5% mutated at record granularity.
-
-    `b` is `copy.deepcopy(a)`, for the same identity-sharing reason
-    documented on `build_api_payloads_case`. With `shuffle=True`, `b` is
-    reordered before mutation (matching `build_ignore_order_case`'s
-    shuffle-then-mutate order) for the `ignore_order` variant; the ordered
-    variant leaves `b` in `a`'s order, matching `build_api_payloads_case`.
-
-    :param shuffle: Whether to shuffle `b`'s record order before mutating.
-    :return: The `(a, b)` pair, as live Python lists of dicts.
-    """
+    """Build the `typed_records` shape, ~5% mutated; with `shuffle=True`, `b` is reordered before mutating."""
     rng = random.Random(SEED + 2)
     a = [_make_typed_record(i, rng) for i in range(TYPED_RECORD_COUNT)]
     b = copy.deepcopy(a)
@@ -341,21 +230,8 @@ def _text_diff_callable(
     supply_b: Callable[[], str],
     ignore_order: bool,
 ) -> Callable[[], object]:
-    """
-    Build the diff callable for the two JSON-text cases (`_json` and `_file`).
-
-    Both cases differ only in how they obtain the two JSON strings; the tool
-    dispatch is identical, so it lives here once. `supply_a`/`supply_b` return
-    the JSON text and are invoked *inside* the returned (timed) callable, so
-    any per-diff cost a real caller pays to obtain the text — reading a file
-    from disk in the `_file` case — is timed identically on both sides.
-
-    :param tool: Either `"deepdiff"` or `"deepdiff_rs"`.
-    :param supply_a: Zero-argument callable returning the `a` JSON text.
-    :param supply_b: Zero-argument callable returning the `b` JSON text.
-    :param ignore_order: Whether to diff order-insensitively.
-    :return: A callable that performs exactly one diff and returns its result.
-    """
+    """Build the diff callable shared by the two JSON-text cases; `supply_a`/`supply_b` run inside it,
+    so per-diff text-acquisition cost is timed too."""
     if tool == "deepdiff":
         return lambda: RealDeepDiff(
             json.loads(supply_a()),
@@ -367,16 +243,7 @@ def _text_diff_callable(
 
 
 def _diff_callable(tool: str, case: str) -> Callable[[], object]:
-    """
-    Build the zero-argument diff callable for one `(tool, case)` pair.
-
-    The fixture is constructed here (outside the returned callable) so only
-    the diff itself is timed.
-
-    :param tool: Either `"deepdiff"` or `"deepdiff_rs"`.
-    :param case: One of the keys in :data:`CASE_LABELS`, or :data:`PROXY_CASE`.
-    :return: A callable that performs exactly one diff and returns its result.
-    """
+    """Build the diff callable for one `(tool, case)` pair; the fixture is built outside it, so only the diff is timed."""
     if case in ("ignore_order", "ignore_order_json"):
         a, b = build_ignore_order_case()
         ignore_order = True
@@ -428,29 +295,14 @@ def _diff_callable(tool: str, case: str) -> Callable[[], object]:
 
 
 def _normalize_maxrss(ru_maxrss: int) -> int:
-    """
-    Convert `resource.getrusage`'s `ru_maxrss` to bytes.
-
-    `ru_maxrss` is bytes on macOS but kilobytes on Linux.
-
-    :param ru_maxrss: The raw `ru_maxrss` value.
-    :return: Peak resident set size, in bytes.
-    """
+    """Convert `resource.getrusage`'s `ru_maxrss` to bytes; it is already bytes on macOS but kilobytes on Linux."""
     if sys.platform == "darwin":
         return ru_maxrss
     return ru_maxrss * 1024
 
 
 def _run_worker(tool: str, case: str) -> None:
-    """
-    Perform one diff and print its wall/CPU/RSS measurement as JSON on stdout.
-
-    This is the subprocess entry point: it performs exactly one diff (see the
-    module docstring for why one per process).
-
-    :param tool: Either `"deepdiff"` or `"deepdiff_rs"`.
-    :param case: The case name to measure.
-    """
+    """Subprocess entry point: perform one diff and print its wall/CPU/RSS measurement as JSON on stdout."""
     run_diff = _diff_callable(tool, case)
 
     before = resource.getrusage(resource.RUSAGE_SELF)
@@ -475,13 +327,7 @@ def _run_worker(tool: str, case: str) -> None:
 
 @dataclass(frozen=True)
 class Measurement:
-    """
-    The median wall time, CPU seconds, and peak RSS for one tool on one case.
-
-    :param wall_s: Median wall-clock diff time, in seconds.
-    :param cpu_s: Median CPU (user + system) diff time, in seconds.
-    :param rss_bytes: Median process peak RSS, in bytes.
-    """
+    """The median wall time, CPU seconds, and peak RSS for one tool on one case."""
 
     wall_s: float
     cpu_s: float
@@ -489,15 +335,7 @@ class Measurement:
 
 
 def measure(tool: str, case: str, runs: int = RUNS) -> Measurement:
-    """
-    Run `runs` independent subprocesses for one `(tool, case)` and take the
-    median of each metric.
-
-    :param tool: Either `"deepdiff"` or `"deepdiff_rs"`.
-    :param case: The case name to measure.
-    :param runs: How many independent subprocess runs to take the median of.
-    :return: The per-metric medians.
-    """
+    """Run `runs` independent subprocesses for one `(tool, case)` and take the median of each metric."""
     walls: list[float] = []
     cpus: list[float] = []
     rsses: list[float] = []
@@ -538,13 +376,7 @@ def _fmt_ratio(ratio: float) -> str:
 
 
 def _print_case_summary(label: str, deepdiff: Measurement, onix: Measurement) -> None:
-    """
-    Print the human-readable three-metric summary for one case.
-
-    :param label: The shape being reported.
-    :param deepdiff: Real DeepDiff's medians.
-    :param onix: deepdiff_rs's medians.
-    """
+    """Print the human-readable three-metric summary for one case."""
     print(label)
     print(
         f"  wall: deepdiff={_fmt_ms(deepdiff.wall_s)}  deepdiff_rs={_fmt_ms(onix.wall_s)}  "
@@ -561,17 +393,7 @@ def _print_case_summary(label: str, deepdiff: Measurement, onix: Measurement) ->
 
 
 def _conversion_proxy_line(onix_api_wall_s: float, proxy_wall_s: float) -> str:
-    """
-    Format the conversion-overhead proxy line.
-
-    :param onix_api_wall_s: deepdiff_rs's median wall time on the mutated
-        api_payloads case.
-    :param proxy_wall_s: deepdiff_rs's median wall time on the equal-inputs
-        proxy (`DeepDiff(a, deepcopy(a))`), which pays the full conversion of
-        both sides plus onix's cheap whole-input equality short-circuit but
-        none of the per-node diff bookkeeping.
-    :return: The formatted line.
-    """
+    """Format the conversion-overhead proxy line; `proxy_wall_s` pays full conversion but no per-node diff bookkeeping."""
     fraction = proxy_wall_s / onix_api_wall_s
     return (
         f"conversion proxy (deepdiff_rs, DeepDiff(a, deepcopy(a)), n={RECORD_COUNT}): "
@@ -581,13 +403,7 @@ def _conversion_proxy_line(onix_api_wall_s: float, proxy_wall_s: float) -> str:
 
 
 def _markdown_table(results: dict[str, tuple[Measurement, Measurement]]) -> str:
-    """
-    Build the ready-to-paste README table: four columns, each shape row
-    followed by peak-RSS and CPU-seconds sub-rows.
-
-    :param results: Case name -> `(deepdiff, deepdiff_rs)` measurements.
-    :return: The Markdown table.
-    """
+    """Build the ready-to-paste README table: each shape row followed by peak-RSS and CPU-seconds sub-rows."""
     lines = [
         "| Shape | deepdiff | deepdiff_rs | Speedup |",
         "| --- | --- | --- | --- |",

@@ -1,17 +1,12 @@
 """Peak-RSS regression guard for the direct compact-value build.
 
 The bindings convert both inputs into `onix_core::Value` directly, with no
-intermediate `serde_json::Value` tree, so the two input trees only ever exist
-in the compact model. This test measures the incremental process RSS of
-converting an ``api_payloads``-shaped fixture (reusing
-``perf/generate_fixtures.build_api_payloads``, the dict-heavy shape the
-benchmark suite uses) and asserts it stays under a bound that the old
-`serde_json::Value` intermediate — with its fixed-size empty ``BTreeMap`` node
-slots and one key ``String`` per occurrence — would blow past.
+intermediate `serde_json::Value` tree. Measures the incremental process RSS
+of converting an ``api_payloads``-shaped fixture and asserts it stays under
+a bound the old `serde_json::Value` intermediate would blow past.
 
-Run in its own subprocess so the RSS reading is isolated from the rest of the
-pytest process, and measured via ``ru_maxrss`` (the process peak), normalized
-across macOS (bytes) and Linux (KiB).
+Run in its own subprocess (isolates the RSS reading from pytest), via
+``ru_maxrss`` normalized across macOS (bytes) and Linux (KiB).
 """
 
 import json
@@ -20,14 +15,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-# Measured on this fixture: the direct compact build's two-tree conversion
-# overhead is ~35 MB for 10,000 records (stable to <1 MB across runs). The
-# pre-migration `serde_json::Value` representation of this dict-heavy shape
-# cost several times that (onix-core's own footprint test pins the
-# compact-vs-serde ratio at >=3x, and higher on small-map-heavy data like the
-# per-record `tags`/`flags`/`history`/`address` sub-dicts here), which would
-# clear this bound with room to spare. The bound sits well above the compact
-# measurement so ordinary allocator/platform noise cannot make it flaky.
+# Regression bound: comfortably above the compact build's measured overhead, so allocator/platform noise can't flake it.
 _OVERHEAD_BOUND_MB = 90.0
 _RECORD_COUNT = 10_000
 
