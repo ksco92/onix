@@ -176,18 +176,24 @@ peak RSS median lies inside the other build's run-to-run range (the largest move
 
 The mask's own memory is one bit per row per column, plus, per worker, a copy of its row range of
 the one right column it is comparing (a float column widened to `Float64` on both sides), so at
-most one copy of a partition's widest column across all workers. `row_diff_rss` medians,
-0.13.0 → 0.14.0, alternating builds (8 runs each for `wide` 200k at 18 threads, 3 otherwise):
+most one copy of a partition's widest column across all workers. `row_diff_rss` peak RSS,
+0.13.0 → 0.14.0, alternating builds, each cell the median with the run range in brackets (8 runs
+per build for `wide` 200k at 18 threads, 5 for `wide` 1M, 3 otherwise):
 
 | Shape (`row_diff_rss`, rows/side) | threads | 0.13.0 | 0.14.0 |
 | --- | --- | --- | --- |
-| `wide` 200k x 1 KB | 2 / 18 / 64 | 1495 / 1005 / 1323 MB | 1450 / 1027 / 1322 MB |
-| `wide` 1M x 1 KB | 18 | 4903 MB | 4906 MB |
-| `manycols` 150k x 8 x 512 B | 2 / 18 / 64 | 2987 / 1808 / 2077 MB | 2458 / 1673 / 2069 MB |
-| `allchange` 1M | 18 | 350 MB | 354 MB |
+| `wide` 200k x 1 KB | 2 | 1495 MB [1392-1497] | 1450 MB [1363-1524] |
+| `wide` 200k x 1 KB | 18 | 1005 MB [945-1036] | 1027 MB [965-1078] |
+| `wide` 200k x 1 KB | 64 | 1323 MB [1320-1327] | 1322 MB [1318-1338] |
+| `wide` 1M x 1 KB | 18 | 4829 MB [4774-4911] | 4815 MB [4794-4862] |
+| `manycols` 150k x 8 x 512 B | 2 | 2987 MB [2383-3066] | 2458 MB [2404-3107] |
+| `manycols` 150k x 8 x 512 B | 18 | 1808 MB [1732-1816] | 1673 MB [1511-1765] |
+| `manycols` 150k x 8 x 512 B | 64 | 2077 MB [1938-2092] | 2069 MB [2035-2072] |
+| `allchange` 1M | 18 | 350 MB [333-385] | 354 MB [344-361] |
 
-Every pair is within run-to-run spread (`wide` 200k at 18 threads ranges 945 to 1036 MB on 0.13.0
-and 965 to 1078 MB on 0.14.0), so the cell pass's memory term is unchanged.
+Every row's two ranges overlap, so the cell pass's memory term is unchanged. The `wide` 1M row sits
+above the 4.62 GB the fused-reads table records for 0.13.0 on both builds alike (re-measured at
+2026-09-24T15:19Z, load average 6), so the README now cites about 4.8 GB for that shape.
 
 ## Thread-count scaling
 
