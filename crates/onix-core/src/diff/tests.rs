@@ -2927,6 +2927,10 @@ fn a_nested_object_attribute_reports_a_deep_dotted_path() {
             )],
             std::sync::Arc::from("Outer"),
             std::sync::Arc::from("Outer"),
+            crate::value::ObjectLengths {
+                dict_len: 1,
+                ..Default::default()
+            },
         )
     };
     let b = {
@@ -2939,6 +2943,10 @@ fn a_nested_object_attribute_reports_a_deep_dotted_path() {
             )],
             std::sync::Arc::from("Outer"),
             std::sync::Arc::from("Outer"),
+            crate::value::ObjectLengths {
+                dict_len: 1,
+                ..Default::default()
+            },
         )
     };
 
@@ -3063,11 +3071,11 @@ fn different_classes_forced_paired_under_ignore_order_become_values_changed() {
     );
 }
 
-// --- Class identity: kind and qualified name (issue #66) -------------------
+// --- Class identity: kind and class object (issue #66) --------------------
 
 #[test]
 fn a_dict_subclass_and_a_custom_object_with_the_same_name_are_a_type_change() {
-    // Same render name and even the same qualified identity, but different
+    // Same render name and even the same class identity, but different
     // kind (a `dict` subclass versus an attribute-diffed object) — `DeepDiff`
     // compares the `type` objects, so this is `type_changes`, never `{}` or a
     // value change at a shared key.
@@ -3099,8 +3107,8 @@ fn a_dict_subclass_and_a_custom_object_with_the_same_name_are_a_type_change() {
 
 #[test]
 fn two_same_named_objects_from_different_modules_are_a_type_change() {
-    // Same render name and kind, different qualified identity (different
-    // module) — `DeepDiff`'s `type(t1) != type(t2)` makes this `type_changes`,
+    // Same render name and kind, different class identity (a different
+    // class object) — `DeepDiff`'s `type(t1) != type(t2)` makes this `type_changes`,
     // both when the attributes match and when they differ (never a
     // `values_changed` at `root.i`).
     let a_equal = ccustom_id("User", "a.User", json!({"i": 1}).as_object().unwrap());

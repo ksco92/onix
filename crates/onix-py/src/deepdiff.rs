@@ -6,7 +6,7 @@
 use onix_core::Value;
 use pyo3::prelude::*;
 
-use crate::convert::{to_value, value_to_pyobject};
+use crate::convert::{Held, refuse_opaque, to_value, value_to_pyobject};
 use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 
 /// A drop-in subset of `deepdiff.DeepDiff`.
@@ -107,13 +107,17 @@ impl DeepDiff {
         // deep) legal value, the `?` drops `a` here on the early return — its
         // iterative `Drop` cannot overflow the calling thread, so no
         // sized-worker hand-off is needed for it.
-        let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth)?;
-        let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth)?;
+        let mut held = Held::default();
+        let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth, &mut held)?;
+        let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth, &mut held)?;
         // The diff is natively recursive: it runs inline when both inputs are
         // shallow, else on the stack-sized worker (GIL released). The report
         // comes back in the same compact value model the inputs use, so it can
         // carry a tuple all the way out to `to_dict`.
         let report_value = diff_to_value(py, a, b, opts)?;
+        if held.opaque {
+            refuse_opaque(&report_value)?;
+        }
         let report_is_deep = is_deep(&report_value);
         // A conservative upper bound: the report only ever carries values
         // (or coerced copies, which coercion always renders as plain UTF-8

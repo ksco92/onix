@@ -129,23 +129,28 @@ pub(crate) fn cobj(map: &serde_json::Map<String, serde_json::Value>) -> Object {
 /// user-defined class, diffed by its attributes). See
 /// [`crate::value::ObjectKind::CustomObject`].
 pub(crate) fn ccustom(class: &str, map: &serde_json::Map<String, serde_json::Value>) -> Value {
-    // The class name is its own qualified identity (same-module), the common
-    // case; the cross-module distinction is exercised via `ccustom_id`.
+    // The class name doubles as its identity; `ccustom_id` sets a distinct one.
     ccustom_id(class, class, map)
 }
 
-/// [`ccustom`] with an explicit qualified `identity` distinct from the render
+/// [`ccustom`] with an explicit `identity` distinct from the render
 /// `class` name — for pinning that two objects sharing a `__name__` but not an
-/// identity (a different module, or a `dict` subclass versus an object) are a
+/// identity (a different class object, or a `dict` subclass versus an object) are a
 /// `type_changes`, never equal. See [`crate::value::Object::same_class`].
 pub(crate) fn ccustom_id(
     class: &str,
     identity: &str,
     map: &serde_json::Map<String, serde_json::Value>,
 ) -> Value {
-    Value::Object(
-        cobj(map).into_custom_object(std::sync::Arc::from(class), std::sync::Arc::from(identity)),
-    )
+    Value::Object(cobj(map).into_class(
+        crate::value::ObjectKind::CustomObject,
+        std::sync::Arc::from(class),
+        std::sync::Arc::from(identity),
+        crate::value::ObjectLengths {
+            dict_len: map.len(),
+            ..Default::default()
+        },
+    ))
 }
 
 /// Compact [`Number`] from a `serde_json` number.

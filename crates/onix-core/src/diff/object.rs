@@ -6,11 +6,11 @@
 //! `['key']`) and the report category (`attribute_*` vs `dictionary_item_*`)
 //! differ, both selected once from [`Object::kind`].
 
-use crate::value::{Object, ObjectKey, ObjectKind, Value};
+use crate::value::{Object, ObjectKind, Value};
 
 use crate::error::Error;
 use crate::ignore_order::IgnoreOrderMemo;
-use crate::path::{PathSegment, attribute_path_segment, object_key_path_segment as key_segment};
+use crate::path::{PathSegment, entry_path_segment, object_key_path_segment as key_segment};
 use crate::report::{Report, ValuesChangedEntry};
 
 use super::{DiffOptions, check_map_depth, check_value_depth, diff_at, scoped};
@@ -123,7 +123,7 @@ pub(crate) fn object_diff(
     for (key, old_value) in a {
         scoped(
             path,
-            key_path_segment(kind, key),
+            entry_path_segment(kind, key),
             |path| -> Result<(), Error> {
                 match b.get(key) {
                     None => {
@@ -140,7 +140,7 @@ pub(crate) fn object_diff(
 
     for (key, new_value) in b {
         if !a.contains_key(key) {
-            scoped(path, key_path_segment(kind, key), |path| {
+            scoped(path, entry_path_segment(kind, key), |path| {
                 check_value_depth(path, new_value, depth + 1, opts.max_depth).map(|()| {
                     insert_added(&mut report, kind, path.clone(), new_value.clone());
                 })
@@ -151,22 +151,15 @@ pub(crate) fn object_diff(
     Ok(report)
 }
 
-/// The path segment one key contributes, selected by [`ObjectKind`]: a
-/// subscript for a `dict`, a dotted attribute for a custom object.
-fn key_path_segment(kind: ObjectKind, key: &ObjectKey) -> PathSegment {
-    match kind {
-        ObjectKind::Dict => key_segment(key),
-        ObjectKind::CustomObject => attribute_path_segment(key),
-    }
-}
-
 /// Records a removed key as the category [`ObjectKind`] selects:
 /// `dictionary_item_removed` for a `dict`, `attribute_removed` for a custom
 /// object.
 fn insert_removed(report: &mut Report, kind: ObjectKind, path: Vec<PathSegment>, value: Value) {
     match kind {
         ObjectKind::Dict => report.insert_dictionary_item_removed(path, value),
-        ObjectKind::CustomObject => report.insert_attribute_removed(path, value),
+        ObjectKind::CustomObject | ObjectKind::Opaque => {
+            report.insert_attribute_removed(path, value);
+        }
     }
 }
 
@@ -174,7 +167,7 @@ fn insert_removed(report: &mut Report, kind: ObjectKind, path: Vec<PathSegment>,
 fn insert_added(report: &mut Report, kind: ObjectKind, path: Vec<PathSegment>, value: Value) {
     match kind {
         ObjectKind::Dict => report.insert_dictionary_item_added(path, value),
-        ObjectKind::CustomObject => report.insert_attribute_added(path, value),
+        ObjectKind::CustomObject | ObjectKind::Opaque => report.insert_attribute_added(path, value),
     }
 }
 

@@ -37,6 +37,7 @@ See ``tests/golden/README.md`` for the pinned versions and any documented,
 out-of-scope DeepDiff quirk excluded from this corpus.
 """
 
+import enum
 import json
 import random
 import unicodedata
@@ -46,6 +47,7 @@ from typing import Final
 
 from deepdiff import DeepDiff
 from golden_tags import (
+    GoldenEnum,
     GoldenObject,
     TaggedValue,
     canonical_report,
@@ -54,6 +56,21 @@ from golden_tags import (
 )
 
 UTC: Final[timezone] = timezone.utc
+
+
+class Planet(enum.Enum):
+    MERCURY = (3.303e23, 2.4397e6)
+    EARTH = (5.976e24, 6.37814e6)
+
+    def __init__(self, mass: float, radius: float) -> None:
+        self.mass = mass
+        self.radius = radius
+
+    @property
+    def surface_gravity(self) -> float:
+        return self.mass / (self.radius**2)
+
+
 PLUS_TWO: Final[timezone] = timezone(timedelta(hours=2))
 MINUS_FIVE: Final[timezone] = timezone(timedelta(hours=-5))
 # An offset that is not a whole number of minutes, which widens `isoformat()`'s
@@ -842,6 +859,12 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
         GoldenObject("A", {"_x": 1, "value": 1}),
         GoldenObject("A", {"_x": 2, "value": 1}),
     ),
+    # An Enum member's own attributes and properties stay out: `_diff_enum`
+    # reads `name` and `value` only.
+    "object_enum_member_reports_name_and_value_only": (
+        GoldenEnum(Planet.MERCURY),
+        GoldenEnum(Planet.EARTH),
+    ),
     "object_equal_reports_nothing": (
         GoldenObject("A", {"x": 1, "y": 2}),
         GoldenObject("A", {"x": 1, "y": 2}),
@@ -1606,6 +1629,8 @@ def _live(value: TaggedValue) -> TaggedValue:
     :param value: A case input.
     :return: The input with markers realized as live instances.
     """
+    if isinstance(value, GoldenEnum):
+        return value.member
     return decode_tags(encode_tags(value)) if _contains_object(value) else value
 
 

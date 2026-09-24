@@ -48,6 +48,7 @@ against the same fixtures.
 from __future__ import annotations
 
 import datetime
+import enum
 import json
 from collections.abc import Callable
 from typing import Final, Protocol, Union
@@ -182,6 +183,14 @@ class GoldenObject:
         return NotImplemented
 
     __hash__ = None  # type: ignore[assignment]  # a mutable marker is never hashed
+
+
+class GoldenEnum(GoldenObject):
+    """An ``Enum`` member as a top-level golden input: written as the ``name`` and ``value`` ``_diff_enum`` reads."""
+
+    def __init__(self, member: enum.Enum) -> None:
+        super().__init__(type(member).__name__, {"name": member.name, "value": member.value})
+        self.member = member
 
 
 # Classes created for `$object` tags, cached by name so two instances of the

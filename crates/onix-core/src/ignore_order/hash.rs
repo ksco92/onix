@@ -132,11 +132,9 @@ fn hash_value<H: Hasher>(root: &Value, state: &mut H) {
             }
             Value::Object(map) => {
                 map.len().hash(state);
-                // A custom object and a `dict` (and two different classes)
-                // are distinct structural identities — `diff_at` reports
-                // `type_changes` between them — so this `DistKey` hash tags
-                // both, matching `ItemKey`'s own class-tagged bucket and
-                // keeping the distance memo from ever conflating them.
+                // Tags a custom object apart from a `dict` by kind and class
+                // `__name__`, as `ItemKey` does; two same-named distinct
+                // classes share this hash and are told apart by equality.
                 map.is_custom_object().hash(state);
                 map.type_name().hash(state);
                 // A `str` key carries the association and is hashed here
@@ -281,15 +279,14 @@ pub(crate) enum ItemKey {
     /// `str` key holding a lone surrogate code point too.
     Dict(BTreeMap<ItemKey, ItemKey>),
     /// A custom object diffed by its attributes: keyed like [`ItemKey::Dict`]
-    /// (key-sorted, recursively keyed attribute values) but in its own bucket
-    /// tagged by the object's class name, so a custom object never
-    /// hash-matches a plain `dict`, a `dict` subclass, or an instance of a
-    /// different class — mirroring `DeepHash._prep_obj`, which prefixes an
-    /// object's digest with `obj` and tags `_prep_dict` with the class name
-    /// where a `dict` gets the bare word `dict`. Per-lookup cost is
-    /// [`ItemKey::Dict`]'s (a full attribute-tree walk to hash and to compare)
-    /// plus the one class-name string comparison.
+    /// but tagged by the class `__name__`, as `DeepHash._prep_obj` tags it, so
+    /// it never matches a `dict`; two distinct classes sharing a `__name__`
+    /// share the tag and match when their attributes do. Per-lookup cost is
+    /// [`ItemKey::Dict`]'s plus the one class-name string comparison.
     Object(Box<str>, BTreeMap<ItemKey, ItemKey>),
+    /// An [`ObjectKind::Opaque`](crate::value::ObjectKind) token, keyed by the
+    /// identity of its Python object: one string comparison per lookup.
+    Opaque(Box<str>),
 }
 
 /// Hand-written to run the `Float` arm through [`mix_float_bits`] before
@@ -316,6 +313,7 @@ impl std::hash::Hash for ItemKey {
             Self::List(items) | Self::Set(items) | Self::FrozenSet(items) => items.hash(state),
             Self::Tuple(items) => items.hash(state),
             Self::Dict(map) => map.hash(state),
+            Self::Opaque(identity) => identity.hash(state),
             Self::Object(class, map) => {
                 class.hash(state);
                 map.hash(state);
@@ -829,14 +827,14 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
             None,
         ),
         Value::Object(map) => {
+            if let Some(identity) = map.opaque_identity() {
+                return (ItemKey::Opaque(Box::from(identity)), None);
+            }
             let attrs = map
                 .iter()
                 .map(|(k, v)| (object_key_item_key(k, memo), item_key(v, memo)))
                 .collect();
-            // A custom object keys into its own class-tagged bucket so it
-            // never hash-matches a `dict` or an instance of another class
-            // (see `ItemKey::Object`); a `dict` (or a `dict` subclass, which
-            // `DeepHash` also digests as a bare `dict`) stays `ItemKey::Dict`.
+            // A `dict` subclass keys as a bare `dict`, as `DeepHash` digests it.
             let key = if map.is_custom_object() {
                 ItemKey::Object(Box::from(map.type_name().unwrap_or_default()), attrs)
             } else {

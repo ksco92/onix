@@ -179,8 +179,8 @@ uv run scripts/gen_goldens.py
 
 Never hand-edit files under `tests/golden/`; every case is defined in
 `scripts/gen_goldens.py`. A case value JSON cannot express (a tuple, a set,
-a frozenset, a datetime, a date, a time or a timedelta) is written in the tagged encoding
-`scripts/golden_tags.py` defines and
+a frozenset, a datetime, a date, a time, a timedelta, or a custom object as `$object`)
+is written in the tagged encoding `scripts/golden_tags.py` defines and
 [`tests/golden/README.md`](tests/golden/README.md) documents; the product's
 own parse paths never interpret those tags. `scripts/differential_fuzz.py`
 is a separate, development-time fuzzer that compares `--ignore-order`

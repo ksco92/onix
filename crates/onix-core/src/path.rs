@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::datetime::{SECONDS_PER_DAY, div_rem_euclid};
-use crate::value::{Number, ObjectKey, Str, Value, Wtf8Char, Wtf8Chars};
+use crate::value::{Number, ObjectKey, ObjectKind, Str, Value, Wtf8Char, Wtf8Chars};
 
 /// One step in a path: a dict key, a list index, or a set item.
 ///
@@ -328,15 +328,16 @@ pub fn object_key_path_segment(key: &ObjectKey) -> PathSegment {
     }
 }
 
-/// The [`PathSegment::Attribute`] a custom object's attribute key
-/// contributes — `root.name`. A custom object's keys are always `str`
-/// attribute names ([`ObjectKey::Str`]); a non-`str` key is impossible for
-/// one and falls back to the ordinary key segment so this stays total.
+/// The path segment one entry of an [`Object`](crate::value::Object) of
+/// `kind` contributes: [`object_key_path_segment`] for a `dict`, a dotted
+/// [`PathSegment::Attribute`] (`root.name`) for a custom object's `str` key.
 #[must_use]
-pub fn attribute_path_segment(key: &ObjectKey) -> PathSegment {
-    match key {
-        ObjectKey::Str(s) => PathSegment::Attribute(s.into()),
-        ObjectKey::Other(_) => object_key_path_segment(key),
+pub fn entry_path_segment(kind: ObjectKind, key: &ObjectKey) -> PathSegment {
+    match (kind, key) {
+        (ObjectKind::CustomObject | ObjectKind::Opaque, ObjectKey::Str(s)) => {
+            PathSegment::Attribute(s.into())
+        }
+        _ => object_key_path_segment(key),
     }
 }
 
@@ -774,11 +775,11 @@ pub(crate) fn python_float_repr(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        PathSegment, attribute_path_segment, escape_non_printable, python_repr, quote_key,
-        render_path, set_item_repr,
+        PathSegment, entry_path_segment, escape_non_printable, python_repr, quote_key, render_path,
+        set_item_repr,
     };
     use crate::test_support::{cdate, cdt_at, ctime, ctimedelta};
-    use crate::value::{Builder, Number, ObjectKey, SetItems, Value};
+    use crate::value::{Builder, Number, ObjectKey, ObjectKind, SetItems, Value};
 
     #[test]
     fn empty_path_renders_as_root() {
@@ -1298,21 +1299,24 @@ mod tests {
     }
 
     #[test]
-    fn attribute_path_segment_str_key_is_a_dotted_attribute() {
+    fn entry_path_segment_renders_an_attribute_for_an_object_and_a_subscript_for_a_dict() {
         let key = ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x")));
+        let rendered = |kind| render_path(&[entry_path_segment(kind, &key)]).to_string();
         assert_eq!(
-            render_path(&[attribute_path_segment(&key)]).to_string(),
-            "root.x"
+            [
+                rendered(ObjectKind::CustomObject),
+                rendered(ObjectKind::Opaque),
+                rendered(ObjectKind::Dict),
+            ],
+            ["root.x", "root.x", "root['x']"]
         );
     }
 
     #[test]
-    fn attribute_path_segment_non_str_key_falls_back_to_the_subscript_form() {
-        // A custom object never has a non-`str` attribute key; the defensive
-        // `Other` arm mirrors `object_key_path_segment` so it stays total.
+    fn entry_path_segment_renders_a_non_str_object_key_as_a_subscript() {
         let key = ObjectKey::Other(Box::new(Value::Number(Number::from_u64(1))));
         assert_eq!(
-            render_path(&[attribute_path_segment(&key)]).to_string(),
+            render_path(&[entry_path_segment(ObjectKind::CustomObject, &key)]).to_string(),
             "root[1]"
         );
     }

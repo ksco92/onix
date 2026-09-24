@@ -277,10 +277,15 @@ fn decode_tagged_object(
         })
         .collect();
 
+    let dict_len = entries.len();
     builder.custom_object(
         entries,
         std::sync::Arc::from(class.as_str()),
         std::sync::Arc::from(identity),
+        onix_core::value::ObjectLengths {
+            dict_len,
+            ..Default::default()
+        },
     )
 }
 

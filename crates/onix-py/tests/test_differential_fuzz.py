@@ -1,8 +1,10 @@
 """Differential fuzz test: onix's Python bindings vs real DeepDiff on live objects.
 
 Runs through `deepdiff_rs.DeepDiff`, exercising the Python-object-to-`Value`
-conversion layer. Twelve batches of seeded cases run twice (ordered and
-`ignore_order=True`), comparing `to_json()` (parsed) and `to_dict()`. The
+conversion layer. Fourteen batches of seeded cases run twice (ordered and
+`ignore_order=True`), comparing `to_json()` (parsed) and `to_dict()`; the
+custom-object batch compares `to_json()` alone and the enum batch the report
+structure alone, since DeepDiff renders a whole object from other views. The
 big-integer batch (issue #65) draws its big ints as bare scalars only, never
 inside a tuple/set, so it stays on the arbitrary-precision property under
 test rather than surfacing the pre-existing container-hashing divergence a
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import collections
 import datetime
+import enum
 import json
 import random
 import time
@@ -444,6 +447,7 @@ def _run_batch(
     calendar: bool = False,
     dict_keys: bool = False,
     case_fn: Callable[[int], tuple[JsonValue, JsonValue]] | None = None,
+    diverge_fn: Callable[[JsonValue, JsonValue, bool], tuple[JsonValue, JsonValue] | None] = _diverges,
 ) -> list[tuple[int, bool, JsonValue, JsonValue, JsonValue, JsonValue]]:
     """Run one batch of seeded cases through both engines, ordered and `ignore_order`."""
     build_case = case_fn or (
@@ -455,7 +459,7 @@ def _run_batch(
         a, b = build_case(seed)
 
         for ignore_order in (False, True):
-            divergence = _diverges(a, b, ignore_order)
+            divergence = diverge_fn(a, b, ignore_order)
 
             if divergence is not None:
                 expected, actual = divergence
@@ -1297,36 +1301,43 @@ def test_differential_fuzz_with_surrogate_strings_matches_real_deepdiff() -> Non
     )
 
 
-# The custom-object batch (issue #66): its own seed range, independent of every
-# batch above. Objects are diffed by their attributes, matching DeepDiff's
-# `_diff_obj`. Attribute values are bare scalars, nested objects, lists or
-# dicts only -- never a tuple/set/frozenset, keeping the batch on the object
-# property rather than surfacing the pre-existing container-hashing divergence
-# a biased alphabet inside a hashable container would (see
-# `tests/golden/README.md` and the differential-fuzz alphabet rule).
+# The custom-object batches (issue #66) draw attribute values from bare
+# scalars, nested objects, lists and dicts, never a tuple or set, to stay off
+# the container-hashing divergence.
 OBJECT_SEED_BASE: Final[int] = 12_000_000
-
-# A small pool of distinct plain, attribute-only classes, so a mutation can
-# swap an instance's class and produce a `type_changes`. Built from one shared
-# `__init__` via `type(...)` so the three bodies do not repeat; each class is
-# created once (module load), so two instances of the same one share one `type`
-# -- the same-class invariant `golden_tags._object_class` also relies on.
+ENUM_OBJECT_SEED_BASE: Final[int] = 13_000_000
 _OBJECT_ATTR_NAMES: Final[list[str]] = ["p", "q", "r", "s"]
 
 
-def _object_init(self: object, **attrs: object) -> None:
-    """Set each keyword as an instance attribute -- the shared body of the fuzz classes."""
-    for key, value in attrs.items():
-        setattr(self, key, value)
+class _Obj1:
+    def __init__(self, **attrs: object) -> None:
+        for key, value in attrs.items():
+            setattr(self, key, value)
 
 
-_OBJECT_CLASSES: Final[list[type]] = [
-    type(f"_Obj{i}", (), {"__init__": _object_init}) for i in range(1, 4)
-]
+class _Obj2:
+    def __init__(self, **attrs: object) -> None:
+        for key, value in attrs.items():
+            setattr(self, key, value)
+
+
+class _Obj3:
+    def __init__(self, **attrs: object) -> None:
+        for key, value in attrs.items():
+            setattr(self, key, value)
+
+
+class _Shade(enum.Enum):
+    RED = 1
+    GREEN = 2
+    BLUE = "blue"
+
+
+_OBJECT_CLASSES: Final[list[type]] = [_Obj1, _Obj2, _Obj3]
 
 
 def _gen_object_attr(rng: random.Random, depth: int) -> object:
-    """Generate one attribute value: a scalar, or (with budget) a nested object/list/dict."""
+    """Generate one attribute value: a scalar, or with depth budget a nested object, list or dict."""
     roll = rng.random()
     if depth > 0 and roll < 0.12:
         return _gen_object(rng, depth - 1)
@@ -1341,14 +1352,14 @@ def _gen_object_attr(rng: random.Random, depth: int) -> object:
 
 
 def _gen_object(rng: random.Random, depth: int) -> object:
-    """Generate one custom-object instance with a random subset of scalar (or nested) attributes."""
+    """Generate one instance of a random pool class with a random subset of attributes."""
     cls = rng.choice(_OBJECT_CLASSES)
     names = rng.sample(_OBJECT_ATTR_NAMES, rng.randint(0, len(_OBJECT_ATTR_NAMES)))
     return cls(**{name: _gen_object_attr(rng, depth) for name in names})
 
 
 def _gen_object_top(rng: random.Random, depth: int) -> object:
-    """Generate a top-level value: a bare object, or a list/dict/tuple of them."""
+    """Generate a top-level value: a bare object, or a list, dict or tuple of them."""
     roll = rng.random()
     if roll < 0.55 or depth <= 0:
         return _gen_object(rng, depth)
@@ -1360,7 +1371,7 @@ def _gen_object_top(rng: random.Random, depth: int) -> object:
 
 
 def _mutate_object(rng: random.Random, obj: object) -> object:
-    """Rebuild `obj` with a random subset of attributes changed, added, removed, or the class swapped."""
+    """Rebuild `obj` with attributes changed, added or removed, or its class swapped."""
     cls = rng.choice(_OBJECT_CLASSES) if rng.random() < 0.15 else type(obj)
     attrs = dict(vars(obj))
     if attrs and rng.random() < 0.3:
@@ -1374,7 +1385,7 @@ def _mutate_object(rng: random.Random, obj: object) -> object:
 
 
 def _mutate_object_value(rng: random.Random, value: object) -> object:
-    """Recursively mutate a value drawn from the object batch (objects, lists, dicts, tuples, scalars)."""
+    """Recursively mutate a value drawn from the object batch."""
     if isinstance(value, tuple(_OBJECT_CLASSES)):
         return _mutate_object(rng, value)
     if isinstance(value, list):
@@ -1388,49 +1399,82 @@ def _mutate_object_value(rng: random.Random, value: object) -> object:
     return _gen_scalar(rng) if rng.random() < 0.5 else value
 
 
+def _generate_object_case(seed: int) -> tuple[object, object]:
+    """Generate one custom-object case: a graph and a mutation of it, or an unrelated graph."""
+    rng = random.Random(seed)
+    a = _gen_object_top(rng, 3)
+    b = _mutate_object_value(rng, a) if rng.random() < 0.9 else _gen_object_top(rng, 3)
+    return a, b
+
+
 def _object_diverges(a: object, b: object, ignore_order: bool) -> tuple[object, object] | None:
-    """
-    Diff `a`/`b` through both engines and return both `to_json` reports if they disagree.
-
-    Only `to_json()` is compared, not `to_dict()`: DeepDiff's `to_dict()` returns
-    the original object instances (its `type_changes` old/new values, its added
-    items), which onix cannot reconstruct from its value model, so onix's
-    `to_dict()` returns the attribute dict instead -- a documented divergence
-    (see `tests/golden/README.md`). `to_json()` is the byte-parity target, where
-    both serialize a whole object to its public attributes.
-
-    :param a: The first value.
-    :param b: The second value.
-    :param ignore_order: Whether to diff with `ignore_order=True`.
-    :return: `(expected, actual)` if they diverge, else `None`.
-    """
-    real = RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)
-    onix = OnixDeepDiff(a, b, ignore_order=ignore_order)
-
-    expected = json.loads(real.to_json())
-    actual = json.loads(onix.to_json())
-
-    if expected != actual:
-        return expected, actual
-    return None
+    """Diff `a`/`b` with both engines and return both parsed `to_json()` reports if they disagree."""
+    expected = json.loads(RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2).to_json())
+    actual = json.loads(OnixDeepDiff(a, b, ignore_order=ignore_order).to_json())
+    return None if expected == actual else (expected, actual)
 
 
 def test_differential_fuzz_with_custom_objects_matches_real_deepdiff() -> None:
     """Runs a SEED_COUNT-case batch of custom-object graphs, ordered and ignore_order=True (issue #66)."""
-    mismatches = []
-
-    for seed in range(OBJECT_SEED_BASE, OBJECT_SEED_BASE + SEED_COUNT):
-        rng = random.Random(seed)
-        a = _gen_object_top(rng, 3)
-        b = _mutate_object_value(rng, a) if rng.random() < 0.9 else _gen_object_top(rng, 3)
-
-        for ignore_order in (False, True):
-            divergence = _object_diverges(a, b, ignore_order)
-            if divergence is not None:
-                expected, actual = divergence
-                mismatches.append((seed, ignore_order, expected, actual))
+    seeds = range(OBJECT_SEED_BASE, OBJECT_SEED_BASE + SEED_COUNT)
+    mismatches = _run_batch(seeds, case_fn=_generate_object_case, diverge_fn=_object_diverges)
 
     assert not mismatches, (
         f"{len(mismatches)} of {SEED_COUNT * 2} custom-object fuzz cases diverged from real "
+        f"DeepDiff (showing up to 3): {mismatches[:3]}"
+    )
+
+
+def _gen_enum_object_item(rng: random.Random) -> object:
+    """Generate a bare Enum member, or a pool-class instance whose attributes are bare scalars or members."""
+    if rng.random() < 0.3:
+        return rng.choice(list(_Shade))
+    names = rng.sample(_OBJECT_ATTR_NAMES, rng.randint(0, len(_OBJECT_ATTR_NAMES)))
+    return rng.choice(_OBJECT_CLASSES)(
+        **{name: rng.choice(list(_Shade)) if rng.random() < 0.4 else _gen_scalar(rng) for name in names}
+    )
+
+
+def _generate_enum_object_case(seed: int) -> tuple[list[object], list[object]]:
+    """Generate a list of objects and Enum members, and a copy with items replaced, dropped or added."""
+    rng = random.Random(seed)
+    a = [_gen_enum_object_item(rng) for _ in range(rng.randint(0, 5))]
+    b = [item if rng.random() < 0.5 else _gen_enum_object_item(rng) for item in a if rng.random() < 0.9]
+    b += [_gen_enum_object_item(rng) for _ in range(rng.randint(0, 2))]
+    rng.shuffle(b)
+    return a, b
+
+
+def _type_name(value: object) -> object:
+    """A `type_changes` type as its name: DeepDiff reports the type, onix the name."""
+    return getattr(value, "__name__", value)
+
+
+def _report_structure(report: dict) -> dict[str, object]:
+    """A `to_dict()` report reduced to its categories, paths and `type_changes` type names."""
+    return {
+        category: sorted(
+            (path, _type_name(entry["old_type"]), _type_name(entry["new_type"])) for path, entry in entries.items()
+        )
+        if category == "type_changes"
+        else sorted(entries)
+        for category, entries in report.items()
+    }
+
+
+def _structure_diverges(a: object, b: object, ignore_order: bool) -> tuple[object, object] | None:
+    """Diff `a`/`b` with both engines and return both report structures if they disagree."""
+    expected = _report_structure(RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2).to_dict())
+    actual = _report_structure(OnixDeepDiff(a, b, ignore_order=ignore_order).to_dict())
+    return None if expected == actual else (expected, actual)
+
+
+def test_differential_fuzz_with_enum_members_and_objects_matches_real_deepdiff() -> None:
+    """Runs a SEED_COUNT-case batch of lists mixing objects and Enum members, ordered and ignore_order=True."""
+    seeds = range(ENUM_OBJECT_SEED_BASE, ENUM_OBJECT_SEED_BASE + SEED_COUNT)
+    mismatches = _run_batch(seeds, case_fn=_generate_enum_object_case, diverge_fn=_structure_diverges)
+
+    assert not mismatches, (
+        f"{len(mismatches)} of {SEED_COUNT * 2} enum-and-object fuzz cases diverged from real "
         f"DeepDiff (showing up to 3): {mismatches[:3]}"
     )

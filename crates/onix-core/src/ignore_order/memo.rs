@@ -166,7 +166,8 @@ type DistanceKey = (DistKey, DistKey);
 /// [`ItemKey::Object`] (hash and equality are a full attribute-tree walk, like
 /// `ItemKey::Dict`, plus one class-name comparison — see `super::fxhash`'s
 /// doc); its distance is memoized here the way a `dict`'s is (see
-/// [`is_container`]).
+/// [`is_container`]). An opaque token keys as an `ItemKey::Opaque`, one
+/// identity-string comparison per lookup, and is never memoized.
 ///
 /// [`rough_distance`]: super::distance::rough_distance
 /// [`is_container`]: super::memo::is_container

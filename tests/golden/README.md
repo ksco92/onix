@@ -599,85 +599,114 @@ same. onix enumerates attributes exactly as `_diff_obj` does — the instance
 `__dict__` plus the non-callable, non-dunder names `dir()` adds (class attributes
 and `@property` values, read through `getattr`), or the slot values up the MRO
 for a slots-only class — dropping dunder (`__x`) names and keeping
-single-underscore (`_x`) and name-mangled (`_Cls__x`) ones. Two instances of one
+single-underscore (`_x`) and name-mangled (`_Cls__x`) ones. An `Enum` member is
+read as `_diff_enum` reads it: `name` and `value` only. Two instances of one
 plain class (only public instance attributes: no `@property`, class attribute, or
 private) match DeepDiff byte-for-byte, including under `ignore_order` and as
 list/dict values.
 
-Class identity is a **qualified** `__module__`-plus-`__qualname__` string, not
-the bare `__name__`, plus the kind (`dict` subclass versus attribute-diffed
-object): DeepDiff reports `type_changes` whenever `type(t1) != type(t2)`, so two
-same-named classes from different modules, and a `dict` subclass versus an object
-of the same name, are a `type_changes`, never a match. The rendered `old_type`/
-`new_type` stays the short `__name__` DeepDiff shows.
+Class identity is the class object itself, as DeepDiff's `type(t1) != type(t2)`
+compares it (the rule is stated once, on `Object::same_class` in
+`crates/onix-core/src/value.rs`), plus the kind (`dict` subclass versus
+attribute-diffed object). The rendered `old_type`/`new_type` stays the short
+`__name__` DeepDiff shows.
 
-Divergences, all deterministic. The first three (a whole object's serialized value, `ignore_order` hashing, and `to_dict`) are the object-view gaps tracked in [#99](https://github.com/ksco92/onix/issues/99), where onix keeps one attribute view and DeepDiff uses three:
+Divergences, all deterministic. The first three (a whole object's serialized
+value, `ignore_order` hashing, and `to_dict`) are the object-view gaps tracked in
+[#99](https://github.com/ksco92/onix/issues/99), where onix keeps one attribute
+view and DeepDiff uses three.
 
-1. **A whole object's serialized value.** When an object appears as a whole
-   value in a report (a `type_changes`' `old_value`/`new_value`, an object added
-   to a list/dict, a `threshold_to_diff_deeper` collapse), onix renders its full
-   diffed attribute set. DeepDiff's `to_json()` instead runs
-   `serialization.json_convertor_default`, which serializes **only** public
-   `@property` values, or failing that only public `__dict__` entries, and
-   raises `TypeError` for a slots-only object with neither. For a plain class the
-   two coincide; they differ only for a whole-value object with one of these
-   four triggers: a `@property`, a class attribute, a private (`_x`) attribute,
-   or a **slot value on a class that also has `__dict__`** — for
-   `class SlotBase: __slots__ = ("p",)` and `class Mixed(SlotBase)` with `p`
-   set, `vars(m)` is `{}`, so DeepDiff renders an added `Mixed` as `{}` while
-   onix renders `{"p": "x"}` — and, separately, for a slots-only object, where
-   DeepDiff crashes and onix renders. onix's value is self-consistent (the value
-   shown equals the value diffed) and total.
+### A whole object's serialized value
 
-2. **`ignore_order` object hashing.** DeepDiff's `DeepHash._prep_obj` hashes an
-   object by its raw `__dict__` (or its slots), never the `dir()`-derived
-   properties and class attributes `_diff_obj` reads. onix hashes the one
-   attribute view it holds (the diffed one), so pairing can differ for an object
-   whose `@property`/class attributes change what its diffed view contains. Both
-   tag the hash with the class name, so a custom object never pairs with a
-   plain `dict` or an instance of another class.
+When an object appears as a whole value in a report (a `type_changes`'
+`old_value`/`new_value`, an object added to a list/dict, a
+`threshold_to_diff_deeper` collapse), onix renders its full diffed attribute set.
+DeepDiff's `to_json()` instead runs `serialization.json_convertor_default`, which
+serializes **only** public `@property` values, or failing that only public
+`__dict__` entries, and raises `TypeError` for a slots-only object with neither.
+For a plain class the two coincide; they differ only for a whole-value object with
+one of these five triggers: a `@property`, a class attribute, a private (`_x`)
+attribute, an `Enum` member (DeepDiff renders `{}`, onix its `name` and
+`value`), or a **slot value on a class that also has `__dict__`** — for
+`class SlotBase: __slots__ = ("p",)` and `class Mixed(SlotBase)` with `p` set,
+`vars(m)` is `{}`, so DeepDiff renders an added `Mixed` as `{}` while onix
+renders `{"p": "x"}` — and, separately, for a slots-only object, where DeepDiff
+crashes and onix renders. onix's value is self-consistent (the value shown equals
+the value diffed) and total.
 
-3. **`to_dict()` returns attribute dicts, not the original objects.** DeepDiff's
-   `to_dict()` hands back the original instances (in a `type_changes`, an added
-   item); onix converts every input to its value model up front and cannot
-   reconstruct an instance, so `to_dict()` returns the object's attribute `dict`.
-   `to_json()` is the byte-parity target and is unaffected.
+### `ignore_order` object hashing
 
-4. **A recursive object.** A self-referential object (`obj.self_ref is obj`) is a
-   cycle DeepDiff breaks with `parents_ids`, returning an empty diff *deterministically*.
-   onix has no object-identity cycle tracking (it holds a compact value model, not
-   the Python objects) and bounds recursion by depth instead, raising `MaxDepthError`
-   at the ceiling — an accepted **architectural** divergence (onix's value model
-   cannot see object identity), not a crash-class one: DeepDiff does not crash here,
-   it returns `{}`, and onix returns a deterministic error instead of following the
-   cycle.
+DeepDiff's `DeepHash._prep_obj` hashes an object by its raw `__dict__` (or its
+slots), never the `dir()`-derived properties and class attributes `_diff_obj`
+reads. onix hashes the one attribute view it holds (the diffed one), so pairing
+can differ for an object whose `@property`/class attributes change what its
+diffed view contains. Both tag the hash with the class `__name__`, so a custom
+object never pairs with a plain `dict`, while two distinct classes sharing a
+`__name__` share a hash bucket in both. The pairing distance counts an object
+the way DeepDiff's `_get_item_length` does (`len(obj.__dict__)`, and for an
+`Enum` class the `__dict__` lengths of all its members) and adds the `DeepHash`
+count of the `__dict__` entries onix does not extract; an `Enum` member's own
+attributes each count as one node there, so one holding a container pairs by a
+slightly different distance.
 
-5. **Types DeepDiff routes to a handler onix lacks are refused, never
-   mis-diffed** (the accept-list, derived from `_diff`'s isinstance ladder).
-   DeepDiff sends a **number** (`complex`,
-   `Decimal`, `Fraction` — `_diff_numbers`), an **iterable** (`bytes`, `bytearray`,
-   `memoryview`, `range`, a generator, `deque`, `array.array`, any
-   `__iter__`-defining object — `_diff_str`/`_diff_iterable`), a **`uuid`**
-   (`_diff_uuids`), an **`ipaddress`** value (`_diff_ipranges`), and a numpy/Pydantic
-   value to dedicated handlers before ever reaching `_diff_obj`; a class object it
-   diffs by its class `__dict__` and a module likewise. onix implements none of
-   those, so each is refused with a typed, path-naming `TypeError` rather than
-   reshaped into an object — which for the attribute-less ones (`complex`, a bare
-   `object()`) would otherwise silently report `{}` for two *unequal* values, and
-   for `Decimal` would recurse through `.imag` to `MaxDepthError`. An **`Enum`
-   member** is the one exception onix keeps: DeepDiff's `_diff_enum` reports it by
-   `name`/`value`, exactly the non-callable attributes attribute enumeration
-   extracts, so onix matches it with no special handler. Implementing the
-   string/iterable/number handlers for the refused types is out of this change's
-   scope (they are not custom objects).
+### `to_dict()` returns attribute dicts, not the original objects
 
-6. **A `@property` that raises.** A getter raising anything other than
-   `AttributeError` (a `ValueError`, and any `BaseException` such as
-   `KeyboardInterrupt`) propagates out of onix as that Python exception at the
-   attribute's path, matching DeepDiff (a non-`AttributeError` raises out of it).
-   An `AttributeError` leaves that one attribute out of the diff, where DeepDiff
-   marks the **whole object** `unprocessed` (a report category onix does not
-   implement) — a nuance, pinned by a test.
+DeepDiff's `to_dict()` hands back the original instances (in a `type_changes`, an
+added item); onix converts every input to its value model up front and cannot
+reconstruct an instance, so `to_dict()` returns the object's attribute `dict`.
+`to_json()` is the byte-parity target and is unaffected.
+
+### A recursive object
+
+A self-referential object (`obj.self_ref is obj`) is a cycle DeepDiff breaks with
+`parents_ids`, returning an empty diff. onix holds a compact value model, not the
+Python objects, and bounds recursion by depth instead, raising `MaxDepthError` at
+the ceiling: a deterministic error where DeepDiff returns `{}`.
+
+### Types DeepDiff routes to a handler onix lacks
+
+The accept-list is derived from `_diff`'s isinstance ladder. DeepDiff sends a
+**number** (`complex`, `Decimal`, `Fraction`, a `numpy` scalar or
+`numpy.datetime64` — `_diff_numbers`, or `_diff_booleans` for `numpy.bool_`), an **iterable** (`bytes`, `bytearray`, `memoryview`,
+`range`, a generator, `deque`, `array.array`, any `__iter__`-defining object —
+`_diff_str`/`_diff_iterable`), a **`uuid`** (`_diff_uuids`), an **`ipaddress`**
+value (`_diff_ipranges`), and a Pydantic value to dedicated handlers before ever
+reaching `_diff_obj`; a class object it diffs by its class `__dict__` and a module
+likewise. onix implements none of those. At the root such a value raises a
+typed, path-naming `TypeError` rather than being reshaped into an object — which
+for the attribute-less ones (`complex`, a bare `object()`) would otherwise
+silently report `{}` for two *unequal* values.
+
+Below the root, DeepDiff's `_diff` returns before any handler when `t1 is t2`, so
+a value both sides share is never diffed: a class attribute every instance of a
+class shares (ABCMeta's `_abc_impl`, a class-level `threading.Lock`, `Decimal` or
+`logging.Logger`), or one object reached from both inputs. onix holds such a
+value, and any class attribute that is not a natively supported type, as an
+identity token: equal to the same object, so it never appears in the report, and
+a `TypeError` naming its path wherever the report would have to show it (two
+different objects compared, or one inside an added, removed or type-changed
+value). Two equal but distinct unsupported objects (`Decimal("1")` built twice)
+therefore raise where DeepDiff reports nothing.
+
+### Refused mappings
+
+A custom `collections.abc.Mapping` that is not a `dict` is an iterable to the
+accept-list and is refused, where DeepDiff diffs it as a mapping. The same holds
+for the read-only mapping a `re.Pattern` with named groups exposes as
+`groupindex`: `re.compile("(?P<x>a)")` versus `re.compile("(?P<y>a)")` raises
+`TypeError: ... mappingproxy at root.groupindex`, where DeepDiff reports both
+`root.groupindex` and `root.pattern`. A pattern without named groups exposes a
+plain `dict` there and diffs like DeepDiff.
+
+### A property that raises
+
+A getter raising anything other than `AttributeError` (a `ValueError`, and any
+`BaseException` such as `KeyboardInterrupt`) propagates out of onix as that Python
+exception, matching DeepDiff. An `AttributeError` while reading an object's
+attributes (a `@property` that raises it, or an unset slot on a class that also
+has `__dict__`) raises a `TypeError` naming the object's path, where DeepDiff
+reports the whole object as `unprocessed`, a report category onix does not
+implement.
 
 A `namedtuple` is unaffected by all of the above: it is a `tuple` subclass and
 diffs positionally (`root[1]`, not `root.field`) — the pre-existing, separately

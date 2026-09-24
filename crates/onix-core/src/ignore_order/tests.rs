@@ -3374,3 +3374,90 @@ fn item_length_of_a_custom_object_is_its_attribute_count_not_its_values() {
     let dict = cv(&json!({"x": [1, 2, 3], "y": 5}));
     assert_eq!(super::distance::item_length(&dict), 4);
 }
+
+/// A custom object `A` with `attrs` and explicit `lengths`.
+fn ccustom_with(attrs: &serde_json::Value, lengths: crate::value::ObjectLengths) -> CValue {
+    CValue::Object(
+        crate::test_support::cobj(attrs.as_object().unwrap()).into_class(
+            crate::value::ObjectKind::CustomObject,
+            std::sync::Arc::from("A"),
+            std::sync::Arc::from("A"),
+            lengths,
+        ),
+    )
+}
+
+/// An opaque token of type `Decimal` for the Python object `identity`.
+fn copaque(identity: &str) -> CValue {
+    crate::value::Builder::new().opaque(
+        std::sync::Arc::from("Decimal"),
+        std::sync::Arc::from(identity),
+    )
+}
+
+#[test]
+fn item_length_of_a_custom_object_is_its_dict_len_not_its_attribute_count() {
+    let lengths = crate::value::ObjectLengths {
+        dict_len: 4,
+        hidden_count: 3,
+        type_len: 12,
+    };
+    let object = ccustom_with(&json!({"name": "B", "value": 2}), lengths);
+    assert_eq!(
+        [
+            super::distance::item_length(&object),
+            super::distance::rough_length(&object),
+            super::distance::type_change_leaf_length(&cv(&json!(1)), &object),
+        ],
+        [4, 1 + 3 + 2 + 2, 12 + 4]
+    );
+}
+
+#[test]
+fn a_collapsed_custom_object_pair_counts_the_new_objects_dict_len() {
+    let lengths = |dict_len| crate::value::ObjectLengths {
+        dict_len,
+        ..Default::default()
+    };
+    let a = ccustom_with(&json!({"x": 1}), lengths(7));
+    let b = ccustom_with(&json!({"y": 1}), lengths(5));
+    let (CValue::Object(a), CValue::Object(b)) = (&a, &b) else {
+        unreachable!("both are objects");
+    };
+    let opts = DiffOptions::default();
+    assert_eq!(
+        super::distance::count_object_diff_leaves(a, b, 0, &opts, &IgnoreOrderMemo::new()),
+        5
+    );
+}
+
+#[test]
+fn an_opaque_token_equals_only_a_token_for_the_same_object() {
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let same = crate::diff::diff_with_options(
+        &CValue::Array(vec![copaque("1")].into_boxed_slice().into()),
+        &CValue::Array(vec![copaque("1")].into_boxed_slice().into()),
+        &opts,
+    )
+    .unwrap();
+    let different = crate::diff::diff_with_options(
+        &CValue::Array(vec![copaque("1")].into_boxed_slice().into()),
+        &CValue::Array(vec![copaque("2")].into_boxed_slice().into()),
+        &opts,
+    )
+    .unwrap();
+    assert_eq!((same.is_empty(), different.is_empty()), (true, false));
+}
+
+#[test]
+fn an_opaque_token_keys_by_its_identity_apart_from_an_object_of_that_name() {
+    let memo = IgnoreOrderMemo::new();
+    let key = |value: &CValue| super::hash::item_key(value, &memo);
+    let named_like_the_identity = ccustom("1", json!({}).as_object().unwrap());
+    assert_ne!(key(&copaque("1")), key(&copaque("2")));
+    assert_ne!(key(&copaque("1")), key(&named_like_the_identity));
+    assert_eq!(key(&copaque("1")), key(&copaque("1")));
+}

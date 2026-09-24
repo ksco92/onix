@@ -57,7 +57,9 @@ class DeepDiff:
             reports its own class name in a ``type_changes`` entry. Any other
             object is diffed by its attributes as a custom object
             (``attribute_added``/``attribute_removed``, ``root.attr`` paths,
-            ``type_changes`` between two different classes).
+            ``type_changes`` between two different classes), except a type
+            DeepDiff routes to a handler onix lacks, which raises
+            ``TypeError``.
         :param t2: The right value to compare, of the same supported types.
         :param ignore_order: Mirrors ``DeepDiff(..., ignore_order=True)``.
         :param max_depth: Recursion-depth bound; defaults to 512. Raises

@@ -6,10 +6,14 @@ conversion table this pins) and `deepdiff_rs.diff_json`'s JSON-parse error
 path.
 """
 
+import abc
 import collections
 import datetime
+import gc
 import json
+import logging
 import math
+import threading
 
 import pytest
 from conftest import _normalize_types, require_deepdiff
@@ -858,12 +862,8 @@ def test_a_property_raising_non_attribute_error_propagates_at_the_path() -> None
         DeepDiff(HasBadProperty(1), HasBadProperty(2))
 
 
-def test_a_property_raising_attribute_error_is_skipped() -> None:
-    """
-    A @property raising AttributeError leaves that attribute out, where DeepDiff
-    marks the whole object 'unprocessed' (a category onix does not have) -- a
-    documented nuance (see tests/golden/README.md), pinned here.
-    """
+def test_a_property_raising_attribute_error_is_refused_where_deepdiff_reports_unprocessed() -> None:
+    """A @property raising AttributeError refuses the object with the path, where DeepDiff reports it unprocessed."""
 
     class HasLazyProperty:
         def __init__(self, x: int) -> None:
@@ -871,11 +871,26 @@ def test_a_property_raising_attribute_error_is_skipped() -> None:
 
         @property
         def lazy(self) -> int:
-            raise AttributeError("not yet")
+            if self.x == 2:
+                raise AttributeError("not yet")
+            return self.x
 
-    assert json.loads(DeepDiff(HasLazyProperty(1), HasLazyProperty(2)).to_json()) == {
-        "values_changed": {"root.x": {"new_value": 2, "old_value": 1}}
-    }
+    assert "unprocessed" in RealDeepDiff(HasLazyProperty(1), HasLazyProperty(2))
+    with pytest.raises(TypeError, match=r"HasLazyProperty at root\['k'\]: AttributeError: not yet"):
+        DeepDiff({"k": HasLazyProperty(1)}, {"k": HasLazyProperty(2)})
+
+
+def test_an_unset_slot_beside_a_dict_is_refused_where_deepdiff_reports_unprocessed() -> None:
+    """An unset slot on a class that also has a __dict__ refuses the object, where DeepDiff reports it unprocessed."""
+
+    class SlotAndDict:
+        __slots__ = ("a", "__dict__")
+
+    a, b = SlotAndDict(), SlotAndDict()
+    b.a = 1
+    assert "unprocessed" in RealDeepDiff(a, b)
+    with pytest.raises(TypeError, match="SlotAndDict at root: AttributeError"):
+        DeepDiff(a, b)
 
 
 def test_a_property_mutating_the_instance_dict_does_not_panic() -> None:
@@ -975,6 +990,26 @@ def test_property_and_class_attribute_object_matches_deepdiff() -> None:
     assert onix == real
 
 
+class _Planet(_enum.Enum):
+    MERCURY = (3.303e23, 2.4397e6)
+    EARTH = (5.976e24, 6.37814e6)
+
+    def __init__(self, mass: float, radius: float) -> None:
+        self.mass = mass
+        self.radius = radius
+
+    @property
+    def surface_gravity(self) -> float:
+        return self.mass / (self.radius**2)
+
+
+def test_an_enum_with_its_own_attributes_reports_only_name_and_value_like_deepdiff() -> None:
+    """An Enum member's own attributes and properties stay out, as _diff_enum reads only name and value."""
+    onix, real = _canonical(_Planet.MERCURY, _Planet.EARTH)
+    assert onix == real
+    assert sorted(onix["values_changed"]) == ["root.name", "root.value[0]", "root.value[1]"]
+
+
 def test_enum_member_matches_deepdiff_via_name_and_value() -> None:
     """An Enum member is diffed by its name/value, matching DeepDiff's _diff_enum (issue #66)."""
     onix = json.loads(DeepDiff(_Color.RED, _Color.GREEN).to_json())
@@ -991,16 +1026,7 @@ def test_enum_member_matches_deepdiff_via_name_and_value() -> None:
 
 
 def test_numbers_number_registered_class_diffs_by_attributes_like_deepdiff() -> None:
-    """
-    A class registered with numbers.Number is not in DeepDiff's concrete number
-    tuple, so it is diffed by attributes, not refused as a number (issue #66).
-
-    A *direct* numbers.Number subclass is a separate matter: ABCMeta gives its
-    instances an `_abc_impl` attribute of an unsupported C type, so onix refuses
-    it under the general "an object with an unsupported-typed attribute is
-    refused" rule (documented in tests/golden/README.md) -- unrelated to the
-    number predicate, which no longer refuses it.
-    """
+    """A class registered with numbers.Number is outside DeepDiff's concrete number tuple, so it diffs by attributes."""
     import numbers
 
     class Registered:
@@ -1108,3 +1134,139 @@ def test_a_dict_property_returning_a_non_dict_raises_with_the_path() -> None:
 
     with pytest.raises(TypeError, match=r"BadDict at root\['k'\]"):
         DeepDiff({"k": BadDict()}, {"k": BadDict()})
+
+
+# --- Values DeepDiff never reaches: shared class attributes and identical objects (issue #66) ---
+
+
+class _AbcBased(abc.ABC):
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+class _WithLogger:
+    log = logging.getLogger("onix-test")
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+class _WithLock:
+    lock = threading.Lock()
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+class _WithDecimal:
+    rate = decimal.Decimal("1.5")
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+@pytest.mark.parametrize("cls", [_AbcBased, _WithLogger, _WithLock, _WithDecimal])
+@pytest.mark.parametrize("x_b", [1, 2])
+def test_a_shared_class_attribute_is_skipped_like_deepdiff(cls: type, x_b: int) -> None:
+    """A class attribute both instances share is never diffed, as DeepDiff's `t1 is t2` check skips it."""
+    onix, real = _canonical(cls(1), cls(x_b))
+    assert onix == real
+
+
+def test_the_same_unsupported_object_on_both_sides_reports_nothing_like_deepdiff() -> None:
+    """One unsupported object reached on both sides is equal, as DeepDiff's `t1 is t2` check makes it."""
+    shared = decimal.Decimal("1.5")
+    onix, real = _canonical({"k": shared, "n": 1}, {"k": shared, "n": 2})
+    assert onix == real
+
+
+@pytest.mark.parametrize("ignore_order", [False, True])
+def test_different_unsupported_objects_raise_with_the_path(ignore_order: bool) -> None:
+    """Two different unsupported objects at one position raise the path-naming TypeError, never {}."""
+    with pytest.raises(TypeError, match=r"Decimal at root\[0\]\['k'\]"):
+        DeepDiff([{"k": decimal.Decimal("1")}], [{"k": decimal.Decimal("1")}], ignore_order=ignore_order)
+
+
+def test_an_unsupported_object_inside_a_reported_value_raises_with_its_path() -> None:
+    """A report that would have to show an unsupported value, here an added instance, raises naming its path."""
+    with pytest.raises(TypeError, match=r"_abc_data at root\[1\]\._abc_impl"):
+        DeepDiff([_AbcBased(1)], [_AbcBased(1), _AbcBased(2)])
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda np, v: np.int64(v),
+        lambda np, v: np.float32(v + 0.5),
+        lambda np, v: np.bool_(v == 2),
+        lambda np, v: np.datetime64(f"202{v}-01-01"),
+    ],
+    ids=["int64", "float32", "bool", "datetime64"],
+)
+def test_a_numpy_scalar_is_refused_rather_than_reshaped(make) -> None:
+    """A numpy scalar, which DeepDiff routes to its number, boolean or datetime handler, raises TypeError."""
+    np = pytest.importorskip("numpy")
+    with pytest.raises(TypeError, match="unsupported type for diffing"):
+        DeepDiff(make(np, 1), make(np, 2))
+
+
+def test_a_class_identity_stays_unique_when_a_getter_frees_its_type() -> None:
+    """Each side's fresh class is held for the diff, so a freed type's address cannot make two classes equal."""
+
+    class Fresh:
+        @property
+        def p(self) -> object:
+            gc.collect()
+            return type("T", (), {})()
+
+    onix, real = _canonical(Fresh(), Fresh())
+    assert onix == real
+    assert "root.p" in onix["type_changes"]
+
+
+def test_a_metaclass_interrupt_while_reading_slots_propagates() -> None:
+    """A KeyboardInterrupt raised reading a base's __slots__ propagates rather than being skipped."""
+
+    class Meta(type):
+        def __getattribute__(cls, name: str) -> object:
+            if name == "__slots__":
+                raise KeyboardInterrupt
+            return super().__getattribute__(name)
+
+    class Slotted(metaclass=Meta):
+        __slots__ = ("a",)
+
+        def __init__(self, a: int) -> None:
+            self.a = a
+
+    with pytest.raises(KeyboardInterrupt):
+        DeepDiff(Slotted(1), Slotted(2))
+
+
+def test_a_dict_whose_copy_returns_itself_is_still_iterated_as_a_snapshot() -> None:
+    """A __dict__ whose copy() hands back the live dict cannot panic when a key's __hash__ inserts into it."""
+
+    class LiveCopy(dict):
+        def copy(self) -> "LiveCopy":
+            return self
+
+    class Key(str):
+        live: LiveCopy | None = None
+
+        def __hash__(self) -> int:
+            if Key.live is not None:
+                Key.live[f"k{len(Key.live)}"] = 0
+            return str.__hash__(self)
+
+    class Holder:
+        def __init__(self, v: int) -> None:
+            self.live = LiveCopy()
+            self.live[Key("v")] = v
+
+        @property
+        def __dict__(self) -> LiveCopy:  # type: ignore[override]
+            return self.live
+
+    a, b = Holder(1), Holder(2)
+    Key.live = a.live
+    assert "root.v" in json.loads(DeepDiff(a, b).to_json())["values_changed"]
