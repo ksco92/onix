@@ -58,22 +58,22 @@
 //!
 //! Per-row state: 32 bytes a row per side single-threaded; in parallel, 32 on
 //! the left plus an 8-byte tally and under a byte of bucket directory, and a
-//! 32-byte map entry per right key absent from the left. Beyond that: the
-//! in-flight batches (workers times batch size), the buffers' reallocation
+//! 32-byte map entry (first-row position and count) per right key absent from
+//! the left. Beyond that: in-flight batches (workers times batch size), buffer
 //! slack, the size gate's peek (at most [`MAX_PEEK_BYTES`] plus one producer
-//! batch per side), and the key values of every distinct duplicated key. In
-//! parallel, a right key the left lacks keeps its first row at full width until
-//! the key repeats and a small record per batch holding one; the first right
-//! row of a key the left holds once with a different row hash is spilled unless
-//! its own batch repeats the key. A selection kept past its scan that keeps
-//! over half its batch keeps that whole input batch resident, per side; a
-//! smaller one copies its buffers out, but a byte-view column's data buffers
-//! reach the output whole, so its batch's view data stays. The duplicate-key
-//! report copies its key columns out always. The cell pass's spill holds every
-//! common value column of every changed row, both sides (resident where written
-//! temp pages count), and the pass adds about twice the `cells_changed` output;
-//! it is not bounded by the changed *cell* count. The README's
-//! Known-limitations bullet states the measured figures.
+//! batch per side), and every distinct duplicated key's values. In parallel, a
+//! key the left lacks keeps its first right row at full width until the key
+//! repeats, and each right batch holding such a row keeps a candidate record of
+//! those rows' key columns (shared with the rows until compaction copies them).
+//! The first right row of a key the left holds once with another row hash is
+//! spilled unless its batch repeats the key. A selection kept past its scan
+//! keeps its whole input batch resident, per side, if it keeps over half of it;
+//! a smaller one copies its buffers out, but byte-view data buffers reach the
+//! output whole, so its view data stays. The duplicate-key report always copies
+//! its key columns out. The cell pass holds a spill of every common value
+//! column of every changed row, both sides (resident where written temp pages
+//! count), and about twice the `cells_changed` output, not bounded by the
+//! changed *cell* count. The README's Known-limitations bullet has the figures.
 //!
 //! # Hashing
 //!
