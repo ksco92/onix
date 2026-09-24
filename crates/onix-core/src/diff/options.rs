@@ -103,10 +103,10 @@ pub fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
 /// assert!(report.is_empty());
 /// ```
 pub fn diff_with_options(a: &Value, b: &Value, opts: &DiffOptions) -> Result<Report, Error> {
-    // The distance memo is created here, per diff invocation, and dropped
-    // when this returns — no cross-call state. It only ever caches
-    // `ignore_order` container-pair distances (see `crate::ignore_order`'s
-    // `memo` module); for an ordered diff it is threaded but never consulted.
+    // The memo is created here, per diff invocation, and dropped when this
+    // returns — no cross-call state. An ordered diff consults it only through
+    // set comparison (set-member and tuple digests); `ignore_order` also
+    // caches container-pair distances in it.
     diff_with_options_memo(a, b, opts, &crate::ignore_order::IgnoreOrderMemo::new())
 }
 

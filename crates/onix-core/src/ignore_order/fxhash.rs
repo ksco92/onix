@@ -21,15 +21,13 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// its result maps (`most_in_common_pairs`, `pairs`), `consumed_removed`, and the distance
 /// memo are `FxHash`-keyed and reached only under `ignore_order=true`: an accepted,
 /// documented `DoS` trade-off — `SipHash` there cost a measured per-call penalty on the
-/// pairing hot path (PR #4). [`IgnoreOrderMemo`](super::memo::IgnoreOrderMemo)'s `tuple_ids`
-/// is `FxHash`-keyed too but not `ignore_order`-only: on the Python-object path (JSON has no
-/// sets or tuples), a set member that is a custom object holding a tuple-keyed dict entry
-/// reaches it on the default path, through `set_member_digest` -> `tuple_keyed` ->
-/// `tuple_digest` — a pre-existing gap tracked in issue #136, the same as the key-union set
-/// below. The key-union `HashSet<&[u8]>` in
-/// [`is_below_threshold_to_diff_deeper`](super::distance::is_below_threshold_to_diff_deeper)
-/// is likewise default-path reachable, called by `object_diff` for every unequal dict pair,
-/// and tracked in the same issue. Bound untrusted input against the module's `O(N²)` pairing
+/// pairing hot path (PR #4). No default-path table is `FxHash`-keyed:
+/// [`IgnoreOrderMemo`](super::memo::IgnoreOrderMemo)'s `tuple_ids`, which set comparison
+/// reaches through `set_member_digest` -> `tuple_keyed` -> `tuple_digest` for a tuple dict
+/// key inside a set member, is a `BTreeMap` (below), and
+/// [`is_below_threshold_to_diff_deeper`](super::distance::is_below_threshold_to_diff_deeper),
+/// called by `object_diff` for every unequal dict pair, counts dict-key overlap by a sorted
+/// merge, with no table. Bound untrusted input against the module's `O(N²)` pairing
 /// regardless of hasher.
 ///
 /// Every `FxHash`-keyed type carrying a float ([`ItemKey`](super::hash::ItemKey),
@@ -40,7 +38,7 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// additionally folds onto one fixed key, matching `DeepHash`'s `str()`-based digest: this
 /// changes which values these tables treat as the same item, not their per-lookup cost.
 ///
-/// `node_table` and `member_content` in `IgnoreOrderMemo` are `BTreeMap`s instead, since they
+/// `node_table`, `member_content` and `tuple_ids` in `IgnoreOrderMemo` are `BTreeMap`s instead, since they
 /// are keyed by attacker-controlled member content and reached on the default path too, with
 /// no `Hash` derive: `O(log n)` worst case, always, though each comparison still walks the
 /// whole probed key — `member_content`'s `MemberContent::UnhashableDict` key is itself keyed
