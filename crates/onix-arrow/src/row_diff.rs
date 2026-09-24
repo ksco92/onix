@@ -3117,8 +3117,8 @@ enum Tally {
     /// The key is not on the indexed side.
     Absent,
     /// The key is on the indexed side once, with a different row hash, and this
-    /// is the other side's first row of it.
-    Changed,
+    /// is the other side's first row of it; the key's count is at `slot`.
+    Changed { partition: usize, slot: usize },
     /// Any other key on the indexed side.
     Present,
 }
@@ -3187,7 +3187,16 @@ impl KeyIndex {
             return Tally::Present;
         }
         count.fetch_or(ROW_DIFFERS, Ordering::Relaxed);
-        Tally::Changed
+        Tally::Changed {
+            partition,
+            slot: start + at,
+        }
+    }
+
+    /// Whether the other side has tallied more than one row of the key whose
+    /// count is at `slot`.
+    fn repeated(&self, partition: usize, slot: usize) -> bool {
+        self.counts[partition][slot].load(Ordering::Relaxed) & !ROW_DIFFERS > 1
     }
 }
 
@@ -3323,14 +3332,18 @@ impl RightFuse<'_> {
         pairs: &[(u128, u128, bool)],
     ) -> Result<(), TableDiffError> {
         let partitions = self.absent.len();
-        let mut changed = vec![false; pairs.len()];
+        let (mut changed, mut changed_slots) = (vec![false; pairs.len()], Vec::new());
         let mut absent_rows: Vec<Vec<usize>> = vec![Vec::new(); partitions];
         for (row, &(key_hash, row_hash, _)) in pairs.iter().enumerate() {
             match self.index.tally(key_hash, row_hash) {
                 Tally::Absent => absent_rows[partition_of(key_hash, partitions)].push(row),
-                Tally::Changed => changed[row] = true,
+                Tally::Changed { partition, slot } => changed_slots.push((row, partition, slot)),
                 Tally::Present => {}
             }
+        }
+        // A key the batch itself repeats is a duplicate, never compared.
+        for (row, partition, slot) in changed_slots {
+            changed[row] = !self.index.repeated(partition, slot);
         }
         let (mut kept, mut stale) = (Vec::new(), 0);
         for (part, rows) in self.absent.iter().zip(&absent_rows) {
@@ -8241,14 +8254,21 @@ mod fused_tests {
 
     #[test]
     fn right_side_spills_only_the_first_row_of_a_changed_key() {
-        let right = view_keyed(&["a", "b", "c"], 0);
-        let batch = right.open().unwrap().next().unwrap().unwrap();
-        let index = KeyIndex::build(vec![vec![(1, 10), (2, 20)]]).unwrap();
+        let right = view_keyed(&["a", "b", "c", "d", "e"], 0);
+        let mut batches = right.open().unwrap();
+        let (first, second) = (
+            batches.next().unwrap().unwrap(),
+            batches.next().unwrap().unwrap(),
+        );
+        let index = KeyIndex::build(vec![vec![(1, 10), (2, 20), (3, 30)]]).unwrap();
         let value_schema = super::spill_schema(&right.schema, &[1]);
         let fuse = right_fuse(&index, &value_schema);
-        // Key 1 keeps its left row hash (unchanged); key 2's differs, and the
-        // right repeats key 2, so only its first row is spilled.
-        fuse.visit(0, &batch, &[(1, 10, false), (2, 21, false), (2, 22, false)])
+        // Keys 2 and 3 differ from the left, but the batch repeats key 3, so
+        // only key 2 is spilled, and a later batch repeating key 2 spills
+        // nothing more; key 1, equal to the left, is never spilled.
+        fuse.visit(0, &first, &[(2, 21, false), (3, 31, false), (3, 32, false)])
+            .unwrap();
+        fuse.visit(3, &second, &[(2, 22, false), (1, 10, false)])
             .unwrap();
         assert_eq!(fuse.spill.finish().unwrap().key_hashes, vec![vec![2]]);
     }
@@ -8456,13 +8476,9 @@ mod fused_tests {
         assert!(index.bits.iter().any(|&bits| bits > 0));
         for i in 0..700u128 {
             // Keys under 200 are on the left twice; the rest once, row hash `i`.
-            let expected = if i >= 200 && i % 2 == 1 {
-                Tally::Changed
-            } else {
-                Tally::Present
-            };
             let row_hash = if i % 2 == 1 { i + 1 } else { i };
-            assert_eq!(index.tally(key(i), row_hash), expected, "key {i}");
+            let changed = matches!(index.tally(key(i), row_hash), Tally::Changed { .. });
+            assert_eq!(changed, i >= 200 && i % 2 == 1, "key {i}");
         }
         for absent in [key(5_000), 0, u128::MAX] {
             assert_eq!(index.tally(absent, 0), Tally::Absent);

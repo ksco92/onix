@@ -67,8 +67,8 @@ pub enum ViewKeys {
     /// Id `i`, omitting every row when `omit_every` is 1, every
     /// `omit_every`-th row when above 1, and none when 0.
     Plain { omit_every: i64 },
-    /// Id `offset + i / 2`, so each id appears twice.
-    Twice { offset: i64 },
+    /// Id `offset + i % period`, so each id repeats every `period` rows.
+    Wrap { offset: i64, period: i64 },
     /// Id `i`, except every `every`-th row, whose id is `-1`.
     RepeatAbsent { every: i64 },
 }
@@ -77,7 +77,7 @@ impl ViewKeys {
     fn id(self, i: i64) -> Option<i64> {
         match self {
             ViewKeys::Plain { omit_every } => (omit_every == 0 || i % omit_every != 0).then_some(i),
-            ViewKeys::Twice { offset } => Some(offset + i / 2),
+            ViewKeys::Wrap { offset, period } => Some(offset + i % period),
             ViewKeys::RepeatAbsent { every } => Some(if i % every == 0 { -1 } else { i }),
         }
     }
@@ -108,10 +108,11 @@ pub enum Case {
     /// Two `width`-byte view columns, equal sides except every `every`-th left
     /// row, which the right lacks.
     ViewSparse { width: usize, every: i64 },
-    /// Left ids once; the right repeats the first half of them twice each, with
-    /// different values, so each is a duplicate key.
+    /// Left ids once; the right holds the first half of them twice each, half
+    /// a side apart and with different values, so each is a duplicate key.
     DupRightOnce(usize),
-    /// Left ids once; the right holds ids the left lacks, each twice.
+    /// Left ids once; the right holds ids the left lacks, each twice, half a
+    /// side apart.
     DupRightAbsent(usize),
     /// Equal sides except every `every`-th right row, keyed by one id the left
     /// lacks.
@@ -188,13 +189,20 @@ impl Case {
                     Field::new("v1", DataType::Utf8View, false),
                 ]));
                 let view = |fill, keys| Shape::View { width, fill, keys };
+                let period = (rows / 2).max(1);
                 let all = ViewKeys::Plain { omit_every: 0 };
                 let (left, right) = match self {
                     Case::ViewRemoved(_) => (all, ViewKeys::Plain { omit_every: 1 }),
                     Case::ViewAdded(_) => (ViewKeys::Plain { omit_every: 1 }, all),
                     Case::ViewSparse { every, .. } => (all, ViewKeys::Plain { omit_every: every }),
-                    Case::DupRightOnce(_) => (all, ViewKeys::Twice { offset: 0 }),
-                    Case::DupRightAbsent(_) => (all, ViewKeys::Twice { offset: rows }),
+                    Case::DupRightOnce(_) => (all, ViewKeys::Wrap { offset: 0, period }),
+                    Case::DupRightAbsent(_) => (
+                        all,
+                        ViewKeys::Wrap {
+                            offset: rows,
+                            period,
+                        },
+                    ),
                     Case::RepeatAbsent { every, .. } => (all, ViewKeys::RepeatAbsent { every }),
                     _ => unreachable!("only view cases reach this arm"),
                 };
