@@ -629,12 +629,13 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "onix-arrow"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-cast",
  "arrow-ipc",
+ "arrow-ord",
  "arrow-schema",
  "arrow-select",
  "getrandom 0.3.4",
@@ -648,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "onix-cli"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "onix-core",
  "serde_json",
@@ -656,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "onix-core"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "num-bigint",
  "num-traits",
@@ -669,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "onix-py"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",

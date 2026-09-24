@@ -55,10 +55,10 @@ use arrow_array::types::{
     UInt32Type, UInt64Type,
 };
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, RecordBatchReader, StringArray,
-    UInt32Array,
+    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, RecordBatchReader,
+    StringArray, UInt32Array,
 };
-use arrow_buffer::{BooleanBuffer, Buffer, NullBuffer, i256};
+use arrow_buffer::{BooleanBuffer, BooleanBufferBuilder, Buffer, NullBuffer, i256};
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use arrow_schema::{ArrowError, DataType, Field, IntervalUnit, Schema, SchemaRef, TimeUnit};
 
@@ -3516,6 +3516,20 @@ struct ColumnPlan {
     left_suffix: String,
     right_suffix: String,
     is_type_change: bool,
+    compare: CellCompare,
+}
+
+/// How [`changed_mask`] decides which of a column's cells changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CellCompare {
+    /// One `distinct` kernel call: both sides decode to one [`kernel_comparable`]
+    /// type.
+    Kernel,
+    /// A type change, over which [`hash_cell`] writes a different tag or flag for
+    /// every non-null pair, so a cell changed unless both sides are null.
+    TypeChange,
+    /// The per-cell [`hash_cell`] comparison, for every other pair.
+    PerCell,
 }
 
 /// Decodes and prepares every compared column of a partition, in output
@@ -3535,6 +3549,13 @@ fn plan_columns(
         let is_type_change = value_domain(&left_dt) != value_domain(&right_dt)
             || timestamp_awareness_differs(&left_dt, &right_dt)
             || interval_variant_differs(&left_dt, &right_dt);
+        let compare = if is_type_change {
+            CellCompare::TypeChange
+        } else if kernel_comparable(&left_dt, &right_dt) {
+            CellCompare::Kernel
+        } else {
+            CellCompare::PerCell
+        };
         let common = common_render_type(&left_dt, &right_dt);
         let (left_render, left_suffix) = prepare_render(&left_dec, common.as_ref())?;
         let (right_render, right_suffix) = prepare_render(&right_dec, common.as_ref())?;
@@ -3548,9 +3569,122 @@ fn plan_columns(
             left_suffix,
             right_suffix,
             is_type_change,
+            compare,
         });
     }
     Ok(plans)
+}
+
+/// Whether a column's two decoded types can take [`CellCompare::Kernel`]: one type,
+/// from an explicit list of those whose `distinct` equality (after
+/// [`canonical_floats`] for a float) is [`hash_cell`]'s.
+fn kernel_comparable(left: &DataType, right: &DataType) -> bool {
+    left == right
+        && matches!(
+            left,
+            DataType::Null
+                | DataType::Boolean
+                | DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+                | DataType::Float16
+                | DataType::Float32
+                | DataType::Float64
+                | DataType::Decimal32(_, _)
+                | DataType::Decimal64(_, _)
+                | DataType::Decimal128(_, _)
+                | DataType::Decimal256(_, _)
+                | DataType::Utf8
+                | DataType::LargeUtf8
+                | DataType::Utf8View
+                | DataType::Binary
+                | DataType::LargeBinary
+                | DataType::BinaryView
+                | DataType::FixedSizeBinary(_)
+                | DataType::Timestamp(_, _)
+                | DataType::Date32
+                | DataType::Date64
+                | DataType::Time32(_)
+                | DataType::Time64(_)
+                | DataType::Duration(_)
+                | DataType::Interval(_)
+        )
+}
+
+/// A float column widened to `Float64` with every NaN folded to one NaN and `-0.0`
+/// to `0.0`, so bitwise equality, the kernel's float equality, is [`hash_float`]'s.
+fn canonical_floats(array: &ArrayRef) -> Result<ArrayRef, TableDiffError> {
+    let wide = arrow_cast::cast(array, &DataType::Float64).map_err(|e| read_error(&e))?;
+    let folded: Float64Array = wide
+        .as_primitive::<Float64Type>()
+        .unary(|v| if v.is_nan() { f64::NAN } else { v + 0.0 });
+    Ok(Arc::new(folded))
+}
+
+/// The changed-cell mask of left rows `lo..lo + right_rows.len()`: bit `i` is set
+/// when left row `lo + i` and right row `right_rows[i]` differ under [`hash_cell`]
+/// (null only equals null), and unset for a null (unpaired) index. Every
+/// [`CellCompare`] arm gives the mask the per-cell arm gives. Memory: one bit per row
+/// for the mask, plus, on the kernel arm, a `take`n copy of the right
+/// column for this row range (a float column also widened to `Float64` on both sides).
+fn changed_mask(
+    plan: &ColumnPlan,
+    hasher: &RowHasher,
+    lo: usize,
+    right_rows: &UInt32Array,
+) -> Result<BooleanBuffer, TableDiffError> {
+    let len = right_rows.len();
+    let changed = match plan.compare {
+        CellCompare::TypeChange => BooleanBuffer::collect_bool(len, |i| {
+            !cell_is_null(&plan.left_dec, lo + i)
+                || (right_rows.is_valid(i)
+                    && !cell_is_null(&plan.right_dec, right_rows.value(i) as usize))
+        }),
+        CellCompare::Kernel => {
+            let left = plan.left_dec.slice(lo, len);
+            let right = arrow_select::take::take(&plan.right_dec, right_rows, None)
+                .map_err(|e| read_error(&e))?;
+            let (left, right) = if is_float(left.data_type()) {
+                (canonical_floats(&left)?, canonical_floats(&right)?)
+            } else {
+                (left, right)
+            };
+            let distinct = arrow_ord::cmp::distinct(&left, &right);
+            distinct.map_err(|e| read_error(&e))?.values().clone()
+        }
+        CellCompare::PerCell => {
+            let mut mask = BooleanBufferBuilder::new(len);
+            for (i, right_row) in right_rows.iter().enumerate() {
+                let Some(right_row) = right_row else {
+                    mask.append(false);
+                    continue;
+                };
+                let (row, right_row) = (lo + i, right_row as usize);
+                let changed = match (
+                    cell_is_null(&plan.left_dec, row),
+                    cell_is_null(&plan.right_dec, right_row),
+                ) {
+                    (true, true) => false,
+                    (false, false) => {
+                        cell_hash(hasher, &plan.left_dec, row)?
+                            != cell_hash(hasher, &plan.right_dec, right_row)?
+                    }
+                    _ => true,
+                };
+                mask.append(changed);
+            }
+            return Ok(mask.finish());
+        }
+    };
+    Ok(match right_rows.nulls() {
+        Some(paired) => &changed & paired.inner(),
+        None => changed,
+    })
 }
 
 /// One key-hash partition's paired changed rows: each side's read-back value
@@ -3600,7 +3734,7 @@ fn emit_partition(
         .collect();
     // A changed key is present once on each side, so a miss is only a
     // ~n²/2¹²⁸ hash collision; such a row is skipped, never paired.
-    let right_row_of: Vec<Option<u32>> = data
+    let right_rows: UInt32Array = data
         .left_key_hashes
         .iter()
         .map(|hash| right_pos.get(hash).copied())
@@ -3624,13 +3758,13 @@ fn emit_partition(
                 continue;
             }
             let plans = &plans;
-            let right_row_of = &right_row_of;
+            let right_rows = &right_rows;
             let left_global_index = data.left_global_index;
             let hasher = plan.hasher;
             let opts = &opts;
             handles.push(
                 scope.spawn(move || -> Result<Vec<CellRecord>, TableDiffError> {
-                    emit_row_range(plans, right_row_of, left_global_index, hasher, opts, lo, hi)
+                    emit_row_range(plans, right_rows, left_global_index, hasher, opts, lo, hi)
                 }),
             );
         }
@@ -3639,44 +3773,39 @@ fn emit_partition(
     Ok(outcomes.into_iter().flatten().collect())
 }
 
-/// Compares and renders every compared column over one row range of a
-/// partition, appending a record per differing cell.
+/// Compares every compared column over one row range of a partition through
+/// [`changed_mask`] and renders a record for each changed cell.
 fn emit_row_range(
     plans: &[ColumnPlan],
-    right_row_of: &[Option<u32>],
+    right_rows: &UInt32Array,
     left_global_index: &[u32],
     hasher: &RowHasher,
     opts: &FormatOptions<'_>,
     lo: usize,
     hi: usize,
 ) -> Result<Vec<CellRecord>, TableDiffError> {
+    let right_rows = right_rows.slice(lo, hi - lo);
     let mut records = Vec::new();
     for plan in plans {
         let left_renderer = SideRenderer::new(&plan.left_render, opts)?;
         let right_renderer = SideRenderer::new(&plan.right_render, opts)?;
-        for row in lo..hi {
-            let Some(right_row) = right_row_of[row] else {
-                continue;
-            };
-            let right_row = right_row as usize;
+        let mask = accum!(
+            "cell: changed mask, summed over threads",
+            changed_mask(plan, hasher, lo, &right_rows)?
+        );
+        for i in mask.set_indices() {
+            let row = lo + i;
+            let right_row = right_rows.value(i) as usize;
             let left_null = cell_is_null(&plan.left_dec, row);
             let right_null = cell_is_null(&plan.right_dec, right_row);
-            let change = if left_null && right_null {
-                continue;
-            } else if left_null {
+            let change = if left_null {
                 CHANGE_BECAME_NON_NULL
             } else if right_null {
                 CHANGE_BECAME_NULL
+            } else if plan.is_type_change {
+                CHANGE_TYPE
             } else {
-                let left_hash = cell_hash(hasher, &plan.left_dec, row)?;
-                let right_hash = cell_hash(hasher, &plan.right_dec, right_row)?;
-                if left_hash == right_hash {
-                    continue;
-                } else if plan.is_type_change {
-                    CHANGE_TYPE
-                } else {
-                    CHANGE_VALUE
-                }
+                CHANGE_VALUE
             };
             let old_value = if left_null {
                 None
@@ -8749,5 +8878,369 @@ mod fused_tests {
             true,
         );
         assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::{
+        CellCompare, ColumnPlan, MILLIS_PER_DAY, RowHasher, changed_mask, kernel_comparable,
+        plan_columns,
+    };
+    use arrow_array::types::{IntervalDayTime, IntervalMonthDayNano};
+    use arrow_array::{
+        Array, ArrayRef, BooleanArray, Decimal128Array, FixedSizeBinaryArray, Float16Array,
+        Float32Array, Float64Array, Int64Array, IntervalDayTimeArray, IntervalMonthDayNanoArray,
+        IntervalYearMonthArray, NullArray, RecordBatch, StringArray, UInt32Array,
+    };
+    use arrow_buffer::BooleanBuffer;
+    use arrow_schema::{DataType, Field, IntervalUnit, Schema, TimeUnit};
+    use half::f16;
+    use std::sync::Arc;
+
+    /// splitmix64: a dependency-free seeded generator, so a failing seed replays.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            usize::try_from((z ^ (z >> 31)) % n as u64).unwrap()
+        }
+    }
+
+    const ALPHABET: usize = 8;
+
+    /// A column of `dt` whose cell `i` is `picks[i]` drawn from a small per-type
+    /// alphabet (null for `None`), so equal and unequal pairs both occur often.
+    /// The alphabets hold the values the hash folds or distinguishes: see
+    /// `float_column`, trailing decimal zeros, non-whole-day `Date64` values, and
+    /// byte strings past the view inline limit.
+    fn column(dt: &DataType, picks: &[Option<usize>]) -> ArrayRef {
+        let ints = [0i64, 1, -1, 2, 7, 1000, -86_400, 3];
+        let as_ints = |to: &DataType| {
+            let base: Int64Array = picks.iter().map(|p| p.map(|i| ints[i])).collect();
+            // arrow casts to a 32-bit temporal type only from `Int32`.
+            if matches!(to, DataType::Time32(_) | DataType::Date32) {
+                let narrow = arrow_cast::cast(&base, &DataType::Int32).unwrap();
+                return arrow_cast::cast(&narrow, to).unwrap();
+            }
+            arrow_cast::cast(&base, to).unwrap()
+        };
+        match dt {
+            DataType::Null => Arc::new(NullArray::new(picks.len())),
+            DataType::Boolean => Arc::new(
+                picks
+                    .iter()
+                    .map(|p| p.map(|i| i % 2 == 0))
+                    .collect::<BooleanArray>(),
+            ),
+            DataType::Float16 | DataType::Float32 | DataType::Float64 => float_column(dt, picks),
+            DataType::Decimal32(_, s)
+            | DataType::Decimal64(_, s)
+            | DataType::Decimal128(_, s)
+            | DataType::Decimal256(_, s) => {
+                let base = picks
+                    .iter()
+                    .map(|p| p.map(|i| i128::from(ints[i]) * 10))
+                    .collect::<Decimal128Array>()
+                    .with_precision_and_scale(38, *s)
+                    .unwrap();
+                arrow_cast::cast(&base, dt).unwrap()
+            }
+            DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Utf8View
+            | DataType::Binary
+            | DataType::LargeBinary
+            | DataType::BinaryView => {
+                let alphabet = [
+                    "",
+                    "a",
+                    "b",
+                    "ab",
+                    "héllo",
+                    "a string past the twelve-byte view inline limit",
+                    "a string past the twelve-byte view inline limit!",
+                    "a string past the twelve-byte view inline limis",
+                ];
+                let base: StringArray = picks.iter().map(|p| p.map(|i| alphabet[i])).collect();
+                arrow_cast::cast(&base, dt).unwrap()
+            }
+            DataType::FixedSizeBinary(_) => Arc::new(
+                FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                    picks
+                        .iter()
+                        .map(|p| p.map(|i| [0, 1, u8::try_from(i).unwrap()])),
+                    3,
+                )
+                .unwrap(),
+            ),
+            DataType::Date64 => {
+                let base: Int64Array = picks
+                    .iter()
+                    .map(|p| p.map(|i| ints[i] * MILLIS_PER_DAY + i64::from(i == 7)))
+                    .collect();
+                arrow_cast::cast(&base, dt).unwrap()
+            }
+            DataType::Interval(IntervalUnit::YearMonth) => Arc::new(
+                picks
+                    .iter()
+                    .map(|p| p.map(|i| i32::try_from(i).unwrap() - 2))
+                    .collect::<IntervalYearMonthArray>(),
+            ),
+            DataType::Interval(IntervalUnit::DayTime) => Arc::new(
+                picks
+                    .iter()
+                    .map(|p| p.map(|i| IntervalDayTime::new(i32::try_from(i % 2).unwrap(), 0)))
+                    .collect::<IntervalDayTimeArray>(),
+            ),
+            DataType::Interval(IntervalUnit::MonthDayNano) => Arc::new(
+                picks
+                    .iter()
+                    .map(|p| {
+                        p.map(|i| IntervalMonthDayNano::new(0, i32::try_from(i % 3).unwrap(), 5))
+                    })
+                    .collect::<IntervalMonthDayNanoArray>(),
+            ),
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                let base: Int64Array = picks
+                    .iter()
+                    .map(|p| p.map(|i| i64::try_from(i).unwrap()))
+                    .collect();
+                arrow_cast::cast(&base, dt).unwrap()
+            }
+            other => as_ints(other),
+        }
+    }
+
+    /// A float column (`Float64` for any type but `Float16` and `Float32`) over an
+    /// alphabet holding signed zero, NaN payloads of both signs, integral values, and
+    /// values past the width's exact-integer range.
+    fn float_column(dt: &DataType, picks: &[Option<usize>]) -> ArrayRef {
+        match dt {
+            DataType::Float32 => {
+                let alphabet = [
+                    0.0,
+                    -0.0,
+                    1.0,
+                    0.1,
+                    f32::NAN,
+                    f32::from_bits(0xffc0_0001),
+                    16_777_216.0,
+                    f32::INFINITY,
+                ];
+                Arc::new(
+                    picks
+                        .iter()
+                        .map(|p| p.map(|i| alphabet[i]))
+                        .collect::<Float32Array>(),
+                )
+            }
+            DataType::Float16 => {
+                let alphabet = [
+                    0x0000, 0x8000, 0x3c00, 0x2e66, 0x7e00, 0xfe01, 0x7bff, 0xfc00,
+                ]
+                .map(f16::from_bits);
+                Arc::new(
+                    picks
+                        .iter()
+                        .map(|p| p.map(|i| alphabet[i]))
+                        .collect::<Float16Array>(),
+                )
+            }
+            _ => {
+                let alphabet = [
+                    0.0,
+                    -0.0,
+                    1.0,
+                    0.1,
+                    f64::NAN,
+                    f64::from_bits(0xfff8_0000_0000_0001),
+                    9_007_199_254_740_992.0,
+                    9_007_199_254_740_994.0,
+                ];
+                Arc::new(
+                    picks
+                        .iter()
+                        .map(|p| p.map(|i| alphabet[i]))
+                        .collect::<Float64Array>(),
+                )
+            }
+        }
+    }
+
+    /// Every type the row diff hashes, once each: each pairs with itself.
+    fn hashable_types() -> Vec<DataType> {
+        let utc = Some("UTC".into());
+        let mut types = vec![
+            DataType::Null,
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float16,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Decimal32(9, 2),
+            DataType::Decimal64(18, 3),
+            DataType::Decimal128(20, 4),
+            DataType::Decimal256(40, 1),
+            DataType::Utf8,
+            DataType::LargeUtf8,
+            DataType::Utf8View,
+            DataType::Binary,
+            DataType::LargeBinary,
+            DataType::BinaryView,
+            DataType::FixedSizeBinary(3),
+            DataType::Date32,
+            DataType::Date64,
+            DataType::Time32(TimeUnit::Second),
+            DataType::Time32(TimeUnit::Millisecond),
+            DataType::Time64(TimeUnit::Microsecond),
+            DataType::Time64(TimeUnit::Nanosecond),
+            DataType::Interval(IntervalUnit::YearMonth),
+            DataType::Interval(IntervalUnit::DayTime),
+            DataType::Interval(IntervalUnit::MonthDayNano),
+        ];
+        for unit in [
+            TimeUnit::Second,
+            TimeUnit::Millisecond,
+            TimeUnit::Microsecond,
+            TimeUnit::Nanosecond,
+        ] {
+            types.push(DataType::Timestamp(unit, None));
+            types.push(DataType::Timestamp(unit, utc.clone()));
+            types.push(DataType::Duration(unit));
+        }
+        types
+    }
+
+    /// `dt`'s column over `picks`, dictionary-encoded when `dictionary` and arrow
+    /// can encode the type.
+    fn encoded(dt: &DataType, picks: &[Option<usize>], dictionary: bool) -> ArrayRef {
+        let plain = column(dt, picks);
+        let target = DataType::Dictionary(Box::new(DataType::Int32), Box::new(dt.clone()));
+        if dictionary && let Ok(dict) = arrow_cast::cast(&plain, &target) {
+            return dict;
+        }
+        plain
+    }
+
+    fn picks(rng: &mut Rng, len: usize) -> Vec<Option<usize>> {
+        (0..len)
+            .map(|_| (rng.below(5) != 0).then(|| rng.below(ALPHABET)))
+            .collect()
+    }
+
+    fn batch(array: ArrayRef) -> RecordBatch {
+        let field = Field::new("v", array.data_type().clone(), true);
+        RecordBatch::try_new(Arc::new(Schema::new(vec![field])), vec![array]).unwrap()
+    }
+
+    /// The arm `plan_columns` picks for one random pair of `left_type` and
+    /// `right_type` columns, the mask that arm gives over a random pairing, and
+    /// the mask the per-cell arm gives over the same pairing.
+    fn both_masks(
+        rng: &mut Rng,
+        hasher: &RowHasher,
+        left_type: &DataType,
+        right_type: &DataType,
+    ) -> (CellCompare, BooleanBuffer, BooleanBuffer) {
+        let (left_len, right_len) = (1 + rng.below(40), 1 + rng.below(40));
+        let left = encoded(left_type, &picks(rng, left_len), rng.below(2) == 0);
+        let right = encoded(right_type, &picks(rng, right_len), rng.below(2) == 0);
+        let mut plans = plan_columns(&[batch(left)], &[batch(right)], &[0], &["v".into()]).unwrap();
+        let plan = plans.pop().unwrap();
+        let lo = rng.below(left_len);
+        let right_rows: UInt32Array = (lo..left_len)
+            .map(|_| (rng.below(8) != 0).then(|| u32::try_from(rng.below(right_len)).unwrap()))
+            .collect();
+        let dispatched = changed_mask(&plan, hasher, lo, &right_rows).unwrap();
+        let arm = plan.compare;
+        let per_cell = ColumnPlan {
+            compare: CellCompare::PerCell,
+            ..plan
+        };
+        let reference = changed_mask(&per_cell, hasher, lo, &right_rows).unwrap();
+        (arm, dispatched, reference)
+    }
+
+    #[test]
+    fn kernel_mask_equals_the_per_cell_decision_for_every_hashable_type() {
+        let hasher = RowHasher::new().unwrap();
+        for dt in hashable_types() {
+            let (mut set, mut unset) = (0, 0);
+            for seed in 0..300 {
+                let mut rng = Rng(seed);
+                let (arm, mask, reference) = both_masks(&mut rng, &hasher, &dt, &dt);
+                assert_eq!(arm, CellCompare::Kernel, "{dt}");
+                assert_eq!(mask, reference, "{dt}, seed {seed}");
+                set += mask.count_set_bits();
+                unset += mask.len() - mask.count_set_bits();
+            }
+            // A `Null` column is all null on both sides, so it never changes.
+            let changes = dt != DataType::Null;
+            assert!(
+                (set > 0) == changes && unset > 0,
+                "{dt}: {set} set, {unset} unset"
+            );
+        }
+    }
+
+    #[test]
+    fn every_type_pair_mask_equals_the_per_cell_decision() {
+        let hasher = RowHasher::new().unwrap();
+        let types = hashable_types();
+        let (mut saw_type_change, mut saw_per_cell) = (false, false);
+        for left in &types {
+            for right in types.iter().filter(|&right| right != left) {
+                let mut set = 0;
+                for seed in 0..40 {
+                    let mut rng = Rng(seed);
+                    let (arm, mask, reference) = both_masks(&mut rng, &hasher, left, right);
+                    assert_ne!(arm, CellCompare::Kernel, "{left} vs {right}");
+                    assert_eq!(mask, reference, "{left} vs {right}, seed {seed}");
+                    set += mask.count_set_bits();
+                    saw_type_change |= arm == CellCompare::TypeChange;
+                    saw_per_cell |= arm == CellCompare::PerCell;
+                }
+                assert!(set > 0, "{left} vs {right} never changed");
+            }
+        }
+        assert!(saw_type_change && saw_per_cell);
+    }
+
+    #[test]
+    fn kernel_accepts_only_identical_listed_types() {
+        let dict = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+        assert!(!kernel_comparable(&dict, &dict));
+        assert!(!kernel_comparable(&DataType::Int32, &DataType::Int64));
+        assert!(kernel_comparable(&DataType::Int64, &DataType::Int64));
+    }
+
+    #[test]
+    fn kernel_folds_signed_zero_and_nan_payloads() {
+        let hasher = RowHasher::new().unwrap();
+        let left: ArrayRef = Arc::new(Float32Array::from(vec![-0.0, f32::NAN, 1.5, 2.0]));
+        let right: ArrayRef = Arc::new(Float32Array::from(vec![
+            0.0,
+            f32::from_bits(0xffc0_0001),
+            1.5,
+            3.0,
+        ]));
+        let mut plans = plan_columns(&[batch(left)], &[batch(right)], &[0], &["v".into()]).unwrap();
+        let rows = UInt32Array::from(vec![0, 1, 2, 3]);
+        let plan = plans.pop().unwrap();
+        assert_eq!(plan.compare, CellCompare::Kernel);
+        let mask = changed_mask(&plan, &hasher, 0, &rows).unwrap();
+        assert_eq!(mask, BooleanBuffer::from(vec![false, false, false, true]));
     }
 }

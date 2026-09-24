@@ -148,6 +148,62 @@ per key the left lacks (the Memory section's "Fused reads" table). The remaining
 pair is the cell pass's compare, render and reorder; on the narrow pair, the parquet read, the
 bindings' input spool and the spool decode.
 
+## Column-wise cell compare (issue #94)
+
+`deepdiff-rs` 0.14.0 finds a partition's changed cells one column at a time: arrow-ord's null-aware
+`distinct` kernel over the aligned rows when both sides decode to one type (floats with signed zero
+and NaN payloads folded first), the two sides' validity for a type change (where every non-null
+pair differs), and the per-cell hash comparison for any other pair, such as a decimal scale or
+timestamp unit that differs across sides. Only the cells the mask selects are rendered. Measured
+with the interleaved method above (one `bench_tables.py` worker process per measurement, six
+rounds with the tool order rotated by one each round, the first discarded, median of the other
+five) for onix 0.14.0, onix 0.13.0, DuckDB and polars, from 2026-09-24T14:40Z to 14:48Z. Other jobs
+kept the load average between 25 and 44 throughout, so every wall here runs above the quieter
+figures of the section above; the rotation spreads that load across the four tools.
+
+| Fixture | onix 0.13.0 | onix 0.14.0 | Speedup | DuckDB | polars | onix / DuckDB | onix / polars | CPU 0.13.0 → 0.14.0 | Peak RSS 0.13.0 → 0.14.0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| narrow 1M | 368.61 ms | **364.37 ms** | 1.01x | 288.29 ms | 91.79 ms | 1.26x | 3.97x | 1.04 → 1.03 s | 1175.8 → 1194.8 MB |
+| wide 1M | 1.275 s | **1.174 s** | 1.09x | 638.92 ms | 231.08 ms | 1.84x | 5.08x | 5.69 → 4.46 s | 2697.6 → 2718.2 MB |
+| narrow full | 4.549 s | **4.402 s** | 1.03x | 2.434 s | 2.721 s | 1.81x | 1.62x | 32.00 → 31.65 s | 21998.6 → 22059.8 MB |
+| wide full | 18.333 s | **16.946 s** | 1.08x | 5.625 s | 3.234 s | 3.01x | 5.24x | 97.11 → 74.85 s | 28849.0 → 28827.7 MB |
+
+The wide pair gains most: its `ts_cast` zone-awareness retype changes a cell in nearly every row,
+and each of its other same-typed columns is now one kernel call per partition instead of two keyed
+hashes per cell. The narrow pair changes 2% of its rows, so its cell pass was already small. Every
+peak RSS median lies inside the other build's run-to-run range (the largest move, narrow 1M's
++19 MB, against a 1134 to 1226 MB spread over 0.13.0's five runs).
+
+The mask's own memory is one bit per row per column, plus, per worker on a column whose two sides
+share a type, a copy of its row range of that right column (a float column widened to `Float64` on
+both sides), so at most one copy of a partition's widest such column across all workers.
+`row_diff_rss` peak RSS, 0.13.0 → 0.14.0, alternating builds, each cell the median with the run
+range in brackets (8 runs per build for `wide` 200k at 18 threads, 5 for `wide` 1M, 3 otherwise):
+
+| Shape (`row_diff_rss`, rows/side) | threads | 0.13.0 | 0.14.0 |
+| --- | --- | --- | --- |
+| `wide` 200k x 1 KB | 2 | 1495 MB [1392-1497] | 1450 MB [1363-1524] |
+| `wide` 200k x 1 KB | 18 | 1005 MB [945-1036] | 1027 MB [965-1078] |
+| `wide` 200k x 1 KB | 64 | 1323 MB [1320-1327] | 1322 MB [1318-1338] |
+| `wide` 1M x 1 KB | 18 | 4829 MB [4774-4911] | 4815 MB [4794-4862] |
+| `manycols` 150k x 8 x 512 B | 2 | 2987 MB [2383-3066] | 2458 MB [2404-3107] |
+| `manycols` 150k x 8 x 512 B | 18 | 1808 MB [1732-1816] | 1673 MB [1511-1765] |
+| `manycols` 150k x 8 x 512 B | 64 | 2077 MB [1938-2092] | 2069 MB [2035-2072] |
+| `allchange` 1M | 18 | 350 MB [333-385] | 354 MB [344-361] |
+
+Every row's two ranges overlap: in these shapes the copy, changed rows ÷ partitions × one `Utf8`
+column's width (1 KB or 512 B), falls inside the spread. A shape built to show it, 500k changed
+rows/side where only an `Int64` column differs and three equal 1 KB columns (`Utf8View`,
+`BinaryView`, `Utf8`) are compared, measures at 2 threads (two partitions of 250k rows, so one 250k
+× 1 KB copy of whichever column a worker is on; byte-view columns are compared as their spilled
+large-offset type, so they copy in full) 5.644 GB [5.007-6.338] on 0.13.1 (identical to 0.13.0 on
+this path) against 5.949 GB [5.549-6.814] on 0.14.0 (medians of 8 runs each), about +0.3 GB; at 18
+threads 2.671 GB [2.605-2.910] against 2.473 GB [2.458-2.927], and at 64 threads 2.032 GB
+[2.019-2.067] against 2.025 GB [2.009-2.057] (3 runs each), where partitions are smaller than the
+spread. Measured 2026-09-24T15:31Z to 15:34Z, load average 4 to 7. The `wide` 1M row sits above the
+4.62 GB the fused-reads table records for 0.13.0 on both builds alike (re-measured at
+2026-09-24T15:19Z, load average 6), so the README now cites about 4.8 GB for that shape.
+
 ## Thread-count scaling
 
 `diff_tables` wall time (median) as the `threads` knob varies, with the tables preloaded so the
@@ -172,17 +228,16 @@ so the 50,000-row threshold runs the workers only where they win.
 
 ## Per-pass profile
 
-Measured on `deepdiff-rs` 0.13.0 from 2026-09-24T11:01Z to 11:15Z, same machine as the Environment
-table above, while other jobs ran on it (a `cargo-mutants` run and five `rustc` processes at the
-start, load average 9 at the start and 18 to 29 by the end); the 1M and `narrow full` columns vary
-most between processes as a result. The numbers
-come from the committed `row_diff_profile` example (built with the `profile` feature; the commands
-are in `perf/arrow/README.md`'s "Profiling" section and the method in the example's module
+Measured on `deepdiff-rs` 0.14.0 from 2026-09-24T14:49Z to 14:58Z, same machine as the Environment
+table above, each process alternating with one of 0.13.0's, while other jobs ran on it (load average
+21 at the start, 40 at its peak during the `narrow full` column and 19 at the last process). The
+numbers come from the committed `row_diff_profile` example (built with the `profile` feature; the
+commands are in `perf/arrow/README.md`'s "Profiling" section and the method in the example's module
 docstring). Every figure is the median of independent processes (**11 at 1M, 5 at full**, the file's
 convention), each row's median taken on its own, so a column's rows need not add up exactly, and
 each pass's share of the net wall is likewise the median of the per-process shares rather than a
-ratio of two medians. Each process runs a discarded warm-up diff, a timed uninstrumented diff, and an
-instrumented diff:
+ratio of two medians. Each process runs a discarded warm-up diff, a timed uninstrumented diff, and
+an instrumented diff:
 
 - `total wall (uninstrumented run)` is the uninstrumented diff's wall.
 - Every other row is the instrumented diff: a pass cell is `wall s (peak RSS MB)`, where the peak is
@@ -202,27 +257,28 @@ and 16.875M rows (`wide`).
 
 | Pass | narrow 1M | wide 1M | narrow full | wide full |
 | --- | --- | --- | --- | --- |
-| set-up | 0.000 (329) | 0.000 (1243) | 0.000 (1093) | 0.000 (6627) |
-| hash and classify | 0.067 (364) | 0.378 (1354) | 2.849 (2970) | 2.457 (6802) |
-| — spool decode (reader.next) | 0.028 | 0.101 | 1.381 | 1.597 |
-| — index left keys | 0.003 | 0.004 | 0.190 | 0.044 |
-| — spill route (take + cast), summed over threads | 0.001 | 0.157 | 0.116 | 2.027 |
-| — spill write, summed over threads | 0.001 | 0.087 | 0.011 | 0.562 |
-| — classify | 0.004 | 0.006 | 0.169 | 0.073 |
-| materialize and cell spill (left re-read) | 0.020 (364) | 0.179 (1408) | 0.828 (2419) | 1.086 (7805) |
-| — spool decode (reader.next) | 0.013 | 0.051 | 0.728 | 0.782 |
-| — spill route (take + cast), summed over threads | 0.001 | 0.139 | 0.078 | 1.979 |
-| — spill write, summed over threads | 0.002 | 0.081 | 0.013 | 0.492 |
-| materialize added (right candidates) | 0.000 (364) | 0.000 (1408) | 0.019 (2389) | 0.005 (7408) |
-| cell: render sort keys | 0.001 (364) | 0.028 (1408) | 0.026 (2389) | 0.362 (7503) |
-| cell: partition read-back and render | 0.014 (364) | 0.484 (1436) | 0.254 (2509) | 5.585 (9512) |
-| — cell: partition read-back | 0.001 | 0.066 | 0.029 | 0.752 |
-| — cell: compare and render | 0.011 | 0.342 | 0.151 | 3.935 |
-| cell: sort and interleave | 0.003 (364) | 0.242 (1479) | 0.138 (2516) | 3.284 (10155) |
-| passes sum | 0.111 | 1.329 | 4.173 | 12.803 |
-| net wall | 0.116 | 1.388 | 4.213 | 13.429 |
-| residual | 0.003 (3.0%) | 0.046 (3.3%) | 0.041 (1.0%) | 0.620 (4.5%) |
-| **total wall (uninstrumented run)** | **0.114** | **1.461** | **3.949** | **13.451** |
+| set-up | 0.000 (314) | 0.000 (1249) | 0.000 (1101) | 0.000 (6591) |
+| hash and classify | 0.066 (326) | 0.247 (1322) | 1.827 (3052) | 2.526 (6812) |
+| — spool decode (reader.next) | 0.031 | 0.110 | 1.175 | 1.673 |
+| — index left keys | 0.003 | 0.003 | 0.142 | 0.044 |
+| — spill route (take + cast), summed over threads | 0.001 | 0.119 | 0.062 | 2.053 |
+| — spill write, summed over threads | 0.001 | 0.031 | 0.007 | 0.607 |
+| — classify | 0.003 | 0.005 | 0.095 | 0.071 |
+| materialize and cell spill (left re-read) | 0.020 (326) | 0.105 (1396) | 0.510 (2424) | 1.107 (7748) |
+| — spool decode (reader.next) | 0.014 | 0.045 | 0.479 | 0.799 |
+| — spill route (take + cast), summed over threads | 0.002 | 0.109 | 0.047 | 1.977 |
+| — spill write, summed over threads | 0.001 | 0.031 | 0.007 | 0.506 |
+| materialize added (right candidates) | 0.000 (326) | 0.000 (1396) | 0.009 (2424) | 0.005 (7410) |
+| cell: render sort keys | 0.000 (326) | 0.024 (1396) | 0.016 (2425) | 0.335 (7569) |
+| cell: partition read-back and render | 0.011 (326) | 0.230 (1426) | 0.129 (2528) | 4.131 (9513) |
+| — cell: partition read-back | 0.001 | 0.055 | 0.020 | 0.801 |
+| — cell: changed mask, summed over threads | 0.004 | 0.293 | 0.063 | 4.610 |
+| — cell: compare and render | 0.009 | 0.118 | 0.062 | 2.412 |
+| cell: sort and interleave | 0.003 (326) | 0.191 (1463) | 0.105 (2535) | 3.263 (10144) |
+| passes sum | 0.100 | 0.808 | 2.586 | 11.313 |
+| net wall | 0.103 | 0.851 | 2.613 | 11.936 |
+| residual | 0.003 (3.0%) | 0.025 (3.2%) | 0.029 (1.1%) | 0.617 (5.2%) |
+| **total wall (uninstrumented run)** | **0.105** | **0.831** | **2.727** | **12.050** |
 
 `hash and classify` reads each side once: it hashes the left, sorts and indexes the left's hashes
 (`index left keys`), then hashes the right while its workers tally each row against the left key it
@@ -231,20 +287,25 @@ partition from the tallies (`classify`). `materialize and cell spill (left re-re
 second read: the left's removed rows, its duplicate-key capture and its changed-row spill come from
 one scan. `materialize added (right candidates)` filters the rows the right's hash pass kept.
 
-Each process alternated with one of 0.11.2's, under the same load, whose medians (0.177, 1.859,
-7.855 and 20.430 s uninstrumented) run above this section's quieter earlier figures (0.133, 1.181,
-4.667 and 19.789 s); against them the uninstrumented wall falls 1.6x on `narrow 1M` (0.177 to 0.114
-s), 1.3x on `wide 1M` (1.859 to 1.461 s), 2.0x on `narrow full` (7.855 to 3.949 s) and 1.5x on `wide
-full` (20.430 to 13.451 s). The spool decode summed over the passes falls from 4.13 to 2.11 s on
-`narrow full` and from 4.27 to 2.38 s on `wide full`.
+`cell: changed mask, summed over threads` is the workers' time finding each column's changed cells
+(the kernel, the validity union or the per-cell hash comparison), a part of `cell: compare and
+render`, which also renders the cells the masks select.
+
+Against 0.13.0's medians in the same alternation, `cell: compare and render` falls from 0.257 to
+0.118 s on `wide 1M` and from 3.946 to 2.412 s on `wide full`: its median share of the net wall
+drops from 26.7% to 14.7% and from 29.0% to 20.1%. The uninstrumented wall falls from 0.976 to 0.831
+s on `wide 1M` and from 14.012 to 12.050 s on `wide full`, and from 0.112 to 0.105 s on `narrow 1M`.
+`narrow full` reads 2.424 s on 0.13.0 against 2.727 s here, the whole gap in `hash and classify`, a
+pass the change does not touch: in each pair 0.13.0 ran first while the load rose. Five more pairs
+with 0.14.0 first (2026-09-24T14:59Z to 15:00Z, load average 8 to 21) give 2.291 s against 2.312 s.
 
 Serial share. Each read decodes its side on one reader thread while the workers hash and route, so a
-pass's decode sub-row is its serial floor. On `narrow full` the decode is 50% of the net wall (2.11
-of 4.21 s), and the left's second read (0.73 s) is the only decode left to remove. On `wide full` it
-is 18% (2.38 of 13.43 s); the cell pass's read-back, compare and render (5.59 s, 42%) and its sort
-and interleave (3.28 s, 24%) dominate, and only compare and render is split across the workers. Each
-pass's share of the net wall (narrow full / wide full): hash and classify 68% / 19%, left re-read
-20% / 8%, render sort keys 0.6% / 2.7%, read-back and render 6% / 42%, sort and interleave 4% / 24%.
+pass's decode sub-row is its serial floor. On `narrow full` the decode is 63% of the net wall (1.65
+of 2.61 s), and the left's second read (0.48 s) is the only decode left to remove. On `wide full` it
+is 21% (2.47 of 11.94 s); the cell pass's read-back, compare and render (4.13 s) and its sort and
+interleave (3.26 s) dominate, and only compare and render is split across the workers. Each pass's
+median share of the net wall (narrow full / wide full): hash and classify 70% / 21%, left re-read
+19% / 9%, render sort keys 0.6% / 2.8%, read-back and render 5% / 34%, sort and interleave 4% / 28%.
 
 ### Proxy shapes (generated mode, 1M rows, 18 threads)
 
@@ -254,33 +315,35 @@ fixtures**: `linear` is two int64 columns (the narrow fixture has five typed col
 `Utf8` columns with every row changed (the wide fixture has 34 distinct scalar types — decimals,
 timestamps, intervals, binary — with ~2% of rows modified plus a zone-awareness retype), so the
 proxy walls do not match the real-fixture walls above. `spool write` is the IPC writer's time
-spooling both generated sides before the diff (file mode has no spool write). Measured
-2026-09-24T11:27Z to 11:31Z, load average 11 to 17.
+spooling both generated sides before the diff (file mode has no spool write). Medians of 5
+processes per shape, measured 2026-09-24T14:58Z to 14:59Z after the fixture columns, alternating
+with 0.13.0 (whose `cell: compare and render` reads 0.004 and 0.229 s), load average 19 to 10.
 
 | Pass | `linear` 1M | `manycols` 1M |
 | --- | --- | --- |
-| set-up | 0.000 (166) | 0.000 (2860) |
-| hash and classify | 0.025 (176) | 0.830 (4896) |
-| — spool decode (reader.next) | 0.002 | 0.431 |
-| — index left keys | 0.002 | 0.003 |
-| — spill route (take + cast), summed over threads | 0.000 | 0.656 |
-| — spill write, summed over threads | 0.000 | 0.159 |
-| — classify | 0.003 | 0.004 |
-| materialize and cell spill (left re-read) | 0.006 (176) | 0.561 (5039) |
-| — spool decode (reader.next) | 0.001 | 0.297 |
-| — spill route (take + cast), summed over threads | 0.000 | 0.529 |
-| — spill write, summed over threads | 0.000 | 0.153 |
-| materialize added (right candidates) | 0.000 (176) | 0.000 (2987) |
-| cell: render sort keys | 0.000 (176) | 0.021 (2989) |
-| cell: partition read-back and render | 0.006 (176) | 0.655 (3027) |
-| — cell: partition read-back | 0.000 | 0.353 |
-| — cell: compare and render | 0.005 | 0.249 |
-| cell: sort and interleave | 0.002 (176) | 0.089 (3173) |
-| passes sum | 0.039 | 2.158 |
-| net wall | 0.041 | 2.214 |
-| residual | 0.002 (4.5%) | 0.055 (2.5%) |
-| **total wall (uninstrumented run)** | **0.043** | **2.201** |
-| spool write | 0.002 | 0.333 |
+| set-up | 0.000 (193) | 0.000 (2940) |
+| hash and classify | 0.020 (196) | 0.812 (4946) |
+| — spool decode (reader.next) | 0.002 | 0.417 |
+| — index left keys | 0.002 | 0.002 |
+| — spill route (take + cast), summed over threads | 0.000 | 0.592 |
+| — spill write, summed over threads | 0.000 | 0.162 |
+| — classify | 0.002 | 0.003 |
+| materialize and cell spill (left re-read) | 0.005 (196) | 0.529 (4992) |
+| — spool decode (reader.next) | 0.001 | 0.284 |
+| — spill route (take + cast), summed over threads | 0.000 | 0.469 |
+| — spill write, summed over threads | 0.000 | 0.149 |
+| materialize added (right candidates) | 0.000 (196) | 0.000 (2929) |
+| cell: render sort keys | 0.000 (196) | 0.020 (2930) |
+| cell: partition read-back and render | 0.005 (196) | 0.469 (2966) |
+| — cell: partition read-back | 0.000 | 0.344 |
+| — cell: changed mask, summed over threads | 0.000 | 0.291 |
+| — cell: compare and render | 0.004 | 0.076 |
+| cell: sort and interleave | 0.002 (196) | 0.087 (3107) |
+| passes sum | 0.032 | 1.925 |
+| net wall | 0.034 | 1.985 |
+| residual | 0.002 (4.5%) | 0.058 (2.9%) |
+| **total wall (uninstrumented run)** | **0.034** | **1.948** |
+| spool write | 0.002 | 0.330 |
 
 ## Memory
 
