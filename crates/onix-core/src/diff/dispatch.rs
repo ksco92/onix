@@ -6,7 +6,7 @@
 //! See the parent `diff` module's doc for the full recursion-depth hardening
 //! (its "Hardening" section) this file implements.
 
-use crate::value::{Object, Value, same_class};
+use crate::value::{Object, ObjectKind, Value, same_class};
 
 use crate::error::Error;
 use crate::ignore_order::IgnoreOrderMemo;
@@ -42,9 +42,6 @@ pub(crate) fn diff_at(
     memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     check_traversal_depth(path, depth, opts.max_depth)?;
-    let Some((a, b)) = memo.substitute(a, b) else {
-        return Ok(Report::new());
-    };
 
     match (a, b) {
         (Value::Null, Value::Null) => Ok(Report::new()),
@@ -109,12 +106,45 @@ pub(crate) fn diff_at(
                 type_change_report(path, a, b, depth, opts.max_depth)
             }
         }
-        (Value::Object(old), Value::Object(new)) => {
+        (Value::Object(old), Value::Object(new))
+            if old.kind() == ObjectKind::Dict && new.kind() == ObjectKind::Dict =>
+        {
             if same_class(a, b) {
                 object_diff(path, old, new, depth, opts, memo)
             } else {
                 type_change_report(path, a, b, depth, opts.max_depth)
             }
+        }
+        (Value::Object(_), _) | (_, Value::Object(_)) => {
+            object_pair_diff(path, a, b, depth, opts, memo)
+        }
+        _ => type_change_report(path, a, b, depth, opts.max_depth),
+    }
+}
+
+/// [`diff_at`] for a pair with a custom object or token on either side, kept
+/// off its frame:
+/// nothing for the identical Python object or a cycle token, the resolved
+/// value of an opaque token through [`diff_at`] again, else the object walk
+/// or a `type_changes`.
+#[inline(never)]
+fn object_pair_diff(
+    path: &mut Vec<PathSegment>,
+    a: &Value,
+    b: &Value,
+    depth: usize,
+    opts: &DiffOptions,
+    memo: &IgnoreOrderMemo,
+) -> Result<Report, Error> {
+    let Some((resolved_a, resolved_b)) = memo.substitute(a, b) else {
+        return Ok(Report::new());
+    };
+    if !std::ptr::eq(resolved_a, a) || !std::ptr::eq(resolved_b, b) {
+        return diff_at(path, resolved_a, resolved_b, depth, opts, memo);
+    }
+    match (a, b) {
+        (Value::Object(old), Value::Object(new)) if same_class(a, b) => {
+            object_diff(path, old, new, depth, opts, memo)
         }
         _ => type_change_report(path, a, b, depth, opts.max_depth),
     }
