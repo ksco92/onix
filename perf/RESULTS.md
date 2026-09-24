@@ -227,7 +227,8 @@ gap:
   DoS-resistance is a real per-call cost: switching the input-keyed maps to
   it slowed this shape's diff by a measurable margin, so `FxHash` is kept
   and the residual hash-flooding exposure on attacker-controlled keys is
-  documented as an accepted trade-off (see `ignore_order.rs`'s own doc).
+  documented as an accepted trade-off (see
+  `crates/onix-core/src/ignore_order/fxhash.rs`'s `FxHasher` doc).
 
 The cost is dominated by `O(change_n²)` (the candidate-pairing loop), not
 `O(n²)`, matching real `DeepDiff`'s own documented cost anatomy (see
