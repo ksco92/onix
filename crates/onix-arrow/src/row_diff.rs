@@ -58,19 +58,25 @@
 //!
 //! Per-row state: the single-threaded path keeps 32 bytes a row on each side;
 //! the parallel path keeps 32 on the left plus an 8-byte tally and under a byte
-//! of bucket directory, and 16 on the right only for a row whose key is absent
+//! of bucket directory, and a 32-byte map entry per distinct right key absent
 //! from the left. Beyond that: the in-flight batches (worker count times batch
 //! size), the shared buffers' reallocation slack, and the size gate's peek
 //! buffer (at most [`MAX_PEEK_BYTES`] plus one producer batch per side). The
 //! duplicate-key report holds the key values of every *distinct duplicated*
-//! key, and the right's added candidates hold, per input batch, the first row
-//! of each key absent from the left, more than the added rows only by
-//! right-only duplicates. The cell pass's spill holds every common value column
-//! of every changed row, both sides (resident where written temp pages count,
-//! e.g. macOS or a RAM-backed tmpfs), and the pass adds about twice the
-//! `cells_changed` output (its one out-of-place reorder); it is not bounded by
-//! the changed *cell* count alone. The README's Known-limitations bullet states
-//! the measured figures.
+//! key. Right-side duplicate keys add two terms on the parallel path: the first
+//! row of each key absent from the left is held in full until the right repeats
+//! the key, and the first right row of a key the left holds once with a
+//! different row hash is spilled unless its own batch repeats the key. A row
+//! kept past its scan copies a buffer it shares with a much larger allocation
+//! when it keeps at most half its batch, but a byte-view column's data buffers
+//! are reproduced in the output as they are, so each batch with a kept row
+//! keeps its view data resident, per side. The cell pass's spill holds every
+//! common value column of every changed row, both sides, plus those repeated
+//! right rows (resident where written temp pages count, e.g. macOS or a
+//! RAM-backed tmpfs), and the pass adds about twice the `cells_changed` output
+//! (its one out-of-place reorder); it is not bounded by the changed *cell*
+//! count alone. The README's Known-limitations bullet states the measured
+//! figures.
 //!
 //! # Hashing
 //!
