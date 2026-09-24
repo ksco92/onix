@@ -1,8 +1,8 @@
-//! `PyO3` bindings for `onix_core`, published to `PyPI` as `deepdiff-rs` (Python import name `deepdiff_rs`).
+//! `PyO3` bindings for `onix_core`, published to `PyPI` as `deepdiff-rs`.
 //!
 //! Three entry points — `deepdiff::DeepDiff`, `fast_path::diff_json`, and
-//! `arrow::diff_tables` — each documented on its own item; `errors` and `guard`
-//! hold the shared exception type and stack-overflow hardening.
+//! `arrow::diff_tables` — each documented on its own item; `errors` and
+//! `guard` hold the shared exception type and stack-overflow hardening.
 mod arrow;
 mod convert;
 mod deepdiff;

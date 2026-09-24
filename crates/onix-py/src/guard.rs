@@ -1,12 +1,13 @@
 //! Native-stack-overflow hardening shared by both Python entry points
 //! ([`crate::deepdiff::DeepDiff`] and [`crate::fast_path::diff_json`]).
 //!
-//! `onix_core`'s diff engine is natively recursive and can overflow the thread stack on deeply
-//! nested input, aborting the interpreter with an uncatchable `SIGSEGV`. A hard ceiling on
-//! `max_depth` ([`MAX_DEPTH_CEILING`], [`resolve_options`]) plus a sized worker thread for
-//! diffing and serializing inputs nested past [`MAX_INLINE_DEPTH`] ([`diff_to_value`],
-//! [`serialize_value`]) prevent that. `crate::convert`'s walk from Python objects runs on the
-//! calling thread instead, so it must itself be iterative.
+//! `onix_core`'s diff engine is natively recursive and can overflow the thread
+//! stack on deeply nested input, aborting the interpreter with an uncatchable
+//! `SIGSEGV`. A hard ceiling on `max_depth` ([`MAX_DEPTH_CEILING`],
+//! [`resolve_options`]), plus a sized worker thread for diffing past
+//! [`MAX_INLINE_DEPTH`] ([`diff_to_value`]) and for serializing a report past
+//! it ([`serialize_value`]), prevent that. `crate::convert`'s walk from Python
+//! objects runs on the calling thread instead, so it must itself be iterative.
 
 use onix_core::{DEFAULT_MAX_DEPTH, DiffOptions, Value};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
