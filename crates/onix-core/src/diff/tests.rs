@@ -1121,7 +1121,7 @@ fn shallow_finding_with_a_value_past_the_guard_errors_cleanly() {
     // diff({}, {"x": <deep array>}) at DEFAULT_MAX_DEPTH.
     // `check_value_depth`/`deeper_than` reject a
     // too-deep value by walking at most `max_depth + 1` levels of it
-    // before short-circuiting (see `check_value_depth`'s doc), so
+    // before short-circuiting (see `deeper_than`'s doc), so
     // PAST_DEFAULT_MAX_DEPTH exercises identical behavior to the
     // original 100_000-deep fixture at a fraction of the memory.
     // Runs entirely on the default test thread (no large-stack helper):
@@ -1414,7 +1414,7 @@ fn equal_inputs_containing_a_bool_leaf_use_the_equality_fast_path_even_past_max_
 
 #[test]
 fn equal_subtree_nested_under_an_unrelated_shallow_change_still_hits_the_bound() {
-    // Documents the accepted edge case from diff_with_max_depth's doc:
+    // Documents the accepted edge case from docs/design/depth-budget.md:
     // the equal-inputs-of-any-depth guarantee only checks the *whole*
     // top-level pair once. The top-level inputs here differ (an
     // unrelated "shallow" key), so that check does not fire, and the
@@ -1683,7 +1683,7 @@ fn i64_and_u64_same_value_at_an_index_are_equal() {
 
 // --- Depth guard: array recursion and iterable-sink clones must
 // respect the same combined path-depth-plus-value-depth budget as
-// object_diff (see check_value_depth's and diff_with_max_depth's doc).
+// object_diff (see docs/design/depth-budget.md).
 // ---
 
 #[test]

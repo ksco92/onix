@@ -1073,9 +1073,8 @@ pub(crate) fn count_array_diff_leaves(
 /// bound of the **remaining** `max_depth` budget, not a fresh one: granting
 /// every one of the (potentially many) candidate-pair trials its own full
 /// `max_depth` would let native stack usage compound with the depth already
-/// reached by the outer traversal, exactly the kind of combined-budget bug
-/// [`crate::diff::check_value_depth`]'s own doc describes fixing elsewhere
-/// in this crate.
+/// reached by the outer traversal — the same combined-budget rule
+/// `docs/design/depth-budget.md` states for the rest of this crate.
 ///
 /// **The one place this can still fail is [`count_array_diff_leaves`]'s own
 /// nested trial diff, and it is believed unreachable today, kept anyway as

@@ -13,9 +13,8 @@ use super::{diff_at, values_equal};
 
 /// Default maximum recursion depth for [`diff()`].
 ///
-/// The root pair is depth `0`; each step into a nested dict value adds one.
-/// This bound only matters for *unequal* nested structures — see
-/// [`diff_with_max_depth`]'s doc for the exact guarantee.
+/// See `docs/design/depth-budget.md` for the depth-counting convention
+/// and the exact guarantee this bound gives unequal nested structures.
 pub const DEFAULT_MAX_DEPTH: usize = 512;
 /// The options a [`diff_with_options`] call runs with.
 ///
@@ -25,8 +24,8 @@ pub const DEFAULT_MAX_DEPTH: usize = 512;
 /// ordered (non-`ignore_order`) comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiffOptions {
-    /// The recursion-depth bound — see [`diff_with_max_depth`]'s doc for the
-    /// exact contract (unchanged by `ignore_order`).
+    /// The recursion-depth bound (unchanged by `ignore_order`) — see
+    /// `docs/design/depth-budget.md` for the exact contract.
     pub max_depth: usize,
     /// Mirrors `DeepDiff(..., ignore_order=True)`: every list/tuple
     /// encountered anywhere in the tree, at any depth, is compared as a
@@ -52,12 +51,9 @@ impl Default for DiffOptions {
 /// # Errors
 ///
 /// Returns [`Error::MaxDepthExceeded`] if comparing `a`/`b` would need to
-/// recurse past [`DEFAULT_MAX_DEPTH`] to find a genuine difference, *or* if
-/// a finding's own value (added, removed, changed, or type-changed) is
-/// nested deeper than the budget remaining at that finding's path — a
-/// deeper path leaves *less* room for the value, not a fresh
-/// [`DEFAULT_MAX_DEPTH`] of its own — see [`diff_with_max_depth`] for the
-/// exact contract and depth-counting convention.
+/// recurse past [`DEFAULT_MAX_DEPTH`], or if a finding's value, combined
+/// with its path depth, nests past that same budget — see
+/// `docs/design/depth-budget.md`.
 ///
 /// # Examples
 ///
@@ -81,7 +77,7 @@ pub fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
 /// delegate to, unchanged themselves (both still run with
 /// `ignore_order: false`).
 ///
-/// See [`diff_with_max_depth`]'s doc for the full recursion-depth contract
+/// See `docs/design/depth-budget.md` for the recursion-depth contract
 /// (unaffected by `ignore_order`), and `crate::ignore_order`'s module
 /// doc when `opts.ignore_order` is `true`.
 ///
@@ -186,86 +182,16 @@ pub(crate) fn diff_with_options_memo(
     })
 }
 /// Diffs two JSON-shaped values like [`diff()`], but with a caller-chosen
-/// recursion-depth bound instead of [`DEFAULT_MAX_DEPTH`].
-///
-/// # Depth-counting convention
-///
-/// The root pair `(a, b)` is depth `0`; stepping into a dict key — whether
-/// it recurses (a shared key) or is a leaf finding (an added or removed
-/// key) — adds one to the depth of that key's value.
-///
-/// **A finding's path depth and its value's own nesting share one combined
-/// `max_depth` budget — they do not each get an independent `max_depth`.**
-/// Precisely: at a finding whose path is at depth `d` (`0` for a
-/// root-level finding), the value(s) cloned into that finding — measured
-/// **standalone**, i.e. treating each value as if it were its own root
-/// (depth `0`), the same convention as above — must have their own nesting
-/// no greater than `max_depth - d`. A value of exactly `max_depth - d` is
-/// accepted; one level more is rejected with [`Error::MaxDepthExceeded`] at
-/// the finding's path. A root-level finding (`d = 0`) gets the full
-/// `max_depth` budget for its value; a finding only reached after
-/// recursing deep into the structure gets proportionally less. Likewise, a
-/// structure whose deepest *reported* difference is only reached by
-/// recursing to path depth exactly `max_depth` still diffs successfully
-/// (that finding's value then has a budget of `0`, i.e. it must be a
-/// scalar or an empty container); recursing one level deeper than that to
-/// find *any* difference returns [`Error::MaxDepthExceeded`] with the path
-/// at which the bound tripped.
-///
-/// This shared-budget rule is not an implementation quirk — it is the fix
-/// for a real, reproduced vulnerability. The traversal that *reaches* a
-/// finding and the native `Clone` that *records* its value run as native
-/// recursion on the *same* call stack, one after the other with no
-/// unwinding in between, so their frame counts **add**, they do not each
-/// get their own independent allowance. Giving the value a full,
-/// position-independent `max_depth` of its own (as an earlier version of
-/// this guard did) let a deep traversal plus a deep value at the bottom
-/// together demand roughly `2 * max_depth` native frames at the `.clone()`
-/// call — safe at a small default, but a caller-raised `max_depth` (this
-/// function's whole reason to exist) could still overflow the stack.
-/// Splitting one flat budget between the two instead is what keeps combined
-/// native stack usage bounded by `max_depth`, never `2 * max_depth`.
-///
-/// # Equal-inputs-of-any-depth guarantee
-///
-/// Before recursing at all, `a` and `b` (the whole inputs) are compared with
-/// an internal iterative, heap-stack-based deep-equality check with no
-/// native recursion. **Two fully-equal inputs of *any* nesting depth always
-/// return an empty [`Report`], regardless of `max_depth`.** This check runs
-/// once, at the top; it does *not* re-run per dict key while recursing (a
-/// deliberate simplicity/perf trade-off — see `object_diff`'s doc for why),
-/// so an equal subtree nested arbitrarily deep
-/// *underneath an unrelated, shallower difference elsewhere* can still trip
-/// [`Error::MaxDepthExceeded`] even though that particular subtree would
-/// resolve to no findings on its own.
-///
-/// # Safety contract: no native recursion exceeds `O(max_depth)` frames
-///
-/// This is what actually makes the engine *safe* to run on untrusted,
-/// adversarially-deep input, and the shared-budget rule above is exactly
-/// what makes it *true*: the traversal consumes up to `d` native frames to
-/// reach a finding, and recording that finding's value then consumes up to
-/// `max_depth - d` more — a combined worst case of `max_depth` frames,
-/// never more, no matter how the total splits between path depth and value
-/// depth. No value whose combined (path depth + own nesting) exceeds
-/// `max_depth` is ever cloned into a [`Report`]. Together, no native
-/// recursion anywhere in `diff` itself, in a returned [`Report`]'s `Drop`,
-/// or in [`Report::to_json_value`] can ever exceed `O(max_depth)` stack
-/// frames (each traversal level costs a small constant number of native
-/// frames — `diff_at` plus `object_diff` or `array_diff`, so roughly
-/// `2 * max_depth` in the worst case — and recording a finding's value adds
-/// no further compounding beyond that same linear cost): the worst case is
-/// always a clean, catchable [`Error::MaxDepthExceeded`] — never a stack
-/// overflow.
-///
-/// This practical depth limit is a property of the recursive engine: an
-/// iterative work-stack rewrite would remove it (and the
-/// nested-equal-subtree edge case above) entirely.
+/// recursion-depth bound instead of [`DEFAULT_MAX_DEPTH`], replacing an
+/// uncatchable stack overflow on adversarially deep input with a
+/// recoverable error. See `docs/design/depth-budget.md` for the
+/// depth-counting convention and the shared path-plus-value budget
+/// this enforces.
 ///
 /// # Errors
 ///
 /// Returns [`Error::MaxDepthExceeded`] if either the traversal or the
-/// combined path-depth-plus-value-depth budget above is exceeded.
+/// combined path-depth-plus-value-depth budget is exceeded.
 ///
 /// # Examples
 ///
@@ -285,11 +211,6 @@ pub(crate) fn diff_with_options_memo(
 /// assert!(report.is_empty());
 /// # let _ = DEFAULT_MAX_DEPTH;
 /// ```
-///
-/// After the recursive traversal completes, runs the whole-tree
-/// mutual-add-remove merge exactly once (see
-/// `crate::report::Report::merge_mutual_add_removes`) — matching
-/// `DeepDiff`'s own once-per-call, post-traversal timing.
 pub fn diff_with_max_depth(a: &Value, b: &Value, max_depth: usize) -> Result<Report, Error> {
     diff_with_options(
         a,

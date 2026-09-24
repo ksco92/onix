@@ -2,9 +2,7 @@
 //! depth-guard invariants it enforces on every step, and the shared
 //! path-buffer helper ([`scoped`]) every container loop in `super::array`
 //! and `super::object` uses to push/pop path segments as they recurse.
-//!
-//! See [`super::diff_with_max_depth`]'s doc for the full recursion-depth
-//! hardening contract this file implements.
+//! See `docs/design/depth-budget.md` for the depth-guard proof.
 
 use crate::value::{Object, ObjectKind, Value, same_class};
 
@@ -225,29 +223,9 @@ pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
 
     false
 }
-/// Guards every place a whole value is about to be cloned into a [`Report`]:
-/// returns `Err(Error::MaxDepthExceeded)` if `value`'s own nesting (see
-/// [`deeper_than`]) exceeds the *remaining* depth budget at `depth`, so the
-/// clone that would otherwise hand an attacker-controlled deep value to the
-/// compact `Value`'s natively recursive (depth-guarded) `Clone`, or to
-/// [`crate::report::Report::to_json_value`]'s recursive render, never
-/// happens. (The compact `Value`'s own `Drop` is iterative, so teardown is
-/// safe regardless — see `docs/design/value-model.md`.)
-///
-/// `depth` is how deep the *path* to this finding already is (the same
-/// convention as [`diff_at`]'s own `depth`: root `0`, one more per dict-key
-/// step) — **not** re-checked against `max_depth` on its own. Instead the
-/// value is checked against `max_depth.saturating_sub(depth)`: the path
-/// depth already reached and the value's own nesting share one combined
-/// `max_depth` budget, because both run as native recursion on the *same*
-/// call stack (the traversal to reach this point, then `.clone()`'s own
-/// recursion into `value`) and so their frame counts add rather than each
-/// getting an independent `max_depth`. Checking the value against a flat
-/// `max_depth` regardless of `depth` was exactly the compounding bug this
-/// closes: a value could be accepted at up to `max_depth` deep *in addition
-/// to* however deep the traversal already was, for a combined worst case of
-/// roughly `2 * max_depth` native frames at the `.clone()` call — see
-/// [`diff_with_max_depth`](super::diff_with_max_depth)'s doc for the full contract this restores.
+/// Rejects `value` (see [`deeper_than`]) if its nesting exceeds the
+/// budget remaining at `depth` (`max_depth.saturating_sub(depth)`), not
+/// a flat `max_depth` — shared with path depth (`docs/design/depth-budget.md`).
 pub(crate) fn check_value_depth(
     path: &[PathSegment],
     value: &Value,
@@ -262,22 +240,9 @@ pub(crate) fn check_value_depth(
     }
     Ok(())
 }
-/// Like [`deeper_than`], but walks a dict's fields directly instead of
-/// requiring an owned `Value::Object` wrapping them.
-///
-/// Delegates to [`deeper_than`] per field rather than duplicating its
-/// stack-walk: each field sits at depth `1` relative to `map` itself, so a
-/// field's own subtree trips `limit` exactly when that field's value
-/// (counted from its own depth `0`) trips `limit - 1` — matching what
-/// wrapping `map` in a `Value::Object` and calling [`deeper_than`] on that
-/// would compute. `limit == 0` is the one case that can't subtract `1`
-/// (`usize` has no negative range) and doesn't need to: at `limit == 0`
-/// *any* field at all already sits one level too deep, regardless of what
-/// it contains, so the answer is simply whether `map` is non-empty.
-/// `Iterator::any` short-circuits on the first offending field, matching
-/// [`deeper_than`]'s own early-return, and introduces no native recursion
-/// of its own — each delegated [`deeper_than`] call is independently
-/// iterative, so this composes without compounding stack usage.
+/// Like [`deeper_than`], but walks a dict's fields directly. `limit`
+/// is the caller's already-reduced remaining budget, shared between
+/// path depth and value depth (`docs/design/depth-budget.md`).
 pub(crate) fn map_deeper_than(map: &Object, limit: usize) -> bool {
     if limit == 0 {
         !map.is_empty()
@@ -306,21 +271,9 @@ pub(crate) fn check_map_depth(
     }
     Ok(())
 }
-/// The plain traversal-recursion depth guard: `Err(Error::MaxDepthExceeded)`
-/// if `depth` (the depth `path` itself already sits at) exceeds
-/// `max_depth`, `Ok(())` otherwise.
-///
-/// This is [`diff_at`]'s own top check, factored out so
-/// `insert_lcs_pair_finding` can enforce the *exact same* bound for an
-/// LCS `'replace'`-opcode pairwise comparison as `diff_at` would have
-/// enforced had the pair been reached by ordinary recursion instead (which
-/// is what `positional_array_diff`'s equivalent same-index pairs go
-/// through) — see `docs/design/list-diff.md`.
-/// Deliberately distinct from [`check_value_depth`]: that function bounds a
-/// *value's own nesting* combined with the remaining budget, and is a
-/// structural no-op for a scalar (nesting `0`) at any depth; this function
-/// bounds the *path depth itself*, regardless of what shape the value at
-/// that path is.
+/// Rejects if the path depth itself (`depth`) exceeds `max_depth`;
+/// [`check_value_depth`] enforces the other half of this same shared
+/// budget (`docs/design/depth-budget.md`).
 pub(crate) fn check_traversal_depth(
     path: &[PathSegment],
     depth: usize,
@@ -334,20 +287,9 @@ pub(crate) fn check_traversal_depth(
     }
     Ok(())
 }
-/// Pushes `seg` onto the shared path buffer, runs `f` with that segment in
-/// place, then pops it again before returning `f`'s result — regardless of
-/// whether `f` succeeded or failed — restoring `path` to exactly its
-/// pre-call state before the caller moves on to the next sibling.
-///
-/// This is the one place the "push a segment, do work with it in scope, pop
-/// it again, then propagate whatever the work returned" shape used by every
-/// [`object_diff`]/[`array_diff`] loop below lives: each call site's
-/// closure does only the work specific to that site (recurse via
-/// [`diff_at`] and merge, or [`check_value_depth`] plus a single `insert_*`
-/// call) and returns a `Result` describing its own outcome; `scoped` alone
-/// owns getting the push/pop pairing right, so there is exactly one place
-/// that can leak a stale segment across siblings, not five or six
-/// independent copies of the same pattern.
+/// Pushes `seg`, runs `f`, then pops it again — even on failure —
+/// restoring `path` for the next sibling; `path.len()` is what every
+/// depth check measures against the shared budget (`docs/design/depth-budget.md`).
 pub(crate) fn scoped<T>(
     path: &mut Vec<PathSegment>,
     seg: PathSegment,
