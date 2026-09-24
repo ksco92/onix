@@ -55,8 +55,8 @@ stack overflow.
 `DEFAULT_MAX_DEPTH` (512) is sized to this measured cost: 513 levels
 (depth `0` through `512`) at the debug-build worst case of 4,000
 bytes/level is about 2,052,000 bytes, leaving roughly 2% headroom
-against an ordinary 2 MiB thread; a release build's per-level cost is
-about a third of that, leaving roughly 3x the headroom. Per-function
-frame size is part of this bound — see `array_diff`'s Stack-footprint
-note for why its scalar-branch locals are kept out of the hot
-recursion frame.
+against an ordinary 2 MiB thread. A release build costs about a third
+as much per level (about 1,327 bytes), so the same 2 MiB thread fits
+roughly three times the depth. Per-function frame size is part of
+this bound — see `array_diff`'s Stack-footprint note for why its
+scalar-branch locals are kept out of the hot recursion frame.
