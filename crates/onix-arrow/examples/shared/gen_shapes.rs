@@ -74,6 +74,9 @@ pub enum ViewKeys {
     /// In `batch`-row batches, the first half new ids from `offset` up and the
     /// second half the previous batch's new ids.
     Chain { offset: i64, batch: i64 },
+    /// Id `i`, except each batch's last row after the first, which repeats the
+    /// previous batch's first id.
+    RepeatPrevFirst { batch: i64 },
 }
 
 impl ViewKeys {
@@ -82,6 +85,14 @@ impl ViewKeys {
             ViewKeys::Plain { omit_every } => (omit_every == 0 || i % omit_every != 0).then_some(i),
             ViewKeys::Wrap { offset, period } => Some(offset + i % period),
             ViewKeys::RepeatAbsent { every } => Some(if i % every == 0 { -1 } else { i }),
+            ViewKeys::RepeatPrevFirst { batch } => {
+                let (b, j) = (i / batch, i % batch);
+                Some(if b > 0 && j == batch - 1 {
+                    (b - 1) * batch
+                } else {
+                    i
+                })
+            }
             ViewKeys::Chain { offset, batch } => {
                 let (b, j, half) = (i / batch, i % batch, (batch / 2).max(1));
                 Some(
@@ -121,6 +132,9 @@ pub enum Case {
     ViewAdded(usize),
     /// [`Case::ViewAdded`] keyed on the `width`-byte view column `v0`.
     ViewAddedByValue(usize),
+    /// [`Case::ViewAdded`] with each right batch's last row repeating the
+    /// previous batch's first key, so every batch keeps a right-only duplicate.
+    ViewAddedRepeat(usize),
     /// Two `width`-byte view columns, equal sides except every `every`-th left
     /// row, which the right lacks.
     ViewSparse { width: usize, every: i64 },
@@ -144,6 +158,7 @@ impl Case {
         let (Case::ViewRemoved(width)
         | Case::ViewAdded(width)
         | Case::ViewAddedByValue(width)
+        | Case::ViewAddedRepeat(width)
         | Case::ViewSparse { width, .. }
         | Case::DupRightOnce(width)
         | Case::DupRightAbsent(width)
@@ -165,6 +180,12 @@ impl Case {
             Case::ViewAdded(_) | Case::ViewAddedByValue(_) => {
                 (ViewKeys::Plain { omit_every: 1 }, all)
             }
+            Case::ViewAddedRepeat(_) => (
+                ViewKeys::Plain { omit_every: 1 },
+                ViewKeys::RepeatPrevFirst {
+                    batch: batch_rows(),
+                },
+            ),
             Case::ViewSparse { every, .. } => (all, ViewKeys::Plain { omit_every: every }),
             Case::DupRightOnce(_) => (all, ViewKeys::Wrap { offset: 0, period }),
             Case::DupRightAbsent(_) => (
@@ -257,6 +278,7 @@ impl Case {
             Case::ViewRemoved(_)
             | Case::ViewAdded(_)
             | Case::ViewAddedByValue(_)
+            | Case::ViewAddedRepeat(_)
             | Case::ViewSparse { .. }
             | Case::DupRightOnce(_)
             | Case::DupRightAbsent(_)

@@ -3486,7 +3486,7 @@ impl RightFuse<'_> {
             )
             .map_err(|e| read_error(&e))?;
             candidate.full = owned_batch(full, before)?;
-            if candidate.full_rows.len() * 2 <= before {
+            if candidate.full_rows.len() * 2 <= candidate.rows.len() {
                 candidate.keys = unshared_batch(candidate.keys.clone())?;
             }
             rows += candidate.full_rows.len();
@@ -3514,7 +3514,7 @@ fn materialize_candidates(
 ) -> Result<(RecordBatch, DupCapture), TableDiffError> {
     candidates.sort_unstable_by_key(|candidate| candidate.at);
     let mut out = MaterializeOut::default();
-    for candidate in &candidates {
+    for candidate in candidates {
         let (keys, hashes) = (&candidate.keys, &candidate.hashes);
         let none = vec![false; hashes.len()];
         materialize_batch(
@@ -8237,6 +8237,14 @@ mod fused_tests {
         }
     }
 
+    /// [`view_keyed`]'s columns with every key in one IPC-read batch.
+    fn view_keyed_in_one_batch(keys: &[&str]) -> IpcInput {
+        let sides = view_keyed(keys, 0);
+        let batches: Vec<RecordBatch> = sides.open().unwrap().map(Result::unwrap).collect();
+        let one = arrow_select::concat::concat_batches(&sides.schema, &batches).unwrap();
+        IpcInput::new(&sides.schema, &[one])
+    }
+
     /// A side keyed by a `Utf8View` column `k`, with a `Utf8View` value and a
     /// wide filler column that makes each IPC message body far larger than the
     /// selected rows.
@@ -8484,35 +8492,35 @@ mod fused_tests {
         );
     }
 
-    /// A batch of `rows` keys the left lacks, a second batch, then a compaction
-    /// after the right repeats the first `repeats` keys; the first batch's
-    /// candidate key columns.
-    fn compacted_after_repeats(rows: u128, repeats: u128) -> RecordBatch {
+    /// A batch of `rows` keys the left lacks, a second batch, then one
+    /// compaction after each group of `repeats` (the right repeating the first
+    /// keys in order); the first batch's candidate key columns.
+    fn compacted_after_repeats(rows: u128, repeats: &[u128]) -> RecordBatch {
         let index = KeyIndex::build(vec![Vec::new()]).unwrap();
-        let right = view_keyed(&["a", "b", "c", "d"], 0);
+        let names: Vec<String> = (0..=rows).map(|i| format!("k{i}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let right = view_keyed_in_one_batch(&names);
         let value_schema = super::spill_schema(&right.schema, &[1]);
         let fuse = right_fuse(&index, &value_schema);
-        let mut batches = right.open().unwrap();
-        let (first, second) = (
-            batches.next().unwrap().unwrap(),
-            batches.next().unwrap().unwrap(),
-        );
-        let first = first.slice(0, usize::try_from(rows).unwrap());
+        let batch = right.open().unwrap().next().unwrap().unwrap();
+        let first = batch.slice(0, usize::try_from(rows).unwrap());
         let pairs: Vec<(u128, u128, bool)> = (1..=rows).map(|k| (k, 0, false)).collect();
         fuse.visit(0, &first, &pairs).unwrap();
-        fuse.visit(3, &second, &[(9, 0, false)]).unwrap();
-        let again = view_keyed(&["a"], 0)
-            .open()
-            .unwrap()
-            .next()
-            .unwrap()
+        let rows_u64 = u64::try_from(rows).unwrap();
+        fuse.visit(rows_u64, &batch.slice(0, 1), &[(1_000, 0, false)])
             .unwrap();
-        for key in 1..=repeats {
-            fuse.visit(9 + u64::try_from(key).unwrap(), &again, &[(key, 0, false)])
-                .unwrap();
+        let again = batch.slice(0, 1);
+        let mut key = 0;
+        for &group in repeats {
+            for _ in 0..group {
+                key += 1;
+                let at = rows_u64 + 1 + u64::try_from(key).unwrap();
+                fuse.visit(at, &again, &[(key, 0, false)]).unwrap();
+            }
+            let mut store = fuse.candidates.lock().unwrap();
+            fuse.compact_if_stale(&mut store, 100).unwrap();
         }
-        let mut store = fuse.candidates.lock().unwrap();
-        fuse.compact_if_stale(&mut store, 100).unwrap();
+        let store = fuse.candidates.lock().unwrap();
         store
             .live
             .iter()
@@ -8534,9 +8542,13 @@ mod fused_tests {
     fn candidate_keys_are_copied_once_compaction_keeps_at_most_half_the_rows() {
         // Full-width rows left after the repeats, of the candidate's before:
         // 1 of 3 and 1 of 2 copy the keys out; 2 of 3 keeps them shared.
-        assert!(!shares_input(&compacted_after_repeats(3, 2)));
-        assert!(!shares_input(&compacted_after_repeats(2, 1)));
-        assert!(shares_input(&compacted_after_repeats(3, 1)));
+        assert!(!shares_input(&compacted_after_repeats(3, &[2])));
+        assert!(!shares_input(&compacted_after_repeats(2, &[1])));
+        assert!(shares_input(&compacted_after_repeats(3, &[1])));
+        // 5 rows shrink to 3, then 2: the second compaction leaves at most half
+        // of the batch's rows, so it copies, though 2 is more than half of 3.
+        assert!(shares_input(&compacted_after_repeats(5, &[2])));
+        assert!(!shares_input(&compacted_after_repeats(5, &[2, 1])));
     }
 
     #[test]

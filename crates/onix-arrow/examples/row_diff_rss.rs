@@ -24,6 +24,7 @@
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 viewremoved 1024
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 viewadded 1024
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 viewaddedbyvalue 1024
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 viewaddedrepeat 1024
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 viewsparse 1024 10000
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 duprightonce 1024
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 duprightabsent 1024
@@ -110,14 +111,15 @@ fn main() {
             )
         }
         "dup" => (Case::Dup(width), format!(" (dup, key_width={width})")),
-        "viewremoved" | "viewadded" | "viewaddedbyvalue" | "viewsparse" | "duprightonce"
-        | "duprightabsent" | "repeatabsent" | "chain" => {
+        "viewremoved" | "viewadded" | "viewaddedbyvalue" | "viewaddedrepeat" | "viewsparse"
+        | "duprightonce" | "duprightabsent" | "repeatabsent" | "chain" => {
             let width: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(1024);
             let every: i64 = args.get(4).and_then(|a| a.parse().ok()).unwrap_or(10_000);
             let case = match mode {
                 "viewremoved" => Case::ViewRemoved(width),
                 "viewadded" => Case::ViewAdded(width),
                 "viewaddedbyvalue" => Case::ViewAddedByValue(width),
+                "viewaddedrepeat" => Case::ViewAddedRepeat(width),
                 "viewsparse" => Case::ViewSparse { width, every },
                 "duprightonce" => Case::DupRightOnce(width),
                 "duprightabsent" => Case::DupRightAbsent(width),
@@ -128,7 +130,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown mode {other:?}; expected linear (the default), nochange, allchange, wide, widesame, manycols, dup, viewremoved, viewadded, viewaddedbyvalue, viewsparse, duprightonce, duprightabsent, repeatabsent or chain"
+                "unknown mode {other:?}; expected linear (the default), nochange, allchange, wide, widesame, manycols, dup, viewremoved, viewadded, viewaddedbyvalue, viewaddedrepeat, viewsparse, duprightonce, duprightabsent, repeatabsent or chain"
             );
             std::process::exit(2);
         }
