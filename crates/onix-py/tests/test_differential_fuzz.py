@@ -1,82 +1,12 @@
 """Differential fuzz test: onix's Python bindings vs real DeepDiff on live objects.
 
-Runs through the actual `deepdiff_rs.DeepDiff` class (not the fast JSON-string
-path), so this exercises the Python-object-to-`Value` conversion layer itself,
-not just the diff engine underneath it.
-
-Eleven batches, each of at least `SEED_COUNT` seeded cases run twice (ordered
-and `ignore_order=True`): the JSON-shaped types; the same plus tuples, as
-containers in their own right and as elements of lists, dicts and other
-tuples; the same plus sets and frozensets, likewise; the same plus naive and
-aware datetimes, dates, times and timedeltas anywhere in a nested value; flat,
-tightly clustered calendar lists, which put maximum pressure on difflib alignment and
-`ignore_order` pairing because near-identical candidates make every tie-break
-observable; dict-wrapped calendar values against strings of themselves, which
-is the shape the `str()` coercion decides; at `COMBINED_SEED_COUNT`
-cases, the full alphabet drawn together in one generator run — tuples, sets,
-frozensets, datetimes and dates all able to appear at any depth, including a
-calendar value as a bare or nested set item (issue #21's own combination);
-multi-line strings, whose str->str changes reach DeepDiff's `_diff_str`
-and the `diff` field it adds at `verbose_level=2` (issue #28); dicts whose
-keys may be `int`/`bool`/`float`/`None`/`datetime`/`date`/a `tuple` of those,
-alongside tuples and calendar values as ordinary leaves too (issue #62); and,
-at `SUBCLASS_KEY_SEED_COUNT` cases, a dict keyed by a `namedtuple`, a `tuple`
-subclass, or a `datetime`/`date` subclass against its base-type twin, half
-matching by value and half not (issue #64's dict-key follow-up: `DeepDiff`'s
-key matching is class-agnostic); and, at `SEED_COUNT` cases, JSON-shaped values
-whose leaves may be arbitrary-precision `int`s beyond `i64`/`u64` in both signs
-(issue #65) — as bare scalars only (no tuples/sets), so the batch stays on the
-big-int property rather than the pre-existing container-hashing one a biased
-alphabet inside a hashable container would surface.
-Every batch compares `to_json()` (canonically, i.e. parsed, since neither
-tool promises a key order) *and* `to_dict()` by `==`, the comparison that can
-see a tuple, a set, a `datetime` or a `date` where the JSON one cannot.
-
-The three calendar batches and the combined batch run under a pinned
-`TZ=UTC` — see `utc_timezone`.
-
-The set and combined batches make two allowances, both for DeepDiff's own
-dependence on the process's set iteration order (see
-`tests/golden/README.md`):
-
-- Anything that came out of a set is compared order-insensitively, since
-  DeepDiff emits it in hash order and onix in its own canonical order.
-- A case whose *DeepDiff* answer is itself order-dependent is skipped, and
-  detected mechanically rather than guessed at: the same pair is diffed a
-  second time with every set rebuilt from its members in reverse, and if
-  DeepDiff disagrees with itself the case is one onix deliberately answers
-  deterministically instead. Anything DeepDiff answers stably, onix must
-  match.
-- A further, narrower class is recognized the same way: a real divergence
-  DeepDiff answers *stably* (so the `_reverse_sets` check above does not
-  catch it) rather than order-dependent instability —
-  `_is_known_set_sequence_coercion_divergence` (`tests/golden/README.md`'s
-  "Set iteration order" section, its `` `list(a_set) == some_list` `` point),
-  reachable through any batch's values once a set/frozenset can pair against
-  a list/tuple under `ignore_order`, not only the set batch's own.
-
-Seeds 120000347 and 120000708, well past `COMBINED_SEED_BASE`'s own window,
-exercise the frozenset shared-cache rule (`tests/golden/README.md`'s "Which
-member of an equality class wins") with an `int`/`float` and a `bool`/`float`
-member respectively, pinned by `test_a_frozenset_never_inherits_another_ones_digest`
-and `test_a_frozenset_bool_vs_float_member_hits_the_same_shared_cache_rule` in
-`test_sets.py`. Neither seed falls inside `COMBINED_SEED_COUNT`'s current window.
-
-Every generator function that walks an *existing* `set`/`frozenset`'s members
-(as opposed to building a fresh one) does so through `_deterministic_members`,
-never Python's own `for item in a_set`: the live set's iteration order is
-hash-bucket order, randomized per process for a `str` member
-(`PYTHONHASHSEED`), and each member visited consumes one `rng` draw — so an
-unordered walk would make the *generated case itself* depend on the process's
-hash seed despite `rng` being seeded deterministically, silently breaking the
-"same seed, same case" contract every batch here relies on. This was the root
-cause of an intermittent failure in the combined-alphabet batch (seed
-6000169): the generated `(a, b)` pair genuinely differed between process
-runs, not `onix` or DeepDiff.
-
-Real DeepDiff's own `to_json()` raises on a report holding a `frozenset`
-value, where onix serializes it as an array; such a case is compared through
-`to_dict()` alone.
+Runs through `deepdiff_rs.DeepDiff`, exercising the Python-object-to-`Value`
+conversion layer. Twelve batches of seeded cases run twice (ordered and
+`ignore_order=True`), comparing `to_json()` (parsed) and `to_dict()`. The
+big-integer batch (issue #65) draws its big ints as bare scalars only, never
+inside a tuple/set, so it stays on the arbitrary-precision property under
+test rather than surfacing the pre-existing container-hashing divergence a
+biased alphabet inside a hashable container would otherwise trigger.
 """
 
 from __future__ import annotations
@@ -117,14 +47,6 @@ SCALARS: Final[list[JsonValue]] = [
     None, True, False, 0, 1, -1, 2, 3, 0.0, 1.5, -2.25, "x", "y", "z", "",
 ]
 
-# The big-integer batch's own seed range and leaf alphabet (issue #65): the
-# base scalars plus Python `int`s beyond `i64`/`u64` in both signs, including
-# one past `i128` (`2**200`) and the just-past-`u64::MAX` boundary (`2**64`).
-# Big ints appear only as *bare* scalars here (this batch never enables
-# tuples/sets/calendar, so a big int is never a member of a hashable
-# container): a biased alphabet inside a hashable container would surface the
-# pre-existing container-hashing divergence instead of the arbitrary-precision
-# property under test.
 BIG_INT_SEED_BASE: Final[int] = 11_000_000
 BIG_INT_SCALARS: Final[list[JsonValue]] = [
     *SCALARS,
@@ -132,40 +54,24 @@ BIG_INT_SCALARS: Final[list[JsonValue]] = [
     2**100, 2**100 + 1, -(2**100), 10**30, 2**200, -(2**200),
 ]
 
-# Comfortably over the >=500-case target; each case also runs twice (once
-# ordered, once ignore_order=True), so this is 2x SEED_COUNT diffs per batch.
 SEED_COUNT: Final[int] = 300
 
-# The tuple and set batches draw from disjoint seed ranges, so the batches are
-# independent corpora rather than the same shapes with extra types sprinkled in.
+# Disjoint seed ranges keep the tuple and set batches independent corpora.
 TUPLE_SEED_BASE: Final[int] = 1_000_000
 SET_SEED_BASE: Final[int] = 5_000_000
 
-# How often the set batch turns a generated sequence into a set or a frozenset.
 SET_PROBABILITY: Final[float] = 0.4
 
-# ...and so do the two calendar batches.
 CALENDAR_SEED_BASE: Final[int] = 2_000_000
 CLUSTERED_SEED_BASE: Final[int] = 3_000_000
 STRINGIFIED_SEED_BASE: Final[int] = 4_000_000
 
-# The combined batch (issue #21): tuples, sets, frozensets, datetimes and dates drawn
-# together in one generator run, its own seed range, and its own (larger) count — the
-# ">=500 seeded cases" the issue's combined-goldens requirement asks for, at fuzz scale.
+# COMBINED_SEED_COUNT satisfies issue #21's >=500-case requirement.
 COMBINED_SEED_BASE: Final[int] = 6_000_000
 COMBINED_SEED_COUNT: Final[int] = 500
 
-# The multi-line string batch (issue #28): values whose leaves are often
-# strings carrying newlines and other line boundaries, so that a str->str
-# change reaches DeepDiff's `_diff_str` and the `diff` field it adds. Its own
-# seed range keeps it independent of the batches above.
 MULTILINE_SEED_BASE: Final[int] = 7_000_000
 
-# The leaf alphabet the multi-line batch draws from: strings that split into
-# several lines (some sharing a prefix/suffix so difflib keeps context, some
-# repeating a line so grouping is exercised), CRLF and bare-CR joins,
-# leading/trailing and doubled newlines, an exotic Unicode boundary, plus a
-# few plain scalars so type_changes and no-diff single-line changes appear too.
 MULTILINE_STRINGS: Final[list[str]] = [
     "a\nb", "a\nc", "c\nd", "line1\nline2", "line1\nline3",
     "x\ny\nz", "x\nY\nz", "\nlead\nmore", "trail\nend\n", "a\n\nb",
@@ -179,41 +85,20 @@ MULTILINE_ALPHABET: Final[list[JsonValue]] = [
     *MULTILINE_STRINGS, None, True, False, 0, 1, 1.5,
 ]
 
-# The non-str dict key batch (issue #62): its own seed range, independent of
-# every batch above.
 DICT_KEY_SEED_BASE: Final[int] = 8_000_000
 
-# The subclass dict key batch (issue #64's dict-key follow-up): its own seed
-# range, independent of every batch above.
 SUBCLASS_KEY_SEED_BASE: Final[int] = 9_000_000
 SUBCLASS_KEY_SEED_COUNT: Final[int] = 150
 
-# How often a generated dict key is drawn from the non-str alphabet below
-# rather than the pre-existing `DICT_KEYS` strings, when the `dict_keys` flag
-# is set. The RNG is only consulted for this when the flag is set, so every
-# pre-existing (`dict_keys=False`) batch draws dict keys exactly as it always
-# has -- see `_gen_dict_key`'s own doc.
 NON_STR_KEY_PROBABILITY: Final[float] = 0.4
 
-# The scalar leaves a generated non-str dict key's `tuple` case may hold --
-# deliberately not itself a `tuple` (a dict key may not nest one, see
-# `crates/onix-py/src/convert.rs`'s module doc).
+# Not itself a tuple: a dict key may not nest one (see convert.rs's module doc).
 NON_STR_KEY_TUPLE_LEAVES: Final[list[JsonValue]] = [1, "x", True, None, 2.5]
 
-# The surrogate batch (issue #59): values whose leaves are often strings
-# carrying a lone (unpaired) surrogate code point — legal in Python, not
-# encodable as UTF-8. Its own seed range keeps it independent of the batches
-# above. Never generates a set/frozenset: real DeepDiff crashes with
-# UnicodeEncodeError hashing a lone surrogate (see tests/golden/README.md),
-# and this batch's own comparison would have no way to tell that expected
-# crash apart from a real divergence, so it stays out of scope here entirely.
+# issue #59. Never generates a set/frozenset: real DeepDiff crashes hashing a
+# lone surrogate (see tests/golden/README.md).
 SURROGATE_SEED_BASE: Final[int] = 10_000_000
 
-# The leaf alphabet the surrogate batch draws from: a lone surrogate alone, at
-# the start/end/middle of a string, doubled, adjacent to a plain non-ASCII
-# character, both surrogate halves (high 0xD800-0xDBFF and low 0xDC00-0xDFFF),
-# plus a few plain scalars so type_changes and ordinary no-diff cases appear
-# too.
 SURROGATE_STRINGS: Final[list[str]] = [
     "\udc80", "\udc81", "\ud800", "\udbff", "\udfff",
     "a\udc80", "\udc80b", "a\udc80b", "x\udc80y\udc81z",
@@ -223,10 +108,8 @@ SURROGATE_ALPHABET: Final[list[JsonValue]] = [
     *SURROGATE_STRINGS, None, True, False, 0, 1, 1.5,
 ]
 
-# The calendar batch's leaves: naive and aware datetimes across a bounded range,
-# plus bare dates. The offsets deliberately include one that is not a whole
-# number of minutes (which widens `isoformat()`'s suffix to `+HH:MM:SS`) and the
-# extremes Python permits.
+# UTC_OFFSETS includes a non-whole-minute offset (widens isoformat()'s suffix
+# to +HH:MM:SS) and Python's extremes.
 CALENDAR_EPOCH: Final[datetime.datetime] = datetime.datetime(2015, 1, 1)
 CALENDAR_SPAN_SECONDS: Final[int] = 15 * 365 * 86400
 UTC_OFFSETS: Final[list[int]] = [
@@ -234,87 +117,47 @@ UTC_OFFSETS: Final[list[int]] = [
 ]
 MICROSECONDS: Final[list[int]] = [0, 1, 123456, 999999]
 
-# How often a calendar leaf is a date rather than a datetime, how often a
-# datetime is naive rather than aware, and how often a calendar batch leaf is a
-# calendar value at all rather than a plain scalar.
 DATE_PROBABILITY: Final[float] = 0.25
 NAIVE_PROBABILITY: Final[float] = 0.4
 CALENDAR_LEAF_PROBABILITY: Final[float] = 0.6
 
-# How often a calendar leaf is a `time` or `timedelta` instead of a
-# `date`/`datetime`, each its own cascading `rng` draw like DATE_PROBABILITY.
 TIME_PROBABILITY: Final[float] = 0.15
 TIMEDELTA_PROBABILITY: Final[float] = 0.15
 
-# Two edits that only the tuple batch applies, both aimed at shapes this slice
-# turns on and that kind-preserving mutation alone can never produce: flipping
-# a sequence between list and tuple while keeping its items, and re-typing a
-# number inside a tuple within Python's `1 == 1.0 == True` family (which is
-# what makes DeepHash's cache hand two tuples the same digest). Kept
-# low-probability so a case still usually differs in more ordinary ways too.
+# Tuple-only: a kind flip (list<->tuple) and a numeric re-type within Python's
+# `1 == 1.0 == True` family, which is what makes DeepHash's cache hand two
+# tuples the same digest.
 KIND_FLIP_PROBABILITY: Final[float] = 0.15
 RETYPE_PROBABILITY: Final[float] = 0.25
 
-# How often the calendar batch re-writes a datetime at another UTC offset,
-# keeping the instant (see `_calendar_edge_mutations`).
 OFFSET_SHIFT_PROBABILITY: Final[float] = 0.3
 
-# How often the calendar batch replaces a calendar leaf with a *string* of
-# itself. Half take `str()` (which `model.py`'s `new_t1 = new_type(change.t1)`
-# reproduces, so a `type_changes` delta omits its new value and the pair stays
-# within the pairing cutoff) and half take `isoformat()` (which it does not,
-# for a datetime). Without this, no generated case ever puts a calendar value
-# next to a string equal to its own `str()`, which is the exact shape a wrong
-# `coerce_to_python_str` gets wrong.
+# Half take str() (which model.py's new_t1 = new_type(change.t1) reproduces,
+# keeping the pair within the type_changes pairing cutoff) and half take
+# isoformat() (which it does not).
 STRINGIFY_PROBABILITY: Final[float] = 0.2
 
-# The clustered batch's own knobs: a two-day window (so every value is a close
-# candidate for every other), and a coin flip that makes an aware value the
-# exact same instant as the naive one it was drawn from.
 CLUSTER_EPOCH: Final[datetime.datetime] = datetime.datetime(2024, 1, 1)
 CLUSTER_SPAN_HOURS: Final[int] = 48
 SAME_INSTANT_TWIN_PROBABILITY: Final[float] = 0.5
 
 
 def _deterministic_members(value: set[object] | frozenset[object]) -> list[object]:
-    """
-    Order a live `set`/`frozenset`'s members independently of `PYTHONHASHSEED`.
+    """Order a live set/frozenset's members deterministically, independent of `PYTHONHASHSEED`.
 
-    A `set`/`frozenset` literal's own iteration order is Python hash-bucket
-    order, which for a `str` member is randomized per process
-    (`PYTHONHASHSEED`). Every generator function below that walks an
-    existing set's members in a list comprehension consumes `rng` once per
-    member, in iteration order -- so an unordered `for member in value` here
-    would make the *sequence* of RNG draws (and therefore the mutated result)
-    depend on the process's hash seed, breaking the "same seed, same case"
-    contract every other batch in this file relies on, even though `rng`
-    itself is seeded deterministically. `golden_tags.canonical_set_order` is
-    a purely structural sort (no hashing), so it is stable across processes.
-
-    :param value: The set or frozenset to order.
-    :return: Its members, in onix's canonical set order.
+    Each member consumes one `rng` draw in iteration order, so callers use this instead of a
+    plain loop to keep a given seed reproducible.
     """
     return canonical_set_order(value)
 
 
 def _gen_scalar(rng: random.Random, scalars: list[JsonValue] | None = None) -> JsonValue:
-    """
-    Pick a random scalar.
-
-    :param rng: Seeded RNG.
-    :param scalars: Alphabet to draw from; defaults to the module `SCALARS`.
-    :return: A random scalar value.
-    """
+    """Pick a random scalar."""
     return rng.choice(SCALARS if scalars is None else scalars)
 
 
 def _gen_calendar(rng: random.Random) -> JsonValue:
-    """
-    Pick a random `date`, `time`, `timedelta`, or a random naive or aware `datetime`.
-
-    :param rng: Seeded RNG.
-    :return: A calendar value, or a plain scalar for the rest of the alphabet.
-    """
+    """Pick a random `date`, `time`, `timedelta`, or naive/aware `datetime`."""
     if rng.random() >= CALENDAR_LEAF_PROBABILITY:
         return _gen_scalar(rng)
 
@@ -356,19 +199,7 @@ def _gen_calendar(rng: random.Random) -> JsonValue:
 
 
 def _gen_non_str_dict_key(rng: random.Random) -> JsonValue:
-    """
-    Pick a random non-`str` dict key: `int`, `bool`, `float`, `None`,
-    `datetime`, `date`, or a `tuple` of scalars (issue #62).
-
-    `NON_STR_KEY_TUPLE_LEAVES` holds both `1` and `True`, so a generated
-    tuple key's own elements may land on a Python-equal-but-differently-typed
-    pair (e.g. `(1, True)`) -- deliberately in scope, exercising the same
-    element-wise `ScalarKey` matching a tuple *key* needs, not a generator
-    bug to avoid.
-
-    :param rng: Seeded RNG.
-    :return: A non-`str` dict key.
-    """
+    """Pick a random non-`str` dict key: a scalar, `datetime`/`date`, or a `tuple` (issue #62)."""
     kind = rng.random()
 
     if kind < 0.2:
@@ -396,16 +227,7 @@ def _gen_non_str_dict_key(rng: random.Random) -> JsonValue:
 
 
 def _gen_dict_key(rng: random.Random, dict_keys: bool) -> JsonValue:
-    """
-    Pick a random dict key: a `str` from `DICT_KEYS`, or (when `dict_keys` is
-    set) sometimes one of the other types `DeepDiff` also accepts.
-
-    :param rng: Seeded RNG.
-    :param dict_keys: Whether a non-`str` key may be generated. The RNG is
-        only consulted for this choice when it is set, so a caller that never
-        sets it draws exactly `rng.choice(DICT_KEYS)`.
-    :return: A dict key.
-    """
+    """Pick a random dict key: a `str`, or (when `dict_keys` is set) another type `DeepDiff` accepts."""
     if dict_keys and rng.random() < NON_STR_KEY_PROBABILITY:
         return _gen_non_str_dict_key(rng)
 
@@ -420,25 +242,7 @@ def _gen_value(
     calendar: bool = False,
     dict_keys: bool = False,
 ) -> JsonValue:
-    """
-    Generate a random JSON-shaped value, nesting up to `depth` levels.
-
-    :param rng: Seeded RNG.
-    :param depth: Remaining nesting budget.
-    :param scalars: Scalar alphabet to draw leaves from; defaults to `SCALARS`.
-    :param tuples: Whether half of the generated sequences are tuples rather
-        than lists. The RNG is only consulted for this when it is set, so the
-        `False` corpus is exactly the one that existed before tuples were
-        supported.
-    :param calendar: Whether leaves may be datetimes and dates. As with
-        `tuples`, the RNG is only consulted for this when it is set, so the
-        two pre-existing corpora are bit-for-bit the ones they were.
-    :param dict_keys: Whether a dict's keys may be non-`str` (issue #62). As
-        with `tuples`/`calendar`, unset means the dict-key draw is the exact
-        `rng.sample(DICT_KEYS, ...)` call every pre-existing corpus used, so
-        those corpora stay bit-for-bit the ones they were.
-    :return: A random value built from the MVP-supported types only.
-    """
+    """Generate a random JSON-shaped value, nesting up to `depth` levels."""
     if depth <= 0:
         return _gen_calendar(rng) if calendar else _gen_scalar(rng, scalars)
 
@@ -477,25 +281,7 @@ def _mutate(
     dict_keys: bool = False,
     scalars: list[JsonValue] | None = None,
 ) -> JsonValue:
-    """
-    Build a related-but-different copy of `value` (shuffle + selective mutation).
-
-    A sequence keeps its own kind: a mutated tuple is still a tuple, so a
-    case's two sides differ in contents rather than in container type (which
-    would make every case a single type change).
-
-    :param rng: Seeded RNG.
-    :param value: The value to derive a mutated copy from.
-    :param tuples: Whether replacement values may themselves be tuples.
-    :param calendar: Whether replacement values may be datetimes and dates.
-    :param dict_keys: Whether a newly added dict key may be non-`str` (issue
-        #62). Unset means the exact `rng.choice(DICT_KEYS)` every
-        pre-existing corpus used, so those stay bit-for-bit the ones they
-        were.
-    :param scalars: Scalar alphabet for replacement leaves; `None` uses the
-        module `SCALARS`, keeping every pre-existing corpus bit-for-bit.
-    :return: A structurally related, partially mutated copy.
-    """
+    """Build a related-but-different copy of `value` via shuffle and selective mutation."""
     if isinstance(value, (list, tuple)):
         mutated = list(value)
         rng.shuffle(mutated)
@@ -535,18 +321,7 @@ def _generate_case(
     dict_keys: bool = False,
     scalars: list[JsonValue] | None = None,
 ) -> tuple[JsonValue, JsonValue]:
-    """
-    Generate one seeded `(a, b)` pair.
-
-    :param seed: The seed driving this case's RNG.
-    :param tuples: Whether the pair may contain tuples.
-    :param calendar: Whether the pair may contain datetimes and dates.
-    :param dict_keys: Whether a dict's keys may be non-`str` (issue #62).
-    :param scalars: Scalar alphabet to draw leaves from; `None` uses the module
-        `SCALARS`, so every pre-existing batch's corpus stays bit-for-bit the
-        one it was.
-    :return: A related-but-different `(a, b)` pair.
-    """
+    """Generate one seeded `(a, b)` pair."""
     rng = random.Random(seed)
     a = _gen_value(rng, 3, scalars=scalars, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
     b = _mutate(rng, a, tuples=tuples, calendar=calendar, dict_keys=dict_keys, scalars=scalars)
@@ -561,27 +336,7 @@ def _generate_case(
 
 
 def _calendar_edge_mutations(rng: random.Random, value: object) -> object:
-    """
-    Apply the two calendar-specific edits: an offset shift and a stringify.
-
-    Both make shapes ordinary mutation cannot. The offset shift produces two
-    datetimes that are a *different* wall clock but the *same* moment, which
-    DeepDiff reports as no difference at all — and, when one side is naive and
-    the other aware, are not even Python-equal, so they reach the difflib
-    `'replace'` and `ignore_order` pairing paths rather than matching outright.
-    The stringify (see `STRINGIFY_PROBABILITY`) puts a calendar value next to a
-    string of itself, which is what exercises the `str()` coercion the
-    `type_changes` delta shape depends on — `time`/`timedelta` take only this
-    edit (`str()`, since neither has an `isoformat()`/offset-shift analogue
-    worth the added complexity here; both are covered directly by the golden
-    corpus and `test_times.py`/`test_timedeltas.py`). The `set`/`frozenset` branch exists
-    for the combined batch (issue #21): the JSON-shaped and tuple batches never
-    produce one, so it is simply never taken there.
-
-    :param rng: Seeded RNG.
-    :param value: The value to edit.
-    :return: The edited value.
-    """
+    """Apply the two calendar-specific edits: an offset shift and a stringify."""
     if isinstance(value, (set, frozenset)):
         members = [_calendar_edge_mutations(rng, item) for item in _deterministic_members(value)]
 
@@ -611,14 +366,7 @@ def _calendar_edge_mutations(rng: random.Random, value: object) -> object:
 
 
 def _retype_number(rng: random.Random, value: JsonValue) -> JsonValue:
-    """
-    Re-type a number within Python's numeric equality family, keeping its value.
-
-    :param rng: Seeded RNG.
-    :param value: The number to re-type.
-    :return: An equal value of a different type (`1` -> `1.0` or `True`), or
-        `value` unchanged when no equal re-typing exists.
-    """
+    """Re-type a number within Python's numeric equality family, keeping its value."""
     if isinstance(value, bool):
         return int(value) if rng.random() < 0.5 else float(value)
 
@@ -635,15 +383,7 @@ def _retype_number(rng: random.Random, value: JsonValue) -> JsonValue:
 
 
 def _tuple_edge_mutations(rng: random.Random, value: JsonValue, in_tuple: bool = False) -> JsonValue:
-    """
-    Apply the two tuple-specific edits recursively (see KIND_FLIP_PROBABILITY).
-
-    :param rng: Seeded RNG.
-    :param value: The value to edit.
-    :param in_tuple: Whether `value` sits inside a tuple, which is where a
-        numeric re-type is worth making.
-    :return: The edited value.
-    """
+    """Apply the two tuple-specific edits recursively: a kind flip and a numeric re-type."""
     if isinstance(value, (list, tuple)):
         as_tuple = isinstance(value, tuple)
         items = [_tuple_edge_mutations(rng, item, in_tuple=as_tuple) for item in value]
@@ -663,17 +403,7 @@ def _tuple_edge_mutations(rng: random.Random, value: JsonValue, in_tuple: bool =
 
 
 def _diverges(a: JsonValue, b: JsonValue, ignore_order: bool) -> tuple[JsonValue, JsonValue] | None:
-    """
-    Diff `a`/`b` with both engines and return both reports if they disagree.
-
-    Both renderings are compared: the JSON one (canonically, by parsing) and
-    the dict one, which is the only one that can see a tuple.
-
-    :param a: The first value.
-    :param b: The second value.
-    :param ignore_order: Whether to diff with `ignore_order=True`.
-    :return: `(expected, actual)` if they diverge, else `None`.
-    """
+    """Diff `a`/`b` with both engines and return both reports if they disagree."""
     real = RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)
     onix = OnixDeepDiff(a, b, ignore_order=ignore_order)
 
@@ -715,20 +445,7 @@ def _run_batch(
     dict_keys: bool = False,
     case_fn: Callable[[int], tuple[JsonValue, JsonValue]] | None = None,
 ) -> list[tuple[int, bool, JsonValue, JsonValue, JsonValue, JsonValue]]:
-    """
-    Run one batch of seeded cases through both engines, ordered and ignore_order.
-
-    :param seeds: The seeds to generate cases from.
-    :param tuples: Whether the generated cases may contain tuples. Ignored when `case_fn` is set.
-    :param calendar: Whether the generated cases may contain datetimes and dates. Ignored when
-        `case_fn` is set.
-    :param dict_keys: Whether a dict's keys may be non-`str` (issue #62). Ignored when `case_fn`
-        is set.
-    :param case_fn: Builds one `(a, b)` case from a seed directly, for a batch with its own
-        generator (bypassing `_generate_case`/`tuples`/`calendar`/`dict_keys` entirely). Defaults
-        to `_generate_case` called with this batch's own `tuples`/`calendar`/`dict_keys`.
-    :return: One entry per diverging (seed, ignore_order) combination.
-    """
+    """Run one batch of seeded cases through both engines, ordered and `ignore_order`."""
     build_case = case_fn or (
         lambda seed: _generate_case(seed, tuples=tuples, calendar=calendar, dict_keys=dict_keys)
     )
@@ -780,12 +497,7 @@ def test_differential_fuzz_with_big_integers_matches_real_deepdiff() -> None:
 
 
 def _gen_clustered_calendar(rng: random.Random) -> JsonValue:
-    """
-    Pick one calendar value from a deliberately tiny window.
-
-    :param rng: Seeded RNG.
-    :return: A `date`, or a naive or aware `datetime` within `CLUSTER_SPAN_HOURS`.
-    """
+    """Pick one calendar value from a tiny window."""
     if rng.random() < DATE_PROBABILITY:
         return (CLUSTER_EPOCH + datetime.timedelta(days=rng.randrange(6))).date()
 
@@ -807,22 +519,10 @@ def _gen_clustered_calendar(rng: random.Random) -> JsonValue:
 
 
 def _generate_stringified_calendar_case(seed: int) -> tuple[JsonValue, JsonValue]:
-    """
-    Generate one seeded case of dict-wrapped calendar values against strings of them.
+    """Generate one seeded case of dict-wrapped calendar values against strings of them.
 
-    Both halves of the shape matter. The **dict wrapper** is what makes a pair
-    close enough to pair at all: two bare scalars have a rough length of 2
-    between them, so even a `diff_length` of 1 lands on 0.5, over the 0.3
-    pairing cutoff, while inside a one-key dict the same difference is 1/6.
-    The **string** is `str()` of the value half the time (which `model.py`'s
-    `new_t1 = new_type(change.t1)` reproduces, so the delta omits its new
-    value and the pair qualifies) and `isoformat()` the other half (which for
-    a datetime it does not). Getting that coercion wrong flips a
-    `type_changes` into an unrelated add plus remove, and no other generator
-    here produces a string equal to a sibling calendar value's `str()`.
-
-    :param seed: The seed driving this case's RNG.
-    :return: A related-but-different pair of lists of one-key dicts.
+    Wrapped in a one-key dict because two bare scalars sit above the 0.3 ignore_order pairing cutoff even for a one-character
+    difference, while the same difference inside a one-key dict sits below it -- bare scalars would never pair.
     """
     rng = random.Random(seed)
     values = [_gen_calendar(rng) for _ in range(rng.randint(1, 5))]
@@ -845,12 +545,7 @@ def _generate_stringified_calendar_case(seed: int) -> tuple[JsonValue, JsonValue
 
 
 def _generate_clustered_case(seed: int) -> tuple[JsonValue, JsonValue]:
-    """
-    Generate one seeded flat-calendar-list `(a, b)` pair.
-
-    :param seed: The seed driving this case's RNG.
-    :return: A related-but-different pair of flat lists.
-    """
+    """Generate one seeded flat-calendar-list `(a, b)` pair."""
     rng = random.Random(seed)
     a = [_gen_clustered_calendar(rng) for _ in range(rng.randint(0, 7))]
     b = list(a)
@@ -873,20 +568,7 @@ def _generate_clustered_case(seed: int) -> tuple[JsonValue, JsonValue]:
 
 @pytest.fixture
 def utc_timezone(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """
-    Pin the process timezone to UTC for the duration of one test.
-
-    Real DeepDiff ranks `ignore_order` pairing candidates with a call to
-    `datetime.timestamp()`, which reads a *naive* datetime in the process's
-    local timezone, so its pairing choice for a list mixing naive and aware
-    datetimes is machine-dependent. onix reads a naive value as UTC
-    everywhere; the two agree exactly once the process timezone is UTC. The
-    rationale in full lives in `distance_family`'s doc
-    (`crates/onix-core/src/ignore_order/distance.rs`).
-
-    :param monkeypatch: pytest's environment patcher, which restores `TZ`.
-    :return: Nothing; this is a setup/teardown fixture.
-    """
+    """Pin the process timezone to UTC for the duration of one test."""
     monkeypatch.setenv("TZ", "UTC")
     time.tzset()
 
@@ -900,11 +582,7 @@ def utc_timezone(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def test_differential_fuzz_with_calendar_values_matches_real_deepdiff(
     utc_timezone: None,
 ) -> None:
-    """
-    Run a third SEED_COUNT-case batch whose values also contain datetimes and dates.
-
-    :param utc_timezone: Pins `TZ=UTC` — see that fixture for why it is needed.
-    """
+    """Run a third SEED_COUNT-case batch whose values also contain datetimes and dates."""
     seeds = range(CALENDAR_SEED_BASE, CALENDAR_SEED_BASE + SEED_COUNT)
     mismatches = _run_batch(seeds, tuples=False, calendar=True)
 
@@ -917,13 +595,7 @@ def test_differential_fuzz_with_calendar_values_matches_real_deepdiff(
 def test_differential_fuzz_with_clustered_calendar_lists_matches_real_deepdiff(
     utc_timezone: None,
 ) -> None:
-    """
-    Run a fourth batch of flat, tightly clustered calendar lists.
-
-    :param utc_timezone: Pins `TZ=UTC` — see that fixture for why it is needed.
-        This batch is the one that actually depends on it: near-identical
-        candidates make DeepDiff's own naive-`timestamp()` reading observable.
-    """
+    """Run a fourth batch of flat, tightly clustered calendar lists."""
     mismatches = []
 
     for seed in range(CLUSTERED_SEED_BASE, CLUSTERED_SEED_BASE + SEED_COUNT):
@@ -945,11 +617,7 @@ def test_differential_fuzz_with_clustered_calendar_lists_matches_real_deepdiff(
 def test_differential_fuzz_with_stringified_calendar_values_matches_real_deepdiff(
     utc_timezone: None,
 ) -> None:
-    """
-    Run a fifth batch pairing dict-wrapped calendar values against strings of them.
-
-    :param utc_timezone: Pins `TZ=UTC` — see that fixture.
-    """
+    """Run a fifth batch pairing dict-wrapped calendar values against strings of them."""
     mismatches = []
 
     for seed in range(STRINGIFIED_SEED_BASE, STRINGIFIED_SEED_BASE + SEED_COUNT):
@@ -969,21 +637,10 @@ def test_differential_fuzz_with_stringified_calendar_values_matches_real_deepdif
 
 
 def _gen_hashable(rng: random.Random, depth: int) -> object:
-    """
-    Generate a value a Python set can hold: a scalar, a tuple of them, or a frozenset.
+    """Generate a value a Python set can hold: a scalar, a tuple of them, or a frozenset.
 
-    A set member is *rendered into* its finding's path, and rendering a
-    frozenset means rendering its members in some order — DeepDiff's is
-    Python's hash order, onix's is canonical, and no order-insensitive
-    comparison can reconcile the two inside a single opaque path string. A
-    frozenset generated here is therefore capped at one member, where the two
-    orders provably coincide; the difference itself is pinned by name in
-    ``test_sets.py``. Tuples are unrestricted, their order being positional in
-    both tools.
-
-    :param rng: Seeded RNG.
-    :param depth: Remaining nesting budget.
-    :return: A hashable value.
+    The frozenset is capped at one member, unlike the tuple branch: a set member renders into the finding's path, DeepDiff's in
+    hash order and onix's in canonical order, and only a single member makes the two coincide.
     """
     if depth <= 0 or rng.random() < 0.55:
         return _gen_scalar(rng)
@@ -995,13 +652,7 @@ def _gen_hashable(rng: random.Random, depth: int) -> object:
 
 
 def _gen_set_value(rng: random.Random, depth: int) -> object:
-    """
-    Generate a random value whose sequences are sometimes sets or frozensets.
-
-    :param rng: Seeded RNG.
-    :param depth: Remaining nesting budget.
-    :return: A random value built from the supported types, sets included.
-    """
+    """Generate a random value whose sequences are sometimes sets or frozensets."""
     if depth <= 0:
         return _gen_scalar(rng)
 
@@ -1026,13 +677,7 @@ def _gen_set_value(rng: random.Random, depth: int) -> object:
 
 
 def _mutate_set_value(rng: random.Random, value: object) -> object:
-    """
-    Build a related-but-different copy of a set-batch value, keeping each container's kind.
-
-    :param rng: Seeded RNG.
-    :param value: The value to derive a mutated copy from.
-    :return: A structurally related, partially mutated copy.
-    """
+    """Build a related-but-different copy of a set-batch value, keeping each container's kind."""
     if isinstance(value, (set, frozenset)):
         members = [
             _gen_hashable(rng, 2) if rng.random() < 0.4 else member
@@ -1067,26 +712,7 @@ def _mutate_set_value(rng: random.Random, value: object) -> object:
 
 
 def _set_edge_mutations(rng: random.Random, value: object, in_set: bool = False) -> object:
-    """
-    Apply the two set-specific edits recursively, mirroring `_tuple_edge_mutations`.
-
-    Both target shapes ordinary kind-preserving mutation can never reach, and both are
-    where a set's *iteration order* becomes load-bearing rather than cosmetic: flipping
-    a container between the four kinds while keeping its members (which is what makes a
-    `list(a_set) == some_list` coercion decide a pairing), and re-typing a number inside
-    a set member within Python's `1 == 1.0 == True` family (which is what makes DeepHash
-    hand two members one digest, so that *which* member was iterated first decides what
-    gets reported).
-
-    Whatever it is handed, this returns a hashable value whenever `in_set` is set: a
-    list or a set cannot be a set member, so inside a set those kinds become their
-    `tuple`/`frozenset` counterparts and a flip swaps only those two.
-
-    :param rng: Seeded RNG.
-    :param value: The value to edit.
-    :param in_set: Whether `value` is itself a set member.
-    :return: The edited value, hashable whenever `in_set` is set.
-    """
+    """Apply the two set-specific edits recursively: a kind flip and a numeric re-type."""
     if isinstance(value, (set, frozenset, list, tuple)):
         # A set's members are set members, and hashability is transitive, so
         # `in_set` both starts at a set and carries down through it.
@@ -1121,12 +747,7 @@ def _set_edge_mutations(rng: random.Random, value: object, in_set: bool = False)
 
 
 def _is_hashable(value: object) -> bool:
-    """
-    Report whether `value` could be a set member.
-
-    :param value: Any value.
-    :return: True if `hash(value)` succeeds.
-    """
+    """Report whether `value` could be a set member."""
     try:
         hash(value)
     except TypeError:
@@ -1155,12 +776,7 @@ _FLIPPED_IN_SET: Final[dict[type, type]] = {frozenset: tuple, tuple: frozenset}
 
 
 def _normalize_set_categories(report: dict[str, object]) -> dict[str, object]:
-    """
-    Sort the two set categories, whose order real DeepDiff draws from Python hash order.
-
-    :param report: A report as either engine's `to_dict()` or parsed `to_json()` gives it.
-    :return: The same report with both set categories as sorted lists.
-    """
+    """Sort the two set categories, whose order real DeepDiff draws from Python hash order."""
     return {
         key: sorted(value) if key in {"set_item_added", "set_item_removed"} else value
         for key, value in report.items()
@@ -1168,16 +784,7 @@ def _normalize_set_categories(report: dict[str, object]) -> dict[str, object]:
 
 
 def _reverse_sets(value: object) -> object:
-    """
-    Rebuild every set and frozenset in `value` from its members in reverse.
-
-    Python inserts a set literal's members in written order, and insertion order can
-    change where a collision lands, so this often (not always) gives a set the same
-    members in a different iteration order.
-
-    :param value: The value to rebuild.
-    :return: A copy with every set rebuilt.
-    """
+    """Rebuild every set and frozenset in `value` from its members in reverse."""
     if isinstance(value, (set, frozenset)):
         members = [_reverse_sets(member) for member in reversed(list(value))]
 
@@ -1195,14 +802,7 @@ def _reverse_sets(value: object) -> object:
 
 
 def _deepdiff_answer(a: object, b: object, ignore_order: bool) -> object:
-    """
-    Real DeepDiff's own answer for one pair, normalized the way the comparison reads it.
-
-    :param a: The first value.
-    :param b: The second value.
-    :param ignore_order: Whether to diff with `ignore_order=True`.
-    :return: The normalized `to_dict()` report.
-    """
+    """Real DeepDiff's own answer for one pair, normalized the way the comparison reads it."""
     real = RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)
 
     return _normalize_set_categories(_normalize_types(real.to_dict()))
@@ -1215,31 +815,7 @@ _SEQUENCE_KINDS: Final[frozenset[str]] = frozenset({"list", "tuple"})
 
 
 def _is_known_set_sequence_coercion_divergence(expected: object, actual: object) -> bool:
-    """
-    Whether `expected` differs from `actual` only by the already-documented
-    "`list(a_set) == some_list`" class in `tests/golden/README.md`'s "Set
-    iteration order" section -- reachable through any batch whose values can
-    pair a set/frozenset against a list/tuple under `ignore_order`, calendar
-    values included; this is not specific to them.
-
-    Once `ignore_order` pairs a set against a sequence, real DeepDiff decides
-    whether to report the pair as `values_changed` (coercion "reproduced" the
-    new value) or `type_changes` (it did not) by comparing `list(the_set)`,
-    in the set's own Python hash-iteration order, against the sequence *as
-    given* -- so which of two equally-valid ordered forms of the same list
-    keeps a `type_changes` depends on the process. onix answers this
-    deterministically by membership instead (`crate::ignore_order::distance`'s
-    `unordered_python_eq`), which decides the *pairing distance*, not the
-    report shape: a genuine `Value` kind mismatch is always `type_changes` in
-    onix, never folded into `values_changed`, regardless of coercion. See
-    `test_a_set_versus_a_list_is_a_type_change_whatever_the_order` in
-    `test_sets.py`, which pins this same class as onix's own output for a
-    plain (non-calendar) pair.
-
-    :param expected: Real DeepDiff's normalized `to_dict()`.
-    :param actual: onix's normalized `to_dict()`.
-    :return: `True` if the only divergence is of this class.
-    """
+    """Whether `expected` differs from `actual` only by the documented `list(a_set) == some_list` coercion class."""
     if not isinstance(expected, dict) or not isinstance(actual, dict):
         return False
 
@@ -1280,25 +856,7 @@ def _is_known_set_sequence_coercion_divergence(expected: object, actual: object)
 
 
 def _diverges_with_sets(a: object, b: object, ignore_order: bool) -> tuple[object, object] | None:
-    """
-    Diff `a`/`b` with both engines, tolerating two accepted, distinct kinds of
-    non-divergence -- see this module's own doc for the full mechanism each
-    reproduces:
-
-    - `DeepDiff` disagreeing with itself once its sets are rebuilt in another
-      order (`_reverse_sets`, order-dependent): a case only onix answers
-      deterministically.
-    - The pre-existing, *deterministic* `` `list(a_set) == some_list` ``
-      class (`_is_known_set_sequence_coercion_divergence`): a real,
-      stably-reproducible divergence documented in
-      `tests/golden/README.md`'s "Set iteration order" section, not order
-      instability.
-
-    :param a: The first value.
-    :param b: The second value.
-    :param ignore_order: Whether to diff with `ignore_order=True`.
-    :return: `(expected, actual)` if they diverge, else `None`.
-    """
+    """Diff `a`/`b` with both engines, tolerating two documented classes of non-divergence."""
     real = RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)
     onix = OnixDeepDiff(a, b, ignore_order=ignore_order)
 
@@ -1338,16 +896,7 @@ def _diverges_with_sets(a: object, b: object, ignore_order: bool) -> tuple[objec
 
 
 def _as_set_insensitive(value: JsonValue) -> JsonValue:
-    """
-    Sort every array in a parsed report, so a set-derived one compares order-free.
-
-    Only used for the set batch's JSON comparison; the `to_dict()` comparison beside it
-    is exact and sees real `set` objects, so list and tuple order is still checked (a
-    Python `set` compares by membership, a `list` does not).
-
-    :param value: A parsed report, or any part of one.
-    :return: The same value with every array sorted by its canonical JSON text.
-    """
+    """Sort every array in a parsed report, so a set-derived one compares order-free."""
     if isinstance(value, dict):
         return {key: _as_set_insensitive(item) for key, item in value.items()}
 
@@ -1383,18 +932,9 @@ def test_differential_fuzz_with_sets_matches_real_deepdiff() -> None:
 
 
 def _gen_combined_hashable(rng: random.Random, depth: int) -> object:
-    """
-    Generate a set member drawing from the full supported alphabet, calendar values included.
+    """Generate a set member drawing from the full supported alphabet, calendar values included.
 
-    Identical in shape to `_gen_hashable`, but its leaves are `_gen_calendar`'s
-    alphabet (scalars plus datetimes and dates) rather than bare scalars, and a
-    frozenset is capped at one member for the identical reason `_gen_hashable`'s
-    own doc gives — a multi-member frozenset's rendering inside a set item's path
-    depends on iteration order, which the two tools do not share.
-
-    :param rng: Seeded RNG.
-    :param depth: Remaining nesting budget.
-    :return: A hashable value, possibly a `datetime` or a `date`.
+    Caps its frozenset at one member for the same reason `_gen_hashable` does.
     """
     if depth <= 0 or rng.random() < 0.55:
         return _gen_calendar(rng)
@@ -1408,18 +948,7 @@ def _gen_combined_hashable(rng: random.Random, depth: int) -> object:
 
 
 def _gen_combined_value(rng: random.Random, depth: int) -> object:
-    """
-    Generate a value drawing from the full supported alphabet in one generator run.
-
-    Lists, dicts, tuples, sets, frozensets, datetimes and dates can all appear
-    together at any depth — issue #21's "combined goldens" requirement, at fuzz
-    scale: mirrors `_gen_set_value`, with `_gen_calendar` in place of `_gen_scalar`
-    for its leaves.
-
-    :param rng: Seeded RNG.
-    :param depth: Remaining nesting budget.
-    :return: A random value built from the full supported alphabet.
-    """
+    """Generate a value drawing from the full supported alphabet in one generator run (issue #21)."""
     if depth <= 0:
         return _gen_calendar(rng)
 
@@ -1444,18 +973,7 @@ def _gen_combined_value(rng: random.Random, depth: int) -> object:
 
 
 def _mutate_combined_value(rng: random.Random, value: object) -> object:
-    """
-    Build a related-but-different copy of a combined-batch value.
-
-    Mirrors `_mutate_set_value`, drawing replacement members from the combined
-    alphabet (`_gen_combined_hashable`/`_gen_combined_value`) so a mutation can
-    turn a plain scalar into a calendar value and back, not only reshuffle ones
-    already present.
-
-    :param rng: Seeded RNG.
-    :param value: The value to derive a mutated copy from.
-    :return: A structurally related, partially mutated copy.
-    """
+    """Build a related-but-different copy of a combined-batch value."""
     if isinstance(value, (set, frozenset)):
         members = [
             _gen_combined_hashable(rng, 2) if rng.random() < 0.4 else member
@@ -1492,18 +1010,7 @@ def _mutate_combined_value(rng: random.Random, value: object) -> object:
 
 
 def _generate_combined_case(seed: int) -> tuple[object, object]:
-    """
-    Generate one seeded `(a, b)` pair drawing from the full supported alphabet.
-
-    Stacks every edge-mutation pass this module has for one type in isolation
-    (`_set_edge_mutations`'s kind flips and numeric retyping,
-    `_calendar_edge_mutations`'s offset shifts and stringify) onto a value that
-    can hold a tuple, a set, a frozenset, a datetime and a date all at once —
-    issue #21's combined-goldens requirement, at fuzz scale instead of by hand.
-
-    :param seed: The seed driving this case's RNG.
-    :return: A related-but-different `(a, b)` pair.
-    """
+    """Generate one seeded `(a, b)` pair drawing from the full supported alphabet (issue #21)."""
     rng = random.Random(seed)
     a = _gen_combined_value(rng, 3)
     b = _mutate_combined_value(rng, a)
@@ -1516,15 +1023,7 @@ def _generate_combined_case(seed: int) -> tuple[object, object]:
 def test_differential_fuzz_with_the_combined_alphabet_matches_real_deepdiff(
     utc_timezone: None,
 ) -> None:
-    """
-    Run a seventh, >=500-case batch drawing the full alphabet in one generator.
-
-    Tuples, sets, frozensets, datetimes and dates all appear together at any
-    depth — including a calendar value as a bare or nested set member, the one
-    combination #18-#20 left out and #21 closes.
-
-    :param utc_timezone: Pins `TZ=UTC` — see that fixture.
-    """
+    """Run a seventh, >=500-case batch drawing the full alphabet in one generator (issue #21)."""
     mismatches = []
 
     for seed in range(COMBINED_SEED_BASE, COMBINED_SEED_BASE + COMBINED_SEED_COUNT):
@@ -1544,23 +1043,12 @@ def test_differential_fuzz_with_the_combined_alphabet_matches_real_deepdiff(
 
 
 def _gen_multiline_leaf(rng: random.Random) -> JsonValue:
-    """
-    Pick a leaf from the multi-line alphabet.
-
-    :param rng: Seeded RNG.
-    :return: A string (often multi-line) or a plain scalar.
-    """
+    """Pick a leaf from the multi-line alphabet."""
     return rng.choice(MULTILINE_ALPHABET)
 
 
 def _gen_multiline_value(rng: random.Random, depth: int) -> JsonValue:
-    """
-    Generate a random value whose leaves are drawn from the multi-line alphabet.
-
-    :param rng: Seeded RNG.
-    :param depth: Remaining nesting budget.
-    :return: A random value built from lists, dicts and multi-line-string leaves.
-    """
+    """Generate a random value whose leaves are drawn from the multi-line alphabet."""
     if depth <= 0:
         return _gen_multiline_leaf(rng)
 
@@ -1580,18 +1068,7 @@ def _gen_multiline_value(rng: random.Random, depth: int) -> JsonValue:
 
 
 def _mutate_multiline_value(rng: random.Random, value: JsonValue) -> JsonValue:
-    """
-    Build a related-but-different copy, replacing leaves from the same alphabet.
-
-    Replacement values come from the multi-line alphabet too (unlike the base
-    `_mutate`, which draws from the plain scalars), so a paired position often
-    changes from one multi-line string to another — the shape that reaches
-    `_diff_str`'s `diff` field.
-
-    :param rng: Seeded RNG.
-    :param value: The value to derive a mutated copy from.
-    :return: A structurally related, partially mutated copy.
-    """
+    """Build a related-but-different copy, replacing leaves from the same alphabet."""
     if isinstance(value, list):
         mutated = list(value)
         rng.shuffle(mutated)
@@ -1618,13 +1095,7 @@ def _mutate_multiline_value(rng: random.Random, value: JsonValue) -> JsonValue:
 
 
 def test_differential_fuzz_with_multiline_strings_matches_real_deepdiff() -> None:
-    """
-    Run an eighth SEED_COUNT-case batch whose leaves are often multi-line strings.
-
-    This is issue #28's own corpus: a str->str change carrying a newline is
-    where DeepDiff adds the `diff` field (a difflib.unified_diff of the two),
-    both ordered and under ignore_order.
-    """
+    """Run an eighth SEED_COUNT-case batch whose leaves are often multi-line strings (issue #28)."""
     mismatches = []
 
     for seed in range(MULTILINE_SEED_BASE, MULTILINE_SEED_BASE + SEED_COUNT):
@@ -1672,16 +1143,7 @@ class _DateSub(datetime.date):
 
 
 def _gen_subclass_key(rng: random.Random) -> object:
-    """
-    Pick a random subclass dict key: a `namedtuple`, a `tuple` subclass, or a
-    `datetime`/`date` subclass -- the key-matching follow-up to issue #64's
-    value-level subclass support. `DeepDiff`'s dict-key matching is plain
-    Python `==`/`hash`, which never consults `type(obj)`, so this key must
-    match (or not) its base-type twin purely by value.
-
-    :param rng: Seeded RNG.
-    :return: A subclass dict key.
-    """
+    """Pick a random subclass dict key: `namedtuple`, `tuple`, `datetime`, or `date` (issue #64 follow-up)."""
     kind = rng.random()
 
     if kind < 0.25:
@@ -1723,29 +1185,7 @@ def _mutated_twin(key: object, rng: random.Random) -> object:
 
 
 def _generate_subclass_key_case(seed: int) -> tuple[dict[object, JsonValue], dict[object, JsonValue]]:
-    """
-    Build one `(a, b)` dict pair keyed by a subclass instance and its
-    matching-or-not base-type twin.
-
-    Deliberately a single-key dict on each side, sharing the same *value*
-    when the keys match: for a `datetime`/`date` subclass key specifically,
-    real `DeepDiff` hits its own narrow bug (`stringify_param`'s
-    `literal_eval_extended` cannot parse a subclass's `Call`-shaped `repr()`
-    back as a literal) whenever it must render such a key as part of any
-    path segment (see `tests/golden/README.md`'s "Known DeepDiff quirks"
-    section for both the ways this can happen). This case sidesteps every
-    route to it at once, not by avoiding a shared key specifically: the
-    matching half builds two genuinely identical dicts (no diff to report,
-    so no path is ever built), and the mismatching half builds two dicts
-    with disjoint keys (`DeepDiff` compares them as one whole changed value
-    instead of decomposing to a per-key path). A `namedtuple`/`tuple`
-    subclass key is unaffected regardless of any of this (`DeepDiff`
-    renders any tuple-shaped key positionally, never through `repr()`), but
-    the single-key shape is kept uniform across every generated key kind.
-
-    :param seed: The seed for this case.
-    :return: A dict pair, each holding one subclass-or-base key.
-    """
+    """Build one `(a, b)` dict pair keyed by a subclass instance and its matching-or-not base-type twin."""
     rng = random.Random(seed)
     key_a = _gen_subclass_key(rng)
     key_b = _base_twin(key_a) if rng.random() < 0.5 else _mutated_twin(key_a, rng)
@@ -1755,12 +1195,7 @@ def _generate_subclass_key_case(seed: int) -> tuple[dict[object, JsonValue], dic
 
 
 def test_differential_fuzz_with_subclass_dict_keys_matches_real_deepdiff() -> None:
-    """
-    Run a tenth batch whose dicts carry a `namedtuple`, `tuple`, `datetime`,
-    or `date` *subclass* key against its base-type twin -- issue #64's
-    dict-key follow-up. Half the cases match by value (a subclass key is
-    the same key as its base-type twin); half do not.
-    """
+    """Run a tenth batch whose dicts carry a subclass key against its base-type twin (issue #64's dict-key follow-up)."""
     seeds = range(SUBCLASS_KEY_SEED_BASE, SUBCLASS_KEY_SEED_BASE + SUBCLASS_KEY_SEED_COUNT)
     mismatches = _run_batch(seeds, case_fn=_generate_subclass_key_case)
 
@@ -1771,27 +1206,12 @@ def test_differential_fuzz_with_subclass_dict_keys_matches_real_deepdiff() -> No
 
 
 def _gen_surrogate_leaf(rng: random.Random) -> JsonValue:
-    """
-    Pick a leaf from the surrogate alphabet.
-
-    :param rng: Seeded RNG.
-    :return: A string (often holding a lone surrogate) or a plain scalar.
-    """
+    """Pick a leaf from the surrogate alphabet."""
     return rng.choice(SURROGATE_ALPHABET)
 
 
 def _gen_surrogate_value(rng: random.Random, depth: int) -> JsonValue:
-    """
-    Generate a random value whose leaves are drawn from the surrogate alphabet.
-
-    Only lists and dicts nest a leaf — never a set/frozenset, which real
-    DeepDiff cannot hash a lone surrogate member into at all (see the module
-    alphabet's own doc).
-
-    :param rng: Seeded RNG.
-    :param depth: Remaining nesting budget.
-    :return: A random value built from lists, dicts and surrogate-string leaves.
-    """
+    """Generate a random value whose leaves are drawn from the surrogate alphabet."""
     if depth <= 0:
         return _gen_surrogate_leaf(rng)
 
@@ -1811,13 +1231,7 @@ def _gen_surrogate_value(rng: random.Random, depth: int) -> JsonValue:
 
 
 def _mutate_surrogate_value(rng: random.Random, value: JsonValue) -> JsonValue:
-    """
-    Build a related-but-different copy, replacing leaves from the same alphabet.
-
-    :param rng: Seeded RNG.
-    :param value: The value to derive a mutated copy from.
-    :return: A structurally related, partially mutated copy.
-    """
+    """Build a related-but-different copy, replacing leaves from the same alphabet."""
     if isinstance(value, list):
         mutated = list(value)
         rng.shuffle(mutated)
@@ -1844,19 +1258,7 @@ def _mutate_surrogate_value(rng: random.Random, value: JsonValue) -> JsonValue:
 
 
 def _mutate_surrogate_keys(rng: random.Random, value: JsonValue) -> JsonValue:
-    """
-    Additionally replace some dict *keys* with a surrogate-bearing string.
-
-    The generator/mutator pair above only ever puts a surrogate in a leaf
-    *value* (`dict.keys()` always draws from the plain `DICT_KEYS` pool); this
-    walks the same structure afterward and randomly retags a subset of keys
-    with a surrogate string too, so the batch also exercises a surrogate
-    *key* (issue #59's own acceptance case), not only a surrogate value.
-
-    :param rng: Seeded RNG.
-    :param value: The value to retag keys in.
-    :return: The same structure with some dict keys replaced.
-    """
+    """Additionally replace some dict keys with a surrogate-bearing string (issue #59)."""
     if isinstance(value, dict):
         retagged: dict[str, JsonValue] = {}
 
@@ -1873,18 +1275,7 @@ def _mutate_surrogate_keys(rng: random.Random, value: JsonValue) -> JsonValue:
 
 
 def test_differential_fuzz_with_surrogate_strings_matches_real_deepdiff() -> None:
-    """
-    Run an eleventh SEED_COUNT-case batch whose leaves and dict keys often hold a
-    lone (unpaired) surrogate code point.
-
-    This is issue #59's own corpus: a `str` (or dict key) holding a code
-    point with no UTF-8 encoding, compared and reported exactly like any
-    other `str`. Ordered only: `ignore_order=True` hashes every value in the
-    tree (`DeepHash`, not just a set's members), so real DeepDiff crashes
-    with `UnicodeEncodeError` the moment a surrogate appears *anywhere*
-    under it; there is nothing for this batch's ordered-vs-ignore_order
-    comparison to check there.
-    """
+    """Run an eleventh SEED_COUNT-case batch whose leaves and dict keys often hold a lone surrogate code point (issue #59)."""
     mismatches = []
 
     for seed in range(SURROGATE_SEED_BASE, SURROGATE_SEED_BASE + SEED_COUNT):
