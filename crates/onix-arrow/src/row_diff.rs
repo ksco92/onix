@@ -1841,6 +1841,12 @@ fn owned_batch(batch: RecordBatch, source_rows: usize) -> Result<RecordBatch, Ta
     if batch.num_rows() * 2 > source_rows {
         return Ok(batch);
     }
+    unshared_batch(batch)
+}
+
+/// `batch` with each column passed through [`unshared`], whatever its share of
+/// the source; for key columns, which are a bounded share of any row.
+fn unshared_batch(batch: RecordBatch) -> Result<RecordBatch, TableDiffError> {
     let mut columns = Vec::with_capacity(batch.num_columns());
     let mut copied = false;
     for column in batch.columns() {
@@ -2074,10 +2080,9 @@ fn dup_key_batch(
             .map_err(|e| read_error(&e))?;
         key_columns.push(cast);
     }
-    owned_batch(
+    unshared_batch(
         RecordBatch::try_new(ctx.key_only_schema.clone(), key_columns)
             .map_err(|e| read_error(&e))?,
-        batch.num_rows(),
     )
 }
 
@@ -3304,6 +3309,8 @@ struct CandidateStore {
     settled: Vec<Candidate>,
     rows: usize,
     stale: usize,
+    #[cfg(test)]
+    scanned: usize,
 }
 
 impl CandidateStore {
@@ -3401,7 +3408,7 @@ impl RightFuse<'_> {
             let hashes = kept.iter().map(|&row| pairs[row].0).collect();
             let candidate = Candidate {
                 at,
-                keys: rows.project(self.key_columns).map_err(|e| read_error(&e))?,
+                keys: unshared_batch(rows.project(self.key_columns).map_err(|e| read_error(&e))?)?,
                 full_rows: (0..kept.len()).collect(),
                 rows: kept,
                 hashes,
@@ -3454,6 +3461,10 @@ impl RightFuse<'_> {
         let mut rows = 0;
         for mut candidate in std::mem::take(&mut store.live) {
             let before = candidate.full_rows.len();
+            #[cfg(test)]
+            {
+                store.scanned += before;
+            }
             let mut full_mask = Vec::with_capacity(before);
             for &i in &candidate.full_rows {
                 let hash = candidate.hashes[i];
@@ -8434,6 +8445,32 @@ mod fused_tests {
         );
         let keys: Vec<usize> = store.live.iter().map(|c| c.keys.num_rows()).collect();
         assert_eq!(keys, vec![2, 2, 2]);
+    }
+
+    #[test]
+    fn right_side_compaction_scans_rows_linearly_on_a_chain_of_repeats() {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        // Batch j holds a new key and a repeat of batch j - 1's new key.
+        let batches = 2_000u128;
+        let batch = view_keyed(&["a", "b"], 0)
+            .open()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        for j in 0..batches {
+            let pairs = [(1_000 + j, 0, false), (999 + j, 0, false)];
+            let at = u64::try_from(2 * j).unwrap();
+            fuse.visit(at, &batch, &pairs).unwrap();
+        }
+        let store = fuse.candidates.lock().unwrap();
+        assert!(
+            store.scanned <= 4 * 2 * 2_000,
+            "{} rows scanned for 4,000 visited",
+            store.scanned
+        );
     }
 
     #[test]
