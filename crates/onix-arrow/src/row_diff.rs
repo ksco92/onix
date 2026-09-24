@@ -8471,7 +8471,7 @@ mod fused_tests {
             fuse.visit(at, &batch, &pairs).unwrap();
         }
         let store = fuse.candidates.lock().unwrap();
-        assert!(store.scanned > 0, "the chain compacts");
+        assert!(store.scanned > 0 && store.visited > 0, "the chain compacts");
         assert!(
             store.visited <= 4 * 2_000,
             "{} candidates visited for 2,000 batches",
@@ -8482,6 +8482,61 @@ mod fused_tests {
             "{} rows scanned for 4,000 visited",
             store.scanned
         );
+    }
+
+    /// A batch of `rows` keys the left lacks, a second batch, then a compaction
+    /// after the right repeats the first `repeats` keys; the first batch's
+    /// candidate key columns.
+    fn compacted_after_repeats(rows: u128, repeats: u128) -> RecordBatch {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let right = view_keyed(&["a", "b", "c", "d"], 0);
+        let value_schema = super::spill_schema(&right.schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        let mut batches = right.open().unwrap();
+        let (first, second) = (
+            batches.next().unwrap().unwrap(),
+            batches.next().unwrap().unwrap(),
+        );
+        let first = first.slice(0, usize::try_from(rows).unwrap());
+        let pairs: Vec<(u128, u128, bool)> = (1..=rows).map(|k| (k, 0, false)).collect();
+        fuse.visit(0, &first, &pairs).unwrap();
+        fuse.visit(3, &second, &[(9, 0, false)]).unwrap();
+        let again = view_keyed(&["a"], 0)
+            .open()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        for key in 1..=repeats {
+            fuse.visit(9 + u64::try_from(key).unwrap(), &again, &[(key, 0, false)])
+                .unwrap();
+        }
+        let mut store = fuse.candidates.lock().unwrap();
+        fuse.compact_if_stale(&mut store, 100).unwrap();
+        store
+            .live
+            .iter()
+            .chain(&store.settled)
+            .find(|c| c.at == 0)
+            .unwrap()
+            .keys
+            .clone()
+    }
+
+    /// Whether a key batch's view data buffer is still a slice of its input batch.
+    fn shares_input(keys: &RecordBatch) -> bool {
+        let data = keys.column(0).to_data();
+        let buffer = &data.buffers()[1];
+        buffer.capacity() > 2 * buffer.len() + 64
+    }
+
+    #[test]
+    fn candidate_keys_are_copied_once_compaction_keeps_at_most_half_the_rows() {
+        // Full-width rows left after the repeats, of the candidate's before:
+        // 1 of 3 and 1 of 2 copy the keys out; 2 of 3 keeps them shared.
+        assert!(!shares_input(&compacted_after_repeats(3, 2)));
+        assert!(!shares_input(&compacted_after_repeats(2, 1)));
+        assert!(shares_input(&compacted_after_repeats(3, 1)));
     }
 
     #[test]
