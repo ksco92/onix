@@ -672,8 +672,7 @@ value — confirmed live, a `tuple` subclass whose `__eq__` always returns
 where `onix` reports the whole dict changed at `root` instead. See
 `crates/onix-py/tests/test_conversions.py`'s
 `test_a_key_subclass_with_overridden_equality_matches_structurally_not_by_python_eq`
-and the differential fuzz batch
-(`test_differential_fuzz_with_subclass_dict_keys_matches_real_deepdiff`).
+and `test_differential_fuzz.py`'s subclass-key batch.
 
 ## Known DeepDiff quirks
 
@@ -711,9 +710,8 @@ and the differential fuzz batch
   never `a`'s. `onix` reproduces both halves in
   `crate::ignore_order::match_dict_keys`, used by
   `crate::diff::object::object_diff_mixed` whenever either side has a
-  non-`str` key. `dict_key_int_vs_float_same_value_matches_by_python_equality`,
-  `dict_key_int_vs_float_changed_value_matches_by_python_equality`, and
-  `dict_key_bool_vs_int_matches_by_python_equality` pin it.
+  non-`str` key. `dict_key_int_vs_float_changed_value_matches_by_python_equality`
+  pins it.
 
 - **`to_json()` on a *nested* dict value with a non-`str` key mirrors
   `json.dumps`'s key-stringification rule where Python has one, and
