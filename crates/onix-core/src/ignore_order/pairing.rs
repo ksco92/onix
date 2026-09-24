@@ -49,42 +49,18 @@ impl AddedCandidates {
     }
 }
 
-/// `DeepDiff`'s `_get_most_in_common_pairs_in_iterables` (diff.py) — the
-/// greedy, non-globally-optimal nearest-neighbor pairing.
+/// `DeepDiff`'s `_get_most_in_common_pairs_in_iterables` (diff.py): greedy,
+/// non-globally-optimal nearest-neighbor pairing of `(added, removed)`
+/// candidates within [`CUTOFF_DISTANCE_FOR_PAIRS`].
 ///
-/// For every `(added, removed)` combination (`hashes_added` outer,
-/// `hashes_removed` inner — both in their own first-occurrence order),
-/// candidates within [`CUTOFF_DISTANCE_FOR_PAIRS`] are grouped into
-/// `most_in_common_pairs[added][distance]` (an [`AddedCandidates`] per
-/// added hash) and, on each *new* bucket, the added hash is also appended to
-/// `distances_to_from_hashes[distance]` — together, one pass reproduces the
-/// exact insertion order `DeepDiff`'s own two-pass construction produces
-/// (build `most_in_common_pairs` fully, *then* flatten it into
-/// `distances_to_from_hashes` by iterating it in insertion order): the
-/// values and order are identical either way, since the flatten step never
-/// depends on anything the first pass hasn't already fixed.
+/// 1. Group candidates into `most_in_common_pairs[added][distance]` buckets.
+/// 2. Drain distance buckets ascending ([`BTreeMap`] order).
+/// 3. Drain each bucket LIFO (`Vec::pop`), matching `SetOrdered.pop()`: the
+///    no-`break` overwrite makes ties resolve to the earliest `t1` index
+///    and, across added hashes, the latest `t2` index.
 ///
-/// The outer loop then walks distances **ascending** (free from a
-/// [`BTreeMap`]'s own iteration order); each per-distance bucket, and each
-/// per-added-hash candidate bucket, is drained **LIFO** (`Vec::pop`, i.e.
-/// latest-pushed first) exactly like `SetOrdered.pop()` — this is what
-/// produces `DeepDiff`'s documented, load-bearing, *asymmetric* tie-break:
-/// among several removed-hash candidates tied at the same distance for one
-/// added hash, the **no-`break` overwrite** (every unused candidate popped
-/// after the first successful one keeps re-overwriting `pairs[added]`, so
-/// the last one processed — LIFO means the *smallest* index — wins) makes
-/// the **earliest t1 index** win; among several added hashes competing for
-/// the same removed candidate, LIFO draining of the *outer* bucket instead
-/// makes the **latest t2 index** get first pick. Replicated here
-/// wart-for-wart, including the missing `break`, because real `DeepDiff`'s
-/// own byte-exact output depends on it (confirmed empirically against a
-/// genuine, non-coincidental tie).
-///
-/// Returns added-hash → removed-hash (only that one direction: `DeepDiff`'s
-/// own `pairs` dict is built symmetrically so `get_other_pair` can look it
-/// up from either side, but this port only ever looks up from the added
-/// side — see [`ignore_order_array_diff`](super::ignore_order_array_diff) — so the reverse direction is
-/// never constructed).
+/// Returns added-hash → removed-hash pairs only; the reverse lookup goes
+/// through [`ignore_order_array_diff`](super::ignore_order_array_diff) instead.
 pub(crate) fn compute_pairs(
     hashes_added: &[Rc<ItemKey>],
     hashes_removed: &[Rc<ItemKey>],
@@ -178,16 +154,8 @@ pub(crate) fn compute_pairs(
             if used.contains(&from_hash) {
                 continue;
             }
-            // `from_hash` was pushed into `distances_to_from_hashes[dist]`
-            // (this very bucket, this very `dist`) only ever at the exact
-            // moment its own `most_in_common_pairs[from_hash][dist]` bucket
-            // was first created (see the construction loop above) — nothing
-            // ever removes a bucket afterward, only drains it — so this
-            // lookup always succeeds. Unlike the depth-guard invariants
-            // elsewhere in this crate, this is a closed, input-independent
-            // bookkeeping fact about this function's own construction, not
-            // something adversarial input could violate — an `.expect()` is
-            // the right call here, not a silent fallback.
+            // `from_hash` entered this bucket only when it was first created
+            // above, and nothing removes a bucket afterward, only drains it.
             let to_hashes = most_in_common_pairs
                 .get_mut(&from_hash)
                 .and_then(|candidates| candidates.buckets.get_mut(&dist))

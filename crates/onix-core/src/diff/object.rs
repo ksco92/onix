@@ -15,56 +15,12 @@ use crate::report::{Report, ValuesChangedEntry};
 
 use super::{DiffOptions, check_map_depth, check_value_depth, diff_at, scoped};
 
-/// Diffs two dicts (JSON objects) at `path`, `depth` levels deep.
-///
-/// Keys present only in `a` become `dictionary_item_removed` findings; keys
-/// present only in `b` become `dictionary_item_added` findings (both keyed by
-/// the raw removed/added value, per `DeepDiff`'s `to_json()` shape); keys
-/// present in both recurse through the engine's own internal dispatch one
-/// level deeper with the key appended to the path, so nested
-/// `values_changed`/`type_changes`/further dict findings, or a nested list
-/// finding (via `array_diff`), all surface with their own deep path.
-///
-/// This always recurses, even for a key whose value is unchanged — it does
-/// not re-check [`values_equal`](super::values_equal) per key. That single top-level check is
-/// enough for the equal-inputs-of-any-depth guarantee (`docs/design/depth-budget.md`:
-/// fully equal *whole* inputs never hit the bound); re-running it per key would
-/// only rescue one specific edge case (an equal subtree nested arbitrarily
-/// deep under an unrelated shallow change) at the cost of an extra full
-/// subtree walk on every recursion step, and — because it can only be
-/// invoked here after some ancestor pair was already proven unequal — would
-/// leave [`diff_at`]'s own equal-value branches permanently unreachable.
-/// Simpler and covered by real test paths beats a cleverness that produces
-/// dead code.
-///
-/// **`threshold_to_diff_deeper` collapse.** Before walking keys at all,
-/// this mirrors `DeepDiff`'s own `_diff_dict` (diff.py): whenever the key
-/// overlap (intersection / union) between `a` and `b` is below `DeepDiff`'s
-/// default `threshold_to_diff_deeper` (`0.33`), the whole pair collapses
-/// into a single wholesale `values_changed` (old/new value the entire
-/// dict) instead of recursing key by key — see
-/// [`crate::ignore_order::is_below_threshold_to_diff_deeper`]'s doc for the
-/// exact ratio (`union_len > 1 && intersect/union < 0.33`, confirmed
-/// against real `deepdiff==9.1.0` including the exact-`0.33`-boundary case,
-/// which does *not* collapse). This applies unconditionally, at every
-/// nesting level (root included), matching `DeepDiff`'s own behavior
-/// whether or not `ignore_order` is set.
-///
-/// [`Report::merge`] documents why the per-key `report.merge(...)` calls
-/// below never collide on a *structural* path (each key here is visited
-/// once, so no traversal ever revisits the same node) — `Report` is keyed
-/// by that structural path, not by [`render_path`](crate::path::render_path)'s rendered string, which
-/// is *not* injective on adversarial keys (see [`crate::path::quote_key`]'s
-/// doc and `Report`'s module doc for how two structurally distinct paths
-/// can render identically, and how that collision is handled at
-/// serialization rather than here).
-///
-/// `path` is the single buffer shared across the whole traversal (see
-/// [`diff_at`]'s doc): each key below runs its work through [`scoped`],
-/// which pushes the key segment, runs the closure with that segment in
-/// place, then pops it again before moving to the next key — restoring
-/// `path` to exactly what it was on entry before touching any sibling key,
-/// so one key's finding never leaks a stale segment into another's path.
+/// Diffs two dicts (JSON objects) at `path`, `depth` levels deep, matching
+/// `DeepDiff`'s `_diff_dict`: keys unique to one side become
+/// `dictionary_item_removed`/`added` findings, shared keys recurse one level
+/// deeper, and a pair below
+/// [`crate::ignore_order::is_below_threshold_to_diff_deeper`]'s ratio
+/// collapses into one wholesale `values_changed` instead.
 pub(crate) fn object_diff(
     path: &mut Vec<PathSegment>,
     a: &Object,

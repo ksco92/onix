@@ -34,22 +34,10 @@ use super::{
 ///   [`positional_array_diff`] alone is used, unconditionally — `DeepDiff`
 ///   never even attempts the LCS match in this case.
 ///
-/// # Stack-footprint note (debug-build depth-guard fidelity)
+/// # Stack-footprint note
 ///
-/// The scalar-only branch's own locals (two [`Report`]s, one for each
-/// candidate) are deliberately kept in [`lcs_or_positional_array_diff`], a
-/// separate, non-tail-called function, rather than inline here — even
-/// though this function's own recursion never actually *builds* them for a
-/// list containing a dict or nested list. In an unoptimized (debug) build,
-/// a function's stack frame is sized for the union of every local it
-/// declares in its source, regardless of which branch runs at
-/// runtime — so those two extra `Report` locals inflated *every* frame of
-/// the native list-of-list recursion below, not just the scalar-list leaf
-/// that actually needs them, measurably lowering the debug-build recursion
-/// depth a default (2 MiB) thread's stack tolerates before
-/// [`Error::MaxDepthExceeded`] can even fire. Splitting them out restores
-/// depth-512 traversal on a default-size stack — see
-/// `array_diff_at_depth_512_on_a_default_stack_completes_without_crashing`.
+/// The scalar-only branch's locals live in [`lcs_or_positional_array_diff`],
+/// not here, so this frame's size stays within the depth guard's budget — see `docs/design/depth-budget.md`.
 pub(crate) fn array_diff(
     path: &mut Vec<PathSegment>,
     a: &[Value],
@@ -348,8 +336,8 @@ fn lcs_array_diff(
 /// doc.
 ///
 /// Like [`object_diff`](super::object_diff), this always recurses into same-index pairs rather
-/// than re-checking [`values_equal`](super::values_equal) first — see that function's doc for why
-/// the single top-level equality check in [`diff_with_max_depth`](super::diff_with_max_depth) is enough.
+/// than re-checking [`values_equal`](super::values_equal) first — the top-level equality check in
+/// [`diff_with_max_depth`](super::diff_with_max_depth) alone is enough (`docs/design/depth-budget.md`).
 ///
 /// Every surplus-tail clone is checked with [`check_value_depth`] first,
 /// exactly like [`object_diff`](super::object_diff)'s added/removed leaf clones: a surplus

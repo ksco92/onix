@@ -1,6 +1,5 @@
 //! Set (`set`/`frozenset`) diffing: [`set_diff`]'s membership comparison,
-//! the one report shape whose findings are bare path strings rather than
-//! path-keyed values.
+//! the only report shape whose findings are bare path strings, not values.
 
 use crate::error::Error;
 use crate::ignore_order::{IgnoreOrderMemo, set_difference};
@@ -11,29 +10,15 @@ use crate::value::SetItems;
 use super::{DiffOptions, check_value_depth, scoped};
 
 /// Diffs two sets of the same kind at `path`, `depth` levels deep, into
-/// `set_item_added`/`set_item_removed` findings.
+/// `set_item_added`/`set_item_removed` findings, mirroring `DeepDiff`'s
+/// `_diff_set` (diff.py):
 ///
-/// This mirrors `DeepDiff`'s `_diff_set` (diff.py), and the mirroring is
-/// what makes it look unlike every other comparison here:
-///
-/// - **Membership is an identity, not structural equality.** `_diff_set`
-///   builds a hashtable per side and compares the two *key sets* — so `{1}`
-///   vs `{1.0}` is a removal plus an addition while `{(1,)}` vs `{(1.0,)}`
-///   is empty. [`set_difference`]'s own doc has the full matching rule this
-///   reproduces, and the one place `onix` is deliberately more
-///   deterministic than `DeepDiff` here.
-/// - **`ignore_order` changes nothing.** A set has no order to ignore, and
-///   `DeepDiff` dispatches to this same `_diff_set` either way; confirmed
-///   against `deepdiff==9.1.0`.
-/// - **An item is never recursed into.** A differing item is reported whole,
-///   as one entry naming it, with no sub-path beneath it — so unlike every
-///   other container there is no `diff_at` recursion from here at all.
-///
-/// Each finding's path is the set's own path plus a
-/// [`PathSegment::SetItem`] carrying the item's rendered text; `depth` grows
-/// by one for that segment, and the item is checked with
-/// [`check_value_depth`] against the remaining budget before being cloned
-/// into the report, exactly like every other value-carrying finding.
+/// - Membership is identity, not structural equality: `{1}` vs `{1.0}` is
+///   add+remove, `{(1,)}` vs `{(1.0,)}` is empty (see [`set_difference`]).
+/// - `ignore_order` has no effect — a set has no order to ignore.
+/// - An item is reported whole, with no `diff_at` recursion into it.
+/// - Each item is checked with [`check_value_depth`] before being cloned
+///   into the report, at the set's path plus its own [`PathSegment::SetItem`].
 pub(crate) fn set_diff(
     path: &mut Vec<PathSegment>,
     a: &SetItems,
