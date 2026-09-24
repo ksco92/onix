@@ -1802,9 +1802,9 @@ fn worker_panic_error(panic: &(dyn std::any::Any + Send)) -> TableDiffError {
     TableDiffError::WorkerPanicked { message }
 }
 
-/// Filters `batch` by `mask` and pushes the result to `out` when it is
-/// non-empty. An empty batch is dropped because [`concat_or_empty`]'s
-/// `concat_batches` would ignore it anyway.
+/// Filters `batch` by `mask` and pushes the selection, copied out of its input
+/// batch (see [`owned_batch`]), to `out` when it keeps a row (`concat_batches`
+/// does not skip an empty batch).
 fn push_filtered(
     batch: &RecordBatch,
     mask: Vec<bool>,
@@ -7944,6 +7944,80 @@ mod fused_tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].1.num_rows(), 3);
         assert_owned(&candidates[0].1);
+    }
+
+    #[test]
+    fn right_side_spills_only_rows_whose_left_row_hash_differs() {
+        let right = view_keyed(&["a", "b"], 0);
+        let batch = right.open().unwrap().next().unwrap().unwrap();
+        let index = KeyIndex::build(vec![vec![(1, 10), (2, 20)]]).unwrap();
+        let value_schema = super::spill_schema(&right.schema, &[1]);
+        let fuse = super::RightFuse {
+            index: &index,
+            value_columns: &[1],
+            value_schema: &value_schema,
+            spill: super::SpillSink::open(1, &value_schema).unwrap(),
+            candidates: std::sync::Mutex::new(Vec::new()),
+        };
+        // Key 1 keeps its left row hash (unchanged); key 2's differs.
+        fuse.visit(0, &batch, &[(1, 10, false), (2, 21, false)])
+            .unwrap();
+        assert_eq!(fuse.spill.finish().unwrap().key_hashes, vec![vec![2]]);
+    }
+
+    #[test]
+    fn push_filtered_drops_an_empty_selection() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2]))]).unwrap();
+        let mut out = Vec::new();
+        super::push_filtered(&batch, vec![false, false], &mut out).unwrap();
+        assert!(out.is_empty());
+        super::push_filtered(&batch, vec![false, true], &mut out).unwrap();
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn unshared_keeps_a_buffer_allocated_at_most_twice_its_length_plus_64() {
+        // 100 values (800 bytes) in an allocation of exactly 2 * 800 + 64 bytes.
+        let mut values: Vec<i64> = Vec::with_capacity(208);
+        values.extend(0..100);
+        let array: ArrayRef = Arc::new(Int64Array::from(values));
+        assert_eq!(array.to_data().buffers()[0].capacity(), 1664);
+        assert!(unshared(&array).unwrap().is_none());
+    }
+
+    #[test]
+    fn spill_partitions_flush_at_the_threshold_rows() {
+        super::SPILL_FLUSH_ROWS_OVERRIDE.with(|rows| rows.set(Some(2)));
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        let sink = super::SpillSink::open(2, &schema).unwrap();
+        super::SPILL_FLUSH_ROWS_OVERRIDE.with(|rows| rows.set(None));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
+        for _ in 0..3 {
+            // Key hashes 2 and 1 route one row to each of the two partitions.
+            let mut routed = Routed::group(2, &[0, 1], &[2, 1]);
+            routed.take_values(&batch, &[0], &schema).unwrap();
+            sink.write(&routed).unwrap();
+        }
+        let spill = sink.finish().unwrap();
+        for file in &spill.files {
+            let rows: Vec<usize> = super::read_partition_batches(file)
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .collect();
+            assert_eq!(rows, vec![2, 1]);
+        }
+    }
+
+    #[test]
+    fn key_index_directory_has_a_bit_per_doubling_of_eight_rows() {
+        let part = |rows: u128| (0..rows).map(|i| (i << 100, i)).collect::<Vec<_>>();
+        let index = KeyIndex::build(vec![part(3), part(800), part(1_000)]).unwrap();
+        assert_eq!(index.bits, vec![0, 6, 6]);
     }
 
     #[test]
