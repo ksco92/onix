@@ -1,7 +1,7 @@
 """Differential fuzz test: onix's Python bindings vs real DeepDiff on live objects.
 
 Runs through `deepdiff_rs.DeepDiff`, exercising the Python-object-to-`Value`
-conversion layer. Eleven batches of seeded cases run twice (ordered and
+conversion layer. Twelve batches of seeded cases run twice (ordered and
 `ignore_order=True`), comparing `to_json()` (parsed) and `to_dict()`. The
 big-integer batch (issue #65) draws its big ints as bare scalars only, never
 inside a tuple/set, so it stays on the arbitrary-precision property under
@@ -143,7 +143,11 @@ SAME_INSTANT_TWIN_PROBABILITY: Final[float] = 0.5
 
 
 def _deterministic_members(value: set[object] | frozenset[object]) -> list[object]:
-    """Order a live set/frozenset's members deterministically, independent of `PYTHONHASHSEED`."""
+    """Order a live set/frozenset's members deterministically, independent of `PYTHONHASHSEED`.
+
+    Each member consumes one `rng` draw in iteration order, so callers use this instead of a
+    plain loop to keep a given seed reproducible.
+    """
     return canonical_set_order(value)
 
 
@@ -493,7 +497,7 @@ def test_differential_fuzz_with_big_integers_matches_real_deepdiff() -> None:
 
 
 def _gen_clustered_calendar(rng: random.Random) -> JsonValue:
-    """Pick one calendar value from a deliberately tiny window."""
+    """Pick one calendar value from a tiny window."""
     if rng.random() < DATE_PROBABILITY:
         return (CLUSTER_EPOCH + datetime.timedelta(days=rng.randrange(6))).date()
 
@@ -515,7 +519,11 @@ def _gen_clustered_calendar(rng: random.Random) -> JsonValue:
 
 
 def _generate_stringified_calendar_case(seed: int) -> tuple[JsonValue, JsonValue]:
-    """Generate one seeded case of dict-wrapped calendar values against strings of them."""
+    """Generate one seeded case of dict-wrapped calendar values against strings of them.
+
+    Wrapped in a one-key dict because two bare scalars sit above the 0.3 ignore_order pairing cutoff even for a one-character
+    difference, while the same difference inside a one-key dict sits below it -- bare scalars would never pair.
+    """
     rng = random.Random(seed)
     values = [_gen_calendar(rng) for _ in range(rng.randint(1, 5))]
     a: list[JsonValue] = [{rng.choice(DICT_KEYS): value} for value in values]
@@ -629,7 +637,11 @@ def test_differential_fuzz_with_stringified_calendar_values_matches_real_deepdif
 
 
 def _gen_hashable(rng: random.Random, depth: int) -> object:
-    """Generate a value a Python set can hold: a scalar, a tuple of them, or a frozenset."""
+    """Generate a value a Python set can hold: a scalar, a tuple of them, or a frozenset.
+
+    The frozenset is capped at one member, unlike the tuple branch: a set member renders into the finding's path, DeepDiff's in
+    hash order and onix's in canonical order, and only a single member makes the two coincide.
+    """
     if depth <= 0 or rng.random() < 0.55:
         return _gen_scalar(rng)
 
@@ -920,7 +932,10 @@ def test_differential_fuzz_with_sets_matches_real_deepdiff() -> None:
 
 
 def _gen_combined_hashable(rng: random.Random, depth: int) -> object:
-    """Generate a set member drawing from the full supported alphabet, calendar values included."""
+    """Generate a set member drawing from the full supported alphabet, calendar values included.
+
+    Caps its frozenset at one member for the same reason `_gen_hashable` does.
+    """
     if depth <= 0 or rng.random() < 0.55:
         return _gen_calendar(rng)
 
