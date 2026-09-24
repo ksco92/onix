@@ -134,7 +134,8 @@ the start and end of each sweep. The numbers come from the committed `row_diff_p
 (built with the `profile` feature; the commands are in `perf/arrow/README.md`'s "Profiling" section
 and the method in the example's module docstring). Every figure is the median of independent
 processes (**11 at 1M, 5 at full**, the file's convention), each row's median taken on its own, so a
-column's rows need not add up exactly. Each process runs a discarded warm-up diff, a timed
+column's rows need not add up exactly, and each pass's share of the net wall is likewise the median
+of the per-process shares rather than a ratio of two medians. Each process runs a discarded warm-up diff, a timed
 uninstrumented diff, and an instrumented diff:
 
 - `total wall (uninstrumented run)` is the uninstrumented diff's wall.
