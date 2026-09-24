@@ -18,13 +18,9 @@ pub(crate) const EXIT_IO_OR_PARSE_ERROR: u8 = 2;
 /// Exit code for [`onix_core::Error::MaxDepthExceeded`].
 pub(crate) const EXIT_MAX_DEPTH_EXCEEDED: u8 = 3;
 
-/// Reads `path` and parses it as JSON, returning both the raw text and the
-/// parsed value (`--timing` re-parses the same in-memory text again to
-/// measure parse cost in isolation — see [`run`]'s doc — so the raw text is
-/// returned here rather than re-read from disk a second time), or a single
-/// human-readable error message on either failure (both map to
-/// [`EXIT_IO_OR_PARSE_ERROR`] via [`read_or_bail`] — see [`run`]'s
-/// exit-code contract).
+/// Reads `path` and parses it as JSON, returning both the raw text (kept for
+/// `--timing`'s re-parse — see [`run`]'s doc) and the parsed value, or a
+/// human-readable error message on either failure.
 pub(crate) fn read_json_file(path: &str) -> Result<(String, Value), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
     let value =
@@ -32,10 +28,8 @@ pub(crate) fn read_json_file(path: &str) -> Result<(String, Value), String> {
     Ok((text, value))
 }
 
-/// Wraps [`read_json_file`] for [`run`]'s use: on failure, writes the error
-/// to `stderr` and returns [`EXIT_IO_OR_PARSE_ERROR`] as an `Err`, so `run`'s
-/// two call sites (for `a_path` and `b_path`) share one copy of this
-/// "read-or-report-and-bail" behavior instead of two identical `match` arms.
+/// Wraps [`read_json_file`] for [`run`]'s two call sites: on failure, writes
+/// the error to `stderr` and returns [`EXIT_IO_OR_PARSE_ERROR`] as an `Err`.
 fn read_or_bail(path: &str, stderr: &mut dyn Write) -> Result<(String, Value), u8> {
     read_json_file(path).map_err(|message| {
         let _ = writeln!(stderr, "error: {message}");
@@ -113,21 +107,13 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
         ignore_order: parsed.ignore_order,
     };
 
-    // The inputs were already stream-parsed straight into the compact
-    // `onix_core::Value` (see `read_json_file`), so the `--timing` window below
-    // measures the diff alone again — no boundary conversion inside it.
     let diff_start = Instant::now();
     let result = onix_core::diff_with_options(&a_value, &b_value, &opts);
     let diff_ns = diff_start.elapsed().as_nanos();
 
     if parsed.timing {
-        // Re-parses the same in-memory text read_or_bail already read
-        // (rather than reading either file from disk a second time): a
-        // second disk read would be both a TOCTOU hazard (the file could
-        // change between reads) and would need a silent fallback for a
-        // failure that "can't happen" here (the read already succeeded
-        // once above). Measuring the exact same bytes is also more
-        // representative of the parse cost the diff above actually paid.
+        // Re-parses the in-memory text read_or_bail already read, not a
+        // second disk read.
         let parse_start = Instant::now();
         let _: Result<Value, _> = serde_json::from_str(&a_text);
         let _: Result<Value, _> = serde_json::from_str(&b_text);
@@ -140,12 +126,8 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
     match result {
         Ok(report) => {
             let value = report.to_json_value();
-            // A Report's to_json_value() is built entirely from the parsed,
-            // finite-number inputs above plus our own path strings, so it can
-            // never contain NaN/Infinity — the only way serde_json::to_string
-            // can fail on a Value (every Value::Object key is always a String,
-            // so the other failure mode serde_json documents does not apply
-            // here). Safe by construction, not by luck.
+            // Built from finite-number inputs and our own path strings, so it
+            // can never contain NaN/Infinity, the only way this can fail.
             let serialized = serde_json::to_string(&value)
                 .expect("a Report's JSON value is always serializable");
             let _ = writeln!(stdout, "{serialized}");
@@ -157,14 +139,9 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
         }
     }
 }
-/// The exit code one engine error maps to.
-///
-/// [`onix_core::Error::DateTimeOutOfRange`] cannot arise here: this
-/// command's inputs are JSON files, and JSON has no datetime literal, so no
-/// value the CLI builds can be one. The arm exists because the `match` is
-/// exhaustive over the engine's error type — which is how a future variant
-/// gets noticed here rather than silently mapped — and it groups with the
-/// input-domain code rather than with the depth guard's.
+/// The exit code one engine error maps to. `DateTimeOutOfRange` cannot arise
+/// here (JSON has no datetime literal) but is matched exhaustively so a
+/// future variant is noticed here rather than silently mapped.
 pub(crate) fn exit_code_for(error: &onix_core::Error) -> u8 {
     match error {
         onix_core::Error::MaxDepthExceeded { .. } => EXIT_MAX_DEPTH_EXCEEDED,

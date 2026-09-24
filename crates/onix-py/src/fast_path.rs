@@ -1,9 +1,6 @@
 //! The fast path: `diff_json(a, b, ignore_order=False, max_depth=None)`.
-//!
-//! Parses both inputs, diffs, and serializes the result back to a JSON
-//! string entirely in Rust — no Python-object traversal at all, unlike
-//! [`crate::deepdiff::DeepDiff`]. Use this when the caller already has (or
-//! is happy to produce) JSON text rather than live Python objects.
+//! Parses, diffs and serializes back to JSON entirely in Rust, with no
+//! Python-object traversal, unlike [`crate::deepdiff::DeepDiff`].
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -11,16 +8,13 @@ use pyo3::prelude::*;
 use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 
 /// Diffs two JSON documents and returns a `DeepDiff`-compatible JSON report
-/// string (`verbose_level=2` shape) — see [`crate::deepdiff::DeepDiff`] for
-/// the equivalent live-Python-object entry point.
+/// string (`verbose_level=2` shape).
 ///
 /// # Errors
 ///
-/// - `ValueError` if `a` or `b` fails to parse as JSON.
-/// - `ValueError` if `max_depth` exceeds `deepdiff_rs.MAX_DEPTH_CEILING`
-///   (see [`crate::guard`]).
-/// - `deepdiff_rs.MaxDepthError` if diffing would recurse past `max_depth`
-///   (default `onix_core::DEFAULT_MAX_DEPTH`, 512).
+/// - `ValueError` if `a` or `b` fails to parse as JSON, or if `max_depth`
+///   exceeds `deepdiff_rs.MAX_DEPTH_CEILING` (see [`crate::guard`]).
+/// - `deepdiff_rs.MaxDepthError` if diffing would recurse past `max_depth`.
 #[pyfunction]
 #[pyo3(signature = (a, b, ignore_order=false, max_depth=None))]
 pub(crate) fn diff_json(
@@ -31,27 +25,11 @@ pub(crate) fn diff_json(
     max_depth: Option<usize>,
 ) -> PyResult<String> {
     let opts = resolve_options(max_depth, ignore_order)?;
-    // `serde_json`'s parser caps its own recursion at ~128 levels (it drives
-    // the compact value's streaming `Deserialize`), so a parsed input is never
-    // nested past that, which keeps parsing itself off the native-stack-
-    // overflow path. The diff and the report's serde serialization/drop are
-    // independently routed onto the sized worker whenever they are past the
-    // inline depth threshold.
-    // Both inputs stream-parse straight into the compact `onix_core::Value`
-    // (its `Deserialize`, driven by `serde_json`'s parser) — no intermediate
-    // `serde_json::Value` tree. If `b` fails to parse after `a` succeeded, the
-    // `?` drops `a`'s (compact) value here; its iterative `Drop` is stack-safe
-    // on the calling thread at any depth, so no sized-worker hand-off is
-    // needed for it.
+    // Stack safety: diffing, see `guard`'s doc; parsing/dropping, see `onix_core::value`'s.
     let a_value = parse_json(a, "a")?;
     let b_value = parse_json(b, "b")?;
-    // Runs the diff inline or on the sized worker depending on input depth.
     let report_value = diff_to_value(py, a_value, b_value, opts)?;
-    // Renders to JSON on the worker if the report is deep. The report itself
-    // drops here iteratively, at any depth, on the calling thread. `false`:
-    // this path parses JSON text (`serde_json`'s own parser, via `parse_json`
-    // above), which rejects a lone surrogate escape outright — see `Str`'s
-    // own doc — so `report_value` can never hold one.
+    // `false`: parsed JSON text can never hold a lone surrogate escape.
     serialize_value(py, &report_value, is_deep(&report_value), false)
 }
 

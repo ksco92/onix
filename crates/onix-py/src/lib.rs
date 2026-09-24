@@ -1,34 +1,8 @@
-//! `PyO3` bindings for `onix_core`, published to `PyPI` as `deepdiff-rs`
-//! (Python import name `deepdiff_rs`).
+//! `PyO3` bindings for `onix_core`, published to `PyPI` as `deepdiff-rs`.
 //!
-//! # Architecture
-//!
-//! Three independent entry points, each documented in full on its own
-//! items (all private — this crate is a `cdylib` consumed from Python, not
-//! a Rust library, so its module tree has no public Rust API to link
-//! against; see each module's own doc comment instead):
-//!
-//! - `deepdiff::DeepDiff` — the drop-in subset of `deepdiff.DeepDiff`:
-//!   accepts live Python objects, converts them to `onix_core`'s value
-//!   model exactly once (see `convert`'s module doc for the full
-//!   conversion table), then diffs and renders natively.
-//! - `fast_path::diff_json` — parses two JSON strings, diffs, and
-//!   serializes the result, entirely in Rust with no Python-object
-//!   traversal at all.
-//! - `arrow::diff_tables` — diffs two Arrow tables (from pyarrow, polars,
-//!   or `DuckDB`) through the Arrow C Data Interface, using the `onix_arrow`
-//!   crate. It builds no `onix_core::Value`, so it bypasses `convert`
-//!   entirely and compares Arrow schemas directly; but it reuses the shared
-//!   hardening — it raises `errors::MaxDepthError` for over-deep nesting and
-//!   runs its whole import/diff on `guard::run_on_worker`, the sized worker
-//!   thread. Its own module doc covers its error mapping.
-//!
-//! `errors` holds the Python-visible exception type (`errors::MaxDepthError`)
-//! all three entry points raise instead of ever letting
-//! `onix_core::Error::MaxDepthExceeded` — or a native stack overflow on
-//! adversarially deep input — escape as anything else. `guard` holds the
-//! shared native-stack-overflow hardening (the `max_depth` ceiling and the
-//! sized worker thread) every entry point routes its recursive work through.
+//! Three entry points — `deepdiff::DeepDiff`, `fast_path::diff_json`, and
+//! `arrow::diff_tables` — each documented on its own item; `errors` and
+//! `guard` hold the shared exception type and stack-overflow hardening.
 mod arrow;
 mod convert;
 mod deepdiff;
