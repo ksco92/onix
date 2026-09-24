@@ -98,9 +98,9 @@ The code is best read in this order, each step building on the last:
 3. [`tests/golden/README.md`](tests/golden/README.md): what the compatibility
    corpus pins down, and the documented DeepDiff quirks it deliberately does
    not chase.
-4. [`crates/onix-py/src/lib.rs`](crates/onix-py/src/lib.rs)'s module doc: how
-   the Python bindings sit on top, converting Python objects to the engine's
-   value model once
+4. [`crates/onix-py/src/deepdiff.rs`](crates/onix-py/src/deepdiff.rs)'s module
+   doc: how the Python bindings sit on top, converting Python objects to the
+   engine's value model once
    ([`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)) before
    calling the same core the CLI does.
 

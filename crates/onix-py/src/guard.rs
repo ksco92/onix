@@ -1,15 +1,12 @@
 //! Native-stack-overflow hardening shared by both Python entry points
 //! ([`crate::deepdiff::DeepDiff`] and [`crate::fast_path::diff_json`]).
 //!
-//! `onix_core`'s diff engine is natively recursive and can overflow the
-//! thread stack on deeply nested input, aborting the interpreter with an
-//! uncatchable `SIGSEGV`. Three mechanisms prevent that for the diff itself:
-//! a hard ceiling on `max_depth` ([`MAX_DEPTH_CEILING`], [`resolve_options`]),
-//! a sized worker thread for inputs nested past [`MAX_INLINE_DEPTH`]
-//! ([`diff_to_value`]), and the same worker for serializing a deep report
-//! ([`serialize_value`]). `crate::convert`'s walk from Python objects into
-//! the value model runs on the calling thread instead, so every walk
-//! reachable there must itself be iterative.
+//! `onix_core`'s diff engine is natively recursive and can overflow the thread stack on deeply
+//! nested input, aborting the interpreter with an uncatchable `SIGSEGV`. A hard ceiling on
+//! `max_depth` ([`MAX_DEPTH_CEILING`], [`resolve_options`]) plus a sized worker thread for
+//! diffing and serializing inputs nested past [`MAX_INLINE_DEPTH`] ([`diff_to_value`],
+//! [`serialize_value`]) prevent that. `crate::convert`'s walk from Python objects runs on the
+//! calling thread instead, so it must itself be iterative.
 
 use onix_core::{DEFAULT_MAX_DEPTH, DiffOptions, Value};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -39,9 +36,9 @@ const WORKER_STACK_BYTES: usize = MAX_DEPTH_CEILING * PER_LEVEL_STACK_BYTES * ST
 
 /// Depth up to which the recursive operations (the diff itself, plus
 /// serializing or dropping its result) may run directly on the calling
-/// thread; anything deeper is routed to the sized worker. Chosen to stay
-/// well within the smallest stack Python allows a caller to configure
-/// (`threading.stack_size()`, down to 512 KiB).
+/// thread; anything deeper is routed to the sized worker. Sized for thread
+/// stacks of 512 KiB and up, the common server-executor size; a thread
+/// configured near Python's 32 KiB minimum can still overflow on inline work.
 const MAX_INLINE_DEPTH: usize = 32;
 
 /// Resolves the two Python-supplied diff parameters into a [`DiffOptions`],
@@ -246,8 +243,8 @@ fn write_json_seq<'a>(items: impl Iterator<Item = &'a Value>, out: &mut String) 
 
 /// Runs `f` on a dedicated worker thread sized to run the recursive diff
 /// engine at [`MAX_DEPTH_CEILING`] without overflowing, GIL released. `f`
-/// is joined before this function returns, so a borrow it holds may outlive
-/// the call.
+/// may borrow non-`'static` data because the worker is joined before this
+/// function returns.
 ///
 /// # Errors
 ///

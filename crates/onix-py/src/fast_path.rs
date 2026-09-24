@@ -25,7 +25,7 @@ pub(crate) fn diff_json(
     max_depth: Option<usize>,
 ) -> PyResult<String> {
     let opts = resolve_options(max_depth, ignore_order)?;
-    // Stack safety for parsing, diffing and dropping: see `guard`'s module doc.
+    // Stack safety: diffing, see `guard`'s doc; parsing/dropping, see `onix_core::value`'s.
     let a_value = parse_json(a, "a")?;
     let b_value = parse_json(b, "b")?;
     let report_value = diff_to_value(py, a_value, b_value, opts)?;
