@@ -1754,15 +1754,106 @@ def test_an_unreadable_object_that_is_compared_raises_its_error() -> None:
         DeepDiff({"k": _Raising(1)}, {"k": _Raising(1)})
 
 
-def test_shadowed_class_attributes_resolve_in_one_extra_pass() -> None:
-    """Fifty classes each with a shadowed class-attribute default take at most two diff passes."""
-    classes = [type(f"C{i}", (), {"d": [i, "x"]}) for i in range(50)]
-    a, b = [], []
-    for i, cls in enumerate(classes):
-        shadowed = cls()
-        shadowed.d = [i, "x" if i % 2 else "y"]
-        a.append(shadowed)
-        b.append(cls())
+def test_a_shadowed_class_attribute_is_converted_once_per_diff() -> None:
+    """A default compared against fifty shadowing values is converted once for the diff."""
+    cls = type("Shadowed", (), {"default": _Counted(1), "__init__": lambda self, v: setattr(self, "default", _Counted(v))})
+    a = [cls(2 + i) for i in range(50)]
+    b = [cls.__new__(cls) for _ in range(50)]
+    _COUNTED_READS.clear()
     onix = DeepDiff(a, b)
+    assert _COUNTED_READS.count(1) == 1
     assert json.loads(onix.to_json()) == json.loads(RealDeepDiff(a, b, verbose_level=2).to_json())
-    assert onix._passes <= 2
+
+
+class _Good:
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        (_Raising(1), 5),
+        (_Raising(1), _Good(1)),
+        ({"k": _Raising(1)}, {"k": None}),
+        ({"k": _Raising(1)}, {}),
+        ([], [_Raising(1)]),
+    ],
+    ids=["type_change", "other_class", "dict_value_type_change", "removed", "added"],
+)
+def test_an_unreadable_object_shown_whole_renders_its_instance_attributes_like_deepdiff(a: object, b: object) -> None:
+    """An unreadable object a report shows whole renders what could be read, as DeepDiff's render does."""
+    onix = DeepDiff(a, b)
+    assert _structure(onix.to_dict()) == _structure(RealDeepDiff(a, b, verbose_level=2).to_dict())
+    assert json.loads(onix.to_json()) == json.loads(RealDeepDiff(a, b, verbose_level=2).to_json())
+
+
+class _Node2:
+    def __init__(self, v: int, me: object = None) -> None:
+        self.v = v
+        self.me = me
+
+    @property
+    def p(self) -> int:
+        if self.v == 7:
+            raise ValueError("boom")
+        return self.v
+
+
+def test_a_second_side_cycle_whose_target_is_unreadable_diffs_like_deepdiff() -> None:
+    """A second-side cycle pointing back at an unreadable object compares against it like DeepDiff."""
+    looped = _Node2(7)
+    looped.me = looped
+    holder_a = {"n": _Node2(1, 5)}
+    holder_b = {"n": _Node2(1, looped)}
+    _same_structure(holder_a, holder_b)
+
+
+def _back_pointing(size: int) -> tuple[object, object]:
+    """A root whose `size` attributes point back at it, and one whose attributes hold integers."""
+    looped = _Looped(0)
+    plain = _Looped(0)
+    for i in range(size):
+        setattr(looped, f"a{i}", looped)
+        setattr(plain, f"a{i}", i)
+    return plain, looped
+
+
+def test_attributes_pointing_back_at_the_root_render_as_stubs_like_deepdiff_reports_them() -> None:
+    """Many attributes pointing back at the root report one type change each, rendered as a bounded stub."""
+    plain, looped = _back_pointing(50)
+    _same_structure(plain, looped)
+    assert json.loads(DeepDiff(plain, looped).to_json())["type_changes"]["root.a3"]["new_value"] == {}
+
+
+def test_a_deep_shadowed_class_attribute_resolves_on_a_small_thread() -> None:
+    """A 2,000-level class attribute compared against its shadow resolves without overflowing a 512 KiB thread."""
+    holder = type("Holder", (), {"a": _nest(1, 2000)})
+    shadow = holder()
+    shadow.a = _nest(2, 2000)
+    outcome: list[object] = []
+
+    def run() -> None:
+        outcome.append(list(json.loads(DeepDiff([shadow], [holder()], max_depth=5000).to_json())["values_changed"]))
+
+    previous = threading.stack_size(512 * 1024)
+    try:
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+    finally:
+        threading.stack_size(previous)
+    assert outcome == [["root[0].a" + "[0]" * 2000]]
+
+
+def test_a_chain_of_back_pointing_ancestors_reports_one_stub_per_level() -> None:
+    """A chain whose every level points back at its parent reports a bounded type change per level."""
+    plain_root = plain = _Looped(0)
+    looped_root = looped = _Looped(0)
+    for i in range(1, 300):
+        plain.child, looped.child = _Looped(i), _Looped(i)
+        plain.child.up, looped.child.up = 0, looped
+        plain, looped = plain.child, looped.child
+    report = json.loads(DeepDiff(plain_root, looped_root, max_depth=20000).to_json())
+    assert len(report["type_changes"]) == 299
+    assert all(entry["new_value"] == {} for entry in report["type_changes"].values())

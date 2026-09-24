@@ -668,8 +668,8 @@ path from the root, so a self-referential object or a parent pointer reports
 nothing for the cycle. onix holds such a child as a cycle token: on the first side
 it reports nothing; on the second side only, it is compared as the object it
 points back at, so `a.me = 5` against `b.me = b` is a `type_changes` as in
-DeepDiff. A cycle token in an added or removed value renders as `{}` where
-DeepDiff's `to_json()` raises on the circular reference.
+DeepDiff. A cycle token a report shows renders as `{}` where DeepDiff's
+`to_json()` raises on the circular reference.
 
 ### Types DeepDiff routes to a handler onix lacks
 
@@ -694,13 +694,15 @@ converted once for the diff (a class-level `Enum` member, config object or
 class attribute onix cannot convert (ABCMeta's `_abc_impl`, a class-level lock)
 raises `TypeError` there, and one nested past `max_depth` on its own raises
 `MaxDepthError`. An `Exception` while reading an object's attributes (a property
-that raises) makes that object a token equal only to itself, hashed under
-`ignore_order` by its instance `__dict__` as `DeepHash` hashes it; one while
+that raises) keeps the object with its instance `__dict__`, equal only to itself
+and hashed under `ignore_order` by that `__dict__` as `DeepHash` hashes it: it
+raises its error only where a walk compares it with an object of its class, as
+DeepDiff does, and a report showing it whole renders that `__dict__` (DeepDiff's
+render shows only its public entries, tracked in #99). An `Exception` while
 converting what the attributes hold (an unsupported dict key, a value nested past
-`max_depth`) makes the innermost object being converted such a token. Either
-raises its error only where a report compares or shows that object, so the same
-object on both sides reports nothing; `KeyboardInterrupt` and `SystemExit` raise
-at once. A whole object in a report leaves every class
+`max_depth`) makes the innermost object being converted a token that raises
+wherever a report compares or shows it. The same object on both sides reports
+nothing either way; `KeyboardInterrupt` and `SystemExit` raise at once. A whole object in a report leaves every class
 attribute out, as DeepDiff's `to_json()` render does. A token raises a
 `TypeError` naming its path wherever a report would have to show it: as the
 compared value of a finding, or as an instance attribute of an object in the

@@ -3632,17 +3632,31 @@ fn a_first_side_cycle_token_or_one_python_object_counts_no_distance() {
     );
 }
 
+/// Diffs `a` and `b`, resolving each token whose identity `table` lists as its
+/// value; returns the report and the identities the resolver was called with.
+fn diff_resolving(
+    a: &CValue,
+    b: &CValue,
+    opts: &DiffOptions,
+    table: &[(&str, CValue)],
+) -> (crate::report::Report, Vec<String>) {
+    let mut calls = Vec::new();
+    let mut resolver = |identity: &str| {
+        calls.push(identity.to_string());
+        table
+            .iter()
+            .find(|(key, _)| *key == identity)
+            .map(|(_, value)| crate::diff::Resolution::Borrowed(value))
+    };
+    let report = crate::diff::diff_with_resolver(a, b, opts, &mut resolver).unwrap();
+    (report, calls)
+}
+
 #[test]
 fn an_opaque_token_is_compared_as_its_resolved_value() {
-    let mut resolved = crate::diff::Resolved::new();
-    resolved.insert(Box::from("1"), cv(&json!([1, 2])));
+    let table = [("1", cv(&json!([1, 2])))];
     let opts = DiffOptions::default();
-    let diff = |a: &CValue, b: &CValue| {
-        crate::diff::diff_with_resolved(a, b, &opts, &resolved)
-            .unwrap()
-            .0
-            .to_json_value()
-    };
+    let diff = |a: &CValue, b: &CValue| diff_resolving(a, b, &opts, &table).0.to_json_value();
     assert_eq!(
         (
             diff(&cv(&json!({"k": [1, 2]})), &cdict_holding(copaque("1"))),
@@ -3659,9 +3673,9 @@ fn an_opaque_token_is_compared_as_its_resolved_value() {
 
 #[test]
 fn a_resolved_token_counts_the_distance_of_its_value() {
-    let mut resolved = crate::diff::Resolved::new();
-    resolved.insert(Box::from("1"), cv(&json!([1, 2])));
-    let memo = IgnoreOrderMemo::with_resolved(&resolved);
+    let value = cv(&json!([1, 2]));
+    let mut resolver = |_: &str| Some(crate::diff::Resolution::Borrowed(&value));
+    let memo = IgnoreOrderMemo::with_resolver(&mut resolver);
     let opts = DiffOptions::default();
     assert_eq!(
         super::distance::count_diff_leaves(&copaque("1"), &cv(&json!([1, 3])), 0, &opts, &memo),
@@ -3681,23 +3695,20 @@ fn a_cycle_token_on_the_first_side_against_a_dict_reports_nothing() {
 }
 
 #[test]
-fn two_tokens_for_one_object_are_equal_without_comparing_their_resolved_value() {
-    let mut resolved = crate::diff::Resolved::new();
-    resolved.insert(
-        Box::from("1"),
-        CValue::Number(crate::value::Number::from_f64(f64::NAN)),
-    );
+fn two_tokens_for_one_object_are_equal_without_resolving_them() {
     let holding = |b: i64| {
         crate::value::Builder::new().object(vec![("token", copaque("1")), ("b", cv(&json!(b)))])
     };
-    let report = crate::diff::diff_with_resolved(
+    let (report, calls) = diff_resolving(
         &holding(1),
         &holding(2),
         &DiffOptions::default(),
-        &resolved,
-    )
-    .unwrap();
-    assert_eq!(report.0.finding_count(), 1);
+        &[(
+            "1",
+            CValue::Number(crate::value::Number::from_f64(f64::NAN)),
+        )],
+    );
+    assert_eq!((report.finding_count(), calls), (1, Vec::<String>::new()));
 }
 
 #[test]
@@ -3709,29 +3720,111 @@ fn a_token_and_an_object_whose_class_identity_matches_it_are_not_the_same_instan
 }
 
 #[test]
-fn the_diff_returns_the_tokens_it_compared_without_a_resolved_value() {
-    let mut resolved = crate::diff::Resolved::new();
-    resolved.insert(Box::from("1"), cv(&json!(1)));
-    let (_, unresolved) = crate::diff::diff_with_resolved(
-        &carr(vec![copaque("1"), copaque("2"), copaque("3")]),
-        &carr(vec![cv(&json!(1)), cv(&json!(2)), copaque("3")]),
+fn the_resolver_is_called_once_per_token_it_is_needed_for() {
+    let (report, calls) = diff_resolving(
+        &carr(vec![copaque("1"), copaque("2"), copaque("3"), copaque("1")]),
+        &carr(vec![
+            cv(&json!(1)),
+            cv(&json!(2)),
+            copaque("3"),
+            cv(&json!(1)),
+        ]),
         &DiffOptions::default(),
-        &resolved,
-    )
-    .unwrap();
-    assert_eq!(unresolved, vec![Box::from("2")]);
+        &[("1", cv(&json!(1)))],
+    );
+    assert_eq!(
+        (report.finding_count(), calls),
+        (1, vec!["1".to_string(), "2".to_string()])
+    );
 }
 
 #[test]
-fn a_second_side_cycle_token_is_compared_as_its_resolved_value() {
-    let mut resolved = crate::diff::Resolved::new();
-    resolved.insert(Box::from("9"), cv(&json!(1)));
-    let (report, unresolved) = crate::diff::diff_with_resolved(
-        &carr(vec![cv(&json!(1)), cobject_at(1, None)]),
-        &carr(vec![ccycle(), cobject_at(2, None)]),
+fn a_second_side_cycle_token_resolves_against_an_object_of_its_class_only() {
+    let (report, calls) = diff_resolving(
+        &carr(vec![cv(&json!(1)), cobject_at(2, None)]),
+        &carr(vec![ccycle(), ccycle()]),
         &DiffOptions::default(),
-        &resolved,
-    )
-    .unwrap();
-    assert_eq!((report.finding_count(), unresolved), (1, Vec::new()));
+        &[("9", cobject_at(1, None))],
+    );
+    let report = report.to_json_value();
+    assert_eq!(
+        (
+            report["type_changes"]["root[0]"]["new_value"].clone(),
+            report["values_changed"]["root[1].x"].clone(),
+            calls,
+        ),
+        (
+            json!({}),
+            json!({"new_value": 1, "old_value": 2}),
+            vec!["9".to_string()],
+        )
+    );
+}
+
+#[test]
+fn a_walk_that_meets_a_failed_object_reports_its_token() {
+    let failed = crate::value::Builder::new().failed_object(
+        vec![(
+            ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x"))),
+            cv(&json!(1)),
+        )],
+        std::sync::Arc::from("A"),
+        std::sync::Arc::from("A"),
+        26,
+    );
+    let other = cobject_at(1, Some(27));
+    let report = crate::diff::diff_with_options(&failed, &other, &DiffOptions::default())
+        .unwrap()
+        .to_value();
+    let unrendered = crate::value::rendered(&report).unwrap_err();
+    assert_eq!(
+        unrendered
+            .into_iter()
+            .map(|token| token.identity)
+            .collect::<Vec<_>>(),
+        vec!["1a".to_string()]
+    );
+}
+
+#[test]
+fn a_failed_object_equals_only_itself_and_renders_its_entries() {
+    let failed = |instance: usize| {
+        crate::value::Builder::new().failed_object(
+            vec![(
+                ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x"))),
+                cv(&json!(1)),
+            )],
+            std::sync::Arc::from("A"),
+            std::sync::Arc::from("A"),
+            instance,
+        )
+    };
+    assert_eq!(
+        (
+            failed(1) == failed(1),
+            failed(1) == failed(2),
+            crate::value::rendered(&failed(1)).unwrap().to_serde_json(),
+        ),
+        (true, false, json!({"x": 1}))
+    );
+}
+
+#[test]
+fn a_failed_object_keys_under_ignore_order_apart_from_a_dict_and_another_class() {
+    let memo = IgnoreOrderMemo::new();
+    let failed = |class: &str| {
+        crate::value::Builder::new().failed_object(
+            vec![(
+                ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x"))),
+                cv(&json!(1)),
+            )],
+            std::sync::Arc::from(class),
+            std::sync::Arc::from(class),
+            1,
+        )
+    };
+    let key = |value: &CValue| super::hash::item_key(value, &memo);
+    assert_ne!(key(&failed("A")), key(&cv(&json!({"x": 1}))));
+    assert_ne!(key(&failed("A")), key(&failed("B")));
+    assert_eq!(key(&failed("A")), key(&failed("A")));
 }

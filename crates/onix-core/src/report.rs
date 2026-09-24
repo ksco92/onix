@@ -506,7 +506,13 @@ impl Report {
     /// of whether two *different* structural paths render to the same
     /// string, which is expected on some input and handled separately at
     /// serialization time (see this module's doc).
-    pub(crate) fn merge(&mut self, other: Report) {
+    pub(crate) fn merge(&mut self, mut other: Report) {
+        // The smaller report goes into the larger, so a finding at every level
+        // of a deep chain is moved a logarithmic number of times, not once per
+        // level.
+        if other.finding_count() > self.finding_count() {
+            std::mem::swap(self, &mut other);
+        }
         for (path, entry) in other.type_changes {
             self.insert_type_change(path, entry);
         }

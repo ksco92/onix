@@ -1045,6 +1045,11 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
                 stack.extend(x.iter().zip(y.iter()));
             }
             (Value::Object(x), Value::Object(y)) => {
+                if (x.kind() == ObjectKind::Failed || y.kind() == ObjectKind::Failed)
+                    && !x.same_instance(y)
+                {
+                    return false;
+                }
                 if x.entries.len() != y.entries.len() {
                     return false;
                 }
@@ -1759,10 +1764,22 @@ pub enum ObjectKind {
     /// diff reports nothing where it is on the first side, as `DeepDiff`'s
     /// `parents_ids` skips it.
     Cycle,
-    /// A custom object whose attributes could not be read: equal only to the
-    /// same object, and hashed under `ignore_order` by its instance
-    /// `__dict__` entries.
+    /// A custom object whose attributes could not be read, holding its instance
+    /// `__dict__` entries: equal only to the same object, and walked against
+    /// an object of its class as a finding whose opaque token's identity is
+    /// its instance address in lowercase hex.
     Failed,
+}
+
+impl ObjectKind {
+    /// The kind whose walk this kind shares: a failed object is walked as the
+    /// custom object it is.
+    fn walked(self) -> ObjectKind {
+        match self {
+            ObjectKind::Failed => ObjectKind::CustomObject,
+            kind => kind,
+        }
+    }
 }
 
 /// A JSON object: key-sorted, exactly-sized entries backed by a single
@@ -1918,6 +1935,12 @@ impl Object {
         self
     }
 
+    /// The address of the Python object a custom object was converted from.
+    #[must_use]
+    pub fn instance(&self) -> Option<usize> {
+        self.class.as_ref().and_then(|class| class.instance)
+    }
+
     /// Whether this is an [`ObjectKind::Cycle`] token.
     #[must_use]
     pub fn is_cycle(&self) -> bool {
@@ -1970,9 +1993,21 @@ impl Object {
     pub fn same_class(&self, other: &Object) -> bool {
         match (self.class.as_ref(), other.class.as_ref()) {
             (None, None) => true,
-            (Some(a), Some(b)) => a.kind == b.kind && a.identity == b.identity,
+            (Some(a), Some(b)) => a.kind.walked() == b.kind.walked() && a.identity == b.identity,
             _ => false,
         }
+    }
+
+    /// The opaque token a walk reports for an [`ObjectKind::Failed`] object,
+    /// `None` for anything else.
+    #[must_use]
+    pub fn failure_token(&self) -> Option<Value> {
+        let class = self
+            .class
+            .as_ref()
+            .filter(|class| class.kind == ObjectKind::Failed)?;
+        let identity = format!("{:x}", class.instance?);
+        Some(Builder::new().opaque(class.name.clone(), Arc::from(identity)))
     }
 
     /// Whether these entries are a `dict`'s items or a custom object's
@@ -1991,13 +2026,13 @@ impl Object {
         matches!(self.kind(), ObjectKind::CustomObject)
     }
 
-    /// The identity of an [`ObjectKind::Opaque`] or [`ObjectKind::Failed`]
-    /// token, which a report cannot show, `None` otherwise.
+    /// The identity of an [`ObjectKind::Opaque`] token, which a report cannot
+    /// show, `None` otherwise.
     #[must_use]
     pub fn opaque_identity(&self) -> Option<&str> {
         self.class
             .as_ref()
-            .filter(|class| matches!(class.kind, ObjectKind::Opaque | ObjectKind::Failed))
+            .filter(|class| class.kind == ObjectKind::Opaque)
             .map(|class| class.identity.as_ref())
     }
 

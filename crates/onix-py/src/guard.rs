@@ -9,7 +9,7 @@
 //! it ([`serialize_value`]), prevent that. `crate::convert`'s walk from Python
 //! objects runs on the calling thread instead, so it must itself be iterative.
 
-use onix_core::diff::Resolved;
+use onix_core::diff::Resolver;
 use onix_core::{DEFAULT_MAX_DEPTH, DiffOptions, Value};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -71,27 +71,29 @@ pub(crate) fn resolve_options(
     })
 }
 
-/// Diffs `a` and `b`, comparing a token as the value `resolved` maps it to,
-/// and renders the report to a [`Value`] (see [`onix_core::Report::to_value`]),
-/// with the identities of the tokens compared with no value in `resolved`;
-/// the natively-recursive diff runs on the sized worker thread when an input
-/// or a resolved value is nested past [`MAX_INLINE_DEPTH`], inline otherwise.
+/// Diffs `a` and `b`, comparing a token as the value `resolver` returns for it
+/// (see [`onix_core::diff::diff_with_resolver`]), and renders the report to a
+/// [`Value`]; the natively-recursive diff runs on the sized worker thread when
+/// `deep` is set or an input is nested past [`MAX_INLINE_DEPTH`], inline
+/// otherwise.
 ///
 /// # Errors
 ///
 /// `deepdiff_rs.MaxDepthError` if the diff would exceed `opts.max_depth`.
-pub(crate) fn diff_to_value(
+pub(crate) fn diff_to_value<'r>(
     py: Python<'_>,
     a: &Value,
     b: &Value,
     opts: DiffOptions,
-    resolved: &Resolved,
-) -> PyResult<(Value, Vec<Box<str>>)> {
-    let diff = || {
-        onix_core::diff::diff_with_resolved(a, b, &opts, resolved)
-            .map(|(report, unresolved)| (report.to_value(), unresolved))
+    resolver: &'r mut Resolver<'r>,
+    deep: bool,
+) -> PyResult<Value> {
+    let mut resolver = Some(resolver);
+    let mut diff = move || {
+        let resolver = resolver.take().expect("the diff runs once");
+        onix_core::diff::diff_with_resolver(a, b, &opts, resolver).map(|report| report.to_value())
     };
-    if is_deep(a) || is_deep(b) || resolved.values().any(is_deep) {
+    if deep || is_deep(a) || is_deep(b) {
         run_on_worker(py, diff)?
     } else {
         diff()

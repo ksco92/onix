@@ -317,9 +317,16 @@ pub(crate) fn count_diff_leaves(
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
 ) -> usize {
-    let Some((a, b)) = memo.substitute(a, b) else {
+    if IgnoreOrderMemo::skips(a, b) {
         return 0;
-    };
+    }
+    let resolved_a = memo.resolve(a, b, true);
+    let resolved_b = memo.resolve(b, resolved_a.as_deref().unwrap_or(a), true);
+    if resolved_a.is_some() || resolved_b.is_some() {
+        let a = resolved_a.as_deref().unwrap_or(a);
+        let b = resolved_b.as_deref().unwrap_or(b);
+        return count_diff_leaves(a, b, depth, opts, memo);
+    }
     match (a, b) {
         (Value::Null, Value::Null) => 0,
         (Value::Bool(x), Value::Bool(y)) => usize::from(x != y),

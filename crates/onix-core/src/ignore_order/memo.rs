@@ -128,9 +128,9 @@
 //! deterministic.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use crate::diff::Resolved;
+use crate::diff::{Resolution, Resolver};
 use crate::value::Value;
 
 use super::fxhash::HashMap;
@@ -204,11 +204,10 @@ pub(crate) struct IgnoreOrderMemo<'r> {
     /// keyed by each of the dict's own keys' `ItemKey` trees (a `tuple`
     /// dict key included), not a cheap string ordering.
     member_content: RefCell<BTreeMap<MemberContent, RepId>>,
-    /// The values the diff compares in place of tokens (see
-    /// [`crate::diff::diff_with_resolved`]), and the identities of the tokens
-    /// it compared with no value there.
-    resolved: &'r Resolved,
-    unresolved: RefCell<BTreeSet<Box<str>>>,
+    /// The caller's resolver (see [`crate::diff::diff_with_resolver`]), and
+    /// what it returned for each token identity it was called with.
+    resolver: RefCell<Option<&'r mut Resolver<'r>>>,
+    resolutions: RefCell<BTreeMap<Box<str>, Option<Resolution<'r>>>>,
     enabled: bool,
     /// Total number of times [`Self::put`] has actually run — every distance
     /// *recomputation*, not just the distinct entries it leaves behind (a
@@ -221,10 +220,7 @@ pub(crate) struct IgnoreOrderMemo<'r> {
     puts: std::cell::Cell<usize>,
 }
 
-/// The empty table a memo compares opaque tokens against by default.
-static NO_RESOLVED: Resolved = BTreeMap::new();
-
-impl IgnoreOrderMemo<'_> {
+impl<'r> IgnoreOrderMemo<'r> {
     /// A live cache (production path).
     pub(crate) fn new() -> Self {
         Self {
@@ -233,8 +229,8 @@ impl IgnoreOrderMemo<'_> {
             tuple_digests: RefCell::new(Vec::new()),
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),
-            resolved: &NO_RESOLVED,
-            unresolved: RefCell::new(BTreeSet::new()),
+            resolver: RefCell::new(None),
+            resolutions: RefCell::new(BTreeMap::new()),
             enabled: true,
             #[cfg(test)]
             puts: std::cell::Cell::new(0),
@@ -252,52 +248,63 @@ impl IgnoreOrderMemo<'_> {
             tuple_digests: RefCell::new(Vec::new()),
             node_table: RefCell::new(BTreeMap::new()),
             member_content: RefCell::new(BTreeMap::new()),
-            resolved: &NO_RESOLVED,
-            unresolved: RefCell::new(BTreeSet::new()),
+            resolver: RefCell::new(None),
+            resolutions: RefCell::new(BTreeMap::new()),
             enabled: false,
             puts: std::cell::Cell::new(0),
         }
     }
 
-    /// A live memo that compares an opaque token by the value `resolved` maps
-    /// its identity to.
-    pub(crate) fn with_resolved(resolved: &Resolved) -> IgnoreOrderMemo<'_> {
+    /// A live memo that compares a token as the value `resolver` returns for
+    /// it.
+    pub(crate) fn with_resolver(resolver: &'r mut Resolver<'r>) -> Self {
         IgnoreOrderMemo {
-            resolved,
+            resolver: RefCell::new(Some(resolver)),
             ..IgnoreOrderMemo::new()
         }
     }
 
-    /// The pair `(a, b)` as the diff compares it, each token with a resolved
-    /// value replaced by that value, or `None` when the pair reports nothing:
-    /// the identical Python object on both sides, or a cycle token on the
-    /// first, as `DeepDiff`'s `t1 is t2` and `parents_ids` checks skip them.
-    pub(crate) fn substitute<'v>(
-        &'v self,
-        a: &'v Value,
-        b: &'v Value,
-    ) -> Option<(&'v Value, &'v Value)> {
-        let resolve = |value: &'v Value| match value {
-            Value::Object(map) => match map.token_identity() {
-                Some(identity) => self.resolved.get(identity).unwrap_or_else(|| {
-                    self.unresolved.borrow_mut().insert(Box::from(identity));
-                    value
-                }),
-                None => value,
-            },
-            _ => value,
-        };
+    /// Whether the pair `(a, b)` reports nothing without a walk: the identical
+    /// Python object on both sides, or a cycle token on the first, as
+    /// `DeepDiff`'s `t1 is t2` and `parents_ids` checks skip them.
+    pub(crate) fn skips(a: &Value, b: &Value) -> bool {
         match (a, b) {
-            (Value::Object(x), Value::Object(y)) if x.same_instance(y) => None,
-            (Value::Object(x), _) if x.is_cycle() => None,
-            _ => Some((resolve(a), resolve(b))),
+            (Value::Object(x), Value::Object(y)) if x.same_instance(y) => true,
+            (Value::Object(x), _) => x.is_cycle(),
+            _ => false,
         }
     }
 
-    /// The identities of the tokens the diff compared with no resolved value,
-    /// in order.
-    pub(crate) fn into_unresolved(self) -> Vec<Box<str>> {
-        self.unresolved.into_inner().into_iter().collect()
+    /// The value the diff compares in place of the token `value` against
+    /// `other`, `None` when `value` is not a token or stays one. A cycle token
+    /// resolves only against an object of the class it points back at, unless
+    /// `any_other` is set.
+    pub(crate) fn resolve(
+        &self,
+        value: &Value,
+        other: &Value,
+        any_other: bool,
+    ) -> Option<Resolution<'r>> {
+        let Value::Object(token) = value else {
+            return None;
+        };
+        let identity = token.token_identity()?;
+        let known = self.resolutions.borrow().get(identity).cloned();
+        let resolution = known.unwrap_or_else(|| {
+            let resolution = self
+                .resolver
+                .borrow_mut()
+                .as_mut()
+                .and_then(|resolver| resolver(identity));
+            self.resolutions
+                .borrow_mut()
+                .insert(Box::from(identity), resolution.clone());
+            resolution
+        })?;
+        if token.is_cycle() && !any_other && !crate::value::same_class(&resolution, other) {
+            return None;
+        }
+        Some(resolution)
     }
 
     /// Whether distance memoization is live for this run. A candidate pair is

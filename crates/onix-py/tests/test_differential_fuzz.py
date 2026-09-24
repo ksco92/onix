@@ -3,9 +3,10 @@
 Runs through `deepdiff_rs.DeepDiff`, exercising the Python-object-to-`Value`
 conversion layer. Fifteen batches of seeded cases run twice (ordered and
 `ignore_order=True`), comparing `to_json()` (parsed) and `to_dict()`; the
-custom-object batch compares `to_json()` alone and the enum and class-attribute
-batches the report structure alone, since DeepDiff renders a whole object from other views. The
-big-integer batch (issue #65) draws its big ints as bare scalars only, never
+custom-object batch compares `to_json()` alone and the enum and
+class-attribute batches the report structure alone, since DeepDiff renders a
+whole object from other views. The big-integer batch (issue #65) draws its
+big ints as bare scalars only, never
 inside a tuple/set, so it stays on the arbitrary-precision property under
 test rather than surfacing the pre-existing container-hashing divergence a
 biased alphabet inside a hashable container would otherwise trigger.

@@ -838,7 +838,7 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
                 .map(|(k, v)| (object_key_item_key(k, memo), item_key(v, memo)))
                 .collect();
             // A `dict` subclass keys as a bare `dict`, as `DeepHash` digests it.
-            let key = if map.is_custom_object() {
+            let key = if matches!(map.kind(), ObjectKind::CustomObject | ObjectKind::Failed) {
                 ItemKey::Object(Box::from(map.type_name().unwrap_or_default()), attrs)
             } else {
                 ItemKey::Dict(attrs)

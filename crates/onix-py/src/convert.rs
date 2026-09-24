@@ -195,7 +195,7 @@
 //! intentionally a little stricter than `onix_core::diff_with_max_depth`'s
 //! guarantee that two *equal* inputs of any depth always diff cleanly,
 //! because equality can't be known yet at conversion time.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use num_bigint::BigInt;
@@ -222,6 +222,7 @@ use pyo3::types::{
 };
 
 use crate::errors::MaxDepthError;
+use crate::guard::is_deep;
 
 /// A Python sequence being walked: a `list` or a `tuple`. The two differ
 /// only in their iterator type and in which [`CValue`] the finished items
@@ -566,7 +567,7 @@ fn classify_other<'py>(
         let identity = identity_of(current);
         held.resolvable
             .insert(identity.clone(), current.clone().unbind());
-        held.needs_render = true;
+        held.cycle_targets.insert(identity.clone());
         return Ok(Step::Done(
             builder.cycle(class_name(current), Arc::from(identity)),
         ));
@@ -589,45 +590,61 @@ fn classify_other<'py>(
 #[pyclass(frozen)]
 struct ClassAttribute(Py<PyAny>);
 
-/// The value the token `identity`, found at `path` in a report, stands for:
-/// its class attribute or cycle target converted by its own walk. A token for
-/// an object whose conversion failed raises that error; a token for anything
-/// else, or an object that cannot be converted, raises the refusal; one nested
-/// past `max_depth` on its own raises `MaxDepthError`.
+/// The value the class-attribute or cycle token `identity` stands for, its
+/// object converted by its own walk once per diff; `None` for any other token
+/// or when the conversion fails, which [`token_error`] then reports. A value
+/// too deep for the calling thread while `inline` is kept for a rerun on the
+/// sized worker.
 pub(crate) fn resolve_token(
+    py: Python<'_>,
+    identity: &str,
+    held: &mut Held,
+    inline: bool,
+) -> Option<Arc<CValue>> {
+    if let Some(resolved) = held.resolved.get(identity) {
+        return resolved.clone().filter(|value| !(inline && is_deep(value)));
+    }
+    let object = held.resolvable.get(identity)?.clone_ref(py);
+    let resolved = match to_value(object.bind(py), held.max_depth, held) {
+        Ok((converted, saw_wtf8)) => {
+            held.saw_wtf8 |= saw_wtf8;
+            Some(Arc::new(converted))
+        }
+        Err(err) => {
+            held.resolution_errors.insert(identity.to_string(), err);
+            None
+        }
+    };
+    held.resolved.insert(identity.to_string(), resolved.clone());
+    if inline && resolved.as_deref().is_some_and(is_deep) {
+        held.needs_worker = true;
+        return None;
+    }
+    resolved
+}
+
+/// The error a report raises for the token `identity` it cannot show at
+/// `path`: the error converting its object, a `MaxDepthError` for a class
+/// attribute nested past `max_depth` on its own, or the refusal.
+pub(crate) fn token_error(
     py: Python<'_>,
     identity: &str,
     type_name: &str,
     path: &str,
-    held: &mut Held,
-) -> PyResult<CValue> {
+    held: &Held,
+) -> PyErr {
     if let Some(err) = held.failures.get(identity) {
-        return Err(err.clone_ref(py));
+        return err.clone_ref(py);
     }
-    let Some(value) = held.resolvable.get(identity).map(|v| v.clone_ref(py)) else {
-        return Err(opaque_error(type_name, path));
-    };
-    match to_value(value.bind(py), held.max_depth, held) {
-        Ok((converted, saw_wtf8)) => {
-            held.saw_wtf8 |= saw_wtf8;
-            Ok(converted)
-        }
-        Err(err) if err.is_instance_of::<MaxDepthError>(py) => {
-            Err(MaxDepthError::new_err(format!(
-                "the {type_name} class attribute at {path} is nested past the configured max_depth \
+    match held.resolution_errors.get(identity) {
+        Some(err) if err.is_instance_of::<MaxDepthError>(py) => MaxDepthError::new_err(format!(
+            "the {type_name} class attribute at {path} is nested past the configured max_depth \
              ({})",
-                held.max_depth,
-            )))
-        }
-        Err(err) if err.is_instance_of::<PyException>(py) => Err(opaque_error(type_name, path)),
-        Err(err) => Err(err),
+            held.max_depth,
+        )),
+        Some(err) if !err.is_instance_of::<PyException>(py) => err.clone_ref(py),
+        _ => opaque_error(type_name, path),
     }
-}
-
-/// Whether the token `identity` stands for an object [`resolve_token`] can
-/// convert.
-pub(crate) fn is_resolvable(held: &Held, identity: &str) -> bool {
-    held.resolvable.contains_key(identity)
 }
 
 /// The identity string an opaque token for `obj` carries: its address.
@@ -637,32 +654,51 @@ fn identity_of(obj: &Bound<'_, PyAny>) -> String {
 
 /// What one diff's conversions share: every Python object whose address a
 /// conversion keys into an identity, held so no address is reused while the
-/// diff runs; the objects class-attribute and cycle tokens stand for, and the
-/// errors of the objects whose conversion failed, by identity; the custom
-/// objects on the current walk's path; each `Enum` class's length; and
-/// whether the report needs [`render_report`].
+/// diff runs; by identity, the objects class-attribute and cycle tokens stand
+/// for, their conversions and conversion errors, and the errors of the objects
+/// whose conversion failed; the custom objects on the current walk's path; each
+/// `Enum` class's length; the identities cycle tokens point back at; and
+/// whether the report needs [`render_report`] or a resolved value the sized
+/// worker.
 pub(crate) struct Held {
     objects: Vec<Py<PyAny>>,
     resolvable: HashMap<String, Py<PyAny>>,
+    pub(crate) cycle_targets: HashSet<String>,
+    resolved: HashMap<String, Option<Arc<CValue>>>,
+    resolution_errors: HashMap<String, PyErr>,
     failures: HashMap<String, PyErr>,
     on_path: Vec<usize>,
     enum_lengths: HashMap<usize, usize>,
     max_depth: usize,
     pub(crate) saw_wtf8: bool,
     pub(crate) needs_render: bool,
+    pub(crate) needs_worker: bool,
 }
 
 impl Held {
+    /// An error converting a token's object that is not an `Exception`
+    /// (`KeyboardInterrupt`, `SystemExit`), which the diff could not raise.
+    pub(crate) fn interrupt(&self, py: Python<'_>) -> Option<PyErr> {
+        self.resolution_errors
+            .values()
+            .find(|err| !err.is_instance_of::<PyException>(py))
+            .map(|err| err.clone_ref(py))
+    }
+
     pub(crate) fn new(max_depth: usize) -> Self {
         Self {
             objects: Vec::new(),
             resolvable: HashMap::new(),
+            cycle_targets: HashSet::new(),
+            resolved: HashMap::new(),
+            resolution_errors: HashMap::new(),
             failures: HashMap::new(),
             on_path: Vec::new(),
             enum_lengths: HashMap::new(),
             max_depth,
             saw_wtf8: false,
             needs_render: false,
+            needs_worker: false,
         }
     }
 }
@@ -823,7 +859,7 @@ fn failed_object_step<'py>(
 ) -> PyResult<Step<'py>> {
     let py = obj.py();
     let identity = identity_of(obj);
-    held.failures.entry(identity.clone()).or_insert(err);
+    held.failures.entry(identity).or_insert(err);
     held.needs_render = true;
     held.objects.push(obj.clone().unbind());
     let storage = PyDict::new(py);
@@ -842,13 +878,8 @@ fn failed_object_step<'py>(
             }
         }
     }
-    let class = Box::new(PyClass {
-        name: class_name(obj),
-        identity: Arc::from(identity),
-        lengths: ObjectLengths::default(),
-        class_attributes: Vec::new(),
-        instance: Some(obj.as_ptr() as usize),
-    });
+    let mut class = Box::new(py_class(obj, ObjectLengths::default(), held));
+    class.instance = Some(obj.as_ptr() as usize);
     let mut iter = storage.iter();
     Ok(match next_dict_entry(&mut iter, path, builder)? {
         None => Step::Done(finish_object(
@@ -1886,10 +1917,8 @@ fn unprocessed_error(obj: &Bound<'_, PyAny>, path: &[PathSegment], err: &PyErr) 
 }
 
 /// `report` as it renders, each finding's value through
-/// [`onix_core::value::rendered`]. `Err` lists every token left in the render,
-/// and, when `with_cycles` is set, every cycle token that is the compared value
-/// of a finding.
-pub(crate) fn render_report(report: &CValue, with_cycles: bool) -> Result<CValue, Vec<Unrendered>> {
+/// [`onix_core::value::rendered`]. `Err` lists every token left in the render.
+pub(crate) fn render_report(report: &CValue) -> Result<CValue, Vec<Unrendered>> {
     let CValue::Object(categories) = report else {
         return Ok(report.clone());
     };
@@ -1912,21 +1941,10 @@ pub(crate) fn render_report(report: &CValue, with_cycles: bool) -> Result<CValue
                 CValue::Object(entry) if compared => {
                     let mut fields = Vec::with_capacity(entry.len());
                     for (field, value) in entry {
-                        let value = if !matches!(field.as_str(), Some("old_value" | "new_value")) {
-                            value.clone()
-                        } else if let CValue::Object(token) = value
-                            && with_cycles
-                            && token.is_cycle()
-                        {
-                            unrendered.push(Unrendered {
-                                path: path.clone(),
-                                type_name: token.type_name().unwrap_or_default().to_string(),
-                                identity: token.token_identity().unwrap_or_default().to_string(),
-                                cycle: true,
-                            });
-                            value.clone()
-                        } else {
+                        let value = if matches!(field.as_str(), Some("old_value" | "new_value")) {
                             rendered_at(value, &path, &mut unrendered)
+                        } else {
+                            value.clone()
                         };
                         fields.push((field.clone(), value));
                     }
@@ -1959,19 +1977,17 @@ fn rendered_at(value: &CValue, path: &str, unrendered: &mut Vec<Unrendered>) -> 
             ),
             type_name: token.type_name,
             identity: token.identity,
-            cycle: false,
         }));
         value.clone()
     })
 }
 
-/// A token left in a rendered report: its full path, its type name, its
-/// identity, and whether it is a cycle token.
+/// A token left in a rendered report: its full path, its type name and its
+/// identity.
 pub(crate) struct Unrendered {
     pub(crate) path: String,
     pub(crate) type_name: String,
     pub(crate) identity: String,
-    pub(crate) cycle: bool,
 }
 
 /// The error for an object that reached a set member, or anything nested
@@ -2340,4 +2356,24 @@ fn number_to_pyobject(py: Python<'_>, n: &CNumber) -> PyResult<Py<PyAny>> {
     n.as_f64()
         .expect("a non-integer Number is always an f64")
         .into_py_any(py)
+}
+
+/// Every custom object in `values` by the identity a cycle token pointing back
+/// at it carries, for the resolver to lend the diff.
+pub(crate) fn objects_by_identity<'v>(values: &[&'v CValue]) -> HashMap<String, &'v CValue> {
+    let mut index = HashMap::new();
+    let mut stack: Vec<&CValue> = values.to_vec();
+    while let Some(value) = stack.pop() {
+        match value {
+            CValue::Object(map) => {
+                if let Some(instance) = map.instance() {
+                    index.insert(format!("{instance:x}"), value);
+                }
+                stack.extend(map.values());
+            }
+            CValue::Array(items) | CValue::Tuple(items) => stack.extend(items.iter()),
+            _ => {}
+        }
+    }
+    index
 }

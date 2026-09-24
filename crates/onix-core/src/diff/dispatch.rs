@@ -123,10 +123,10 @@ pub(crate) fn diff_at(
 }
 
 /// [`diff_at`] for a pair with a custom object or token on either side, kept
-/// off its frame:
-/// nothing for the identical Python object or a cycle token, the resolved
-/// value of an opaque token through [`diff_at`] again, else the object walk
-/// or a `type_changes`.
+/// off its frame: nothing for a pair [`IgnoreOrderMemo::skips`], a resolved
+/// token's value through [`diff_at`] again, a finding carrying a failed
+/// object's token where a walk meets it, else the object walk or a
+/// `type_changes`.
 #[inline(never)]
 fn object_pair_diff(
     path: &mut Vec<PathSegment>,
@@ -136,15 +136,29 @@ fn object_pair_diff(
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
-    let Some((resolved_a, resolved_b)) = memo.substitute(a, b) else {
+    if IgnoreOrderMemo::skips(a, b) {
         return Ok(Report::new());
-    };
-    if !std::ptr::eq(resolved_a, a) || !std::ptr::eq(resolved_b, b) {
-        return diff_at(path, resolved_a, resolved_b, depth, opts, memo);
+    }
+    let resolved_a = memo.resolve(a, b, false);
+    let resolved_b = memo.resolve(b, resolved_a.as_deref().unwrap_or(a), false);
+    if resolved_a.is_some() || resolved_b.is_some() {
+        let a = resolved_a.as_deref().unwrap_or(a);
+        let b = resolved_b.as_deref().unwrap_or(b);
+        return diff_at(path, a, b, depth, opts, memo);
     }
     match (a, b) {
         (Value::Object(old), Value::Object(new)) if same_class(a, b) => {
-            object_diff(path, old, new, depth, opts, memo)
+            match (old.failure_token(), new.failure_token()) {
+                (None, None) => object_diff(path, old, new, depth, opts, memo),
+                (old_token, new_token) => scalar_diff(
+                    path,
+                    false,
+                    old_token.as_ref().unwrap_or(a),
+                    new_token.as_ref().unwrap_or(b),
+                    depth,
+                    opts.max_depth,
+                ),
+            }
         }
         _ => type_change_report(path, a, b, depth, opts.max_depth),
     }

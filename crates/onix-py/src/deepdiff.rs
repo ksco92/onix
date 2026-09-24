@@ -4,16 +4,12 @@
 //! doc for the full, documented MVP surface.
 
 use onix_core::Value;
+use onix_core::diff::Resolution;
 use pyo3::prelude::*;
 
-use onix_core::diff::Resolved;
-
-use std::collections::BTreeSet;
-
-use pyo3::exceptions::PyException;
-
 use crate::convert::{
-    Held, is_resolvable, opaque_error, render_report, resolve_token, to_value, value_to_pyobject,
+    Held, objects_by_identity, render_report, resolve_token, to_value, token_error,
+    value_to_pyobject,
 };
 use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, serialize_value};
 
@@ -83,10 +79,6 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, seria
 /// corresponds to).
 #[pyclass(module = "deepdiff_rs")]
 pub(crate) struct DeepDiff {
-    /// How many diffs the report took: one, plus one per round of tokens
-    /// resolved.
-    #[pyo3(get, name = "_passes")]
-    passes: usize,
     report_value: Value,
     /// Whether `report_value` is nested past the inline-depth threshold, and
     /// so must be rendered to JSON on the sized worker thread rather than the
@@ -128,74 +120,58 @@ impl DeepDiff {
         // carry a tuple all the way out to `to_dict`.
         // A class attribute stays an opaque token until the report compares
         // it; each such token is converted and the diff run again.
-        let mut resolved = Resolved::new();
-        let mut attempted = BTreeSet::new();
-        let mut passes = 0;
-        let render = |report: &Value, with_cycles: bool| {
-            if is_deep(report) {
-                run_on_worker(py, || render_report(report, with_cycles))
-            } else {
-                Ok(render_report(report, with_cycles))
-            }
-        };
+        // A class-attribute or cycle token is resolved by the diff the first
+        // time it compares one: a cycle target is lent from the inputs, a
+        // class attribute converted once under the GIL.
+        let mut index = None;
+        let mut deep = false;
         let report_value = loop {
-            passes += 1;
-            let (report_value, unresolved) = diff_to_value(py, &a, &b, opts, &resolved)?;
-            let rendered = if held.needs_render {
-                Some(render(&report_value, true)?)
-            } else {
-                None
+            let report_value = {
+                let held = &mut held;
+                let index = &mut index;
+                let (a, b) = (&a, &b);
+                let mut resolver = |identity: &str| {
+                    if held.cycle_targets.contains(identity) {
+                        let index = index.get_or_insert_with(|| objects_by_identity(&[a, b]));
+                        if let Some(value) = index.get(identity) {
+                            return Some(Resolution::Borrowed(value));
+                        }
+                    }
+                    Python::attach(|py| resolve_token(py, identity, held, !deep))
+                        .map(Resolution::Shared)
+                };
+                diff_to_value(py, a, b, opts, &mut resolver, deep)?
             };
-            let mut progressed = false;
-            for token in rendered.iter().filter_map(|r| r.as_ref().err()).flatten() {
-                if is_resolvable(&held, &token.identity) && attempted.insert(token.identity.clone())
-                {
-                    let value = resolve_token(
+            if held.needs_worker && !deep {
+                deep = true;
+                continue;
+            }
+            break report_value;
+        };
+        if let Some(err) = held.interrupt(py) {
+            return Err(err);
+        }
+        let report_value = if held.needs_render {
+            let rendered = if is_deep(&report_value) {
+                run_on_worker(py, || render_report(&report_value))?
+            } else {
+                render_report(&report_value)
+            };
+            match rendered {
+                Ok(rendered) => rendered,
+                Err(tokens) => {
+                    let token = &tokens[0];
+                    return Err(token_error(
                         py,
                         &token.identity,
                         &token.type_name,
                         &token.path,
-                        &mut held,
-                    )?;
-                    resolved.insert(Box::from(token.identity.as_str()), value);
-                    progressed = true;
+                        &held,
+                    ));
                 }
             }
-            for identity in unresolved {
-                if is_resolvable(&held, &identity) && attempted.insert(identity.to_string()) {
-                    match resolve_token(py, &identity, "", "", &mut held) {
-                        Ok(value) => {
-                            resolved.insert(identity, value);
-                            progressed = true;
-                        }
-                        Err(err) if err.is_instance_of::<PyException>(py) => {}
-                        Err(err) => return Err(err),
-                    }
-                }
-            }
-            if progressed {
-                continue;
-            }
-            match rendered {
-                None => break report_value,
-                Some(Ok(rendered)) => break rendered,
-                Some(Err(tokens)) => {
-                    if let Some(token) = tokens.iter().find(|token| !token.cycle) {
-                        return Err(resolve_token(
-                            py,
-                            &token.identity,
-                            &token.type_name,
-                            &token.path,
-                            &mut held,
-                        )
-                        .err()
-                        .unwrap_or_else(|| opaque_error(&token.type_name, &token.path)));
-                    }
-                    break render(&report_value, false)?.ok().expect(
-                        "a report whose only tokens are cycle tokens renders without them",
-                    );
-                }
-            }
+        } else {
+            report_value
         };
         let report_is_deep = is_deep(&report_value);
         // A conservative upper bound: the report only ever carries values
@@ -205,7 +181,6 @@ impl DeepDiff {
         let may_have_wtf8 = a_may_have_wtf8 || b_may_have_wtf8 || held.saw_wtf8;
 
         Ok(Self {
-            passes,
             report_value,
             report_is_deep,
             may_have_wtf8,

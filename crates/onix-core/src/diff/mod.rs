@@ -180,7 +180,7 @@
 //!
 //! - `options` — the public API surface: [`DiffOptions`], [`DEFAULT_MAX_DEPTH`],
 //!   and the four entry points ([`diff()`], [`diff_with_options()`],
-//!   [`diff_with_max_depth()`], [`diff_with_resolved()`]).
+//!   [`diff_with_max_depth()`], [`diff_with_resolver()`]).
 //! - `dispatch` — the recursive traversal core: `diff_at` (the type-dispatch
 //!   switch every recursion step goes through), the depth-guard invariants
 //!   (`check_traversal_depth`, `check_value_depth` — see this doc's
@@ -218,8 +218,8 @@ mod set;
 mod tests;
 
 pub use options::{
-    DEFAULT_MAX_DEPTH, DiffOptions, Resolved, diff, diff_with_max_depth, diff_with_options,
-    diff_with_resolved,
+    DEFAULT_MAX_DEPTH, DiffOptions, Resolution, Resolver, diff, diff_with_max_depth,
+    diff_with_options, diff_with_resolver,
 };
 
 pub(crate) use array::array_diff;
