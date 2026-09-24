@@ -107,12 +107,28 @@ helps nor hurts it measurably; the wide fixture (nearly every row changed) is wh
 ## Fused reads (issue #90)
 
 `deepdiff-rs` 0.13.0 decodes the right input once and the left twice on the parallel path, where
-0.11.2 decoded each three times (see the Per-pass profile section for where the time went). Both
-versions ran through this harness in one session, 2026-09-24T11:15Z to 11:26Z, 0.13.0 first for each
-kind, same machine and tool versions as the Environment table (only `deepdiff-rs` differs), on the
-same fixture pairs (identical SHA-256s); the correctness precheck passed for every tool at both
-sizes. Other jobs ran on the machine throughout (load average 18 to 29), which affects the three
-tools alike within a run. DuckDB and polars rows come from the 0.13.0 run.
+0.11.2 decoded each three times (see the Per-pass profile section for where the time went). The full
+pairs' headline comes from an interleaved run: `bench_tables.py`'s own per-run worker (one
+subprocess per measurement, parquet read inside the timed window) for onix 0.13.0, onix 0.11.2,
+DuckDB and polars, in six rounds whose tool order rotates by one each round, the first round
+discarded as warm-up and the median taken over the other five. It started at 2026-09-24T11:56Z at
+load average 3.8 and ended at 12:02Z; the load rose to 16 to 22 during it, largely from the
+benchmark's own 18-thread processes, and rotation spreads that across all four tools.
+
+| Fixture | onix 0.11.2 | onix 0.13.0 | Speedup | DuckDB | polars | onix / DuckDB | onix / polars | Peak RSS 0.11.2 → 0.13.0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| narrow full | 5.727 s | **3.879 s** | 1.48x | 2.275 s | 2.012 s | 1.71x | 1.93x | 22648.3 → 22026.3 MB |
+| wide full | 21.294 s | **14.968 s** | 1.42x | 5.164 s | 2.738 s | 2.90x | 5.47x | 33164.0 → 28801.2 MB |
+
+The same interleaving earlier the same day, begun at load average 6 that rose to 46 within the first
+round (2026-09-24T11:42Z to 11:49Z), measured narrow full at 4.686 s against DuckDB's 2.655 s
+(1.76x) and wide full at 16.690 s against 5.473 s (3.05x). The run above is the representative one:
+it started in a quiet window and its load came mostly from the tools themselves.
+
+`bench_tables.py` itself, both versions in one session (2026-09-24T11:15Z to 11:26Z, 0.13.0 first
+for each kind, same machine and tool versions as the Environment table, same fixture pairs,
+correctness precheck passed for every tool at both sizes) while other jobs ran on the machine (load
+average 18 to 29); DuckDB and polars rows come from the 0.13.0 run:
 
 | Fixture | Tool | Wall (0.11.2) | Wall (0.13.0) | Speedup | RSS (0.11.2) | RSS (0.13.0) | CPU (0.13.0) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -129,10 +145,9 @@ tools alike within a run. DuckDB and polars rows come from the 0.13.0 run.
 | wide full | DuckDB (oracle SQL) | — | 5.332 s | — | — | 11908.9 MB | 66.373 s |
 | wide full | polars (anti-join/inner-join) | — | 3.489 s | — | — | 29818.0 MB | 27.030 s |
 
-At full size `onix` trails DuckDB by 2.02x on the narrow pair (5.089 against 2.514 s) and 3.25x on
-the wide pair (17.336 against 5.332 s), and polars by 1.88x and 4.97x. The previous run of this
-section at a lower load (2026-09-24T08:47Z to 08:56Z, load average 15 to 28) measured 1.91x and
-3.35x against DuckDB. Peak RSS falls on every cell: the wide pair's by 4.3 GB, because rows kept for
+In this sequential, loaded run `onix` trails DuckDB by 2.02x on the narrow full pair (5.089 against
+2.514 s) and 3.25x on the wide full pair; the interleaved run above measures 1.71x and 2.90x. Peak
+RSS falls on every cell: the wide pair's by 4.3 GB, because rows kept for
 `rows_added`/`rows_removed` no longer hold whole decoded input batches through a `Utf8View` column,
 and the narrow pair's by 0.6 GB, because the right side keeps no per-row hashes, only a map entry
 per key the left lacks (the Memory section's "Fused reads" table). The remaining wall on the wide
@@ -281,7 +296,8 @@ spooling both generated sides before the diff (file mode has no spool write). Me
 against the left key it matches (an 8-byte count per left row), and keeps a 32-byte map entry per
 distinct right key absent from the left. A selection kept for `rows_added`, `rows_removed` or the
 right's candidates copies a buffer it shares with a much larger allocation when it keeps at most
-half its batch; the duplicate-key report and the candidates' key columns always do. Peak resident
+half its batch; the duplicate-key report always does, and a candidate's key columns follow its
+full-width rows. Peak resident
 set of one fresh process per run, measured 2026-09-24 alongside 0.11.2's build (the same example
 shapes on both); a cell with several runs is their median:
 
@@ -303,6 +319,9 @@ shapes on both); a cell with several runs is their median:
 | `dup` 1M, 16 B keys | 18 | 218 MB | 196 MB | 3 |
 | `viewremoved` 1M (every row removed) | 1 / 18 | 2130 / 2108 MB | 2127 / 2112 MB | 3 |
 | `viewadded` 1M (every row added) | 1 / 18 | 2126 / 2105 MB | 2127 / 2190 MB | 3 |
+| `viewadded` 1M | 2 / 64 | 2171 / 2138 MB | 2242 / 2230 MB | 3 |
+| `viewaddedbyvalue` 1M (every row added, keyed on a 1 KB view column) | 1 / 2 | 2125 / 2174 MB | 2141 / 2243 MB | 3 |
+| `viewaddedbyvalue` 1M | 18 / 64 | 2110 / 2132 MB | 2191 / 2228 MB | 3 |
 | `viewsparse` 1M (one row in 10,000 removed) | 1 | 2176 MB | 2172 MB | 5 |
 | `viewsparse` 1M | 18 | 2166 MB | 1978 MB | 3 |
 | `duprightonce` 1M (500k left keys each twice on the right) | 1 / 18 | 1401 / 1368 MB | 1397 / 2320 MB | 3 |
@@ -322,6 +341,13 @@ process, median of 3): a 50,000-row left; a right of 2,001 batches of about 1,00
 never repeats (attack) or one left key (control); columns `id` Int64, `v` 64 B `Utf8View`, `w` 1 KB
 `Utf8`. Attack: 2586 → 603 MB at 2 threads, 2564 → 754 MB at 64. Control: 400 → 471 MB at 2 threads,
 424 → 647 MB at 64.
+
+A spooled all-added right side (1M rows of `id` Int64, two 1 KB `Utf8View` columns, a 1 KB `Utf8`
+column and a 30 B `Utf8View` column; an empty left) keyed on a 1 KB `Utf8View` column measures 4183
+→ 4185 MB at 1 thread, 4220 → 4273 MB at 2, 4211 → 4239 MB at 18 and 4226 → 4281 MB at 64 (0.11.2 →
+0.13.0, median of 3), the same as keyed on `id` (4217 → 4273 MB at 2 threads, 4212 → 4240 at 18,
+4225 → 4277 at 64): a candidate's key columns stay shared with its rows until a compaction copies
+those rows out.
 
 `chain` wall time at 18 threads (`row_diff_rss`, median of 3), 0.11.2 → 0.13.0: 2-row batches at
 100k / 200k / 400k rows 0.73 / 1.46 / 2.94 s → 0.65 / 1.22 / 2.55 s; 16-row batches at 1M / 2M / 4M
