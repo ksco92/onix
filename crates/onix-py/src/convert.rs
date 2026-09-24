@@ -47,8 +47,8 @@
 //!   raises [`PyTypeError`] (at the root, else an [`opaque`] token).
 //!
 //! A `str` holding a lone surrogate code point converts and compares like any other `str` (see
-//! [`pystring_to_cstr`] and `tests/golden/README.md`'s lone-surrogate bullet); a repeated `str`
-//! object key is interned once per walk
+//! [`pystring_to_cstr`] and `tests/golden/README.md`'s lone-surrogate bullet); a repeated UTF-8
+//! `str` object key is interned once per walk (a lone-surrogate key is kept per occurrence)
 //! (`docs/design/value-conversion.md`'s "Key interning" section).
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
