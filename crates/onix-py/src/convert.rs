@@ -125,8 +125,8 @@
 //! converts the same way a `datetime` does (wall-clock fields plus the fixed
 //! offset in force); unlike `datetime`, real `DeepDiff` never normalizes a
 //! `time` at report time, so onix reports it raw everywhere (see
-//! [`onix_core::datetime`]'s module doc for the exact, confirmed comparison
-//! and hashing rules — genuinely different from `datetime`'s). A
+//! `docs/design/value-model.md`'s "Calendar types" section for the exact
+//! comparison and hashing rules — genuinely different from `datetime`'s). A
 //! `timedelta` (or a subclass) converts to its exact
 //! `(days, seconds, microseconds)`.
 //!

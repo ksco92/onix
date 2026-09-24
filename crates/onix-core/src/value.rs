@@ -1019,6 +1019,10 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
 /// [`serde_json::Number`] ([`Value::to_serde_json`] falls back to `null` for
 /// one that can't, the same collapse the streaming parse path already used
 /// for a non-finite value arriving some other way).
+///
+/// The three-way split is load-bearing for byte-compatible output: `1` and
+/// `1.0` must render differently, and a `u64` above `i64::MAX` must survive
+/// as an integer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Number {
     repr: NumberRepr,
