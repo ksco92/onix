@@ -17,66 +17,56 @@
 //!    both with equal row hashes (unchanged, never materialized), or appearing
 //!    more than once on either side (a duplicate key, excluded from the other
 //!    three and reported with its per-side counts).
-//! 2. **Materialize pass.** Each side is opened again (a [`TableInput`] is
+//! 2. **Materialize pass.** Each side is read again (a [`TableInput`] is
 //!    re-openable) and filtered to the rows whose keys landed in the added /
 //!    removed sets, plus one row per duplicate key for the duplicate-key report.
-//!    Only the differing rows are ever built into an output batch.
-//! 3. **Cell pass.** Each side is opened once more and filtered to the rows
-//!    whose key is in the *changed* set (present on both sides, differing row
-//!    hash); the two sides' changed rows are paired by key hash and every common
-//!    non-key column is compared cell by cell, one output record per differing
-//!    cell. Below the size gate this runs single-threaded and materializes both
-//!    sides' changed rows at once (see [`diff_cells`]); above it, the changed
-//!    value rows are spilled by key-hash partition to anonymous temporary IPC
-//!    files and one partition is compared and rendered at a time across the
-//!    workers (see [`diff_cells_streaming`]), so the pass holds one partition's
-//!    rows plus the output, never both sides' full changed rows.
+//!    Only the differing rows are ever built into an output batch, and a kept
+//!    selection copies any buffer it shares with its decoded input batch (see
+//!    [`unshared`]).
+//! 3. **Cell pass.** The rows whose key is in the *changed* set are paired by
+//!    key hash and every common non-key column is compared cell by cell, one
+//!    output record per differing cell (see [`diff_cells`]).
+//!
+//! Single-threaded, every pass re-reads both sides and the cell pass holds both
+//! sides' changed rows at once. The parallel path reads the right side once: the
+//! left is hashed and indexed first ([`KeyIndex`]), so the right's hash pass also
+//! keeps its added candidates and spills its changed value rows by key-hash
+//! partition to anonymous temporary IPC files ([`RightFuse`]); one re-read of the
+//! left then materializes it and spills its changed rows ([`reread_left`]), and
+//! the cell pass compares and renders one partition at a time across the workers
+//! ([`diff_cells_streaming`]), holding one partition plus the output.
 //!
 //! # Parallelism
 //!
-//! By default the diff hashes and classifies across `TableDiffOptions::threads`
-//! workers (the machine's available parallelism, capped at
-//! [`crate::MAX_THREADS`]): the hash pass hashes each batch on a worker and
-//! appends its rows straight into shared per-key-hash partition buffers, the
-//! classify pass merge-joins each partition on its own worker, the materialize
-//! pass hashes its key columns on workers while the sequential filtering runs in
-//! batch order, and the cell pass spills each side's changed value rows by
-//! key-hash partition and compares and renders one partition at a time across
-//! the workers (see [`diff_cells_streaming`]). The partition count is capped
-//! independently of the worker count (see [`partition_count`] and
-//! [`MAX_PARTITIONS`]), so it never grows with the requested threads. Every
-//! partitioning is by key hash and every reduction is order-independent or
-//! reordered back to batch order, so the output is byte-identical at any thread
-//! count; `threads == 1` runs the original single-threaded path. The
-//! parallel-vs-single-threaded choice is made
-//! by peeking up to [`MIN_PARALLEL_ROWS`] rows or [`MAX_PEEK_BYTES`] of each
-//! side (whichever comes first) before spawning: a diff whose sides both fit
-//! under that bound runs single-threaded, and the peek reads the left side first
-//! so a large left never also buffers the right.
+//! By default the diff runs across `TableDiffOptions::threads` workers (the
+//! machine's available parallelism, capped at [`crate::MAX_THREADS`]): the hash
+//! passes hash each batch on a worker and append its rows straight into shared
+//! per-key-hash partition buffers, the classify step merge-joins each partition
+//! on its own worker, the left re-read classifies and routes each batch on a
+//! worker while the order-dependent filtering runs in batch order, and the cell
+//! pass renders each partition across the workers. The partition count is
+//! capped independently of the worker count (see [`partition_count`] and
+//! [`MAX_PARTITIONS`]). Every partitioning is by key hash and every reduction is
+//! order-independent or reordered back to batch order, so the output is
+//! byte-identical at any thread count; `threads == 1` runs the single-threaded
+//! path. The choice is made by peeking up to [`MIN_PARALLEL_ROWS`] rows or
+//! [`MAX_PEEK_BYTES`] of each side (whichever comes first) before spawning: a
+//! diff whose sides both fit under that bound runs single-threaded, and the peek
+//! reads the left side first so a large left never also buffers the right.
 //!
-//! Memory beyond the per-row hash vectors: workers append directly into the
-//! shared partition buffers — the resident hashes are one copy per side, as in
-//! the single-threaded path — so the parallel path's structural addition is the
-//! in-flight batches, one batch's rows buffered per worker between flushes plus
-//! a few decoded batches held over the bounded channels (worker count times
-//! batch size), on top of the shared buffers' reallocation slack and the size
+//! Memory beyond the per-row hash vectors (one copy per side, plus under a byte
+//! per left row for the index's bucket directory): the in-flight batches (worker
+//! count times batch size), the shared buffers' reallocation slack, and the size
 //! gate's peek buffer (at most [`MAX_PEEK_BYTES`] plus one producer batch per
-//! side, since the byte check runs between whole batches, and at most two sides
-//! resident); the README's Known-limitations bullet states the measured
-//! figures. The duplicate-key report holds the actual key values of every
-//! *distinct duplicated* key, so a duplicate-heavy input adds a term
-//! proportional to the number of distinct duplicated keys times the key width.
-//! The cell pass spills both sides' changed value rows — every common value
-//! column of every changed row, changed or not — to anonymous temporary IPC
-//! files and holds one key-hash partition plus the reordered output resident.
-//! Its peak term is the spilled changed value rows (the changed-row count times
-//! the total width of the common value columns, both sides — resident where
-//! written temp pages count, e.g. macOS or a RAM-backed tmpfs) plus about twice
-//! the `cells_changed` output (its one out-of-place reorder) plus the per-row
-//! hash vectors; the spill term dominates for wide rows with few changed cells,
-//! the output term for many changed cells. It is not bounded by the changed
-//! *cell* count alone. The README's Known-limitations bullet states these with
-//! measured figures.
+//! side). The duplicate-key report holds the key values of every *distinct
+//! duplicated* key, and the right's added candidates hold, per input batch, the
+//! first row of each key absent from the left, more than the added rows only by
+//! right-only duplicates. The cell pass's spill holds every common value column
+//! of every changed row, both sides (resident where written temp pages count,
+//! e.g. macOS or a RAM-backed tmpfs), and the pass adds about twice the
+//! `cells_changed` output (its one out-of-place reorder); it is not bounded by
+//! the changed *cell* count alone. The README's Known-limitations bullet states
+//! the measured figures.
 //!
 //! # Hashing
 //!
@@ -253,10 +243,9 @@ macro_rules! accum {
 
 /// A re-openable source of one table's record batches.
 ///
-/// The row diff reads each side more than once — to hash every row, to
-/// materialize the added/removed rows, and to materialize the changed rows for
-/// the per-cell diff — so it needs a source it can open more than once rather
-/// than a single-use [`RecordBatchReader`]. A caller whose input is a one-shot
+/// The row diff may read a side more than once — to hash every row, then to
+/// materialize the added, removed and changed rows — so it needs a source it can
+/// open more than once rather than a single-use [`RecordBatchReader`]. A caller whose input is a one-shot
 /// reader (a Python Arrow stream, say) spools it to an anonymous temporary Arrow
 /// IPC file first and re-reads that file through a fresh, rewound handle on each
 /// `open`; an in-memory table is re-openable directly (see [`MemoryInput`]).
@@ -264,8 +253,8 @@ pub trait TableInput {
     /// The table's schema, without opening a reader.
     fn schema(&self) -> SchemaRef;
 
-    /// A fresh reader over the whole table. Called several times per diff (the
-    /// hash pass, the added/removed materialize pass, and the per-cell pass).
+    /// A fresh reader over the whole table, opened once by each pass that reads
+    /// this side: up to three times per diff.
     ///
     /// # Errors
     ///
@@ -2790,17 +2779,7 @@ fn build_cells_changed(
     RecordBatch::try_new(out_schema.clone(), columns).map_err(|e| read_error(&e))
 }
 
-// --- Streaming, partitioned cell pass (parallel path) ---------------------
-//
-// The sequential [`diff_cells`] materializes both sides' full changed rows and
-// renders on one thread. For a large diff the parallel path below instead
-// spills each side's changed *value* rows to anonymous per-key-hash-partition
-// IPC files, then processes one partition at a time — pairing, comparing and
-// rendering its rows across the worker threads — so its resident memory is one
-// partition's rows plus the growing output, not both sides' full changed rows.
-// The output is reassembled in the same total order [`diff_cells`] produces
-// (rendered key, then left-schema column order, then scan-order row index), so
-// it is byte-identical at every thread count.
+// --- Parallel path: partition spills, the fused reads, the streaming cell pass
 
 /// The schema of a projection of `schema` to `indices` (in that order): the
 /// value-column schema each partition spill file carries, or the key-column
