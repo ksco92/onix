@@ -23,9 +23,9 @@ type DistanceKey = (DistKey, DistKey);
 /// The per-diff caches described in `docs/design/ignore-order.md`'s
 /// "Distance memo" section: pairwise container distances, tuple
 /// digests, and set-member digests, scoped to one diff run. `DistKey`
-/// and `MemberContent` keys hash and compare by a full-tree walk, and
-/// a big-integer leaf costs `O(digits)` per lookup; `super::fxhash`'s
-/// doc enumerates each key's per-lookup cost.
+/// keys hash and compare by a full-tree walk; `MemberContent` keys
+/// compare by one (it has no `Hash`). A big-integer leaf costs
+/// `O(digits)` per lookup; `super::fxhash`'s doc enumerates each key's cost.
 pub(crate) struct IgnoreOrderMemo<'r> {
     cache: RefCell<HashMap<DistanceKey, f64>>,
     /// Interns each hashable-tuple identity to its digest, shared
