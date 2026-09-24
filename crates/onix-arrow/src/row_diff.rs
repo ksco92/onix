@@ -1248,7 +1248,15 @@ fn hash_parallel(
     let partitions = partition_count(config.threads);
     let (prefix, reader) = left_side;
     let no_hook = |_: usize, _: &RecordBatch, _: &[(u128, u128, bool)]| Ok(());
-    let left = hash_side_parallel(prefix, reader, left_columns, config, partitions, &no_hook)?;
+    let left = hash_side_parallel(
+        prefix,
+        reader,
+        left_columns,
+        config,
+        partitions,
+        &no_hook,
+        &[],
+    )?;
     let index = accum!("index left keys", KeyIndex::build(left.parts)?);
 
     let (prefix, reader) = match right_side {
@@ -1266,7 +1274,20 @@ fn hash_parallel(
     let hook = |idx: usize, batch: &RecordBatch, pairs: &[(u128, u128, bool)]| {
         fuse.visit(idx, batch, pairs)
     };
-    let right_parts = hash_side_parallel(prefix, reader, right_columns, config, partitions, &hook)?;
+    let reserve: Vec<usize> = index
+        .parts
+        .iter()
+        .map(|part| part.len() + part.len() / 4)
+        .collect();
+    let right_parts = hash_side_parallel(
+        prefix,
+        reader,
+        right_columns,
+        config,
+        partitions,
+        &hook,
+        &reserve,
+    )?;
     let capture = RightCapture {
         candidates: fuse
             .candidates
@@ -1376,7 +1397,9 @@ struct SharedSink {
 /// hash. Only the fixed-size hashes are retained (one copy per side), plus at
 /// most one batch's rows buffered per worker before each flush — the parallel
 /// path's only memory term over the single-threaded hash vectors. `hook` runs
-/// on the worker with each batch's input index and row hashes. Joins every
+/// on the worker with each batch's input index and row hashes; `reserve[p]`
+/// presizes partition `p`'s buffer (capacity never written is not resident, and
+/// a buffer that never grows leaves no freed copies behind). Joins every
 /// worker on every exit path (including a read error) so a concurrent worker
 /// panic surfaces as [`TableDiffError::WorkerPanicked`], never an abort.
 fn hash_side_parallel(
@@ -1386,6 +1409,7 @@ fn hash_side_parallel(
     config: &HashConfig<'_>,
     partitions: usize,
     hook: &BatchHook<'_>,
+    reserve: &[usize],
 ) -> Result<SidePartitions, TableDiffError> {
     #[cfg(test)]
     PARALLEL_HASH_PASSES.with(|count| count.set(count.get() + 1));
@@ -1394,7 +1418,9 @@ fn hash_side_parallel(
     let key_names = config.key_names;
     let value_names = config.value_names;
     let sink = SharedSink {
-        parts: (0..partitions).map(|_| Mutex::new(Vec::new())).collect(),
+        parts: (0..partitions)
+            .map(|p| Mutex::new(Vec::with_capacity(reserve.get(p).copied().unwrap_or(0))))
+            .collect(),
         null_keys: Mutex::new(HashSet::new()),
     };
 
@@ -7101,6 +7127,7 @@ mod tests {
             &config,
             4,
             &|_, _, _| Ok(()),
+            &[],
         );
         assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
     }
@@ -7143,6 +7170,7 @@ mod tests {
             &config,
             4,
             &|_, _, _| Ok(()),
+            &[],
         );
         assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
     }
@@ -8112,6 +8140,7 @@ mod fused_tests {
             &config,
             4,
             &|_, _, _| -> Result<(), TableDiffError> { panic!("hook boom") },
+            &[],
         );
         assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
     }
