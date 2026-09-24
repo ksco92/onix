@@ -21,7 +21,7 @@ Generated entirely by `perf/run_bench.sh` (via `perf/summarize_results.py`). Eve
 
 ## Fixture matrix
 
-Generated deterministically by `perf/generate_fixtures.py` (fixed seed `20260831`, recorded there: regeneration is byte-identical, see that file's module docstring for the verification command). ~5% values changed, ~2% added, ~2% removed between each fixture's `a`/`b` pair, except `identical_1m` (byte-identical copy), `startup_trivial` (`{}` vs `{}`), and `ignore_order_10k` (pure shuffle plus ~5% value-changed, no add/remove; see `ignore_order.rs`).
+Generated deterministically by `perf/generate_fixtures.py` (fixed seed `20260831`, recorded there: regeneration is byte-identical, see that file's module docstring for the verification command). ~5% values changed, ~2% added, ~2% removed between each fixture's `a`/`b` pair, except `identical_1m` (byte-identical copy), `startup_trivial` (`{}` vs `{}`), and `ignore_order_10k` (pure shuffle plus ~5% value-changed, no add/remove; see `build_ignore_order_list` in that file).
 
 | Fixture | What it stresses | Input size (a+b) |
 |---|---|---|
