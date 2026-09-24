@@ -162,12 +162,9 @@ type DistanceKey = (DistKey, DistKey);
 /// `cache`'s `DistKey`s and, when a set member, in `member_content`), hashed
 /// and compared by its magnitude at `O(digit length)` — a per-lookup cost the
 /// element-count bounds above do not cap (see `super::fxhash`'s doc). A custom
-/// object reaches the `cache`'s `DistKey`s as a class-tagged
-/// [`ItemKey::Object`] (hash and equality are a full attribute-tree walk, like
-/// `ItemKey::Dict`, plus one class-name comparison — see `super::fxhash`'s
-/// doc); its distance is memoized here the way a `dict`'s is (see
-/// [`is_container`]). An opaque token keys as an `ItemKey::Opaque`, one
-/// identity-string comparison per lookup, and is never memoized.
+/// object keys as an [`ItemKey::Object`] and is memoized like a `dict` (see
+/// [`is_container`]); an opaque token keys as an `ItemKey::Opaque` and is
+/// never memoized. `super::fxhash`'s doc states both per-lookup costs.
 ///
 /// [`rough_distance`]: super::distance::rough_distance
 /// [`is_container`]: super::memo::is_container
@@ -365,9 +362,7 @@ impl IgnoreOrderMemo {
 
 /// Whether `key` is a container (list/tuple/dict/custom object) rather than a
 /// scalar — the variants whose distance is computed by a recursive trial
-/// diff, and so the only ones worth memoizing. A custom object joins the list
-/// for the same reason a `dict` is on it: its distance walks its attribute
-/// values, which can themselves be arbitrarily deep.
+/// diff, and so the only ones worth memoizing.
 pub(crate) fn is_container(key: &ItemKey) -> bool {
     matches!(
         key,
