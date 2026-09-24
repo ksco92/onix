@@ -6,8 +6,8 @@ comparators with a biased scalar alphabet: one over plain lists (the
 pre-existing ``ignore_order`` hashing fix), one building sets and frozensets
 directly (issue #46), through ``_diverges_with_sets`` (which tolerates
 DeepDiff's own hash-order instability and the documented
-`list(a_set) == some_list` coercion class -- see `test_differential_fuzz`'s
-own module doc for the mechanism). A real Python `set`/`frozenset` can never
+`list(a_set) == some_list` coercion class -- see tests/golden/README.md's
+"Set iteration order" section for the mechanism). A real Python `set`/`frozenset` can never
 hold both `-0.0` and `0.0` -- `set(...)`/`frozenset(...)` collapse the pair to
 one member before the value ever reaches onix -- so this batch, run through
 the bindings, pins that a genuine single-representative signed-zero set
