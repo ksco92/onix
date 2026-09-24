@@ -155,27 +155,27 @@ The Python bindings against real `deepdiff` on **live Python objects**, the numb
 
 | Shape | deepdiff | deepdiff_rs | Speedup |
 | --- | --- | --- | --- |
-| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 898.79ms | 85.92ms | **10.46x** |
-| &nbsp;&nbsp;peak RSS | 402.9 MB | 204.3 MB | **1.97x** |
-| &nbsp;&nbsp;CPU seconds | 0.879 s | 0.086 s | **10.24x** |
-| Heterogeneous API-payload records, n=20,000 (live objects) | 3491.90ms | 143.26ms | **24.37x** |
-| &nbsp;&nbsp;peak RSS | 228.1 MB | 274.7 MB | **0.83x** |
-| &nbsp;&nbsp;CPU seconds | 3.490 s | 0.143 s | **24.37x** |
-| Typed records (datetime/tuple/set fields), n=10,000 (live objects) | 984.54ms | 49.19ms | **20.01x** |
-| &nbsp;&nbsp;peak RSS | 171.2 MB | 175.8 MB | **0.97x** |
-| &nbsp;&nbsp;CPU seconds | 0.921 s | 0.049 s | **18.73x** |
-| Same typed-records shape, `ignore_order` (live objects) | 62842.99ms | 821.77ms | **76.47x** |
-| &nbsp;&nbsp;peak RSS | 225.7 MB | 257.6 MB | **0.88x** |
-| &nbsp;&nbsp;CPU seconds | 61.670 s | 0.821 s | **75.10x** |
-| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 686.08ms | 66.70ms | **10.29x** |
-| &nbsp;&nbsp;peak RSS | 402.4 MB | 204.1 MB | **1.97x** |
-| &nbsp;&nbsp;CPU seconds | 0.686 s | 0.067 s | **10.28x** |
-| Same API-payload shape, via `diff_json` (JSON-string path) | 4588.09ms | 93.72ms | **48.96x** |
-| &nbsp;&nbsp;peak RSS | 248.9 MB | 268.1 MB | **0.93x** |
-| &nbsp;&nbsp;CPU seconds | 4.585 s | 0.094 s | **48.95x** |
-| Same API-payload shape, both tools reading two JSON files from disk | 4574.10ms | 94.81ms | **48.25x** |
-| &nbsp;&nbsp;peak RSS | 249.0 MB | 268.2 MB | **0.93x** |
-| &nbsp;&nbsp;CPU seconds | 4.571 s | 0.095 s | **48.25x** |
+| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 699.68ms | 66.23ms | **10.56x** |
+| &nbsp;&nbsp;peak RSS | 401.8 MB | 203.4 MB | **1.98x** |
+| &nbsp;&nbsp;CPU seconds | 0.699 s | 0.066 s | **10.56x** |
+| Heterogeneous API-payload records, n=20,000 (live objects) | 3486.50ms | 141.42ms | **24.65x** |
+| &nbsp;&nbsp;peak RSS | 228.1 MB | 274.6 MB | **0.83x** |
+| &nbsp;&nbsp;CPU seconds | 3.484 s | 0.141 s | **24.64x** |
+| Typed records (datetime/tuple/set fields), n=10,000 (live objects) | 795.03ms | 46.45ms | **17.11x** |
+| &nbsp;&nbsp;peak RSS | 169.8 MB | 175.6 MB | **0.97x** |
+| &nbsp;&nbsp;CPU seconds | 0.794 s | 0.046 s | **17.11x** |
+| Same typed-records shape, `ignore_order` (live objects) | 60834.60ms | 864.82ms | **70.34x** |
+| &nbsp;&nbsp;peak RSS | 225.6 MB | 257.6 MB | **0.88x** |
+| &nbsp;&nbsp;CPU seconds | 60.786 s | 0.863 s | **70.47x** |
+| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 731.31ms | 74.54ms | **9.81x** |
+| &nbsp;&nbsp;peak RSS | 402.3 MB | 203.9 MB | **1.97x** |
+| &nbsp;&nbsp;CPU seconds | 0.730 s | 0.074 s | **9.81x** |
+| Same API-payload shape, via `diff_json` (JSON-string path) | 5125.41ms | 95.33ms | **53.76x** |
+| &nbsp;&nbsp;peak RSS | 249.1 MB | 269.7 MB | **0.92x** |
+| &nbsp;&nbsp;CPU seconds | 4.971 s | 0.095 s | **52.22x** |
+| Same API-payload shape, both tools reading two JSON files from disk | 4774.33ms | 97.33ms | **49.05x** |
+| &nbsp;&nbsp;peak RSS | 249.0 MB | 269.7 MB | **0.92x** |
+| &nbsp;&nbsp;CPU seconds | 4.771 s | 0.097 s | **49.12x** |
 
 The engine's own diff-only time and peak resident memory against pinned `deepdiff` 9.1.0 (source: [`perf/RESULTS.md`](perf/RESULTS.md), same machine, median over tier-appropriate runs, diff time excluding process startup and JSON parsing on both sides):
 
