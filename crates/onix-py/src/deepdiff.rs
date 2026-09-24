@@ -13,10 +13,13 @@ use crate::convert::{
 };
 use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, serialize_value};
 
-/// A drop-in subset of `deepdiff.DeepDiff`: `DeepDiff(t1, t2,
-/// ignore_order=False, max_depth=None)` diffs two Python values at
-/// `verbose_level=2`, without the full option surface (`exclude_paths`,
-/// `significant_digits`, custom operators). Supported types, conversion rules, and every raised error: `crate::convert`'s module doc.
+/// A drop-in subset of `deepdiff.DeepDiff`, diffing `t1`/`t2` at
+/// `verbose_level=2`. `max_depth` defaults to 512, capped at
+/// `MAX_DEPTH_CEILING` (else `ValueError`); past it raises `MaxDepthError`;
+/// deeper-than-inline input diffs on a sized worker thread. Supported types
+/// and every raised error are listed in the module doc of
+/// `crates/onix-py/src/convert.rs` in the onix repository; the depth bound and
+/// its errors in `crates/onix-py/src/guard.rs`.
 #[pyclass(module = "deepdiff_rs")]
 pub(crate) struct DeepDiff {
     report_value: Value,
@@ -40,8 +43,9 @@ impl DeepDiff {
         max_depth: Option<usize>,
     ) -> PyResult<Self> {
         let opts = resolve_options(max_depth, ignore_order)?;
-        // Conversion needs the GIL, so it stays on the calling thread; its
-        // iterative `Drop` cannot overflow it either, on an early-return `?`.
+        // Conversion needs the GIL, so it stays on the calling thread; if `t2`
+        // fails, the `?` drops a possibly deep `a` here, safe because
+        // `Value`'s `Drop` is iterative.
         let mut held = Held::new(opts.max_depth);
         let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth, &mut held)?;
         let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth, &mut held)?;
@@ -113,7 +117,9 @@ impl DeepDiff {
 
     /// The report as a `DeepDiff`-compatible JSON string at
     /// `verbose_level=2`; a deep report renders on the sized worker thread
-    /// rather than inline. Documented differences: `tests/golden/README.md`.
+    /// rather than inline. Differences from `DeepDiff`'s rendering are
+    /// documented in the onix repository's `tests/golden/README.md`,
+    /// 'Normalized versus raw datetimes' and 'Set iteration order' sections.
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
         serialize_value(
             py,
@@ -123,10 +129,14 @@ impl DeepDiff {
         )
     }
 
-    /// The report as a native Python `dict`, with Python types (tuples,
-    /// sets, datetimes) intact rather than rendered to JSON; conversion is
-    /// iterative ([`crate::convert::value_to_pyobject`]), safe at any depth.
-    /// Documented differences: `tests/golden/README.md`.
+    /// The report as a native Python `dict`, with Python types (tuples, sets,
+    /// datetimes) intact rather than rendered to JSON; conversion is iterative
+    /// (`value_to_pyobject` in `crates/onix-py/src/convert.rs`), safe at any
+    /// depth. Differences from `DeepDiff`'s `to_dict()` are documented in the
+    /// onix repository's `tests/golden/README.md`: its 'Normalized versus raw
+    /// datetimes' section, 'Fixed-offset `tzinfo` round-trip' point, and its
+    /// 'Known `DeepDiff` quirks' section, '`to_dict()` reports a
+    /// `type_changes` entry's types as names, not classes' point.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         value_to_pyobject(py, &self.report_value)
     }
