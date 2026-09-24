@@ -151,31 +151,31 @@ Beyond a join-based diff, `diff_tables` reports duplicate and null keys rather t
 
 Two committed, regenerable reports back the numbers below; every figure here is copied verbatim from them.
 
-The Python bindings against real `deepdiff` on **live Python objects**, the number a real caller pays (source: [`crates/onix-py/benchmarks/bench_bindings.py`](crates/onix-py/benchmarks/bench_bindings.py), macOS 26.5.1, Apple M5 Max, median of 11 isolated subprocess runs per side, run on 2026-09-04):
+The Python bindings against real `deepdiff` on **live Python objects**, the number a real caller pays (source: [`crates/onix-py/benchmarks/bench_bindings.py`](crates/onix-py/benchmarks/bench_bindings.py), macOS 26.5.1, Apple M5 Max, median of 11 isolated subprocess runs per side, run on 2026-09-23):
 
 | Shape | deepdiff | deepdiff_rs | Speedup |
 | --- | --- | --- | --- |
-| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 3111.56ms | 71.68ms | **43.41x** |
-| &nbsp;&nbsp;peak RSS | 228.5 MB | 93.2 MB | **2.45x** |
-| &nbsp;&nbsp;CPU seconds | 3.110 s | 0.072 s | **43.42x** |
-| Heterogeneous API-payload records, n=20,000 (live objects) | 3439.96ms | 153.83ms | **22.36x** |
-| &nbsp;&nbsp;peak RSS | 118.1 MB | 147.8 MB | **0.80x** |
-| &nbsp;&nbsp;CPU seconds | 3.439 s | 0.154 s | **22.36x** |
-| Typed records (datetime/tuple/set fields), n=10,000 (live objects) | 795.17ms | 48.48ms | **16.40x** |
-| &nbsp;&nbsp;peak RSS | 60.2 MB | 62.2 MB | **0.97x** |
-| &nbsp;&nbsp;CPU seconds | 0.795 s | 0.048 s | **16.40x** |
-| Same typed-records shape, `ignore_order` (live objects) | 60506.65ms | 775.38ms | **78.03x** |
-| &nbsp;&nbsp;peak RSS | 110.3 MB | 121.6 MB | **0.91x** |
-| &nbsp;&nbsp;CPU seconds | 60.471 s | 0.774 s | **78.10x** |
-| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 3116.22ms | 73.85ms | **42.20x** |
-| &nbsp;&nbsp;peak RSS | 228.8 MB | 93.8 MB | **2.44x** |
-| &nbsp;&nbsp;CPU seconds | 3.114 s | 0.074 s | **42.20x** |
-| Same API-payload shape, via `diff_json` (JSON-string path) | 4559.90ms | 87.02ms | **52.40x** |
-| &nbsp;&nbsp;peak RSS | 139.5 MB | 140.9 MB | **0.99x** |
-| &nbsp;&nbsp;CPU seconds | 4.558 s | 0.087 s | **52.58x** |
-| Same API-payload shape, both tools reading two JSON files from disk | 4555.37ms | 85.62ms | **53.20x** |
-| &nbsp;&nbsp;peak RSS | 139.5 MB | 141.0 MB | **0.99x** |
-| &nbsp;&nbsp;CPU seconds | 4.553 s | 0.086 s | **53.21x** |
+| `ignore_order`, 10k shuffled ints, ~5% mutated (live objects) | 898.79ms | 85.92ms | **10.46x** |
+| &nbsp;&nbsp;peak RSS | 402.9 MB | 204.3 MB | **1.97x** |
+| &nbsp;&nbsp;CPU seconds | 0.879 s | 0.086 s | **10.24x** |
+| Heterogeneous API-payload records, n=20,000 (live objects) | 3491.90ms | 143.26ms | **24.37x** |
+| &nbsp;&nbsp;peak RSS | 228.1 MB | 274.7 MB | **0.83x** |
+| &nbsp;&nbsp;CPU seconds | 3.490 s | 0.143 s | **24.37x** |
+| Typed records (datetime/tuple/set fields), n=10,000 (live objects) | 984.54ms | 49.19ms | **20.01x** |
+| &nbsp;&nbsp;peak RSS | 171.2 MB | 175.8 MB | **0.97x** |
+| &nbsp;&nbsp;CPU seconds | 0.921 s | 0.049 s | **18.73x** |
+| Same typed-records shape, `ignore_order` (live objects) | 62842.99ms | 821.77ms | **76.47x** |
+| &nbsp;&nbsp;peak RSS | 225.7 MB | 257.6 MB | **0.88x** |
+| &nbsp;&nbsp;CPU seconds | 61.670 s | 0.821 s | **75.10x** |
+| Same `ignore_order` shape, via `diff_json` (JSON-string path) | 686.08ms | 66.70ms | **10.29x** |
+| &nbsp;&nbsp;peak RSS | 402.4 MB | 204.1 MB | **1.97x** |
+| &nbsp;&nbsp;CPU seconds | 0.686 s | 0.067 s | **10.28x** |
+| Same API-payload shape, via `diff_json` (JSON-string path) | 4588.09ms | 93.72ms | **48.96x** |
+| &nbsp;&nbsp;peak RSS | 248.9 MB | 268.1 MB | **0.93x** |
+| &nbsp;&nbsp;CPU seconds | 4.585 s | 0.094 s | **48.95x** |
+| Same API-payload shape, both tools reading two JSON files from disk | 4574.10ms | 94.81ms | **48.25x** |
+| &nbsp;&nbsp;peak RSS | 249.0 MB | 268.2 MB | **0.93x** |
+| &nbsp;&nbsp;CPU seconds | 4.571 s | 0.095 s | **48.25x** |
 
 The engine's own diff-only time and peak resident memory against pinned `deepdiff` 9.1.0 (source: [`perf/RESULTS.md`](perf/RESULTS.md), same machine, median over tier-appropriate runs, diff time excluding process startup and JSON parsing on both sides):
 
