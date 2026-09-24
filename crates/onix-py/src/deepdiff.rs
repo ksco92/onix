@@ -24,7 +24,8 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, seria
 pub(crate) struct DeepDiff {
     report_value: Value,
     /// Whether `report_value` must render on the sized worker thread rather
-    /// than inline; computed once so `to_json` never re-walks it. See `crate::guard::is_deep`.
+    /// than inline; computed once so `to_json` never re-walks it.
+    /// See `crate::guard::is_deep`.
     report_is_deep: bool,
     /// Whether either input held a lone surrogate code point, found during
     /// conversion; lets `to_json` skip its own WTF-8 tree walk when `false`.
@@ -43,9 +44,8 @@ impl DeepDiff {
         max_depth: Option<usize>,
     ) -> PyResult<Self> {
         let opts = resolve_options(max_depth, ignore_order)?;
-        // Conversion needs the GIL, so it stays on the calling thread; if `t2`
-        // fails, the `?` drops a possibly deep `a` here, safe because
-        // `Value`'s `Drop` is iterative.
+        // Conversion stays here (needs the GIL); if `t2` fails, `?` drops a
+        // deep `a`, safe because `Value`'s `Drop` is iterative.
         let mut held = Held::new(opts.max_depth);
         let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth, &mut held)?;
         let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth, &mut held)?;
@@ -118,8 +118,9 @@ impl DeepDiff {
     /// The report as a `DeepDiff`-compatible JSON string at
     /// `verbose_level=2`; a deep report renders on the sized worker thread
     /// rather than inline. Differences from `DeepDiff`'s rendering are
-    /// documented in the onix repository's `tests/golden/README.md`,
-    /// 'Normalized versus raw datetimes' and 'Set iteration order' sections.
+    /// documented in the onix repository's `tests/golden/README.md`, 'The
+    /// `date` superset', 'The `time`/`timedelta` superset' and 'Set
+    /// iteration order' sections.
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
         serialize_value(
             py,
