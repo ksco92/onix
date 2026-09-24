@@ -1274,11 +1274,7 @@ fn hash_parallel(
     let hook = |idx: usize, batch: &RecordBatch, pairs: &[(u128, u128, bool)]| {
         fuse.visit(idx, batch, pairs)
     };
-    let reserve: Vec<usize> = index
-        .parts
-        .iter()
-        .map(|part| part.len() + part.len() / 4)
-        .collect();
+    let reserve = index.reserve_for_other_side();
     let right_parts = hash_side_parallel(
         prefix,
         reader,
@@ -1398,9 +1394,8 @@ struct SharedSink {
 /// most one batch's rows buffered per worker before each flush — the parallel
 /// path's only memory term over the single-threaded hash vectors. `hook` runs
 /// on the worker with each batch's input index and row hashes; `reserve[p]`
-/// presizes partition `p`'s buffer (capacity never written is not resident, and
-/// a buffer that never grows leaves no freed copies behind). Joins every
-/// worker on every exit path (including a read error) so a concurrent worker
+/// presizes partition `p`'s buffer (capacity never written is not resident).
+/// Joins every worker on every exit path (including a read error) so a concurrent worker
 /// panic surfaces as [`TableDiffError::WorkerPanicked`], never an abort.
 fn hash_side_parallel(
     prefix: Vec<RecordBatch>,
@@ -3145,6 +3140,15 @@ impl KeyIndex {
             index.bits.push(bits);
         }
         Ok(index)
+    }
+
+    /// Per partition, a buffer size for the other side's rows: a quarter more
+    /// than this side's, so a similar-sized side never regrows its buffers.
+    fn reserve_for_other_side(&self) -> Vec<usize> {
+        self.parts
+            .iter()
+            .map(|part| part.len() + part.len() / 4)
+            .collect()
     }
 
     fn lookup(&self, key: u128) -> KeyMatch {
@@ -8041,6 +8045,39 @@ mod fused_tests {
         let part = |rows: u128| (0..rows).map(|i| (i << 100, i)).collect::<Vec<_>>();
         let index = KeyIndex::build(vec![part(3), part(800), part(1_000)]).unwrap();
         assert_eq!(index.bits, vec![0, 6, 6]);
+        assert_eq!(index.reserve_for_other_side(), vec![3, 1_000, 1_250]);
+    }
+
+    #[test]
+    fn hash_side_parallel_presizes_each_partition() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
+        let input = MemoryInput::new(schema, vec![batch]);
+        let hasher = super::RowHasher::new().unwrap();
+        let columns = super::SideColumns {
+            key: vec![0],
+            value: Vec::new(),
+        };
+        let config = super::HashConfig {
+            key_names: &["id"],
+            value_names: &[],
+            hasher: &hasher,
+            threads: 2,
+        };
+        let parts = super::hash_side_parallel(
+            Vec::new(),
+            input.open().unwrap(),
+            &columns,
+            &config,
+            2,
+            &|_, _, _| Ok(()),
+            &[100, 300],
+        )
+        .unwrap()
+        .parts;
+        assert!(parts[0].capacity() >= 100 && parts[1].capacity() >= 300);
     }
 
     #[test]
