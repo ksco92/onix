@@ -1,54 +1,15 @@
 //! Native-stack-overflow hardening shared by both Python entry points
 //! ([`crate::deepdiff::DeepDiff`] and [`crate::fast_path::diff_json`]).
 //!
-//! `onix_core`'s diff engine is natively recursive: it walks the two value
-//! trees on the call stack, bounded by a `max_depth` budget counter but not
-//! by any stack-safety mechanism. A caller is free to raise `max_depth` (that
-//! is the whole reason the parameter is exposed), and a genuinely-unequal
-//! input nested just under a raised bound makes the traversal recurse that
-//! many frames deep. Past a few thousand levels that overflows an ordinary
-//! thread stack and aborts the whole interpreter with an uncatchable
-//! `SIGSEGV`, which no Python `try`/`except` can recover.
-//!
-//! Three mechanisms here make that impossible for the *diff*, so no input and
-//! no `max_depth` reachable from Python can crash the process there. They do
-//! not cover the step before it: `crate::convert`'s walk from Python objects
-//! into the value model runs on the calling thread, gets no worker, and
-//! happens before any depth guard has a value to measure — so **every walk
-//! reachable during conversion must itself be iterative**, including the
-//! ones `onix_core` runs on the caller's behalf while a value is being
-//! built (`SetItems::new`'s canonical ordering is one). The three
-//! mechanisms:
-//!
-//! 1. A hard ceiling ([`MAX_DEPTH_CEILING`]) on the `max_depth` a caller may
-//!    request; anything above it is rejected up front with a catchable
-//!    `ValueError` ([`resolve_options`]).
-//! 2. A diff whose inputs are nested deeper than [`MAX_INLINE_DEPTH`] runs on
-//!    a dedicated worker thread whose stack is sized so the recursive engine
-//!    cannot overflow it even at the ceiling ([`diff_to_value`]), with the
-//!    GIL released while it runs. Shallow diffs run inline on the calling
-//!    thread to avoid the fixed cost of spawning a thread.
-//! 3. The rendered report is a compact [`onix_core::Value`] too, so its
-//!    teardown is iterative and safe anywhere; but rendering it to JSON text
-//!    ([`serialize_value`]) still builds and drops a transient
-//!    `serde_json::Value` through natively recursive code, so a deep report
-//!    routes that one operation to the sized worker.
-//!
-//! Nothing else needs any of this for its *own* teardown:
-//! [`crate::convert`] builds the compact [`onix_core::Value`] directly with an
-//! iterative walk, that type's `Drop` and `PartialEq` are iterative, and the
-//! report — being the same type — inherits all of it, including the tuples it
-//! can carry that JSON cannot. Only the natively-recursive diff engine itself
-//! (mechanism 2) and the JSON rendering of a deep report (mechanism 3) still
-//! touch the worker.
-//!
-//! # Where the sizes come from
-//!
-//! Both depth constants are derived from the recursive engine's per-level
-//! native stack cost, measured (not guessed) by a committed, runnable
-//! example — see [`PER_LEVEL_STACK_BYTES`], which records the figure, the
-//! example, and how to reproduce it. The two thresholds size their margins
-//! against that one constant.
+//! `onix_core`'s diff engine is natively recursive and can overflow the
+//! thread stack on deeply nested input, aborting the interpreter with an
+//! uncatchable `SIGSEGV`. Three mechanisms prevent that for the diff itself:
+//! a hard ceiling on `max_depth` ([`MAX_DEPTH_CEILING`], [`resolve_options`]),
+//! a sized worker thread for inputs nested past [`MAX_INLINE_DEPTH`]
+//! ([`diff_to_value`]), and the same worker for serializing a deep report
+//! ([`serialize_value`]). `crate::convert`'s walk from Python objects into
+//! the value model runs on the calling thread instead, so every walk
+//! reachable there must itself be iterative.
 
 use onix_core::{DEFAULT_MAX_DEPTH, DiffOptions, Value};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -59,24 +20,11 @@ use crate::errors::map_diff_error;
 /// The largest `max_depth` a Python caller may request through either entry
 /// point. A value above this is rejected with a catchable `ValueError`
 /// rather than risking a native stack overflow the interpreter cannot catch.
-///
-/// The default `max_depth` ([`onix_core::DEFAULT_MAX_DEPTH`], 512) is far
-/// below this ceiling and is unaffected; the ceiling only ever rejects an
-/// explicitly, unusually high caller-supplied value. Real-world JSON is
-/// essentially never nested even into the hundreds, so 512 already covers
-/// legitimate inputs with a wide margin, and this ceiling exists purely to
-/// bound the adversarial worst case.
 pub(crate) const MAX_DEPTH_CEILING: usize = 20_000;
 
 /// Worst-case native stack, in bytes, one level of the recursive diff engine
-/// costs — the single source of that figure for both the worker stack and the
-/// inline-vs-worker threshold. Measured by
-/// `crates/onix-core/examples/stack_frame_cost.rs` (`cargo run -p onix-core
-/// --example stack_frame_cost`, and `--release`), which binary-searches the
-/// deepest genuinely-unequal input that does not overflow a fixed stack: the
-/// worst case is nested lists in a debug build (the profile `cargo test`
-/// uses) at roughly 3.5 KiB/level, release roughly 0.9 KiB/level. Rounded up
-/// to 4 KiB here.
+/// costs, measured by `crates/onix-core/examples/stack_frame_cost.rs` and
+/// rounded up from its debug-build worst case (~3.5 KiB/level).
 const PER_LEVEL_STACK_BYTES: usize = 4_096;
 
 /// Extra multiplier over the bare `ceiling * per-level` figure, so the worker
@@ -84,27 +32,16 @@ const PER_LEVEL_STACK_BYTES: usize = 4_096;
 /// permits.
 const STACK_SAFETY_MARGIN: usize = 4;
 
-/// The diff worker thread's stack size: enough for the recursive engine to
-/// run at [`MAX_DEPTH_CEILING`] with a [`STACK_SAFETY_MARGIN`]-fold margin.
-/// This is reserved virtual address space, committed lazily by the OS, so
-/// only the pages a given diff actually touches cost real memory.
+/// The diff worker thread's stack size: reserved virtual address space,
+/// committed lazily, sized for [`MAX_DEPTH_CEILING`] with a
+/// [`STACK_SAFETY_MARGIN`]-fold margin.
 const WORKER_STACK_BYTES: usize = MAX_DEPTH_CEILING * PER_LEVEL_STACK_BYTES * STACK_SAFETY_MARGIN;
 
 /// Depth up to which the recursive operations (the diff itself, plus
 /// serializing or dropping its result) may run directly on the calling
-/// thread; anything deeper is routed to the sized worker.
-///
-/// The calling thread's stack is out of this crate's control. Python's main
-/// thread stack is large, but worker threads created with
-/// `threading.stack_size()` — as web servers and async executors routinely
-/// do — can be as small as 512 KiB. At [`PER_LEVEL_STACK_BYTES`] (4 KiB) per
-/// level, a 512 KiB stack holds on the order of 128 levels of diff recursion
-/// (512 KiB / 4 KiB) before overflowing, and somewhat fewer in practice
-/// because thread bootstrap consumes some of it. This threshold, 32, sits
-/// well below that, leaving room for that overhead and for the report's own
-/// serialize/drop recursion. Real inputs are almost always far shallower than
-/// this, so the inline path handles the overwhelming majority of diffs with
-/// no thread-spawn overhead.
+/// thread; anything deeper is routed to the sized worker. Chosen to stay
+/// well within the smallest stack Python allows a caller to configure
+/// (`threading.stack_size()`, down to 512 KiB).
 const MAX_INLINE_DEPTH: usize = 32;
 
 /// Resolves the two Python-supplied diff parameters into a [`DiffOptions`],
@@ -135,14 +72,10 @@ pub(crate) fn resolve_options(
     })
 }
 
-/// Diffs `a` and `b` and renders the report to a [`Value`] (the
-/// type-preserving rendering — see [`onix_core::Report::to_value`]), choosing where
-/// the natively-recursive diff runs: inline on the calling thread when both
-/// inputs are shallow (no thread-spawn cost), or on the sized worker thread
-/// (GIL released) when either is nested past [`MAX_INLINE_DEPTH`]. In the
-/// worker case `a` and `b` are moved in and dropped there, on the large
-/// stack; in the inline case they are shallow, so dropping them here cannot
-/// overflow.
+/// Diffs `a` and `b` and renders the report to a [`Value`] (see
+/// [`onix_core::Report::to_value`]), running the natively-recursive diff on
+/// the sized worker thread when either input is nested past
+/// [`MAX_INLINE_DEPTH`], inline otherwise.
 ///
 /// # Errors
 ///
@@ -154,19 +87,11 @@ pub(crate) fn diff_to_value(
     opts: DiffOptions,
 ) -> PyResult<Value> {
     if is_deep(&a) || is_deep(&b) {
-        // Only the natively-recursive diff needs the sized worker now: the
-        // inputs were already built (iteratively, stack-safely) by
-        // `crate::convert`, and their compact `Value` `Drop` is iterative too,
-        // so they are moved in and dropped on the worker purely because that
-        // is where they were last used, not for stack safety.
         run_on_worker(py, move || {
             onix_core::diff_with_options(&a, &b, &opts).map(|report| report.to_value())
         })?
         .map_err(|error| map_diff_error(&error))
     } else {
-        // Shallow inputs: the diff runs inline, and the inputs drop inline
-        // afterwards — their iterative `Drop` cannot overflow the calling
-        // thread regardless.
         onix_core::diff_with_options(&a, &b, &opts)
             .map(|report| report.to_value())
             .map_err(|error| map_diff_error(&error))
@@ -174,17 +99,9 @@ pub(crate) fn diff_to_value(
 }
 
 /// Serializes `value` to a JSON string, on the sized worker thread when
-/// `deep` (the caller's [`is_deep`] verdict for `value`) is set, because
-/// rendering it goes through natively recursive code that could then
-/// overflow the calling thread; inline otherwise. The caller passes the
-/// verdict in so it is computed once per value rather than re-walked here.
-///
-/// `may_have_wtf8` is the caller's own upper-bound verdict (e.g.
-/// [`crate::deepdiff::DeepDiff`]'s `may_have_wtf8`, a byproduct of
-/// `crate::convert::to_value`'s walk) for whether `value` could hold a lone
-/// surrogate code point — passed in for the same reason `deep` is: so
-/// [`to_json_string`] never re-walks `value` just to answer a question the
-/// caller already knows the answer to.
+/// `deep` is set (rendering is natively recursive too), inline otherwise.
+/// `deep` and `may_have_wtf8` are the caller's own precomputed verdicts (see
+/// [`is_deep`]) so this never re-walks `value` to answer either question.
 ///
 /// # Errors
 ///
@@ -204,37 +121,10 @@ pub(crate) fn serialize_value(
     })
 }
 
-/// Renders one compact [`Value`] to JSON text, matching real `DeepDiff`'s own
-/// `to_json()` in the two places `serde_json`'s ordinary path cannot
-/// represent: a `NaN`, `Infinity` or `-Infinity` float renders as the bare,
-/// non-standard token Python's `json.dumps` writes for one by default, and a
-/// lone (unpaired) surrogate code point in a string or object key renders as
-/// `json.dumps`'s own single-backslash `\uXXXX` escape (a plain Rust `str`
-/// cannot hold one at all — see [`Value::Str`]'s doc). Both checks are cheap
-/// relative to actually walking every leaf by hand, so the overwhelming
-/// common case — no non-finite float and no lone surrogate anywhere in the
-/// tree — takes the fast, unconditionally-correct `to_serde_json()` +
-/// `serde_json::to_string` path and never reaches [`write_json`].
-///
-/// `may_have_wtf8` is the caller's own upper-bound verdict (a byproduct of
-/// `crate::convert::to_value`'s walk — see [`serialize_value`]'s doc) for
-/// whether `value` could hold a lone surrogate, passed in so this never
-/// re-walks `value` with [`onix_core::value::contains_wtf8`] just to answer a
-/// question the caller already knows the answer to; whether a non-finite
-/// float or an arbitrary-precision integer is present has no such byproduct
-/// anywhere upstream, so it is still checked here, once, by
-/// [`needs_written_number`].
-///
-/// `may_have_wtf8` is a *whole-report* flag, not a per-leaf one: once any
-/// single `Str`/key anywhere in `value` holds a surrogate, every `Str` in
-/// the entire report is rendered through [`write_json`]'s
-/// `onix_core::value::write_json_str_content` call, including the ones that
-/// hold no surrogate at all — there is no cheaper per-leaf check to fall
-/// back to below this point, and `write_json` walks the tree once
-/// regardless. That is only acceptable because
-/// `write_json_str_content`/[`onix_core::value::Wtf8Chars`] (in `onix-core`)
-/// are themselves `O(length)`, not `O(length²)`, per string — see that
-/// type's own doc for the `O(n²)` regression this guards against.
+/// Renders one compact [`Value`] to JSON text, matching real `DeepDiff`'s
+/// `to_json()` for a non-finite float and a lone surrogate code point
+/// (neither of which `serde_json`'s own path renders correctly); falls back
+/// to the fast `serde_json` path when neither is present anywhere in `value`.
 fn to_json_string(value: &Value, may_have_wtf8: bool) -> String {
     if !may_have_wtf8 && !needs_written_number(value) {
         return serde_json::to_string(&value.to_serde_json())
@@ -245,12 +135,9 @@ fn to_json_string(value: &Value, may_have_wtf8: bool) -> String {
     out
 }
 
-/// Returns `true` if `value` is, or contains anywhere within it, a number
-/// `serde_json`'s ordinary path cannot render exactly: a non-finite float
-/// (which has no JSON literal) or an arbitrary-precision integer beyond
-/// `u64`/`i64` (which [`Value::to_serde_json`] would collapse to its nearest
-/// `f64`). Either forces the hand-written [`write_json`] path, which emits the
-/// non-finite token or the integer's full decimal digits.
+/// Returns `true` if `value` contains a non-finite float or an
+/// arbitrary-precision integer, either of which [`Value::to_serde_json`]
+/// cannot render exactly and forces the hand-written [`write_json`] path.
 fn needs_written_number(value: &Value) -> bool {
     match value {
         Value::Number(n) => n.as_big().is_some() || n.as_f64().is_some_and(|f| !f.is_finite()),
@@ -267,27 +154,12 @@ fn needs_written_number(value: &Value) -> bool {
     }
 }
 
-/// [`to_json_string`]'s slow path, reached once either [`needs_written_number`]
-/// or the caller's `may_have_wtf8` verdict says `value` needs hand-written
-/// rendering somewhere in it. Writes every node's JSON text by hand — a
-/// `Number` decides its own rendering directly from its own finiteness (the
-/// literal token, or `Value::to_serde_json` for a finite one), a `Str`
-/// renders its content through [`onix_core::value::write_json_str_content`]
-/// (WTF-8-aware: a lone surrogate gets its own escape, everything else is
-/// handed to `serde_json`'s own escaper — see that function's doc), and
-/// every container writes its children the same way — so the walk touches
-/// each node exactly once, `O(nodes)` total, with no re-scanning of what an
-/// ancestor already covered. An object key renders through
-/// [`write_json_object_key`] (itself WTF-8-aware for a `str` key), the same
-/// non-`str`-key rendering `Value::to_serde_json` uses, so the two rendering
-/// paths agree on a key regardless of which one a given report takes.
+/// [`to_json_string`]'s slow path: writes every node's JSON text by hand,
+/// WTF-8-aware, touching each node once.
 fn write_json(value: &Value, out: &mut String) {
     match value {
         Value::Number(n) => {
             if let Some(big) = n.as_big() {
-                // No serde_json::Number form exists for a value beyond
-                // u64/i64; write its exact decimal digits, matching Python's
-                // json.dumps.
                 out.push_str(&big.to_string());
             } else {
                 let f = n
@@ -326,10 +198,6 @@ fn write_json(value: &Value, out: &mut String) {
             }
             out.push('}');
         }
-        // An ordinary leaf reached only because a non-finite float or a
-        // lone surrogate exists somewhere else in the tree: `write_json`
-        // renders every node once it is called at all (see this function's
-        // own doc), it never re-checks containment per leaf.
         Value::Null
         | Value::Bool(_)
         | Value::DateTime(_)
@@ -344,13 +212,8 @@ fn write_json(value: &Value, out: &mut String) {
     }
 }
 
-/// Writes one [`onix_core::value::ObjectKey`] as a JSON string literal
-/// (quotes and all): a `str` key's content goes through
-/// [`onix_core::value::write_json_str_content`] directly, WTF-8-aware,
-/// exactly the way [`write_json`] renders a `Str`; any other key is already
-/// rendered as a plain (surrogate-free — see the module doc's key-type
-/// table) `String` by [`onix_core::value::object_key_json_string`], so that
-/// one only needs `serde_json` to add the quoting and escaping.
+/// Writes one [`onix_core::value::ObjectKey`] as a JSON string literal,
+/// WTF-8-aware for a `str` key, the same way [`write_json`] renders a `Str`.
 fn write_json_object_key(key: &onix_core::value::ObjectKey, out: &mut String) {
     match key {
         onix_core::value::ObjectKey::Str(s) => {
@@ -381,30 +244,21 @@ fn write_json_seq<'a>(items: impl Iterator<Item = &'a Value>, out: &mut String) 
     out.push(']');
 }
 
-/// Runs `f` on a dedicated worker thread whose stack is large enough for the
-/// recursive diff engine (and any recursive operation on its result) to run
-/// at [`MAX_DEPTH_CEILING`] without overflowing, releasing the GIL while it
-/// runs.
-///
-/// `f` must own or borrow only data that outlives the call; the worker is a
-/// scoped thread, joined before this function returns, so a borrow of
-/// `&self` data (e.g. the stored report `Value`) is fine.
+/// Runs `f` on a dedicated worker thread sized to run the recursive diff
+/// engine at [`MAX_DEPTH_CEILING`] without overflowing, GIL released. `f`
+/// is joined before this function returns, so a borrow it holds may outlive
+/// the call.
 ///
 /// # Errors
 ///
-/// `RuntimeError` if the worker thread cannot be spawned (resource
-/// exhaustion) or panics (an internal bug). The panic case cannot fire in
-/// normal operation — `onix_core` is panic-free on the reachable paths — but
-/// is surfaced as a catchable exception rather than aborting.
+/// `RuntimeError` if the worker thread cannot be spawned or panics.
 pub(crate) fn run_on_worker<F, T>(py: Python<'_>, f: F) -> PyResult<T>
 where
     F: FnOnce() -> T + Send,
     T: Send,
 {
-    // Construct no `PyErr` inside `detach` (the GIL is released there): the
-    // closure returns a plain `Send` outcome, mapped to a `PyErr` afterwards
-    // on the calling thread. `detach` is pyo3's GIL-release primitive
-    // (formerly `allow_threads`).
+    // `f` returns a plain Send outcome, mapped to a PyErr after `detach`
+    // returns, since a PyErr cannot be built while the GIL is released.
     let outcome: Result<T, WorkerFailure> = py.detach(|| {
         std::thread::scope(|scope| {
             match std::thread::Builder::new()
@@ -435,17 +289,9 @@ enum WorkerFailure {
     Panicked,
 }
 
-/// Whether `value` is nested past [`MAX_INLINE_DEPTH`], so the natively
-/// recursive work over it must run on the sized worker rather than the
-/// calling thread — asked of both a converted *input* (whose diff is the
-/// recursive part) and a rendered *report* (whose JSON rendering is, see
-/// [`serialize_value`]).
-///
-/// Delegates to [`onix_core::exceeds_depth`] — the same iterative,
-/// stack-safe depth check the diff engine uses internally to bound its own
-/// native recursion — so both crates agree on what "too deep" means by
-/// construction rather than via two copies of the walk, and so it is itself
-/// safe to run on any depth on the calling thread.
+/// Whether `value` is nested past [`MAX_INLINE_DEPTH`] and must run its
+/// recursive work on the sized worker. Delegates to
+/// [`onix_core::exceeds_depth`], itself iterative and safe at any depth.
 #[must_use]
 pub(crate) fn is_deep(value: &Value) -> bool {
     onix_core::exceeds_depth(value, MAX_INLINE_DEPTH)
