@@ -29,12 +29,14 @@
 //!
 //! Single-threaded, every pass re-reads both sides and the cell pass holds both
 //! sides' changed rows at once. The parallel path reads the right side once: the
-//! left is hashed and indexed first ([`KeyIndex`]), so the right's hash pass also
-//! keeps its added candidates and spills its changed value rows by key-hash
-//! partition to anonymous temporary IPC files ([`RightFuse`]); one re-read of the
-//! left then materializes it and spills its changed rows ([`reread_left`]), and
-//! the cell pass compares and renders one partition at a time across the workers
-//! ([`diff_cells_streaming`]), holding one partition plus the output.
+//! left is hashed and indexed first ([`KeyIndex`]), so the right's hash pass
+//! tallies each row against the left key it matches instead of keeping its
+//! hashes ([`classify_indexed`]), keeps its added candidates, and spills its
+//! changed value rows by key-hash partition to anonymous temporary IPC files
+//! ([`RightFuse`]); one re-read of the left then materializes it and spills its
+//! changed rows ([`reread_left`]), and the cell pass compares and renders one
+//! partition at a time across the workers ([`diff_cells_streaming`]), holding one
+//! partition plus the output.
 //!
 //! # Parallelism
 //!
@@ -54,11 +56,13 @@
 //! diff whose sides both fit under that bound runs single-threaded, and the peek
 //! reads the left side first so a large left never also buffers the right.
 //!
-//! Memory beyond the per-row hash vectors (one copy per side, plus under a byte
-//! per left row for the index's bucket directory): the in-flight batches (worker
-//! count times batch size), the shared buffers' reallocation slack, and the size
-//! gate's peek buffer (at most [`MAX_PEEK_BYTES`] plus one producer batch per
-//! side). The duplicate-key report holds the key values of every *distinct
+//! Per-row state: the single-threaded path keeps 32 bytes a row on each side; the
+//! parallel path keeps 32 on the left plus an 8-byte tally and under a byte of
+//! bucket directory, and 16 on the right only for a row whose key is absent from
+//! the left. Beyond that: the in-flight batches (worker count times batch size),
+//! the shared buffers' reallocation slack, and the size gate's peek buffer (at
+//! most [`MAX_PEEK_BYTES`] plus one producer batch per side). The duplicate-key
+//! report holds the key values of every *distinct
 //! duplicated* key, and the right's added candidates hold, per input batch, the
 //! first row of each key absent from the left, more than the added rows only by
 //! right-only duplicates. The cell pass's spill holds every common value column
@@ -3253,12 +3257,13 @@ struct RightCapture {
 }
 
 /// The per-batch step of the right side's parallel hash pass, run on the
-/// workers against the indexed left. A row whose key is absent from the left is
-/// an added candidate (whether it is a right-only duplicate is known only once
-/// the pass ends, so the first row per batch of each such key is kept for the
-/// duplicate report); a row whose key is on the left once with a different row
-/// hash is spilled for the cell pass; any other row is unchanged, or a
-/// duplicate whose key the left side captures.
+/// workers against the indexed left, where every row is tallied (see
+/// [`KeyIndex::tally`]). A row whose key is absent from the left is an added
+/// candidate (whether it is a right-only duplicate is known only once the pass
+/// ends, so the first row per batch of each such key is kept for the duplicate
+/// report); a row whose key is on the left once with a different row hash is
+/// spilled for the cell pass; any other row is unchanged, or a duplicate whose
+/// key the left side captures.
 struct RightFuse<'a> {
     index: &'a KeyIndex,
     value_columns: &'a [usize],
