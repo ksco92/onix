@@ -35,10 +35,11 @@ shallower difference can still trip `MaxDepthExceeded`.
 The traversal recurses at most `max_depth` levels; each level costs a
 small constant number of native frames (`diff_at` plus one dispatch
 function, `object_diff` or `array_diff`), so the worst case is
-roughly `2 * max_depth` frames — about 3.5 KiB/level in a debug
-build, measured by `crates/onix-core/examples/stack_frame_cost.rs`
-the same way `crates/onix-py/src/guard.rs` sizes its worker stack
-from it. Every site that clones a whole value into a `Report` calls
+roughly `2 * max_depth` frames — about 4,000 bytes/level for nested
+lists in a debug build (the measured worst-case shape), per
+`crates/onix-core/examples/stack_frame_cost.rs`; `guard.rs` (in
+`onix-py`) rounds this up to size its worker stack. Every site that
+clones a whole value into a `Report` calls
 `check_value_depth`/`check_map_depth` first, so no value over the
 combined budget is ever cloned; `Value`'s `Clone` then recurses no
 deeper than that budget, and `Report::to_json_value` renders those
