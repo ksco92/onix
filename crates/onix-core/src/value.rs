@@ -86,6 +86,8 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
+use crate::path::{PathSegment, entry_path_segment};
+
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -1804,6 +1806,9 @@ struct ObjectClass {
     /// attributes.
     kind: ObjectKind,
     lengths: ObjectLengths,
+    /// The sorted names of the entries read from the class rather than the
+    /// instance, which a whole-object render leaves out.
+    class_attributes: Box<[Arc<str>]>,
 }
 
 /// The lengths `DeepDiff`'s `ignore_order` distance reads off a custom object
@@ -1868,14 +1873,15 @@ impl Object {
                 identity,
                 kind: ObjectKind::Dict,
                 lengths: ObjectLengths::default(),
+                class_attributes: Box::default(),
             })
         });
         self
     }
 
     /// Marks these entries as `kind`'s (a custom object's attributes, or an
-    /// opaque token's none) under class `name`, `identity` and `lengths` —
-    /// see [`ObjectKind`] and the `ObjectClass` struct.
+    /// opaque token's none) under class `name`, `identity`, `lengths` and
+    /// `class_attributes` — see [`ObjectKind`] and the `ObjectClass` struct.
     #[must_use]
     pub fn into_class(
         mut self,
@@ -1883,14 +1889,31 @@ impl Object {
         name: Arc<str>,
         identity: Arc<str>,
         lengths: ObjectLengths,
+        mut class_attributes: Vec<Arc<str>>,
     ) -> Self {
+        class_attributes.sort_unstable();
         self.class = Some(Box::new(ObjectClass {
             name,
             identity,
             kind,
             lengths,
+            class_attributes: class_attributes.into_boxed_slice(),
         }));
         self
+    }
+
+    /// Whether `key` names an entry read from the class rather than the
+    /// instance.
+    #[must_use]
+    pub fn is_class_attribute(&self, key: &ObjectKey) -> bool {
+        self.class.as_ref().is_some_and(|class| {
+            key.as_str().is_some_and(|name| {
+                class
+                    .class_attributes
+                    .binary_search_by(|a| a.as_ref().cmp(name))
+                    .is_ok()
+            })
+        })
     }
 
     /// The class *name* (`__name__`) this object carries, or `None` for the
@@ -2223,12 +2246,14 @@ impl Builder {
         name: Arc<str>,
         identity: Arc<str>,
         lengths: ObjectLengths,
+        class_attributes: Vec<Arc<str>>,
     ) -> Value {
         Value::Object(Object::from_pairs(entries).into_class(
             ObjectKind::CustomObject,
             name,
             identity,
             lengths,
+            class_attributes,
         ))
     }
 
@@ -2241,8 +2266,64 @@ impl Builder {
             name,
             identity,
             ObjectLengths::default(),
+            Vec::new(),
         ))
     }
+}
+
+/// A copy of `value` as a report shows it: every custom object's class
+/// attributes left out, at any depth, as `DeepDiff`'s whole-object render leaves them out.
+/// `Err` carries the path below `value` and the type name of the first opaque
+/// token the render would show.
+///
+/// Recurses natively over `value`'s nesting; a caller runs a deep value on a
+/// sized stack.
+///
+/// # Errors
+///
+/// Returns the token's relative path and type name when one is left in the
+/// render.
+pub fn rendered(value: &Value) -> Result<Value, (Vec<PathSegment>, String)> {
+    let mut path = Vec::new();
+    rendered_at(value, &mut path).map_err(|name| (path, name))
+}
+
+fn rendered_at(value: &Value, path: &mut Vec<PathSegment>) -> Result<Value, String> {
+    let (items, tuple) = match value {
+        Value::Object(map) => {
+            if map.opaque_identity().is_some() {
+                return Err(map.type_name().unwrap_or_default().to_string());
+            }
+            let mut kept = Vec::with_capacity(map.entries.len());
+            for (key, child) in map {
+                if map.is_class_attribute(key) {
+                    continue;
+                }
+                path.push(entry_path_segment(map.kind(), key));
+                kept.push((key.clone(), rendered_at(child, path)?));
+                path.pop();
+            }
+            return Ok(Value::Object(Object {
+                entries: kept.into_boxed_slice(),
+                class: map.class.clone(),
+            }));
+        }
+        Value::Array(items) => (items, false),
+        Value::Tuple(items) => (items, true),
+        other => return Ok(other.clone()),
+    };
+    let mut kept = Vec::with_capacity(items.inner.len());
+    for (index, child) in items.inner.iter().enumerate() {
+        path.push(PathSegment::Index(index));
+        kept.push(rendered_at(child, path)?);
+        path.pop();
+    }
+    let items = Typed::with_class_name(kept.into_boxed_slice(), items.class_name.clone());
+    Ok(if tuple {
+        Value::Tuple(items)
+    } else {
+        Value::Array(items)
+    })
 }
 
 impl<'de> Deserialize<'de> for Value {

@@ -3383,6 +3383,7 @@ fn ccustom_with(attrs: &serde_json::Value, lengths: crate::value::ObjectLengths)
             std::sync::Arc::from("A"),
             std::sync::Arc::from("A"),
             lengths,
+            Vec::new(),
         ),
     )
 }
@@ -3460,4 +3461,77 @@ fn an_opaque_token_keys_by_its_identity_apart_from_an_object_of_that_name() {
     assert_ne!(key(&copaque("1")), key(&copaque("2")));
     assert_ne!(key(&copaque("1")), key(&named_like_the_identity));
     assert_eq!(key(&copaque("1")), key(&copaque("1")));
+}
+
+/// A custom object `A` holding `entries`, the names in `class_attributes` read
+/// from its class.
+fn cobject_with_class_attributes(
+    entries: Vec<(&str, CValue)>,
+    class_attributes: &[&str],
+) -> CValue {
+    let entries = entries
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from(name))),
+                value,
+            )
+        })
+        .collect();
+    crate::value::Builder::new().custom_object(
+        entries,
+        std::sync::Arc::from("A"),
+        std::sync::Arc::from("A"),
+        crate::value::ObjectLengths::default(),
+        class_attributes
+            .iter()
+            .map(|name| std::sync::Arc::from(*name))
+            .collect(),
+    )
+}
+
+#[test]
+fn rough_length_leaves_out_class_attributes() {
+    let object = cobject_with_class_attributes(
+        vec![("x", cv(&json!(1))), ("shared", cv(&json!([1, 2])))],
+        &["shared"],
+    );
+    assert_eq!(super::distance::rough_length(&object), 1 + 1 + 1);
+}
+
+#[test]
+fn rendered_leaves_out_class_attributes_at_any_depth_and_keeps_container_shapes() {
+    let inner = cobject_with_class_attributes(
+        vec![("y", cv(&json!(2))), ("token", copaque("1"))],
+        &["token"],
+    );
+    let value = carr(vec![ctuple(vec![cobject_with_class_attributes(
+        vec![
+            ("x", inner),
+            ("z", cv(&json!(3))),
+            ("shared", cv(&json!(4))),
+        ],
+        &["shared", "z"],
+    )])]);
+    let expected = carr(vec![ctuple(vec![cobject_with_class_attributes(
+        vec![(
+            "x",
+            cobject_with_class_attributes(vec![("y", cv(&json!(2)))], &[]),
+        )],
+        &[],
+    )])]);
+    assert_eq!(crate::value::rendered(&value), Ok(expected));
+}
+
+#[test]
+fn rendered_names_the_path_and_type_of_an_opaque_token_left_in_the_render() {
+    let value = carr(vec![
+        cv(&json!(0)),
+        cobject_with_class_attributes(vec![("price", copaque("1"))], &[]),
+    ]);
+    let (path, type_name) = crate::value::rendered(&value).unwrap_err();
+    assert_eq!(
+        (crate::path::render_path(&path).to_string(), type_name),
+        ("root[1].price".to_string(), "Decimal".to_string())
+    );
 }

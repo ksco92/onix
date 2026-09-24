@@ -217,7 +217,11 @@ pub(crate) fn rough_length(value: &Value) -> usize {
         }
         Value::Object(map) => {
             1 + map.lengths().hidden_count
-                + map.values().map(|v| 1 + rough_length(v)).sum::<usize>()
+                + map
+                    .iter()
+                    .filter(|(key, _)| !map.is_class_attribute(key))
+                    .map(|(_, v)| 1 + rough_length(v))
+                    .sum::<usize>()
         }
     }
 }

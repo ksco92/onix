@@ -8,12 +8,15 @@ path.
 
 import abc
 import collections
+import dataclasses
 import datetime
 import gc
 import json
 import logging
 import math
+import re
 import threading
+import time
 
 import pytest
 from conftest import _normalize_types, require_deepdiff
@@ -1187,12 +1190,6 @@ def test_different_unsupported_objects_raise_with_the_path(ignore_order: bool) -
         DeepDiff([{"k": decimal.Decimal("1")}], [{"k": decimal.Decimal("1")}], ignore_order=ignore_order)
 
 
-def test_an_unsupported_object_inside_a_reported_value_raises_with_its_path() -> None:
-    """A report that would have to show an unsupported value, here an added instance, raises naming its path."""
-    with pytest.raises(TypeError, match=r"_abc_data at root\[1\]\._abc_impl"):
-        DeepDiff([_AbcBased(1)], [_AbcBased(1), _AbcBased(2)])
-
-
 @pytest.mark.parametrize(
     "make",
     [
@@ -1272,32 +1269,6 @@ def test_a_dict_whose_copy_returns_itself_is_still_iterated_as_a_snapshot() -> N
     assert "root.v" in json.loads(DeepDiff(a, b).to_json())["values_changed"]
 
 
-def test_a_class_attribute_of_a_natively_converted_type_is_rendered_in_a_whole_object_value() -> None:
-    """A class attribute onix converts natively stays a value, so a whole-object render shows it."""
-
-    class Natives:
-        none = None
-        count = 2
-        number = 1.5
-        text = "t"
-        day = datetime.date(2020, 1, 1)
-        clock = datetime.time(1, 2)
-        span = datetime.timedelta(days=1)
-        items = [1]
-        pair = (1, 2)
-        members = frozenset({1})
-        bag = {3}
-        mapping = {"k": 1}
-
-    class Other:
-        pass
-
-    old_value = json.loads(DeepDiff(Natives(), Other()).to_json())["type_changes"]["root"]["old_value"]
-    assert sorted(old_value) == [
-        "bag", "clock", "count", "day", "items", "mapping", "members", "none", "number", "pair", "span", "text",
-    ]
-
-
 def test_an_object_holding_an_enum_against_a_bare_member_pairs_like_deepdiff_under_ignore_order() -> None:
     """Under ignore_order an object and an Enum member pair by DeepDiff's lengths, so both report root[0]."""
 
@@ -1310,3 +1281,176 @@ def test_an_object_holding_an_enum_against_a_bare_member_pairs_like_deepdiff_und
     assert {category: sorted(entries) for category, entries in onix.items()} == {
         category: sorted(entries) for category, entries in real.items()
     } == {"values_changed": ["root[0]"]}
+
+
+# --- Class attributes in reports, shadowed class defaults, and refused models (issue #66) ---
+
+
+class _Pair(abc.ABC):
+    def __init__(self, x: int, y: int) -> None:
+        self.x = x
+        self.y = y
+
+
+@dataclasses.dataclass
+class _AbcRecord(abc.ABC):
+    x: int
+
+
+class _WithEnumDefault:
+    color = _Color.RED
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+class _WithPatternDefault:
+    pat = re.compile("a")
+
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "ignore_order"),
+    [
+        ([_AbcBased(1)], [_AbcBased(1), _AbcBased(2)], False),
+        ({"a": _AbcBased(1)}, {}, False),
+        (_AbcBased(1), 5, False),
+        ([_AbcRecord(1)], [_AbcRecord(1), _AbcRecord(2)], False),
+        ([_WithEnumDefault(1)], [_WithEnumDefault(1), _WithEnumDefault(2)], False),
+        ([_WithPatternDefault(1)], [_WithPatternDefault(1), _WithPatternDefault(2)], False),
+        ([_Pair(1, 1), _Pair(2, 2), _Pair(3, 3), 7], [_Pair(1, 9), _Pair(9, 2), _Pair(3, 9), 8], True),
+    ],
+    ids=["added", "removed", "type_change", "abc_dataclass", "enum_default", "pattern_default", "ignore_order"],
+)
+def test_a_whole_object_value_leaves_out_class_attributes_like_deepdiff(a: object, b: object, ignore_order: bool) -> None:
+    """A whole object in a report shows no class attribute, as DeepDiff's to_json render shows none."""
+    onix = json.loads(DeepDiff(a, b, ignore_order=ignore_order).to_json())
+    real = json.loads(RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2).to_json())
+    assert onix == real
+
+
+def test_an_unsupported_instance_attribute_in_a_reported_object_is_refused_with_its_path() -> None:
+    """An instance attribute onix does not convert is refused wherever a report would show it."""
+
+    class Priced:
+        def __init__(self, price: decimal.Decimal) -> None:
+            self.price = price
+
+    with pytest.raises(TypeError, match=r"Decimal at root\[1\]\.price"):
+        DeepDiff([Priced(decimal.Decimal(1))], [Priced(decimal.Decimal(1)), Priced(decimal.Decimal(2))])
+
+
+class _Item:
+    color = _Color.RED
+
+    def __init__(self, n: int, color: _Color | None = None) -> None:
+        self.n = n
+        if color is not None:
+            self.color = color
+
+
+class _Cfg:
+    def __init__(self, v: int) -> None:
+        self.v = v
+
+
+class _Svc:
+    config = _Cfg(1)
+
+    def __init__(self, config: _Cfg | None = None) -> None:
+        if config is not None:
+            self.config = config
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        (_Item(1, _Color.RED), _Item(1)),
+        (_Item(1, _Color.GREEN), _Item(1)),
+        (_Svc(_Cfg(1)), _Svc()),
+        (_Svc(_Cfg(2)), _Svc()),
+    ],
+    ids=["enum_same", "enum_changed", "object_equal", "object_changed"],
+)
+def test_an_instance_value_against_its_class_default_diffs_like_deepdiff(a: object, b: object) -> None:
+    """An instance attribute shadowing a class default is compared with the default's own value."""
+    onix, real = _canonical(a, b)
+    assert onix == real
+
+
+@pytest.mark.parametrize(
+    ("default", "shadow"),
+    [
+        (None, 1),
+        (True, False),
+        (1, 2),
+        (1.5, 2.5),
+        ("a", "b"),
+        (datetime.datetime(2020, 1, 1), datetime.datetime(2021, 1, 1)),
+        (datetime.date(2020, 1, 1), datetime.date(2021, 1, 1)),
+        (datetime.time(1), datetime.time(2)),
+        (datetime.timedelta(1), datetime.timedelta(2)),
+        ([1], [2]),
+        ((1,), (2,)),
+        ({1}, {2}),
+        (frozenset({1}), frozenset({2})),
+        ({"k": 1}, {"k": 2}),
+    ],
+)
+def test_a_natively_converted_class_default_diffs_against_its_shadow_like_deepdiff(default: object, shadow: object) -> None:
+    """Every type onix converts natively, as a class default, diffs against an instance value that shadows it."""
+    holder = type("Holder", (), {"value": default})
+    shadowed = holder()
+    shadowed.value = shadow
+    onix = _normalize_types(DeepDiff(shadowed, holder()).to_dict())
+    real = _normalize_types(RealDeepDiff(shadowed, holder(), verbose_level=2).to_dict())
+    assert onix == real
+
+
+def test_a_metaclass_interrupt_while_checking_for_a_class_attribute_propagates() -> None:
+    """A KeyboardInterrupt from the class lookup that detects a class attribute propagates."""
+
+    class Meta(type):
+        def __getattribute__(cls, name: str) -> object:
+            if name == "shared":
+                raise KeyboardInterrupt
+            return super().__getattribute__(name)
+
+    class Guarded(metaclass=Meta):
+        shared = 1
+
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+    with pytest.raises(KeyboardInterrupt):
+        DeepDiff(Guarded(1), Guarded(2))
+
+
+def test_a_pydantic_model_is_refused_where_deepdiff_diffs_it() -> None:
+    """A pydantic model, which DeepDiff diffs by attributes but hashes as an iterable, raises TypeError."""
+    pydantic = pytest.importorskip("pydantic")
+
+    class Model(pydantic.BaseModel):
+        a: int
+        b: str
+
+    assert "values_changed" in RealDeepDiff(Model(a=1, b="x"), Model(a=1, b="y"))
+    with pytest.raises(TypeError, match="unsupported type for diffing: Model at root"):
+        DeepDiff(Model(a=1, b="x"), Model(a=1, b="y"))
+
+
+def test_converting_every_member_of_a_large_enum_scales_linearly() -> None:
+    """A list of all members of an N-member Enum converts in time linear in N."""
+
+    def convert_seconds(size: int) -> float:
+        members = list(_enum.Enum("Big", [f"M{i}" for i in range(size)]))
+        best = math.inf
+        for _ in range(3):
+            start = time.perf_counter()
+            DeepDiff(members, members[:-1])
+            best = min(best, time.perf_counter() - start)
+        return best
+
+    assert convert_seconds(4000) < 8 * convert_seconds(1000)

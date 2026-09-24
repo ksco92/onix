@@ -1309,22 +1309,10 @@ ENUM_OBJECT_SEED_BASE: Final[int] = 13_000_000
 _OBJECT_ATTR_NAMES: Final[list[str]] = ["p", "q", "r", "s"]
 
 
-class _Obj1:
-    def __init__(self, **attrs: object) -> None:
-        for key, value in attrs.items():
-            setattr(self, key, value)
-
-
-class _Obj2:
-    def __init__(self, **attrs: object) -> None:
-        for key, value in attrs.items():
-            setattr(self, key, value)
-
-
-class _Obj3:
-    def __init__(self, **attrs: object) -> None:
-        for key, value in attrs.items():
-            setattr(self, key, value)
+def _set_attributes(self: object, **attrs: object) -> None:
+    """Set each keyword argument as an attribute: the shared constructor of the object batch's classes."""
+    for key, value in attrs.items():
+        setattr(self, key, value)
 
 
 class _Shade(enum.Enum):
@@ -1333,7 +1321,9 @@ class _Shade(enum.Enum):
     BLUE = "blue"
 
 
-_OBJECT_CLASSES: Final[list[type]] = [_Obj1, _Obj2, _Obj3]
+_OBJECT_CLASSES: Final[list[type]] = [
+    type(name, (), {"__init__": _set_attributes}) for name in ("_Obj1", "_Obj2", "_Obj3")
+]
 
 
 def _gen_object_attr(rng: random.Random, depth: int) -> object:

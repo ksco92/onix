@@ -2931,6 +2931,7 @@ fn a_nested_object_attribute_reports_a_deep_dotted_path() {
                 dict_len: 1,
                 ..Default::default()
             },
+            Vec::new(),
         )
     };
     let b = {
@@ -2947,6 +2948,7 @@ fn a_nested_object_attribute_reports_a_deep_dotted_path() {
                 dict_len: 1,
                 ..Default::default()
             },
+            Vec::new(),
         )
     };
 

@@ -195,6 +195,7 @@
 //! intentionally a little stricter than `onix_core::diff_with_max_depth`'s
 //! guarantee that two *equal* inputs of any depth always diff cleanly,
 //! because equality can't be known yet at conversion time.
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use num_bigint::BigInt;
@@ -202,6 +203,7 @@ use onix_core::datetime::{
     Date as CDate, DateTime as CDateTime, Time as CTime, TimeDelta as CTimeDelta,
 };
 use onix_core::path::{PathSegment, entry_path_segment, render_path};
+use onix_core::value::rendered;
 use onix_core::value::{
     Builder, Entries, Key as CKey, ObjectKey, ObjectKind, ObjectLengths, SetItems, Str as CStr,
     Typed,
@@ -545,9 +547,9 @@ fn classify<'py>(
     classify_other(current, path, builder, held)
 }
 
-/// [`classify`] for a value onix does not convert natively: a custom object,
-/// or an opaque token for a value `DeepDiff` would never reach, refused at
-/// the root.
+/// [`classify`] for a value onix does not convert natively: a class
+/// attribute, a custom object, or an opaque token for a value `DeepDiff` would
+/// never reach, refused at the root.
 fn classify_other<'py>(
     current: &Bound<'py, PyAny>,
     path: &[PathSegment],
@@ -556,7 +558,12 @@ fn classify_other<'py>(
 ) -> PyResult<Step<'py>> {
     if let Ok(attribute) = current.cast::<ClassAttribute>() {
         let value = attribute.get().0.bind(current.py()).clone();
-        return Ok(Step::Done(opaque(&value, builder, held)));
+        return Ok(Step::Done(class_attribute_value(
+            &value,
+            path.len(),
+            builder,
+            held,
+        )?));
     }
     if let Some(strategy) = object_strategy(current)? {
         return object_step(current, &strategy, path, builder, held);
@@ -570,43 +577,88 @@ fn classify_other<'py>(
     Ok(Step::Done(opaque(current, builder, held)))
 }
 
-/// Whether [`classify`] converts `value` natively, outside a set member.
-fn is_native(value: &Bound<'_, PyAny>) -> bool {
-    value.is_none()
-        || value.is_instance_of::<PyInt>()
-        || value.is_instance_of::<PyFloat>()
-        || value.is_instance_of::<PyString>()
-        || value.is_instance_of::<PyDate>()
-        || value.is_instance_of::<PyTime>()
-        || value.is_instance_of::<PyDelta>()
-        || value.is_instance_of::<PyList>()
-        || value.is_instance_of::<PyTuple>()
-        || value.is_instance_of::<PySet>()
-        || value.is_instance_of::<PyFrozenSet>()
-        || value.is_instance_of::<PyDict>()
-}
-
-/// A class attribute's value onix does not convert natively, as
-/// [`detailed_dict`] hands it to [`classify`] to become an [`opaque`] token:
-/// two instances of one class share it, so `DeepDiff`'s `t1 is t2` check
-/// skips it.
+/// A class attribute's value, as [`detailed_dict`] hands it to [`classify`]:
+/// converted once per diff by [`class_attribute_value`].
 #[pyclass(frozen)]
 struct ClassAttribute(Py<PyAny>);
 
-/// Every Python object whose address a conversion keys into an identity (a
-/// class, or an opaque token's value), held so no address is reused while the
-/// diff runs, and whether any opaque token was built.
-#[derive(Default)]
+/// How many class-attribute conversions may nest inside one another on the
+/// native stack before a further one becomes an opaque token.
+const MAX_CLASS_ATTRIBUTE_NESTING: usize = 16;
+
+/// The class attribute `value` at `depth`, converted by its own walk and
+/// memoized by address for the diff. A value that cannot be converted, one
+/// already being converted, or one nested too deep is an opaque token, as
+/// `DeepDiff`'s `t1 is t2` check never looks inside a value two instances
+/// share.
+fn class_attribute_value(
+    value: &Bound<'_, PyAny>,
+    depth: usize,
+    builder: &mut Builder,
+    held: &mut Held,
+) -> PyResult<CValue> {
+    let address = value.as_ptr() as usize;
+    if let Some(converted) = held.class_attributes.get(&address) {
+        return Ok(match converted {
+            Some(converted) => converted.clone(),
+            None => opaque(value, builder, held),
+        });
+    }
+    if held.nesting == MAX_CLASS_ATTRIBUTE_NESTING {
+        return Ok(opaque(value, builder, held));
+    }
+    held.objects.push(value.clone().unbind());
+    held.class_attributes.insert(address, None);
+    held.nesting += 1;
+    let converted = to_value(value, held.max_depth.saturating_sub(depth), held);
+    held.nesting -= 1;
+    let converted = match converted {
+        Ok((converted, saw_wtf8)) => {
+            held.saw_wtf8 |= saw_wtf8;
+            converted
+        }
+        Err(err) if err.is_instance_of::<PyException>(value.py()) => opaque(value, builder, held),
+        Err(err) => return Err(err),
+    };
+    held.class_attributes
+        .insert(address, Some(converted.clone()));
+    Ok(converted)
+}
+
+/// What one diff's conversions share: every Python object whose address a
+/// conversion keys into an identity or a memo, held so no address is reused
+/// while the diff runs; the converted class attributes (`None` while one is
+/// being converted); each `Enum` class's length; and whether the report needs
+/// [`render_report`].
 pub(crate) struct Held {
     objects: Vec<Py<PyAny>>,
-    pub(crate) opaque: bool,
+    class_attributes: HashMap<usize, Option<CValue>>,
+    enum_lengths: HashMap<usize, usize>,
+    max_depth: usize,
+    nesting: usize,
+    pub(crate) saw_wtf8: bool,
+    pub(crate) needs_render: bool,
+}
+
+impl Held {
+    pub(crate) fn new(max_depth: usize) -> Self {
+        Self {
+            objects: Vec::new(),
+            class_attributes: HashMap::new(),
+            enum_lengths: HashMap::new(),
+            max_depth,
+            nesting: 0,
+            saw_wtf8: false,
+            needs_render: false,
+        }
+    }
 }
 
 /// An [`ObjectKind::Opaque`] token for `obj`: equal only to a token for the
-/// same object, and refused by [`refuse_opaque`] wherever a report shows it.
+/// same object, and refused by [`render_report`] wherever a report shows it.
 fn opaque(obj: &Bound<'_, PyAny>, builder: &mut Builder, held: &mut Held) -> CValue {
     held.objects.push(obj.clone().unbind());
-    held.opaque = true;
+    held.needs_render = true;
     builder.opaque(
         class_name(obj),
         Arc::from(format!("{:x}", obj.as_ptr() as usize)),
@@ -630,6 +682,9 @@ enum Strategy<'py> {
 /// - a number from `DeepDiff`'s concrete tuple (`complex`, `Decimal`,
 ///   `Fraction`, or a `numpy` scalar), not the `numbers.Number` ABC, plus
 ///   `uuid` and `ipaddress`;
+/// - a `pydantic` model, which `DeepDiff` diffs by attributes but hashes and
+///   measures as an iterable of fields (see `tests/golden/README.md`'s
+///   "Pydantic models");
 /// - any `collections.abc.Iterable`, before the `Enum` check as in the
 ///   ladder. A custom non-`dict` `Mapping` is over-refused here (see
 ///   `tests/golden/README.md`'s "Refused mappings").
@@ -650,7 +705,8 @@ fn object_strategy<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Option<Strategy<'py
         || obj.is_instance(&py.import("fractions")?.getattr("Fraction")?)?
         || obj.is_instance(&py.import("uuid")?.getattr("UUID")?)?
         || is_ipaddress(obj)?
-        || is_numpy_scalar(obj)?
+        || is_loaded_instance(obj, "numpy", "generic")?
+        || is_loaded_instance(obj, "pydantic.main", "BaseModel")?
     {
         return Ok(None);
     }
@@ -675,12 +731,12 @@ fn object_strategy<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Option<Strategy<'py
     Ok(has_public.then_some(Strategy::Members(members)))
 }
 
-/// Whether `obj` is a `numpy.generic` scalar, without importing `numpy`: an
-/// instance of one implies the module is already loaded.
-fn is_numpy_scalar(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+/// Whether `obj` is an instance of `module.class`, without importing
+/// `module`: an instance of one implies the module is already loaded.
+fn is_loaded_instance(obj: &Bound<'_, PyAny>, module: &str, class: &str) -> PyResult<bool> {
     let modules = obj.py().import("sys")?.getattr("modules")?;
-    match modules.cast::<PyDict>()?.get_item("numpy")? {
-        Some(numpy) => obj.is_instance(&numpy.getattr("generic")?),
+    match modules.cast::<PyDict>()?.get_item(module)? {
+        Some(module) => obj.is_instance(&module.getattr(class)?),
         None => Ok(false),
     }
 }
@@ -715,8 +771,10 @@ fn object_step<'py>(
     builder: &mut Builder,
     held: &mut Held,
 ) -> PyResult<Step<'py>> {
-    let (attrs, lengths) = object_attributes(obj, strategy, path)?;
-    let class = Box::new(py_class(obj, lengths, held));
+    let (attrs, lengths, class_attributes) = object_attributes(obj, strategy, path, held)?;
+    held.needs_render = true;
+    let mut class = Box::new(py_class(obj, lengths, held));
+    class.class_attributes = class_attributes;
     let mut iter = attrs.iter();
     Ok(match next_dict_entry(&mut iter, path, builder)? {
         None => Step::Done(finish_object(
@@ -746,10 +804,12 @@ fn object_attributes<'py>(
     obj: &Bound<'py, PyAny>,
     strategy: &Strategy<'py>,
     path: &[PathSegment],
-) -> PyResult<(Bound<'py, PyDict>, ObjectLengths)> {
+    held: &mut Held,
+) -> PyResult<(Bound<'py, PyDict>, ObjectLengths, Vec<Arc<str>>)> {
+    let mut class_attributes = Vec::new();
     let (result, lengths) = match strategy {
-        Strategy::Enum => enum_dict(obj)?,
-        Strategy::Dict(dir) => detailed_dict(obj, dir, path)?,
+        Strategy::Enum => enum_dict(obj, held)?,
+        Strategy::Dict(dir) => detailed_dict(obj, dir, path, &mut class_attributes)?,
         Strategy::Slots => (slots_dict(obj)?, plain_lengths(dunder_dict_len(obj)?, 0)),
         Strategy::Members(members) => (members.clone(), plain_lengths(dunder_dict_len(obj)?, 0)),
     };
@@ -765,7 +825,7 @@ fn object_attributes<'py>(
     for key in dunder {
         result.del_item(&key)?;
     }
-    Ok((result, lengths))
+    Ok((result, lengths, class_attributes))
 }
 
 /// The [`ObjectLengths`] of an object whose class is not iterable.
@@ -788,8 +848,12 @@ fn dunder_dict_len(obj: &Bound<'_, PyAny>) -> PyResult<usize> {
 
 /// `detailed__dict__(obj, include_keys=ENUM_INCLUDE_KEYS)`: `name` and
 /// `value`, each skipped when reading it raises an `Exception`. The hidden
-/// count takes each other `__dict__` value as one `DeepHash` node.
-fn enum_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<(Bound<'py, PyDict>, ObjectLengths)> {
+/// count takes each other `__dict__` value as one `DeepHash` node; the class
+/// length is computed once per `Enum` class for the diff.
+fn enum_dict<'py>(
+    obj: &Bound<'py, PyAny>,
+    held: &mut Held,
+) -> PyResult<(Bound<'py, PyDict>, ObjectLengths)> {
     let py = obj.py();
     let result = PyDict::new(py);
     for name in ["name", "value"] {
@@ -813,10 +877,18 @@ fn enum_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<(Bound<'py, PyDict>, Obje
         .filter(|key| *key != "_name_" && *key != "_value_")
         .map(|key| if key.starts_with("__") { 1 } else { 2 })
         .sum();
-    let mut type_len = 0;
-    for member in obj.get_type().try_iter()? {
-        type_len += dunder_dict_len(&member?)?;
-    }
+    let class = obj.get_type();
+    let type_len = if let Some(type_len) = held.enum_lengths.get(&(class.as_ptr() as usize)) {
+        *type_len
+    } else {
+        let mut type_len = 0;
+        for member in class.try_iter()? {
+            type_len += dunder_dict_len(&member?)?;
+        }
+        held.enum_lengths.insert(class.as_ptr() as usize, type_len);
+        held.objects.push(class.into_any().unbind());
+        type_len
+    };
     Ok((
         result,
         ObjectLengths {
@@ -834,6 +906,7 @@ fn detailed_dict<'py>(
     obj: &Bound<'py, PyAny>,
     dir: &Bound<'py, PyList>,
     path: &[PathSegment],
+    class_attributes: &mut Vec<Arc<str>>,
 ) -> PyResult<(Bound<'py, PyDict>, ObjectLengths)> {
     let py = obj.py();
     let result = PyDict::new(py);
@@ -882,10 +955,13 @@ fn detailed_dict<'py>(
         if value.is_callable() {
             continue;
         }
-        let is_class_attribute = class
-            .getattr(&*text)
-            .is_ok_and(|class_value| class_value.is(&value));
-        if is_class_attribute && !is_native(&value) {
+        let is_class_attribute = match class.getattr(&*text) {
+            Ok(class_value) => class_value.is(&value),
+            Err(err) if err.is_instance_of::<PyAttributeError>(py) => false,
+            Err(err) => return Err(err),
+        };
+        if is_class_attribute {
+            class_attributes.push(Arc::from(text));
             result.set_item(name, ClassAttribute(value.unbind()))?;
         } else {
             result.set_item(name, value)?;
@@ -1078,7 +1154,13 @@ fn finish_object(
         }
         ObjectKind::CustomObject | ObjectKind::Opaque => {
             let class = class.expect("a custom object always carries its class");
-            builder.custom_object(built, class.name, class.identity, class.lengths)
+            builder.custom_object(
+                built,
+                class.name,
+                class.identity,
+                class.lengths,
+                class.class_attributes,
+            )
         }
     }
 }
@@ -1584,7 +1666,17 @@ fn unsupported_type_error(type_name: &str, path: &str) -> PyErr {
         "unsupported type for diffing: {type_name} at {path}; a custom object is diffed by \
          its attributes, but a value DeepDiff routes to a handler onix lacks \
          (bytes/bytearray/memoryview or another iterable, a number such as \
-         complex/Decimal/Fraction, uuid, ipaddress, a class or module) is not",
+         complex/Decimal/Fraction, uuid, ipaddress, a pydantic model, a class or module) is not",
+    ))
+}
+
+/// The error for an opaque token (see [`opaque`]) a report would have to
+/// show: onix holds the value only by identity.
+pub(crate) fn opaque_error(type_name: &str, path: &str) -> PyErr {
+    PyTypeError::new_err(format!(
+        "cannot report the {type_name} at {path}: onix compares a value it does not convert \
+         (a type DeepDiff routes to a handler onix lacks, or a shared class attribute onix \
+         could not convert) only by identity, and cannot render it"
     ))
 }
 
@@ -1599,77 +1691,58 @@ fn unprocessed_error(obj: &Bound<'_, PyAny>, path: &[PathSegment], err: &PyErr) 
     ))
 }
 
-/// Raises [`unsupported_type_error`] for the first opaque token (see
-/// [`opaque`]) that `report`, a rendered report, shows in any finding.
-pub(crate) fn refuse_opaque(report: &CValue) -> PyResult<()> {
-    enum Step<'v> {
-        Entry(ObjectKind, &'v ObjectKey),
-        Index(usize),
-    }
+/// `report` as it renders, each finding's value through
+/// [`onix_core::value::rendered`]. An opaque token left in the render is the
+/// `Err` of its type name and full path.
+pub(crate) fn render_report(report: &CValue) -> Result<CValue, (String, String)> {
     let CValue::Object(categories) = report else {
-        return Ok(());
+        return Ok(report.clone());
     };
+    let mut builder = Builder::new();
+    let mut rendered_categories = Vec::with_capacity(categories.len());
     for (category, findings) in categories {
         let CValue::Object(findings) = findings else {
+            rendered_categories.push((category.clone(), findings.clone()));
             continue;
         };
         let compared = matches!(category.as_str(), Some("values_changed" | "type_changes"));
+        let mut rendered_findings = Vec::with_capacity(findings.len());
         for (finding_path, finding) in findings {
-            let mut steps: Vec<(Option<usize>, Step<'_>)> = Vec::new();
-            let mut stack: Vec<(&CValue, Option<usize>)> = match finding {
-                CValue::Object(entry) if compared => ["old_value", "new_value"]
-                    .into_iter()
-                    .filter_map(|side| entry.get_str(side))
-                    .map(|value| (value, None))
-                    .collect(),
-                _ => vec![(finding, None)],
+            let path = match finding_path {
+                ObjectKey::Str(key) => String::from_utf8_lossy(key.as_bytes()).into_owned(),
+                ObjectKey::Other(_) => String::new(),
             };
-            while let Some((value, parent)) = stack.pop() {
-                match value {
-                    CValue::Object(map) => {
-                        if map.opaque_identity().is_some() {
-                            let mut segments = Vec::new();
-                            let mut at = parent;
-                            while let Some(index) = at {
-                                let (up, step) = &steps[index];
-                                segments.push(match step {
-                                    Step::Entry(kind, key) => entry_path_segment(*kind, key),
-                                    Step::Index(i) => PathSegment::Index(*i),
-                                });
-                                at = *up;
-                            }
-                            segments.reverse();
-                            let suffix = render_path(&segments).to_string();
-                            return Err(unsupported_type_error(
-                                map.type_name().unwrap_or_default(),
-                                &format!(
-                                    "{}{}",
-                                    match finding_path {
-                                        ObjectKey::Str(key) =>
-                                            String::from_utf8_lossy(key.as_bytes()),
-                                        ObjectKey::Other(_) => "root".into(),
-                                    },
-                                    &suffix["root".len()..],
-                                ),
-                            ));
-                        }
-                        for (key, child) in map {
-                            steps.push((parent, Step::Entry(map.kind(), key)));
-                            stack.push((child, Some(steps.len() - 1)));
-                        }
+            let finding = match finding {
+                CValue::Object(entry) if compared => {
+                    let mut fields = Vec::with_capacity(entry.len());
+                    for (field, value) in entry {
+                        let value = if matches!(field.as_str(), Some("old_value" | "new_value")) {
+                            rendered_at(value, &path)?
+                        } else {
+                            value.clone()
+                        };
+                        fields.push((field.clone(), value));
                     }
-                    CValue::Array(items) | CValue::Tuple(items) => {
-                        for (i, child) in items.iter().enumerate() {
-                            steps.push((parent, Step::Index(i)));
-                            stack.push((child, Some(steps.len() - 1)));
-                        }
-                    }
-                    _ => {}
+                    builder.object_with_keys(fields)
                 }
-            }
+                _ => rendered_at(finding, &path)?,
+            };
+            rendered_findings.push((finding_path.clone(), finding));
         }
+        rendered_categories.push((
+            category.clone(),
+            builder.object_with_keys(rendered_findings),
+        ));
     }
-    Ok(())
+    Ok(builder.object_with_keys(rendered_categories))
+}
+
+/// [`onix_core::value::rendered`] for the finding value at `path`.
+fn rendered_at(value: &CValue, path: &str) -> Result<CValue, (String, String)> {
+    rendered(value).map_err(|(below, type_name)| {
+        let below = render_path(&below).to_string();
+        (type_name, format!("{path}{}", &below["root".len()..]))
+    })
 }
 
 /// The error for an object that reached a set member, or anything nested
@@ -1706,6 +1779,7 @@ struct PyClass {
     name: Arc<str>,
     identity: Arc<str>,
     lengths: ObjectLengths,
+    class_attributes: Vec<Arc<str>>,
 }
 
 /// The [`PyClass`] of `obj`'s type, identified by the type object's address;
@@ -1718,6 +1792,7 @@ fn py_class(obj: &Bound<'_, PyAny>, lengths: ObjectLengths, held: &mut Held) -> 
         name: class_name(obj),
         identity,
         lengths,
+        class_attributes: Vec::new(),
     }
 }
 

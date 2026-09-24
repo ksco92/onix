@@ -54,7 +54,8 @@ Repository = "https://github.com/ksco92/onix"
 # use makes pandas a runtime dependency of the package itself). pyarrow is
 # both the `arrow` extra and a test dependency (the tests exercise
 # to_pyarrow() and pyarrow inputs). mypy runs the stub-usability check (see
-# test_stub_mypy.py).
+# test_stub_mypy.py). pydantic supplies the model DeepDiff diffs and onix
+# refuses (test_conversions.py).
 test = [
     "pytest>=8",
     "deepdiff==9.1.0 ; python_version >= '3.10'",
@@ -63,6 +64,7 @@ test = [
     "duckdb>=1",
     "pandas>=2.2",
     "mypy>=1.11",
+    "pydantic>=2",
 ]
 
 [tool.pytest.ini_options]

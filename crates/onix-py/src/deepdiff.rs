@@ -6,8 +6,8 @@
 use onix_core::Value;
 use pyo3::prelude::*;
 
-use crate::convert::{Held, refuse_opaque, to_value, value_to_pyobject};
-use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
+use crate::convert::{Held, opaque_error, render_report, to_value, value_to_pyobject};
+use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, serialize_value};
 
 /// A drop-in subset of `deepdiff.DeepDiff`.
 ///
@@ -107,23 +107,29 @@ impl DeepDiff {
         // deep) legal value, the `?` drops `a` here on the early return — its
         // iterative `Drop` cannot overflow the calling thread, so no
         // sized-worker hand-off is needed for it.
-        let mut held = Held::default();
+        let mut held = Held::new(opts.max_depth);
         let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth, &mut held)?;
         let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth, &mut held)?;
         // The diff is natively recursive: it runs inline when both inputs are
         // shallow, else on the stack-sized worker (GIL released). The report
         // comes back in the same compact value model the inputs use, so it can
         // carry a tuple all the way out to `to_dict`.
-        let report_value = diff_to_value(py, a, b, opts)?;
-        if held.opaque {
-            refuse_opaque(&report_value)?;
+        let mut report_value = diff_to_value(py, a, b, opts)?;
+        let mut report_is_deep = is_deep(&report_value);
+        if held.needs_render {
+            let rendered = if report_is_deep {
+                run_on_worker(py, || render_report(&report_value))?
+            } else {
+                render_report(&report_value)
+            };
+            report_value = rendered.map_err(|(type_name, path)| opaque_error(&type_name, &path))?;
+            report_is_deep = is_deep(&report_value);
         }
-        let report_is_deep = is_deep(&report_value);
         // A conservative upper bound: the report only ever carries values
         // (or coerced copies, which coercion always renders as plain UTF-8
         // — see `crate::guard`) that already existed in `t1`/`t2`, so
         // neither input holding one guarantees the report holds none.
-        let may_have_wtf8 = a_may_have_wtf8 || b_may_have_wtf8;
+        let may_have_wtf8 = a_may_have_wtf8 || b_may_have_wtf8 || held.saw_wtf8;
 
         Ok(Self {
             report_value,

@@ -286,6 +286,7 @@ fn decode_tagged_object(
             dict_len,
             ..Default::default()
         },
+        Vec::new(),
     )
 }
 

@@ -150,6 +150,7 @@ pub(crate) fn ccustom_id(
             dict_len: map.len(),
             ..Default::default()
         },
+        Vec::new(),
     ))
 }
 
