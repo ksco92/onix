@@ -8466,6 +8466,7 @@ mod fused_tests {
             fuse.visit(at, &batch, &pairs).unwrap();
         }
         let store = fuse.candidates.lock().unwrap();
+        assert!(store.scanned > 0, "the chain compacts");
         assert!(
             store.scanned <= 4 * 2 * 2_000,
             "{} rows scanned for 4,000 visited",
