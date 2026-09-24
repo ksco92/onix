@@ -119,6 +119,8 @@ pub enum Case {
     ViewRemoved(usize),
     /// [`Case::ViewRemoved`] mirrored: every right row added (left empty).
     ViewAdded(usize),
+    /// [`Case::ViewAdded`] keyed on the `width`-byte view column `v0`.
+    ViewAddedByValue(usize),
     /// Two `width`-byte view columns, equal sides except every `every`-th left
     /// row, which the right lacks.
     ViewSparse { width: usize, every: i64 },
@@ -141,6 +143,7 @@ impl Case {
     fn view(self, rows: i64) -> (SchemaRef, Shape, Shape, &'static str) {
         let (Case::ViewRemoved(width)
         | Case::ViewAdded(width)
+        | Case::ViewAddedByValue(width)
         | Case::ViewSparse { width, .. }
         | Case::DupRightOnce(width)
         | Case::DupRightAbsent(width)
@@ -159,7 +162,9 @@ impl Case {
         let all = ViewKeys::Plain { omit_every: 0 };
         let (left, right) = match self {
             Case::ViewRemoved(_) => (all, ViewKeys::Plain { omit_every: 1 }),
-            Case::ViewAdded(_) => (ViewKeys::Plain { omit_every: 1 }, all),
+            Case::ViewAdded(_) | Case::ViewAddedByValue(_) => {
+                (ViewKeys::Plain { omit_every: 1 }, all)
+            }
             Case::ViewSparse { every, .. } => (all, ViewKeys::Plain { omit_every: every }),
             Case::DupRightOnce(_) => (all, ViewKeys::Wrap { offset: 0, period }),
             Case::DupRightAbsent(_) => (
@@ -184,7 +189,12 @@ impl Case {
         } else {
             b'a'
         };
-        (schema, view(b'a', left), view(right_fill, right), "id")
+        let key = if matches!(self, Case::ViewAddedByValue(_)) {
+            "v0"
+        } else {
+            "id"
+        };
+        (schema, view(b'a', left), view(right_fill, right), key)
     }
 
     /// The schema, the left and right shapes, and the key column.
@@ -246,6 +256,7 @@ impl Case {
             }
             Case::ViewRemoved(_)
             | Case::ViewAdded(_)
+            | Case::ViewAddedByValue(_)
             | Case::ViewSparse { .. }
             | Case::DupRightOnce(_)
             | Case::DupRightAbsent(_)

@@ -56,27 +56,24 @@
 //! diff whose sides both fit under that bound runs single-threaded, and the peek
 //! reads the left side first so a large left never also buffers the right.
 //!
-//! Per-row state: the single-threaded path keeps 32 bytes a row on each side;
-//! the parallel path keeps 32 on the left plus an 8-byte tally and under a byte
-//! of bucket directory, and a 32-byte map entry per distinct right key absent
-//! from the left. Beyond that: the in-flight batches (worker count times batch
-//! size), the shared buffers' reallocation slack, and the size gate's peek
-//! buffer (at most [`MAX_PEEK_BYTES`] plus one producer batch per side). The
-//! duplicate-key report holds the key values of every *distinct duplicated*
-//! key. Right-side duplicate keys add two terms on the parallel path: the first
-//! row of each key absent from the left is held in full until the right repeats
-//! the key, and the first right row of a key the left holds once with a
-//! different row hash is spilled unless its own batch repeats the key. A row
-//! kept past its scan copies a buffer it shares with a much larger allocation
-//! when it keeps at most half its batch, but a byte-view column's data buffers
-//! are reproduced in the output as they are, so each batch with a kept row
-//! keeps its view data resident, per side. The cell pass's spill holds every
-//! common value column of every changed row, both sides, plus those repeated
-//! right rows (resident where written temp pages count, e.g. macOS or a
-//! RAM-backed tmpfs), and the pass adds about twice the `cells_changed` output
-//! (its one out-of-place reorder); it is not bounded by the changed *cell*
-//! count alone. The README's Known-limitations bullet states the measured
-//! figures.
+//! Per-row state: 32 bytes a row per side single-threaded; in parallel, 32 on
+//! the left plus an 8-byte tally and under a byte of bucket directory, and a
+//! 32-byte map entry per right key absent from the left. Beyond that: the
+//! in-flight batches (workers times batch size), the buffers' reallocation
+//! slack, the size gate's peek (at most [`MAX_PEEK_BYTES`] plus one producer
+//! batch per side), and the key values of every distinct duplicated key. In
+//! parallel, a right key the left lacks keeps its first row at full width until
+//! the key repeats and a small record per batch holding one; the first right
+//! row of a key the left holds once with a different row hash is spilled unless
+//! its own batch repeats the key. A selection kept past its scan that keeps
+//! over half its batch keeps that whole input batch resident, per side; a
+//! smaller one copies its buffers out, but a byte-view column's data buffers
+//! reach the output whole, so its batch's view data stays. The duplicate-key
+//! report copies its key columns out always. The cell pass's spill holds every
+//! common value column of every changed row, both sides (resident where written
+//! temp pages count), and the pass adds about twice the `cells_changed` output;
+//! it is not bounded by the changed *cell* count. The README's
+//! Known-limitations bullet states the measured figures.
 //!
 //! # Hashing
 //!
@@ -1845,7 +1842,7 @@ fn owned_batch(batch: RecordBatch, source_rows: usize) -> Result<RecordBatch, Ta
 }
 
 /// `batch` with each column passed through [`unshared`], whatever its share of
-/// the source; for key columns, which are a bounded share of any row.
+/// the source.
 fn unshared_batch(batch: RecordBatch) -> Result<RecordBatch, TableDiffError> {
     let mut columns = Vec::with_capacity(batch.num_columns());
     let mut copied = false;
@@ -3312,6 +3309,9 @@ struct CandidateStore {
     /// Full-width rows re-scanned across compaction calls.
     #[cfg(test)]
     scanned: usize,
+    /// Candidates visited across compaction calls.
+    #[cfg(test)]
+    visited: usize,
 }
 
 impl CandidateStore {
@@ -3409,7 +3409,7 @@ impl RightFuse<'_> {
             let hashes = kept.iter().map(|&row| pairs[row].0).collect();
             let candidate = Candidate {
                 at,
-                keys: unshared_batch(rows.project(self.key_columns).map_err(|e| read_error(&e))?)?,
+                keys: rows.project(self.key_columns).map_err(|e| read_error(&e))?,
                 full_rows: (0..kept.len()).collect(),
                 rows: kept,
                 hashes,
@@ -3465,6 +3465,7 @@ impl RightFuse<'_> {
             #[cfg(test)]
             {
                 store.scanned += before;
+                store.visited += 1;
             }
             let mut full_mask = Vec::with_capacity(before);
             for &i in &candidate.full_rows {
@@ -3485,6 +3486,9 @@ impl RightFuse<'_> {
             )
             .map_err(|e| read_error(&e))?;
             candidate.full = owned_batch(full, before)?;
+            if candidate.full_rows.len() * 2 <= before {
+                candidate.keys = unshared_batch(candidate.keys.clone())?;
+            }
             rows += candidate.full_rows.len();
             if candidate.full_rows.is_empty() {
                 store.settled.push(candidate);
@@ -8468,6 +8472,11 @@ mod fused_tests {
         }
         let store = fuse.candidates.lock().unwrap();
         assert!(store.scanned > 0, "the chain compacts");
+        assert!(
+            store.visited <= 4 * 2_000,
+            "{} candidates visited for 2,000 batches",
+            store.visited
+        );
         assert!(
             store.scanned <= 4 * 2 * 2_000,
             "{} rows scanned for 4,000 visited",
