@@ -15,18 +15,18 @@ TESTS_ROOT = Path(__file__).resolve().parent
 
 def test_no_test_name_is_defined_twice() -> None:
     """Every test in every module of this suite has a name of its own."""
-    duplicates = {
-        path.name: sorted(
-            name
-            for name, count in Counter(
-                node.name
-                for node in ast.parse(path.read_text()).body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
-            ).items()
-            if count > 1
+    duplicates = {}
+
+    for path in sorted(TESTS_ROOT.glob("test_*.py")):
+        counts = Counter(
+            node.name
+            for node in ast.parse(path.read_text()).body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
         )
-        for path in sorted(TESTS_ROOT.glob("test_*.py"))
-    }
-    duplicates = {name: found for name, found in duplicates.items() if found}
+
+        found = sorted(name for name, count in counts.items() if count > 1)
+
+        if found:
+            duplicates[path.name] = found
 
     assert not duplicates, f"shadowed test definitions: {duplicates}"
