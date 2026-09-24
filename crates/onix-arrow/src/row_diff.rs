@@ -2897,39 +2897,54 @@ fn spill_flush_rows() -> usize {
 /// their key hashes, their ranks among the selected rows, and, once
 /// [`Routed::take_values`] has run, their value columns.
 struct Routed {
-    rows: Vec<u64>,
-    ranks: Vec<usize>,
+    rows: Vec<u32>,
+    ranks: Vec<u32>,
     key_hashes: Vec<u128>,
     bounds: Vec<usize>,
     values: Option<RecordBatch>,
 }
 
 impl Routed {
-    /// Groups the selected `rows` and their `key_hashes` with a counting sort.
-    fn group(partitions: usize, rows: &[usize], key_hashes: &[u128]) -> Self {
+    /// Groups the rows `selected` marks, each keyed by `key_hash(row)`, with a
+    /// counting sort; a batch too long for the `u32` row indices is refused.
+    // `selected.len()` fits `u32`, so every row index and rank does.
+    #[allow(clippy::cast_possible_truncation)]
+    fn group(
+        partitions: usize,
+        selected: &[bool],
+        key_hash: impl Fn(usize) -> u128,
+    ) -> Result<Self, TableDiffError> {
+        if u32::try_from(selected.len()).is_err() {
+            return Err(TableDiffError::TooManyChangedRows {
+                rows: selected.len(),
+            });
+        }
+        let chosen = || (0..selected.len()).filter(|&row| selected[row]);
         let mut bounds = vec![0; partitions + 1];
-        for &key_hash in key_hashes {
-            bounds[partition_of(key_hash, partitions) + 1] += 1;
+        for row in chosen() {
+            bounds[partition_of(key_hash(row), partitions) + 1] += 1;
         }
         for partition in 1..=partitions {
             bounds[partition] += bounds[partition - 1];
         }
+        let total = bounds[partitions];
         let mut next = bounds.clone();
         let mut routed = Self {
-            rows: vec![0; rows.len()],
-            ranks: vec![0; rows.len()],
-            key_hashes: vec![0; rows.len()],
+            rows: vec![0; total],
+            ranks: vec![0; total],
+            key_hashes: vec![0; total],
             bounds,
             values: None,
         };
-        for (rank, (&row, &key_hash)) in rows.iter().zip(key_hashes).enumerate() {
-            let slot = &mut next[partition_of(key_hash, partitions)];
-            routed.rows[*slot] = row as u64;
-            routed.ranks[*slot] = rank;
-            routed.key_hashes[*slot] = key_hash;
+        for (rank, row) in chosen().enumerate() {
+            let hash = key_hash(row);
+            let slot = &mut next[partition_of(hash, partitions)];
+            routed.rows[*slot] = row as u32;
+            routed.ranks[*slot] = rank as u32;
+            routed.key_hashes[*slot] = hash;
             *slot += 1;
         }
-        routed
+        Ok(routed)
     }
 
     /// Takes the routed rows' `value_columns` in partition order with one
@@ -2945,7 +2960,7 @@ impl Routed {
             return Ok(());
         }
         let values = accum!("spill route (take + cast), summed over threads", {
-            let indices = arrow_array::UInt64Array::from_iter_values(self.rows.iter().copied());
+            let indices = UInt32Array::from(self.rows.clone());
             let projected = batch.project(value_columns).map_err(|e| read_error(&e))?;
             let taken = arrow_select::take::take_record_batch(&projected, &indices)
                 .map_err(|e| read_error(&e))?;
@@ -3205,16 +3220,13 @@ impl RightFuse<'_> {
         batch: &RecordBatch,
         pairs: &[(u128, u128, bool)],
     ) -> Result<(), TableDiffError> {
-        let (mut changed_rows, mut changed_hashes) = (Vec::new(), Vec::new());
+        let mut changed = vec![false; pairs.len()];
         let mut added = Vec::new();
         let mut seen = HashSet::new();
         for (row, &(key_hash, row_hash, _)) in pairs.iter().enumerate() {
             match self.index.lookup(key_hash) {
                 KeyMatch::Absent if seen.insert(key_hash) => added.push(row),
-                KeyMatch::Unique(left_hash) if left_hash != row_hash => {
-                    changed_rows.push(row);
-                    changed_hashes.push(key_hash);
-                }
+                KeyMatch::Unique(left_hash) if left_hash != row_hash => changed[row] = true,
                 _ => {}
             }
         }
@@ -3233,7 +3245,8 @@ impl RightFuse<'_> {
                 .push((idx, kept, hashes));
         }
         let partitions = self.spill.parts.len();
-        let mut routed = Routed::group(partitions, &changed_rows, &changed_hashes);
+        let mut routed = Routed::group(partitions, &changed, |row| pairs[row].0)?;
+        drop(changed);
         routed.take_values(batch, self.value_columns, self.value_schema)?;
         self.spill.write(&routed)
     }
@@ -3289,18 +3302,18 @@ impl LeftReread<'_> {
     /// Classifies one batch's rows and routes its changed rows (on a worker).
     fn prepare(&self, batch: &RecordBatch, hashes: &[u128]) -> Result<LeftRows, TableDiffError> {
         let (mut removed, mut dup_rows) = (Vec::new(), Vec::new());
-        let (mut changed_rows, mut changed_hashes) = (Vec::new(), Vec::new());
+        let mut changed_mask = vec![false; hashes.len()];
         for (row, &key_hash) in hashes.iter().enumerate() {
             if self.classified.removed.contains(&key_hash) {
                 removed.push(row);
             } else if self.classified.duplicates.contains_key(&key_hash) {
                 dup_rows.push(row);
             } else if self.changed.contains(&key_hash) {
-                changed_rows.push(row);
-                changed_hashes.push(key_hash);
+                changed_mask[row] = true;
             }
         }
-        let mut changed = Routed::group(self.partitions, &changed_rows, &changed_hashes);
+        let mut changed = Routed::group(self.partitions, &changed_mask, |row| hashes[row])?;
+        drop(changed_mask);
         changed.take_values(batch, &self.ctx.columns.value, self.value_schema)?;
         Ok(LeftRows {
             removed,
@@ -3358,7 +3371,7 @@ fn reread_left(
             }
             for (index, bounds) in global_index.iter_mut().zip(changed.bounds.windows(2)) {
                 let ranks = &changed.ranks[bounds[0]..bounds[1]];
-                index.extend(ranks.iter().map(|&rank| counter + rank as u32));
+                index.extend(ranks.iter().map(|&rank| counter + rank));
             }
             counter += changed.rows.len() as u32;
             let changed_mask = mask(&mut changed.rows.iter().map(|&row| row as usize));
@@ -6755,8 +6768,8 @@ mod tests {
         let value_schema = super::spill_schema(&sch, &columns.value);
         let sink = super::SpillSink::open(partitions, &value_schema).unwrap();
         let key_hashes = super::hash_batch_keys(&batch, &columns.key, &["id"], &hasher).unwrap();
-        let rows: Vec<usize> = (0..batch.num_rows()).collect();
-        let mut routed = super::Routed::group(partitions, &rows, &key_hashes);
+        let all = vec![true; batch.num_rows()];
+        let mut routed = super::Routed::group(partitions, &all, |row| key_hashes[row]).unwrap();
         routed
             .take_values(&batch, &columns.value, &value_schema)
             .unwrap();
@@ -8025,7 +8038,7 @@ mod fused_tests {
                 .unwrap();
         for _ in 0..3 {
             // Key hashes 2 and 1 route one row to each of the two partitions.
-            let mut routed = Routed::group(2, &[0, 1], &[2, 1]);
+            let mut routed = Routed::group(2, &[true, true], |row| [2, 1][row]).unwrap();
             routed.take_values(&batch, &[0], &schema).unwrap();
             sink.write(&routed).unwrap();
         }
@@ -8117,7 +8130,11 @@ mod fused_tests {
 
     #[test]
     fn routed_groups_rows_by_partition_keeping_row_order_and_ranks() {
-        let routed = Routed::group(3, &[0, 2, 5, 7, 9], &[4, 3, 7, 6, 1]);
+        let selected = [
+            true, false, true, false, false, true, false, true, false, true,
+        ];
+        let hashes = [4, 0, 3, 0, 0, 7, 0, 6, 0, 1];
+        let routed = Routed::group(3, &selected, |row| hashes[row]).unwrap();
         assert_eq!(routed.bounds, vec![0, 2, 5, 5]);
         assert_eq!(routed.rows, vec![2, 7, 0, 5, 9]);
         assert_eq!(routed.ranks, vec![1, 3, 0, 2, 4]);
