@@ -128,41 +128,101 @@ so the 50,000-row threshold runs the workers only where they win.
 
 ## Per-pass profile
 
-Measured on `deepdiff-rs` 0.11.2 (2026-09-06T18:00Z), same machine as the Environment table above.
-The row diff's wall time, broken down by pass, from the committed `row_diff_profile` example (built
-with the `profile` feature; see `perf/arrow/README.md`'s "Profiling" section and the example's module
-docstring, which is the single home for the method). Each wall cell is the median of 11 runs (the
-file's 1M convention) and each RSS the median of the 11 runs' per-pass peaks. Two shapes at 1M rows
-per side, default 18 threads: `linear` (id + int64 value, ~2% of rows changed — the narrow fixture's
-shape) and `manycols` (id + 34 64-byte string columns, every row changed but one cell each — the
-wide fixture's shape, where the spill carries all value columns).
+Measured on `deepdiff-rs` 0.11.2 (2026-09-24T01:06Z to 01:18Z), same machine as the Environment
+table above, with no other `cargo`/`rustc`/`maturin`/`pytest`/`python`/`duckdb` process running at
+the start and end of each sweep. The numbers come from the committed `row_diff_profile` example
+(built with the `profile` feature; the commands are in `perf/arrow/README.md`'s "Profiling" section
+and the method in the example's module docstring). Every figure is the median of independent
+processes (**11 at 1M, 5 at full**, the file's convention), each row's median taken on its own, so a
+column's rows need not add up exactly. Each process runs a discarded warm-up diff, a timed
+uninstrumented diff, and an instrumented diff:
 
-| Pass | `linear` 1M: s (RSS MB) | `manycols` 1M: s (RSS MB) |
+- `total wall (uninstrumented run)` is the uninstrumented diff's wall.
+- Every other row is the instrumented diff: a pass cell is `wall s (peak RSS MB)`, where the peak is
+  the process's resident set while the pass ran (the third diff in the process, so it includes
+  allocator-retained memory from the first two); a `—` row is an additive sub-cost of the pass above
+  it, with no RSS.
+- `net wall` is the instrumented wall minus the profiler's own boundary `ps` reads, and `residual` is
+  `net wall` minus the sum of the passes: untimed code outside every pass, such as building the
+  changed-key set and freeing each pass's state.
+
+### Real fixtures (file mode, 18 threads)
+
+Both parquet fixture pairs (`narrow`/`wide`, 1M and full) converted once to uncompressed Arrow IPC
+and read in file mode, so each pass re-reads and re-decodes its side as the Python bindings' input
+spool does. Full sizes are 37M rows (`narrow`) and 16.875M rows (`wide`).
+
+| Pass | narrow 1M | wide 1M | narrow full | wide full |
+| --- | --- | --- | --- | --- |
+| set-up | 0.000 (289) | 0.000 (1493) | 0.000 (961) | 0.000 (10586) |
+| hash and classify | 0.046 (305) | 0.151 (1519) | 1.223 (3962) | 1.760 (11092) |
+| — spool decode | 0.027 | 0.078 | 0.978 | 1.574 |
+| materialize | 0.034 (305) | 0.075 (1489) | 1.597 (3644) | 1.380 (16025) |
+| — spool decode | 0.024 | 0.072 | 0.791 | 1.368 |
+| cell: spill | 0.031 (305) | 0.392 (1801) | 1.437 (1616) | 7.459 (17847) |
+| — spool decode | 0.024 | 0.082 | 0.757 | 1.198 |
+| — spill route (take + cast) | 0.002 | 0.212 | 0.094 | 3.597 |
+| — spill write | 0.002 | 0.055 | 0.014 | 0.803 |
+| cell: render sort keys | 0.000 (305) | 0.020 (1804) | 0.014 (1617) | 0.332 (16911) |
+| cell: read-back and render | 0.009 (305) | 0.320 (1887) | 0.133 (1710) | 5.417 (18748) |
+| — partition read-back | 0.001 | 0.053 | 0.019 | 0.776 |
+| — compare and render | 0.007 | 0.215 | 0.069 | 3.746 |
+| cell: sort and interleave | 0.003 (305) | 0.168 (1964) | 0.097 (1605) | 3.249 (19461) |
+| passes sum | 0.124 | 1.127 | 4.498 | 19.592 |
+| net wall | 0.127 | 1.150 | 4.523 | 20.275 |
+| residual | 0.003 (2.3%) | 0.023 (2.0%) | 0.026 (0.6%) | 0.663 (3.3%) |
+| **total wall (uninstrumented run)** | **0.129** | **1.148** | **4.540** | **20.176** |
+
+Serial share. Each re-read pass decodes its side on one reader thread while the workers hash, so
+the decode sub-row is that pass's serial floor; the spill's route and write run on one consumer
+thread, concurrently with the decode, not after it. The partition read-back, the sort-key render and
+the final sort and interleave run on the calling thread; only compare and render is split across
+the workers.
+
+| Serial term, share of its pass | narrow 1M | wide 1M | narrow full | wide full |
+| --- | --- | --- | --- | --- |
+| hash and classify: decode | 59% | 52% | 80% | 89% |
+| materialize: decode | 71% | 96% | 50% | 99% |
+| cell: spill: decode | 77% | 21% | 53% | 16% |
+| cell: spill: route + write | 13% | 68% | 8% | 59% |
+
+On the narrow fixture the three re-read passes (hash, materialize, spill) are 94% of the net wall at
+full size (4.26 of 4.52 s), and their decode alone is 2.53 s (56%). On the wide fixture they are 52%
+(10.60 of 20.28 s), decode is 4.14 s (20%), and the spill's route (3.60 s), compare and render
+(3.75 s), and sort and interleave (3.25 s) are the other large terms. Decode is 59% to 68% of the
+re-read passes' wall on the narrow fixture and 38% to 39% on the wide one.
+
+### Proxy shapes (generated mode, 1M rows, 18 threads)
+
+Dependency-free proxies for a quick check without a fixture on disk. They are **proxies, not the
+fixtures**: `linear` is two int64 columns (the narrow fixture has five typed columns:
+`id`/`ts`/`category`-dictionary/`amount`-decimal/`payload`), and `manycols` is 34 identical 64-byte
+`Utf8` columns with every row changed (the wide fixture has 34 distinct scalar types — decimals,
+timestamps, intervals, binary — with ~2% of rows modified plus a zone-awareness retype), so the
+proxy walls do not match the real-fixture walls above. `spool write` is the IPC writer's time
+spooling both generated sides before the diff (file mode has no spool write).
+
+| Pass | `linear` 1M | `manycols` 1M |
 | --- | --- | --- |
-| set-up (input spool already written) | 0.000 (8) | 0.000 (196) |
-| hash and classify (re-read + hash both sides) | 0.016 (169) | 0.543 (1172) |
-| materialize (re-read both sides, filter added/removed) | 0.028 (174) | 0.370 (1173) |
-| cell: spill (re-read + hash + route + write both sides) | 0.021 (176) | 1.481 (4804) |
-| — of which spill write | 0.001 | 0.313 |
-| cell: partition read-back and render | 0.006 (177) | 0.684 (1620) |
-| — of which partition read-back | 0.000 | 0.391 |
-| — of which compare and render | 0.005 | 0.237 |
-| cell: sort and interleave | 0.001 (177) | 0.090 (1741) |
-| **total wall** | **0.094** | **3.255** |
-
-The re-read passes dominate the wide-shape residual: the hash pass, the materialize pass, and the
-cell pass's spill each open and re-decode both spooled sides and re-hash their key columns. On
-`manycols` 1M those three re-read rounds are 0.543 + 0.370 + (1.481 − 0.313) = 2.08 s of the 3.26 s
-total (64%); the spill write (0.313 s), partition read-back (0.391 s), compare-and-render (0.237 s),
-and reorder (0.090 s) are the remainder. Decode is a large part of the re-read cost but not the whole
-of it — re-hashing the key columns is a comparable share — so the re-read term is removable (issue
-#90). This matches the shape of the real wide 1M cell-pass profile recorded in issue #90 (re-read +
-key hashing for the two spill passes the largest single bucket).
-
-For contrast, `manycols` 1M single-threaded (`threads 1`, a single run) totals 9.58 s: hash and
-classify 1.71 s, materialize 0.39 s, and the non-streaming cell pass (which holds both sides' changed
-rows at once) 7.46 s at 7.4 GB peak RSS — the pass the streaming cell path of issue #87 replaced on
-the parallel path.
+| set-up | 0.000 (204) | 0.000 (1478) |
+| hash and classify | 0.014 (228) | 0.543 (2205) |
+| — spool decode | 0.002 | 0.451 |
+| materialize | 0.032 (229) | 0.396 (2203) |
+| — spool decode | 0.002 | 0.395 |
+| cell: spill | 0.024 (229) | 1.472 (5773) |
+| — spool decode | 0.002 | 0.462 |
+| — spill route (take + cast) | 0.000 | 0.916 |
+| — spill write | 0.001 | 0.323 |
+| cell: render sort keys | 0.000 (229) | 0.020 (767) |
+| cell: read-back and render | 0.005 (229) | 0.693 (1558) |
+| — partition read-back | 0.000 | 0.399 |
+| — compare and render | 0.004 | 0.240 |
+| cell: sort and interleave | 0.001 (229) | 0.088 (1674) |
+| passes sum | 0.076 | 3.218 |
+| net wall | 0.078 | 3.269 |
+| residual | 0.002 (2.5%) | 0.048 (1.5%) |
+| **total wall (uninstrumented run)** | **0.078** | **3.259** |
+| spool write | 0.002 | 0.342 |
 
 ## Memory
 

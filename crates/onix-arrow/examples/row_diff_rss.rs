@@ -45,14 +45,11 @@
 //! key is a duplicate and the whole `duplicate_keys` report is materialized —
 //! the term that scales with distinct duplicated keys times the key width.
 
-use std::sync::Arc;
-
-use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use onix_arrow::{TableDiffOptions, diff_tables};
 
 #[path = "shared/gen_shapes.rs"]
 mod gen_shapes;
-use gen_shapes::{Generated, Shape, batch_rows};
+use gen_shapes::{Case, Generated, batch_rows};
 
 /// Options for the diff, honoring a `ROW_DIFF_THREADS` override so the parallel
 /// path's peak RSS can be compared against the single-threaded baseline; unset
@@ -71,122 +68,44 @@ fn options_from_env(key: &str) -> TableDiffOptions {
     options
 }
 
-/// Builds the (schema, left shape, right shape, key column, label) for a mode.
-#[allow(clippy::too_many_lines)]
-fn build_case(
-    mode: &str,
-    rows: i64,
-    width: usize,
-    args: &[String],
-) -> (SchemaRef, Shape, Shape, &'static str, String) {
-    match mode {
-        "dup" => {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("key", DataType::Utf8, false),
-                Field::new("value", DataType::Int64, false),
-            ]));
-            let shape = Shape::Dup { key_width: width };
-            (
-                schema,
-                shape,
-                shape,
-                "key",
-                format!(" (dup, key_width={width})"),
-            )
-        }
-        "wide" | "widesame" => {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Int64, false),
-                Field::new("value", DataType::Utf8, false),
-            ]));
-            // `widesame` fills both sides identically (zero changes), isolating
-            // the size gate's peek buffer; `wide` differs, changing every row.
-            let right_fill = if mode == "widesame" { b'a' } else { b'b' };
-            (
-                schema,
-                Shape::Wide {
-                    value_width: width,
-                    fill: b'a',
-                },
-                Shape::Wide {
-                    value_width: width,
-                    fill: right_fill,
-                },
-                "id",
-                format!(" ({mode}, value_width={width})"),
-            )
-        }
-        "manycols" => {
-            let ncols: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(8);
-            let cell_width: usize = args.get(4).and_then(|a| a.parse().ok()).unwrap_or(512);
-            let mut fields = vec![Field::new("id", DataType::Int64, false)];
-            for c in 0..ncols {
-                fields.push(Field::new(format!("value{c}"), DataType::Utf8, false));
-            }
-            let schema = Arc::new(Schema::new(fields));
-            (
-                schema,
-                Shape::ManyCols {
-                    ncols,
-                    width: cell_width,
-                    first_fill: b'a',
-                },
-                Shape::ManyCols {
-                    ncols,
-                    width: cell_width,
-                    first_fill: b'b',
-                },
-                "id",
-                format!(" (manycols, ncols={ncols}, width={cell_width})"),
-            )
-        }
-        _ => {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Int64, false),
-                Field::new("value", DataType::Int64, false),
-            ]));
-            let step = (rows / 100).max(1);
-            // `nochange`: 1% added/removed but no changed rows (the pass-one
-            // baseline). `allchange`: no added/removed, every row changed.
-            // Default: 1% added/removed, ~2% changed.
-            let (id_offset, change_every, label) = match mode {
-                "nochange" => (step, i64::MAX, " (nochange baseline)"),
-                "allchange" => (0, 1, " (all changed)"),
-                _ => (step, 50, ""),
-            };
-            (
-                schema,
-                Shape::Linear {
-                    id_offset: 0,
-                    change_every: i64::MAX,
-                },
-                Shape::Linear {
-                    id_offset,
-                    change_every,
-                },
-                "id",
-                label.to_string(),
-            )
-        }
-    }
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let rows: i64 = args
         .get(1)
         .and_then(|a| a.parse().ok())
         .unwrap_or(1_000_000);
-    // Mode selects the shape: "dup" (duplicate-heavy), "wide" (all rows changed,
-    // wide string value column), "manycols" (wide rows, one differing column),
-    // "nochange"/"allchange"/default (linear int).
     let mode = args.get(2).map_or("", String::as_str);
     let width: usize = args
         .get(3)
         .and_then(|a| a.parse().ok())
         .unwrap_or(if mode == "wide" { 1024 } else { 16 });
 
-    let (schema, left_shape, right_shape, key, label) = build_case(mode, rows, width, &args);
+    let (case, label) = match mode {
+        "" => (Case::Linear, String::new()),
+        "nochange" => (Case::NoChange, " (nochange baseline)".to_string()),
+        "allchange" => (Case::AllChange, " (all changed)".to_string()),
+        "wide" => (Case::Wide(width), format!(" (wide, value_width={width})")),
+        "widesame" => (
+            Case::WideSame(width),
+            format!(" (widesame, value_width={width})"),
+        ),
+        "manycols" => {
+            let ncols: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(8);
+            let width: usize = args.get(4).and_then(|a| a.parse().ok()).unwrap_or(512);
+            (
+                Case::ManyCols { ncols, width },
+                format!(" (manycols, ncols={ncols}, width={width})"),
+            )
+        }
+        "dup" => (Case::Dup(width), format!(" (dup, key_width={width})")),
+        other => {
+            eprintln!(
+                "unknown mode {other:?}; expected nochange, allchange, wide, widesame, manycols or dup"
+            );
+            std::process::exit(2);
+        }
+    };
+    let (schema, left_shape, right_shape, key) = case.build(rows);
 
     let batch = batch_rows();
     let left = Generated {

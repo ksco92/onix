@@ -1273,7 +1273,7 @@ fn peek_side(mut reader: Box<dyn RecordBatchReader + Send>) -> Result<PeekedSide
         if rows >= max_rows || bytes >= MAX_PEEK_BYTES {
             return Ok((buffered, reader, false));
         }
-        match reader.next() {
+        match accum!("spool decode (reader.next)", reader.next()) {
             Some(Ok(batch)) => {
                 rows += batch.num_rows();
                 bytes += batch.get_array_memory_size();
@@ -1313,7 +1313,11 @@ fn hash_reader_and_prefix(
     for batch in prefix {
         hash_batch(&batch)?;
     }
-    for batch in reader {
+    let mut reader = reader;
+    loop {
+        let Some(batch) = accum!("spool decode (reader.next)", reader.next()) else {
+            break;
+        };
         hash_batch(&batch.map_err(|e| read_error(&e))?)?;
     }
     Ok(SidePass { entries, null_keys })
@@ -1414,7 +1418,11 @@ fn hash_side_parallel(
                     break 'feed;
                 }
             }
-            for batch in reader {
+            let mut reader = reader;
+            loop {
+                let Some(batch) = accum!("spool decode (reader.next)", reader.next()) else {
+                    break;
+                };
                 match batch {
                     Ok(b) => {
                         if tx.send(b).is_err() {
@@ -1532,8 +1540,11 @@ fn for_each_batch_with_key_hashes<F>(
 where
     F: FnMut(&RecordBatch, &[u128]) -> Result<(), TableDiffError>,
 {
-    let reader = source.open()?;
-    for batch in reader {
+    let mut reader = source.open()?;
+    loop {
+        let Some(batch) = accum!("spool decode (reader.next)", reader.next()) else {
+            break;
+        };
         let batch = batch.map_err(|e| read_error(&e))?;
         let key_hashes = hash_batch_keys(&batch, key_columns, key_names, hasher)?;
         visit(&batch, &key_hashes)?;
@@ -1654,7 +1665,14 @@ where
             let stop = Arc::clone(&stop);
             let back_tx = back_tx.clone();
             scope.spawn(move || {
-                for (idx, batch) in reader.enumerate() {
+                let mut reader = reader.enumerate();
+                // The reader thread decodes the spool serially while the workers
+                // hash in parallel, so the decode wall is the re-read cost.
+                loop {
+                    let Some((idx, batch)) = accum!("spool decode (reader.next)", reader.next())
+                    else {
+                        break;
+                    };
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
@@ -2808,11 +2826,13 @@ impl PartitionWriters {
             perm.extend_from_slice(rows);
         }
         let indices = UInt32Array::from(perm);
-        let taken = arrow_select::take::take_record_batch(value_batch, &indices)
-            .map_err(|e| read_error(&e))?;
-        // Compact byte-view columns so a spilled partition holds only its rows'
-        // view data, not the whole side's retained variadic buffers.
-        let reordered = cast_batch_to(&taken, &self.value_schema)?;
+        let reordered = accum!("cell: spill route (take + cast)", {
+            let taken = arrow_select::take::take_record_batch(value_batch, &indices)
+                .map_err(|e| read_error(&e))?;
+            // Compact byte-view columns so a spilled partition holds only its
+            // rows' view data, not the whole side's retained variadic buffers.
+            cast_batch_to(&taken, &self.value_schema)?
+        });
         let mut offset = 0;
         for (partition, rows) in part_rows.iter().enumerate() {
             if rows.is_empty() {
@@ -2836,7 +2856,10 @@ impl PartitionWriters {
         }
         let batches = std::mem::take(&mut self.buffers[partition]);
         self.buffered_rows[partition] = 0;
-        let coalesced = concat_or_empty(&self.value_schema, &batches)?;
+        let coalesced = accum!(
+            "cell: spill route (take + cast)",
+            concat_or_empty(&self.value_schema, &batches)?
+        );
         let outcome = accum!(
             "cell: spill write (of spill pass)",
             self.writers[partition].write(&coalesced)
@@ -3322,7 +3345,11 @@ fn diff_cells_streaming(
     let mut order: Vec<usize> = (0..ctx.common_values.len()).collect();
     order.sort_by_key(|&j| ranks[j]);
 
-    let key_renders = render_key_arrays(&left_spill.left_keys, key_count)?;
+    // Render every changed left row's key columns for the output's sort key.
+    let key_renders = pass!(
+        "cell: render sort keys",
+        render_key_arrays(&left_spill.left_keys, key_count)?
+    );
 
     // Each partition emits its changed cells into its own output arrays; the
     // per-partition arrays together are exactly one copy of the output. Holding
@@ -3859,6 +3886,36 @@ mod tests {
         assert_eq!(diff.counts.duplicate_keys, 0);
         assert_eq!(ids(&diff.rows_added), BTreeSet::from([Some(4)]));
         assert_eq!(ids(&diff.rows_removed), BTreeSet::from([Some(1)]));
+    }
+
+    #[test]
+    fn materialize_reads_each_side_through_its_own_column_order() {
+        // left is [id, v]; right is [v, id] — the key and value columns sit at
+        // different positions on each side. Materializing the right side through
+        // the left's column indices would hash the wrong column as the key and
+        // misclassify every row (all removed, all added), so the added/removed
+        // sets pin that each side uses its own `SideColumns`.
+        let left_sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
+        let right_sch = schema(vec![Field::new("v", DataType::Int64, false), id_field()]);
+        let left = reader(
+            &left_sch,
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1), Some(2), Some(3)])),
+                Arc::new(Int64Array::from(vec![10, 20, 30])),
+            ],
+        );
+        let right = reader(
+            &right_sch,
+            vec![
+                Arc::new(Int64Array::from(vec![20, 30, 40])),
+                Arc::new(Int64Array::from(vec![Some(2), Some(3), Some(4)])),
+            ],
+        );
+        let diff = diff_rows(&left, &right, &left_sch, &right_sch, &key()).unwrap();
+        assert_eq!(diff.counts.rows_removed, 1);
+        assert_eq!(diff.counts.rows_added, 1);
+        assert_eq!(ids(&diff.rows_removed), BTreeSet::from([Some(1)]));
+        assert_eq!(ids(&diff.rows_added), BTreeSet::from([Some(4)]));
     }
 
     #[test]
@@ -5888,6 +5945,99 @@ mod tests {
         let left: Vec<(Option<i64>, i64)> = (0..50).map(|i| (Some(i), 0)).collect();
         let right: Vec<(Option<i64>, i64)> = (0..50).map(|i| (Some(i), 1)).collect();
         assert_parallel_matches(&left, &right);
+    }
+
+    #[cfg(feature = "profile")]
+    struct SpooledInput {
+        file: std::fs::File,
+        schema: SchemaRef,
+    }
+
+    #[cfg(feature = "profile")]
+    impl TableInput for SpooledInput {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+        fn open(&self) -> Result<Box<dyn RecordBatchReader + Send>, TableDiffError> {
+            Ok(Box::new(crate::spool::reopen(&self.file)?))
+        }
+    }
+
+    #[cfg(feature = "profile")]
+    fn spooled(sch: &SchemaRef, rows: &[(Option<i64>, i64)]) -> SpooledInput {
+        let (file, mut writer) = crate::spool::open(sch).unwrap();
+        for batch in chunked_reader(sch, rows, 4).open().unwrap() {
+            writer.write(&batch.unwrap()).unwrap();
+        }
+        writer.finish().unwrap();
+        SpooledInput {
+            file,
+            schema: sch.clone(),
+        }
+    }
+
+    /// The pass labels of a profiled diff at `threads`, and the passes whose
+    /// sub-costs include a nonzero spool decode.
+    #[cfg(feature = "profile")]
+    fn profiled_passes(threads: usize) -> (Vec<&'static str>, BTreeSet<&'static str>) {
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
+        let left_rows: Vec<(Option<i64>, i64)> = (0..200).map(|i| (Some(i), i)).collect();
+        let right_rows: Vec<(Option<i64>, i64)> = (5..205)
+            .map(|i| (Some(i), i + i64::from(i % 7 == 0)))
+            .collect();
+        let (left, right) = (spooled(&sch, &left_rows), spooled(&sch, &right_rows));
+        let session = crate::profile::begin();
+        diff_rows_with(&left, &right, &sch, &sch, &key(), threads).unwrap();
+        let report = session.finish();
+        let (mut passes, mut decoded) = (Vec::new(), BTreeSet::new());
+        for row in &report {
+            if row.peak_rss_mib.is_some() {
+                passes.push(row.label);
+            } else if row.label == "spool decode (reader.next)"
+                && row.wall_secs > 0.0
+                && let Some(&pass) = passes.last()
+            {
+                decoded.insert(pass);
+            }
+        }
+        (passes, decoded)
+    }
+
+    #[cfg(feature = "profile")]
+    #[test]
+    fn profiled_diff_records_every_pass_in_order_with_its_decode_time() {
+        let _guard = crate::profile::serialized();
+        let (sequential, decoded) = profiled_passes(1);
+        assert_eq!(
+            sequential,
+            [
+                "set-up",
+                "hash and classify",
+                "materialize",
+                "cell (sequential)"
+            ]
+        );
+        assert!(decoded.is_superset(&BTreeSet::from(["hash and classify", "materialize"])));
+        force_parallel_path();
+        let (parallel, decoded) = profiled_passes(2);
+        use_real_size_gate();
+        assert_eq!(
+            parallel,
+            [
+                "set-up",
+                "hash and classify",
+                "materialize",
+                "cell: spill (re-read, hash, route, write)",
+                "cell: render sort keys",
+                "cell: partition read-back and render",
+                "cell: sort and interleave",
+            ]
+        );
+        assert!(decoded.is_superset(&BTreeSet::from([
+            "hash and classify",
+            "materialize",
+            "cell: spill (re-read, hash, route, write)"
+        ])));
     }
 
     // --- Streaming (spilled, partitioned) cell pass -----------------------

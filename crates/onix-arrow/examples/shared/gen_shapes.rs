@@ -1,7 +1,8 @@
-//! Shared streaming table generator for the row-diff examples (`row_diff_rss`
-//! and `row_diff_profile`), included with `#[path]` by both. Each shape's data
-//! is a deterministic function of the row index, so nothing is retained between
-//! batches and two runs at the same size produce byte-identical data.
+//! Shared streaming table generator and cases for the row-diff examples
+//! (`row_diff_rss` and `row_diff_profile`), included with `#[path]` by both.
+//! Each shape's data is a deterministic function of the row index, so nothing
+//! is retained between batches and two runs at the same size produce
+//! byte-identical data.
 
 // Each example includes this module and uses a subset of the shapes, so a shape
 // unused by one example is not dead across the pair.
@@ -10,7 +11,7 @@
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, RecordBatchReader, StringArray};
-use arrow_schema::{ArrowError, SchemaRef};
+use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use onix_arrow::{TableDiffError, TableInput};
 
 /// The default rows per generated batch; override with `ROW_DIFF_BATCH` to
@@ -49,6 +50,96 @@ pub enum Shape {
         width: usize,
         first_fill: u8,
     },
+}
+
+/// A generated two-sided case, with its size parameters already defaulted by
+/// the calling example.
+#[derive(Clone, Copy)]
+pub enum Case {
+    /// 1% of keys added and 1% removed, every 50th shared value changed.
+    Linear,
+    /// [`Case::Linear`]'s added and removed keys with no changed row.
+    NoChange,
+    /// The same keys on both sides, every row changed.
+    AllChange,
+    /// Every row changed in a `width`-byte string column.
+    Wide(usize),
+    /// [`Case::Wide`] with equal sides.
+    WideSame(usize),
+    /// `ncols` `width`-byte string columns, only the first differing.
+    ManyCols { ncols: usize, width: usize },
+    /// Every `key_width`-byte string key appearing twice on each side.
+    Dup(usize),
+}
+
+impl Case {
+    /// The schema, the left and right shapes, and the key column.
+    pub fn build(self, rows: i64) -> (SchemaRef, Shape, Shape, &'static str) {
+        let int_schema = || {
+            Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("value", DataType::Int64, false),
+            ]))
+        };
+        let linear = |id_offset, change_every| {
+            let left = Shape::Linear {
+                id_offset: 0,
+                change_every: i64::MAX,
+            };
+            let right = Shape::Linear {
+                id_offset,
+                change_every,
+            };
+            (int_schema(), left, right, "id")
+        };
+        let step = (rows / 100).max(1);
+        match self {
+            Case::Linear => linear(step, 50),
+            Case::NoChange => linear(step, i64::MAX),
+            Case::AllChange => linear(0, 1),
+            Case::Wide(width) | Case::WideSame(width) => {
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new("id", DataType::Int64, false),
+                    Field::new("value", DataType::Utf8, false),
+                ]));
+                let right_fill = if matches!(self, Case::WideSame(_)) {
+                    b'a'
+                } else {
+                    b'b'
+                };
+                let shape = |fill| Shape::Wide {
+                    value_width: width,
+                    fill,
+                };
+                (schema, shape(b'a'), shape(right_fill), "id")
+            }
+            Case::ManyCols { ncols, width } => {
+                let mut fields = vec![Field::new("id", DataType::Int64, false)];
+                for c in 0..ncols {
+                    fields.push(Field::new(format!("value{c}"), DataType::Utf8, false));
+                }
+                let shape = |first_fill| Shape::ManyCols {
+                    ncols,
+                    width,
+                    first_fill,
+                };
+                (
+                    Arc::new(Schema::new(fields)),
+                    shape(b'a'),
+                    shape(b'b'),
+                    "id",
+                )
+            }
+            Case::Dup(key_width) => {
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new("key", DataType::Utf8, false),
+                    Field::new("value", DataType::Int64, false),
+                ]));
+                let shape = Shape::Dup { key_width };
+                (schema, shape, shape, "key")
+            }
+        }
+    }
 }
 
 /// A table generated on demand, retaining nothing between batches.

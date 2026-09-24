@@ -56,6 +56,7 @@ Every part must pass:
 | `make fmt` | `cargo fmt --all --check` | no diffs |
 | `make clippy` | `cargo clippy --all-targets --all-features -- -D warnings` | zero warnings (pedantic enabled at warn) |
 | `make test` | `cargo test --workspace` | all pass (includes doctests) |
+| `make test-all-features` | `cargo test --workspace --all-features` | all pass; runs the `onix-arrow/profile` instrumentation and the profiler's own tests, which the default `test` and `coverage` builds omit |
 | `make coverage` | `cargo llvm-cov --workspace --fail-under-lines 95` (`onix-py` excluded, see below) | ≥95% line coverage |
 | `make docs` | `RUSTDOCFLAGS="-D warnings" cargo doc --document-private-items --no-deps --workspace` | no rustdoc warnings |
 | `make deny` | `cargo deny check` | advisories/licenses/bans/sources clean |

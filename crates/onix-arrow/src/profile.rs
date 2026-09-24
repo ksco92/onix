@@ -1,16 +1,13 @@
 //! Per-pass wall-time and peak-RSS profiler for the row diff, compiled only
-//! under the `profile` feature and absent from the release wheel (which never
-//! enables it). Peak RSS is sampled by running the macOS/Linux `ps` in a
-//! background thread, so the module needs no new dependency and no `unsafe`; each
-//! sample is attributed to whichever pass is active when it is taken.
+//! under the `profile` feature (the release wheel never enables it). Peak RSS is
+//! sampled by a background thread running `/bin/ps`, so the module needs no new
+//! dependency and no `unsafe`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
-use std::thread::JoinHandle;
+use std::thread::{JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-/// One profiled pass: its label, the wall time between [`enter`] and its guard's
-/// drop, and the highest RSS (KiB) any sample saw while it was active.
 struct Pass {
     label: &'static str,
     start: Instant,
@@ -19,21 +16,38 @@ struct Pass {
     open: bool,
 }
 
-/// An additive sub-cost measured inside a streaming pass (the spill write, which
-/// interleaves with the re-read and hash it shares a pass with).
+/// An additive sub-cost of the pass active when it was added.
 struct Accum {
     label: &'static str,
+    pass: usize,
     total: Duration,
 }
 
 struct State {
     passes: Vec<Pass>,
     accums: Vec<Accum>,
+    /// The thread that called [`begin`]; `None` when not recording.
+    owner: Option<ThreadId>,
     sampler_running: bool,
-    /// The running sampler thread; [`finish`] joins it before returning, so a
-    /// later [`begin`] cannot spawn a second sampler while this one is still
-    /// draining its final tick.
     sampler: Option<JoinHandle<()>>,
+}
+
+impl State {
+    fn add(&mut self, label: &'static str, pass: usize, elapsed: Duration) {
+        if let Some(accum) = self
+            .accums
+            .iter_mut()
+            .find(|a| a.label == label && a.pass == pass)
+        {
+            accum.total += elapsed;
+        } else {
+            self.accums.push(Accum {
+                label,
+                pass,
+                total: elapsed,
+            });
+        }
+    }
 }
 
 fn state() -> MutexGuard<'static, State> {
@@ -43,6 +57,7 @@ fn state() -> MutexGuard<'static, State> {
             Mutex::new(State {
                 passes: Vec::new(),
                 accums: Vec::new(),
+                owner: None,
                 sampler_running: false,
                 sampler: None,
             })
@@ -51,32 +66,35 @@ fn state() -> MutexGuard<'static, State> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The index of the currently active pass for the sampler thread to attribute
-/// RSS to; [`NO_PASS`] when no pass is open.
 static ACTIVE: AtomicUsize = AtomicUsize::new(NO_PASS);
 const NO_PASS: usize = usize::MAX;
 
-/// Clears any prior run's records and starts the background RSS sampler. Call
-/// once before the diff being profiled; a second call while a sampler is already
-/// running is a no-op.
-pub fn begin() {
+/// The sub-cost the `ps` reads at pass boundaries accumulate under, so a caller
+/// can subtract them from a wall timed around the profiled diff.
+pub const BOUNDARY_LABEL: &str = "profiler: boundary ps reads";
+
+/// Clears any prior records and records the passes entered on the calling
+/// thread until the returned session is finished or dropped.
+#[must_use = "dropping the session stops the profiler"]
+pub fn begin() -> Session {
     ACTIVE.store(NO_PASS, Ordering::Release);
     let mut state = state();
     state.passes.clear();
     state.accums.clear();
-    if state.sampler.is_some() {
-        return;
+    state.owner = Some(std::thread::current().id());
+    if state.sampler.is_none() {
+        state.sampler_running = true;
+        // Spawned under the lock, so the handle is stored before the sampler's
+        // first `state()` returns.
+        match std::thread::Builder::new()
+            .name("row-diff-profile-sampler".to_string())
+            .spawn(sampler_loop)
+        {
+            Ok(handle) => state.sampler = Some(handle),
+            Err(_) => state.sampler_running = false,
+        }
     }
-    state.sampler_running = true;
-    // Spawn while holding the lock: the sampler blocks on its first `state()`
-    // call until this returns, so the handle is stored before it can run.
-    match std::thread::Builder::new()
-        .name("row-diff-profile-sampler".to_string())
-        .spawn(sampler_loop)
-    {
-        Ok(handle) => state.sampler = Some(handle),
-        Err(_) => state.sampler_running = false,
-    }
+    Session { _private: () }
 }
 
 fn sampler_loop() {
@@ -88,23 +106,26 @@ fn sampler_loop() {
         if !state().sampler_running {
             break;
         }
-        let idx = ACTIVE.load(Ordering::Acquire);
-        if idx == NO_PASS {
-            continue;
-        }
-        if let Some(rss) = read_rss_kib(pid)
-            && let Some(pass) = state().passes.get_mut(idx)
-        {
-            pass.peak_rss_kib = pass.peak_rss_kib.max(rss);
-        }
+        sample_active(|| read_rss_kib(pid));
     }
     #[cfg(test)]
     LIVE_SAMPLERS.fetch_sub(1, Ordering::AcqRel);
 }
 
-/// The process's resident set size in KiB from `/bin/ps` (an absolute path, so
-/// the sample never resolves a `ps` through `PATH`), or `None` if it is
-/// unavailable or its output cannot be parsed.
+/// Raises the active pass's peak to `read()`, which is not called when no pass
+/// is active.
+fn sample_active(read: impl FnOnce() -> Option<u64>) {
+    let idx = ACTIVE.load(Ordering::Acquire);
+    if idx == NO_PASS {
+        return;
+    }
+    if let Some(rss) = read()
+        && let Some(pass) = state().passes.get_mut(idx)
+    {
+        pass.peak_rss_kib = pass.peak_rss_kib.max(rss);
+    }
+}
+
 fn read_rss_kib(pid: u32) -> Option<u64> {
     let output = std::process::Command::new("/bin/ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
@@ -113,23 +134,22 @@ fn read_rss_kib(pid: u32) -> Option<u64> {
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
-/// Number of live sampler threads, so a test can prove `finish` joins the
-/// sampler and back-to-back cycles never accumulate a second one.
 #[cfg(test)]
 static LIVE_SAMPLERS: AtomicUsize = AtomicUsize::new(0);
 
-/// Opens a pass named `label`; drop the returned guard to close it. Passes are
-/// sequential, not nested: opening a pass while another is open leaves the
-/// previous one's RSS attribution to the newer pass.
+/// Opens a pass named `label`, closed when the guard drops. Passes are
+/// sequential, not nested, and record only on the thread that called [`begin`].
 #[must_use]
 pub fn enter(label: &'static str) -> PassGuard {
-    // Read RSS before the timer starts so the boundary sample (which catches a
-    // pass shorter than the sampler interval) never counts against the pass wall.
+    if state().owner != Some(std::thread::current().id()) {
+        return PassGuard { idx: NO_PASS };
+    }
+    let read_start = Instant::now();
     let boundary = read_rss_kib(std::process::id()).unwrap_or(0);
     let now = Instant::now();
     let idx = {
         let mut state = state();
-        let idx = state.passes.len();
+        state.add(BOUNDARY_LABEL, NO_PASS, now - read_start);
         state.passes.push(Pass {
             label,
             start: now,
@@ -137,33 +157,30 @@ pub fn enter(label: &'static str) -> PassGuard {
             peak_rss_kib: boundary,
             open: true,
         });
-        idx
+        state.passes.len() - 1
     };
     ACTIVE.store(idx, Ordering::Release);
     PassGuard { idx }
 }
 
-/// Adds `elapsed` to the additive sub-cost named `label` (created on first use).
+/// Adds `elapsed` to the sub-cost `label` of the active pass.
 pub fn accumulate(label: &'static str, elapsed: Duration) {
     let mut state = state();
-    if let Some(accum) = state.accums.iter_mut().find(|a| a.label == label) {
-        accum.total += elapsed;
-    } else {
-        state.accums.push(Accum {
-            label,
-            total: elapsed,
-        });
+    if state.owner.is_some() {
+        state.add(label, ACTIVE.load(Ordering::Acquire), elapsed);
     }
 }
 
-/// A live pass; its drop records the pass's wall time and clears the active
-/// index so later samples are not attributed to it.
+/// A live pass.
 pub struct PassGuard {
     idx: usize,
 }
 
 impl Drop for PassGuard {
     fn drop(&mut self) {
+        if self.idx == NO_PASS {
+            return;
+        }
         if let Some(pass) = state().passes.get_mut(self.idx)
             && pass.open
         {
@@ -171,75 +188,231 @@ impl Drop for PassGuard {
             pass.open = false;
         }
         let _ = ACTIVE.compare_exchange(self.idx, NO_PASS, Ordering::AcqRel, Ordering::Acquire);
-        // Sample RSS after the wall is recorded, so the `ps` latency is untimed.
+        let read_start = Instant::now();
         let boundary = read_rss_kib(std::process::id()).unwrap_or(0);
-        if let Some(pass) = state().passes.get_mut(self.idx) {
+        let mut state = state();
+        state.add(BOUNDARY_LABEL, NO_PASS, read_start.elapsed());
+        if let Some(pass) = state.passes.get_mut(self.idx) {
             pass.peak_rss_kib = pass.peak_rss_kib.max(boundary);
         }
     }
 }
 
-/// One reported pass: label, wall seconds, and peak RSS in MiB.
+/// One reported pass or sub-cost.
 pub struct PassReport {
-    /// The pass label.
+    /// The pass or sub-cost label.
     pub label: &'static str,
     /// Wall time in seconds.
     pub wall_secs: f64,
-    /// Peak RSS while the pass was active, in MiB; `None` for an additive
-    /// sub-cost, which owns no time window.
+    /// Peak RSS in MiB for a pass; `None` for a sub-cost.
     pub peak_rss_mib: Option<f64>,
 }
 
-/// Stops the sampler, joins it (so no sampler outlives this call), and returns
-/// the recorded passes in order followed by any additive sub-costs.
-#[must_use]
-#[allow(clippy::cast_precision_loss)]
-pub fn finish() -> Vec<PassReport> {
-    // Stop the sampler and take its handle under the lock, then release the lock
-    // before joining -- the sampler takes the lock each tick, so joining while
-    // holding it would deadlock.
+/// A recording window opened by [`begin`].
+pub struct Session {
+    _private: (),
+}
+
+impl Session {
+    /// Stops recording and returns each pass followed by its sub-costs, then
+    /// the sub-costs added outside any pass.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn finish(self) -> Vec<PassReport> {
+        stop();
+        let state = state();
+        let accums_of = |pass: usize| {
+            state
+                .accums
+                .iter()
+                .filter(move |a| a.pass == pass)
+                .map(|a| PassReport {
+                    label: a.label,
+                    wall_secs: a.total.as_secs_f64(),
+                    peak_rss_mib: None,
+                })
+        };
+        let mut reports = Vec::new();
+        for (idx, pass) in state.passes.iter().enumerate() {
+            reports.push(PassReport {
+                label: pass.label,
+                wall_secs: pass.wall.as_secs_f64(),
+                peak_rss_mib: Some(pass.peak_rss_kib as f64 / 1024.0),
+            });
+            reports.extend(accums_of(idx));
+        }
+        reports.extend(accums_of(NO_PASS));
+        reports
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        stop();
+    }
+}
+
+/// Stops recording and joins the sampler outside the lock, which the sampler
+/// takes on every tick.
+fn stop() {
     let handle = {
         let mut state = state();
+        state.owner = None;
         state.sampler_running = false;
         state.sampler.take()
     };
+    ACTIVE.store(NO_PASS, Ordering::Release);
     if let Some(handle) = handle {
         let _ = handle.join();
     }
-    let state = state();
-    let mut reports: Vec<PassReport> = state
-        .passes
-        .iter()
-        .map(|pass| PassReport {
-            label: pass.label,
-            wall_secs: pass.wall.as_secs_f64(),
-            peak_rss_mib: Some(pass.peak_rss_kib as f64 / 1024.0),
-        })
-        .collect();
-    reports.extend(state.accums.iter().map(|accum| PassReport {
-        label: accum.label,
-        wall_secs: accum.total.as_secs_f64(),
-        peak_rss_mib: None,
-    }));
-    reports
+}
+
+/// Serializes the tests that open a session on the process-global profiler.
+#[cfg(test)]
+pub(crate) fn serialized() -> MutexGuard<'static, ()> {
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LIVE_SAMPLERS, begin, enter, finish};
+    use super::{
+        ACTIVE, BOUNDARY_LABEL, LIVE_SAMPLERS, NO_PASS, PassReport, accumulate, begin, enter,
+        read_rss_kib, sample_active, serialized, state,
+    };
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    /// The rows with the given labels; a row diff running on another test thread
+    /// adds its own sub-costs to an open session.
+    fn only<'a>(report: &'a [PassReport], labels: &[&str]) -> Vec<&'a PassReport> {
+        report
+            .iter()
+            .filter(|row| labels.contains(&row.label))
+            .collect()
+    }
 
     #[test]
     fn finish_joins_the_sampler_so_cycles_never_accumulate() {
+        let _guard = serialized();
         for _ in 0..20 {
-            begin();
+            let session = begin();
             drop(enter("pass"));
-            let _ = finish();
-            assert_eq!(
-                LIVE_SAMPLERS.load(Ordering::Acquire),
-                0,
-                "finish must join the sampler before returning"
-            );
+            let _ = session.finish();
+            assert_eq!(LIVE_SAMPLERS.load(Ordering::Acquire), 0);
         }
+    }
+
+    #[test]
+    fn a_second_begin_does_not_spawn_a_second_sampler() {
+        let _guard = serialized();
+        let first = begin();
+        let second = begin();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(LIVE_SAMPLERS.load(Ordering::Acquire), 1);
+        drop(second);
+        drop(first);
+        assert_eq!(LIVE_SAMPLERS.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_panic_inside_the_session_stops_recording_and_the_sampler() {
+        let _guard = serialized();
+        let unwound = std::panic::catch_unwind(|| {
+            let _session = begin();
+            let _pass = enter("panicking");
+            std::thread::sleep(Duration::from_millis(50));
+            panic!("unwind through the session");
+        });
+        assert!(unwound.is_err());
+        assert_eq!(LIVE_SAMPLERS.load(Ordering::Acquire), 0);
+        assert_eq!(ACTIVE.load(Ordering::Acquire), NO_PASS);
+        assert!(state().owner.is_none());
+    }
+
+    #[test]
+    fn reports_each_pass_followed_by_its_sub_costs() {
+        let _guard = serialized();
+        let session = begin();
+        drop(enter("first"));
+        {
+            let _open = enter("second");
+            accumulate("sub", Duration::from_millis(1));
+            accumulate("sub", Duration::from_millis(2));
+        }
+        accumulate("outside", Duration::from_millis(4));
+        let report = session.finish();
+        let rows: Vec<_> = only(
+            &report,
+            &["first", "second", "sub", BOUNDARY_LABEL, "outside"],
+        )
+        .into_iter()
+        .map(|r| (r.label, r.peak_rss_mib.is_some(), r.wall_secs))
+        .collect();
+        let labels: Vec<_> = rows.iter().map(|&(label, rss, _)| (label, rss)).collect();
+        assert_eq!(
+            labels,
+            [
+                ("first", true),
+                ("second", true),
+                ("sub", false),
+                (BOUNDARY_LABEL, false),
+                ("outside", false)
+            ]
+        );
+        assert!((rows[2].2 - 0.003).abs() < 1e-9);
+        assert!(rows[3].2 > 0.0);
+        assert!((rows[4].2 - 0.004).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_pass_wall_covers_its_body_and_its_peak_is_a_real_rss_in_mib() {
+        let _guard = serialized();
+        let session = begin();
+        {
+            let _pass = enter("sleeps");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let report = session.finish();
+        let pass = only(&report, &["sleeps"])[0];
+        assert!(pass.wall_secs >= 0.03, "{}", pass.wall_secs);
+        let rss = pass.peak_rss_mib.expect("a pass carries RSS");
+        assert!(rss > 1.0, "{rss}");
+    }
+
+    #[test]
+    fn a_sample_raises_only_the_active_pass_peak_in_mib() {
+        let _guard = serialized();
+        let session = begin();
+        sample_active(|| panic!("no pass is active, so no reading is taken"));
+        {
+            let _pass = enter("sampled");
+            sample_active(|| Some(3 << 30));
+        }
+        let report = session.finish();
+        assert_eq!(
+            only(&report, &["sampled"])[0].peak_rss_mib,
+            Some(f64::from(3u32 << 20))
+        );
+    }
+
+    #[test]
+    fn nothing_records_outside_a_session_or_off_its_thread() {
+        let _guard = serialized();
+        drop(enter("before"));
+        accumulate("before", Duration::from_millis(1));
+        assert!(state().passes.iter().all(|p| p.label != "before"));
+        assert!(state().accums.iter().all(|a| a.label != "before"));
+        let session = begin();
+        std::thread::spawn(|| drop(enter("foreign")))
+            .join()
+            .unwrap();
+        assert!(only(&session.finish(), &["foreign", BOUNDARY_LABEL]).is_empty());
+    }
+
+    #[test]
+    fn rss_reads_are_the_process_rss_or_none_for_a_missing_process() {
+        assert!(read_rss_kib(std::process::id()).is_some_and(|kib| kib > 1024));
+        assert_eq!(read_rss_kib(u32::MAX), None);
     }
 }

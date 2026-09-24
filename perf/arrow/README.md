@@ -147,14 +147,26 @@ The row diff's per-pass wall time and peak RSS come from the committed
 `row_diff_profile` example (`crates/onix-arrow/examples/row_diff_profile.rs`),
 built with the `profile` feature that compiles the pass boundaries into
 `onix-arrow` (off by default, absent from the release wheel). Its own module
-docstring is the single home for the method and the shapes; the command is:
+docstring is the single home for the method, the two modes, and the shapes.
+
+The real fixtures are profiled in **file mode**, which reads each side from an
+uncompressed Arrow IPC file (this crate depends on no parquet reader, so convert
+the parquet fixtures once):
 
 ```sh
 cargo build -p onix-arrow --release --features profile --example row_diff_profile
-# narrow-fixture proxy (few changed rows) and wide-fixture proxy (all rows
-# changed, every value column spilled), 1M rows per side, default 18 threads:
-target/release/examples/row_diff_profile 1000000 linear 18
-target/release/examples/row_diff_profile 1000000 manycols 18 34 64
+# convert each fixture parquet to uncompressed Arrow IPC (both sides, both kinds):
+python -c "import pyarrow.parquet as p, pyarrow.feather as f; \
+  f.write_feather(p.read_table('fixtures/narrow-1m/a.parquet'), 'fixtures/narrow-1m/a.arrow', compression='uncompressed')"
+target/release/examples/row_diff_profile file fixtures/narrow-1m/a.arrow fixtures/narrow-1m/b.arrow --key id --threads 18
+```
+
+A dependency-free **generated mode** runs deterministic proxy shapes for a quick
+check without a fixture on disk:
+
+```sh
+target/release/examples/row_diff_profile 1000000 linear 18       # narrow-shaped proxy
+target/release/examples/row_diff_profile 1000000 manycols 18 34 64  # wide-shaped proxy
 ```
 
 Every row-diff performance change posts its before/after per-pass table from this
