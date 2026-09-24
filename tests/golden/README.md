@@ -352,8 +352,8 @@ carrying a plain `datetime.timezone(timedelta(...))`, built from the offset a
 never the original zone object. This changes nothing about the diff itself
 (`DeepDiff` compares by instant and reports `values_changed` normalized to UTC
 regardless — see above), only what a caller sees if they inspect
-`to_dict()`'s value directly. See `crates/onix-py/src/convert.rs`'s module
-doc.
+`to_dict()`'s value directly. See `docs/design/value-conversion.md`'s
+"Subclasses" section for the same simplification on any other subclass.
 
 ## Set iteration order: where onix is deliberately different
 
@@ -786,7 +786,8 @@ and `test_differential_fuzz.py`'s subclass-key batch.
   `type(obj).__name__` rule exactly (one restriction: a `tuple`/`frozenset`
   subclass, including a `namedtuple`, is not accepted as a `set` member).
   See `crates/onix-core/src/value.rs`'s `Typed` doc and
-  `crates/onix-py/src/convert.rs`'s module doc for the conversion rules;
+  `docs/design/value-conversion.md`'s "Subclasses" section for the
+  conversion rules;
   `test_tuples.py`, `test_sets.py`, `test_datetimes.py` and
   `test_conversions.py` assert this against the real tool. No golden case
   uses a subclass, for the same tagged-encoding reason as above.

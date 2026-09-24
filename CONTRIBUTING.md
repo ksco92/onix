@@ -112,8 +112,10 @@ The code is best read in this order, each step building on the last:
 4. [`crates/onix-py/src/deepdiff.rs`](crates/onix-py/src/deepdiff.rs)'s module
    doc: how the Python bindings sit on top, converting Python objects to the
    engine's value model once
-   ([`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)) before
-   calling the same core the CLI does.
+   ([`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs), with
+   [`docs/design/value-conversion.md`](docs/design/value-conversion.md) for
+   the subclass classification order and key interning) before calling the
+   same core the CLI does.
 5. [`crates/onix-arrow/src/lib.rs`](crates/onix-arrow/src/lib.rs)'s module
    doc: the Arrow table diff's entry point. Follow it into
    [`crates/onix-arrow/src/row_diff.rs`](crates/onix-arrow/src/row_diff.rs)
@@ -171,11 +173,14 @@ each lives at its pointer, not restated here:
 - **Year-boundary rejection** — `tests/golden/README.md`'s "Known DeepDiff
   quirks" section.
 - **Tuple/set/frozenset-subclass and namedtuple refusal** —
-  [`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)'s module doc.
+  `tests/golden/README.md`'s "Custom objects" section, its "Every other
+  subclass" point.
 - **Fixed-offset `tzinfo` round-trip** — a `zoneinfo`/`pytz` zone comes back as
   a plain `datetime.timezone`, not the original zone object —
-  [`crates/onix-py/src/convert.rs`](crates/onix-py/src/convert.rs)'s module doc;
-  `tests/golden/README.md`'s "Normalized versus raw datetimes" section.
+  `tests/golden/README.md`'s "Fixed-offset tzinfo round-trip" and
+  "Normalized versus raw datetimes" sections;
+  [`docs/design/value-conversion.md`](docs/design/value-conversion.md)'s
+  "Subclasses" section for the same simplification on any other subclass.
 
 ## Golden corpus
 
