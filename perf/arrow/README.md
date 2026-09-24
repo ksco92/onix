@@ -155,16 +155,23 @@ the parquet fixtures once):
 
 ```sh
 cargo build -p onix-arrow --release --features profile --example row_diff_profile
-# convert each fixture parquet to uncompressed Arrow IPC (both sides, both kinds):
-python -c "import pyarrow.parquet as p, pyarrow.feather as f; \
-  f.write_feather(p.read_table('fixtures/narrow-1m/a.parquet'), 'fixtures/narrow-1m/a.arrow', compression='uncompressed')"
-target/release/examples/row_diff_profile file fixtures/narrow-1m/a.arrow fixtures/narrow-1m/b.arrow --key id --threads 18
+# from the repo root, convert both sides of a fixture pair to uncompressed Arrow IPC:
+for side in a b; do
+  uv run --project perf/arrow --group perf python -c "import sys, pyarrow.parquet as p, pyarrow.feather as f; \
+    f.write_feather(p.read_table(sys.argv[1] + '.parquet'), sys.argv[1] + '.arrow', compression='uncompressed')" \
+    perf/arrow/fixtures/narrow-1m/$side
+done
+target/release/examples/row_diff_profile file perf/arrow/fixtures/narrow-1m/a.arrow perf/arrow/fixtures/narrow-1m/b.arrow --key id --threads 18
 ```
+
+The same conversion and command, with `narrow-1m` replaced, give the `wide-1m`, `narrow-full`
+and `wide-full` columns.
 
 A dependency-free **generated mode** runs deterministic proxy shapes for a quick
 check without a fixture on disk:
 
 ```sh
+# from the repo root
 target/release/examples/row_diff_profile 1000000 linear 18       # narrow-shaped proxy
 target/release/examples/row_diff_profile 1000000 manycols 18 34 64  # wide-shaped proxy
 ```

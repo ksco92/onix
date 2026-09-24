@@ -186,6 +186,10 @@ the workers.
 | cell: spill: decode | 77% | 21% | 53% | 16% |
 | cell: spill: route + write | 13% | 68% | 8% | 59% |
 
+Each pass's share of the net wall (narrow full / wide full): hash and classify 27% / 9%,
+materialize 35% / 7%, cell spill 32% / 37%, render sort keys 0.3% / 1.6%, read-back and render
+3% / 26%, sort and interleave 2% / 16%.
+
 On the narrow fixture the three re-read passes (hash, materialize, spill) are 94% of the net wall at
 full size (4.26 of 4.52 s), and their decode alone is 2.53 s (56%). On the wide fixture they are 52%
 (10.60 of 20.28 s), decode is 4.14 s (20%), and the spill's route (3.60 s), compare and render

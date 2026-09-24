@@ -64,3 +64,7 @@ half = "2"
 [[example]]
 name = "row_diff_profile"
 required-features = ["profile"]
+
+[[test]]
+name = "profile_passes"
+required-features = ["profile"]

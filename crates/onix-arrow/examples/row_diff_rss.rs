@@ -81,7 +81,7 @@ fn main() {
         .unwrap_or(if mode == "wide" { 1024 } else { 16 });
 
     let (case, label) = match mode {
-        "" => (Case::Linear, String::new()),
+        "" | "linear" => (Case::Linear, String::new()),
         "nochange" => (Case::NoChange, " (nochange baseline)".to_string()),
         "allchange" => (Case::AllChange, " (all changed)".to_string()),
         "wide" => (Case::Wide(width), format!(" (wide, value_width={width})")),
@@ -100,7 +100,7 @@ fn main() {
         "dup" => (Case::Dup(width), format!(" (dup, key_width={width})")),
         other => {
             eprintln!(
-                "unknown mode {other:?}; expected nochange, allchange, wide, widesame, manycols or dup"
+                "unknown mode {other:?}; expected linear (the default), nochange, allchange, wide, widesame, manycols or dup"
             );
             std::process::exit(2);
         }
