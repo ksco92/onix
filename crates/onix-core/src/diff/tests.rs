@@ -3245,3 +3245,21 @@ fn ignore_order_two_disjoint_attribute_objects_collapse_to_a_whole_value_change(
         }}})
     );
 }
+
+#[test]
+fn merging_a_finding_at_every_level_of_a_deep_chain_moves_each_finding_a_few_times() {
+    run_on_a_large_stack(|| {
+        let chain = |offset: i64| {
+            let mut value = json!({"v": offset});
+            for level in 1..1000 {
+                value = json!({"v": level + offset, "c": value});
+            }
+            value
+        };
+        crate::report::MERGE_MOVES.with(|moves| moves.set(0));
+        let report = diff_with_max_depth(&chain(0), &chain(1), 5000).unwrap();
+        let moves = crate::report::MERGE_MOVES.with(std::cell::Cell::get);
+        assert_eq!(report.finding_count(), 1000);
+        assert!(moves < 20 * 1000, "{moves} findings moved");
+    });
+}

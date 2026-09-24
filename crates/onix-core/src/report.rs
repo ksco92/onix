@@ -513,6 +513,8 @@ impl Report {
         if other.finding_count() > self.finding_count() {
             std::mem::swap(self, &mut other);
         }
+        #[cfg(test)]
+        MERGE_MOVES.with(|moves| moves.set(moves.get() + other.finding_count()));
         for (path, entry) in other.type_changes {
             self.insert_type_change(path, entry);
         }
@@ -903,6 +905,12 @@ impl Report {
 
         serde_json::Value::Object(root)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many findings [`Report::merge`] has moved on this thread.
+    pub(crate) static MERGE_MOVES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
