@@ -71,6 +71,9 @@ pub enum ViewKeys {
     Wrap { offset: i64, period: i64 },
     /// Id `i`, except every `every`-th row, whose id is `-1`.
     RepeatAbsent { every: i64 },
+    /// In `batch`-row batches, the first half new ids from `offset` up and the
+    /// second half the previous batch's new ids.
+    Chain { offset: i64, batch: i64 },
 }
 
 impl ViewKeys {
@@ -79,6 +82,17 @@ impl ViewKeys {
             ViewKeys::Plain { omit_every } => (omit_every == 0 || i % omit_every != 0).then_some(i),
             ViewKeys::Wrap { offset, period } => Some(offset + i % period),
             ViewKeys::RepeatAbsent { every } => Some(if i % every == 0 { -1 } else { i }),
+            ViewKeys::Chain { offset, batch } => {
+                let (b, j, half) = (i / batch, i % batch, (batch / 2).max(1));
+                Some(
+                    offset
+                        + if j < half {
+                            b * half + j
+                        } else {
+                            (b - 1) * half + j - half
+                        },
+                )
+            }
         }
     }
 }
@@ -117,9 +131,62 @@ pub enum Case {
     /// Equal sides except every `every`-th right row, keyed by one id the left
     /// lacks.
     RepeatAbsent { width: usize, every: i64 },
+    /// A right side of ids the left lacks, each batch repeating the previous
+    /// batch's new ids.
+    Chain(usize),
 }
 
 impl Case {
+    /// [`Case::build`] for the two-view-column shapes.
+    fn view(self, rows: i64) -> (SchemaRef, Shape, Shape, &'static str) {
+        let (Case::ViewRemoved(width)
+        | Case::ViewAdded(width)
+        | Case::ViewSparse { width, .. }
+        | Case::DupRightOnce(width)
+        | Case::DupRightAbsent(width)
+        | Case::RepeatAbsent { width, .. }
+        | Case::Chain(width)) = self
+        else {
+            unreachable!("only view cases reach this method")
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("v0", DataType::Utf8View, false),
+            Field::new("v1", DataType::Utf8View, false),
+        ]));
+        let view = |fill, keys| Shape::View { width, fill, keys };
+        let period = (rows / 2).max(1);
+        let all = ViewKeys::Plain { omit_every: 0 };
+        let (left, right) = match self {
+            Case::ViewRemoved(_) => (all, ViewKeys::Plain { omit_every: 1 }),
+            Case::ViewAdded(_) => (ViewKeys::Plain { omit_every: 1 }, all),
+            Case::ViewSparse { every, .. } => (all, ViewKeys::Plain { omit_every: every }),
+            Case::DupRightOnce(_) => (all, ViewKeys::Wrap { offset: 0, period }),
+            Case::DupRightAbsent(_) => (
+                all,
+                ViewKeys::Wrap {
+                    offset: rows,
+                    period,
+                },
+            ),
+            Case::RepeatAbsent { every, .. } => (all, ViewKeys::RepeatAbsent { every }),
+            Case::Chain(_) => (
+                all,
+                ViewKeys::Chain {
+                    offset: 2 * rows,
+                    batch: batch_rows(),
+                },
+            ),
+            _ => unreachable!("only view cases reach this arm"),
+        };
+        let right_fill = if matches!(self, Case::DupRightOnce(_)) {
+            b'b'
+        } else {
+            b'a'
+        };
+        (schema, view(b'a', left), view(right_fill, right), "id")
+    }
+
     /// The schema, the left and right shapes, and the key column.
     pub fn build(self, rows: i64) -> (SchemaRef, Shape, Shape, &'static str) {
         let int_schema = || {
@@ -177,42 +244,13 @@ impl Case {
                     "id",
                 )
             }
-            Case::ViewRemoved(width)
-            | Case::ViewAdded(width)
-            | Case::ViewSparse { width, .. }
-            | Case::DupRightOnce(width)
-            | Case::DupRightAbsent(width)
-            | Case::RepeatAbsent { width, .. } => {
-                let schema = Arc::new(Schema::new(vec![
-                    Field::new("id", DataType::Int64, false),
-                    Field::new("v0", DataType::Utf8View, false),
-                    Field::new("v1", DataType::Utf8View, false),
-                ]));
-                let view = |fill, keys| Shape::View { width, fill, keys };
-                let period = (rows / 2).max(1);
-                let all = ViewKeys::Plain { omit_every: 0 };
-                let (left, right) = match self {
-                    Case::ViewRemoved(_) => (all, ViewKeys::Plain { omit_every: 1 }),
-                    Case::ViewAdded(_) => (ViewKeys::Plain { omit_every: 1 }, all),
-                    Case::ViewSparse { every, .. } => (all, ViewKeys::Plain { omit_every: every }),
-                    Case::DupRightOnce(_) => (all, ViewKeys::Wrap { offset: 0, period }),
-                    Case::DupRightAbsent(_) => (
-                        all,
-                        ViewKeys::Wrap {
-                            offset: rows,
-                            period,
-                        },
-                    ),
-                    Case::RepeatAbsent { every, .. } => (all, ViewKeys::RepeatAbsent { every }),
-                    _ => unreachable!("only view cases reach this arm"),
-                };
-                let right_fill = if matches!(self, Case::DupRightOnce(_)) {
-                    b'b'
-                } else {
-                    b'a'
-                };
-                (schema, view(b'a', left), view(right_fill, right), "id")
-            }
+            Case::ViewRemoved(_)
+            | Case::ViewAdded(_)
+            | Case::ViewSparse { .. }
+            | Case::DupRightOnce(_)
+            | Case::DupRightAbsent(_)
+            | Case::RepeatAbsent { .. }
+            | Case::Chain(_) => self.view(rows),
             Case::Dup(key_width) => {
                 let schema = Arc::new(Schema::new(vec![
                     Field::new("key", DataType::Utf8, false),

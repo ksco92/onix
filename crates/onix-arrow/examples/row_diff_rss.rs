@@ -27,6 +27,8 @@
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 duprightonce 1024
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 duprightabsent 1024
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 repeatabsent 1024 10000
+//! # a right side of keys the left lacks, each batch repeating the last one's
+//! ROW_DIFF_BATCH=16 target/release/examples/row_diff_rss 1000000 chain 64
 //! # duplicate-heavy shape: every key duplicated, wide string key
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 dup 16
 //! /usr/bin/time -l target/release/examples/row_diff_rss 200000 dup 1024
@@ -108,7 +110,7 @@ fn main() {
         }
         "dup" => (Case::Dup(width), format!(" (dup, key_width={width})")),
         "viewremoved" | "viewadded" | "viewsparse" | "duprightonce" | "duprightabsent"
-        | "repeatabsent" => {
+        | "repeatabsent" | "chain" => {
             let width: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(1024);
             let every: i64 = args.get(4).and_then(|a| a.parse().ok()).unwrap_or(10_000);
             let case = match mode {
@@ -117,13 +119,14 @@ fn main() {
                 "viewsparse" => Case::ViewSparse { width, every },
                 "duprightonce" => Case::DupRightOnce(width),
                 "duprightabsent" => Case::DupRightAbsent(width),
+                "chain" => Case::Chain(width),
                 _ => Case::RepeatAbsent { width, every },
             };
             (case, format!(" ({mode}, width={width}, every={every})"))
         }
         other => {
             eprintln!(
-                "unknown mode {other:?}; expected linear (the default), nochange, allchange, wide, widesame, manycols, dup, viewremoved, viewadded, viewsparse, duprightonce, duprightabsent or repeatabsent"
+                "unknown mode {other:?}; expected linear (the default), nochange, allchange, wide, widesame, manycols, dup, viewremoved, viewadded, viewsparse, duprightonce, duprightabsent, repeatabsent or chain"
             );
             std::process::exit(2);
         }
