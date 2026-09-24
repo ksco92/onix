@@ -3309,6 +3309,7 @@ struct CandidateStore {
     settled: Vec<Candidate>,
     rows: usize,
     stale: usize,
+    /// Full-width rows re-scanned across compaction calls.
     #[cfg(test)]
     scanned: usize,
 }
