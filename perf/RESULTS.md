@@ -231,9 +231,9 @@ gap:
 
 The cost is dominated by `O(change_n²)` (the candidate-pairing loop), not
 `O(n²)`, matching real `DeepDiff`'s own documented cost anatomy (see
-`crate::ignore_order`'s own module doc for the full, source-cited
-scaling-signature analysis; not re-run here, since it validates the
-algorithm's asymptotic behavior, not this fixture's specific numbers).
+`docs/design/ignore-order.md` for the scaling-signature analysis; not
+re-run here, since it validates the algorithm's asymptotic behavior, not
+this fixture's specific numbers).
 
 ## Energy (best-effort: fell back to the documented proxy)
 

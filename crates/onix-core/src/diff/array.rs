@@ -1,7 +1,6 @@
 //! List (JSON array) diffing: [`array_diff`]'s dispatch between the
 //! LCS/`difflib`-style match and the plain index-aligned comparison — see
-//! the parent `diff` module's "List diffing" doc section for the full,
-//! empirically-verified spec this implements.
+//! `docs/design/list-diff.md` for the full spec this implements.
 
 use crate::value::{Value, class_name};
 
@@ -19,8 +18,8 @@ use super::{
 /// Diffs two lists (JSON arrays) at `path`, `depth` levels deep.
 ///
 /// Dispatches between two candidate algorithms, matching `DeepDiff`'s own
-/// `_diff_iterable_in_order` dispatch exactly (see the parent `diff` module's
-/// "List diffing" doc section for the full, empirically-verified spec):
+/// `_diff_iterable_in_order` dispatch exactly (see `docs/design/list-diff.md`
+/// for the full spec):
 ///
 /// - **When every element of *both* `a` and `b` is a scalar** (null, bool,
 ///   number, string, plus datetime and date — `DeepDiff`'s "basic hashable"
@@ -141,8 +140,7 @@ struct LcsPair<'a> {
 /// recursing through [`diff_at`] (whose own top check *is*
 /// [`check_traversal_depth`]). This finding is reached without ever calling
 /// `diff_at`, so without this explicit check it would silently accept a
-/// pairwise difference one level deeper than `max_depth` permits — see this
-/// module's "List diffing" doc section.
+/// pairwise difference one level deeper than `max_depth` permits.
 ///
 /// No [`check_value_depth`] guard is needed here (unlike every other
 /// clone-into-[`Report`] sink in this module): both values are guaranteed
@@ -244,9 +242,9 @@ fn insert_lcs_pair_finding(
     })
 }
 /// Diffs two lists of JSON scalars via a `difflib`-style LCS match — see
-/// [`array_diff`]'s doc for when this is tried, and this module's "List
-/// diffing" doc section for the opcode-to-finding mapping this implements
-/// (a direct port of `deepdiff/diff.py::_diff_ordered_iterable_by_difflib`).
+/// [`array_diff`]'s doc for when this is tried, and `docs/design/list-diff.md`
+/// for the opcode-to-finding mapping this implements (a direct port of
+/// `deepdiff/diff.py::_diff_ordered_iterable_by_difflib`).
 ///
 /// The only possible [`Error::MaxDepthExceeded`] source is
 /// [`insert_lcs_pair_finding`]'s traversal-depth check on a `'replace'`

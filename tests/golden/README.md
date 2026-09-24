@@ -210,8 +210,7 @@ nothing), the `new_path` field on an index-drifted `values_changed`/
 `type_changes` (including on a mixed-type pair, and with unicode strings),
 the "keep the smaller, ties favor index-aligned" count comparison, and the
 `autojunk=False` finding at ≥200 items. See
-`crates/onix-core/src/diff/mod.rs`'s "List diffing" module doc for the
-full spec these pin down.
+`docs/design/list-diff.md` for the full spec these pin down.
 
 **Set cases (`set_*`, `frozenset_*`, `ignore_order_set_*`,
 `ignore_order_frozenset_*`, `ignore_order_unhashable_set_*`):** a set diffs into
@@ -327,10 +326,9 @@ bool-vs-int never hash-equal, one-sided all-added/all-removed, the
 asymmetric-tie-break example, and index-drift `new_path` (both on a
 real finding and confirmed absent on added/removed). Plus 20 seeded-random
 fuzz cases (`_generate_ignore_order_fuzz_cases`). See
-`crates/onix-core/src/ignore_order/mod.rs`'s module doc for the full,
-source-cited spec this implements; `scripts/differential_fuzz.py` is a
-separate, larger-scale (thousands of cases) fuzzer run during development,
-not part of this fixed corpus.
+`docs/design/ignore-order.md` for the full spec this implements;
+`scripts/differential_fuzz.py` is a separate, larger-scale (thousands of
+cases) fuzzer run during development, not part of this fixed corpus.
 
 ## Normalized versus raw datetimes
 

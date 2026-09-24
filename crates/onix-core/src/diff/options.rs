@@ -31,8 +31,8 @@ pub struct DiffOptions {
     /// Mirrors `DeepDiff(..., ignore_order=True)`: every list/tuple
     /// encountered anywhere in the tree, at any depth, is compared as a
     /// multiset-ish match (hash-based pairing) instead of the ordered
-    /// index-aligned/LCS comparison — see `crate::ignore_order`'s
-    /// module doc for the full, empirically-verified spec this implements.
+    /// index-aligned/LCS comparison — see `docs/design/ignore-order.md`
+    /// for the full spec this implements.
     /// Dicts are unaffected (always key-compared); this only changes how
     /// *list-typed* values compare, recursively.
     pub ignore_order: bool,
@@ -233,8 +233,8 @@ pub(crate) fn diff_with_options_memo(
 /// native recursion. **Two fully-equal inputs of *any* nesting depth always
 /// return an empty [`Report`], regardless of `max_depth`.** This check runs
 /// once, at the top; it does *not* re-run per dict key while recursing (a
-/// deliberate simplicity/perf trade-off — see the `diff.rs` module and
-/// `object_diff`'s doc for why), so an equal subtree nested arbitrarily deep
+/// deliberate simplicity/perf trade-off — see `object_diff`'s doc for why),
+/// so an equal subtree nested arbitrarily deep
 /// *underneath an unrelated, shallower difference elsewhere* can still trip
 /// [`Error::MaxDepthExceeded`] even though that particular subtree would
 /// resolve to no findings on its own.
@@ -287,8 +287,7 @@ pub(crate) fn diff_with_options_memo(
 /// ```
 ///
 /// After the recursive traversal completes, runs the whole-tree
-/// mutual-add-remove merge exactly once (see this module's "The
-/// mutual-add-remove merge" doc section and
+/// mutual-add-remove merge exactly once (see
 /// `crate::report::Report::merge_mutual_add_removes`) — matching
 /// `DeepDiff`'s own once-per-call, post-traversal timing.
 pub fn diff_with_max_depth(a: &Value, b: &Value, max_depth: usize) -> Result<Report, Error> {

@@ -33,7 +33,7 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// `O(n)` per operation — worst case pushing
 /// [`HashedList::build`](super::hash::HashedList::build) from `O(n)` to
 /// `O(n²)` on a crafted all-colliding list, on top of the module's already
-/// `O(N²)` pairing (see the parent module doc's complexity note).
+/// `O(N²)` pairing (see README's `ignore_order` Known-limitations bullet).
 ///
 /// **Scope: which tables are collision-immune, and why.** The set-member
 /// interning tables in [`IgnoreOrderMemo`](super::memo::IgnoreOrderMemo)

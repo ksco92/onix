@@ -13,8 +13,8 @@
 //! [`crate::report::Report`], [`crate::path::PathSegment`], or recursion
 //! depth — it only turns two slices of [`crate::value::Value`] scalars into an
 //! ordered list of [`Opcode`]s. [`crate::diff::array_diff`] is what maps
-//! those opcodes into report findings; see that module's doc for the full,
-//! empirically-verified `DeepDiff` list-compat spec this exists to serve.
+//! those opcodes into report findings; see `docs/design/list-diff.md` for
+//! the full `DeepDiff` list-compat spec this exists to serve.
 //!
 //! # Why this exists
 //!
@@ -29,9 +29,9 @@
 //! match and, only when that produces more than one finding, compares its
 //! finding *count* against the plain index-aligned algorithm's, keeping
 //! whichever is smaller (a tie keeps the index-aligned result). See
-//! `crate::diff`'s module doc for the full write-up, including the
-//! surprising matching-equality and `new_path` details this module's
-//! algorithm alone doesn't explain.
+//! `docs/design/list-diff.md` for the full write-up, including the
+//! matching-equality and `new_path` details this module's algorithm alone
+//! doesn't explain.
 //!
 //! # Junk and autojunk
 //!
@@ -345,8 +345,8 @@ pub(crate) struct Opcode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tag {
     /// `a[a1..a2]` and `b[b1..b2]` are the same (by [`ScalarKey`] equality),
-    /// element for element. Never diffed further — see `crate::diff`'s
-    /// module doc.
+    /// element for element. Never diffed further — see
+    /// `docs/design/list-diff.md`.
     Equal,
     /// `a[a1..a2]` should be replaced by `b[b1..b2]`; the two ranges never
     /// share a matching element (see [`compute_opcodes`]'s doc).
