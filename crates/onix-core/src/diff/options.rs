@@ -51,7 +51,8 @@ impl Default for DiffOptions {
 /// # Errors
 ///
 /// Returns [`Error::MaxDepthExceeded`] if comparing `a`/`b` would need to
-/// recurse past [`DEFAULT_MAX_DEPTH`], per the shared depth budget in
+/// recurse past [`DEFAULT_MAX_DEPTH`], or if a finding's value, combined
+/// with its path depth, nests past that same budget — see
 /// `docs/design/depth-budget.md`.
 ///
 /// # Examples
@@ -181,9 +182,11 @@ pub(crate) fn diff_with_options_memo(
     })
 }
 /// Diffs two JSON-shaped values like [`diff()`], but with a caller-chosen
-/// recursion-depth bound instead of [`DEFAULT_MAX_DEPTH`]. See
-/// `docs/design/depth-budget.md` for the depth-counting convention and
-/// the shared path-plus-value budget this enforces.
+/// recursion-depth bound instead of [`DEFAULT_MAX_DEPTH`], replacing an
+/// uncatchable stack overflow on adversarially deep input with a
+/// recoverable error. See `docs/design/depth-budget.md` for the
+/// depth-counting convention and the shared path-plus-value budget
+/// this enforces.
 ///
 /// # Errors
 ///

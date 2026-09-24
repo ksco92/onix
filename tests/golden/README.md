@@ -815,11 +815,11 @@ documented divergence, unchanged here.
   `serde_json::Map`'s keys in alphabetical order (no `preserve_order`
   feature), an unrelated ordering — reproducing `DeepDiff`'s exact choice
   would mean threading original JSON key order through the whole engine for
-  a vanishingly rare edge case. `crates/onix-core/tests/golden.rs` checks
-  this case with its own dedicated test (no panic, valid `DeepDiff`-shaped
-  output, onix's own deterministic survivor) instead of exact-matching
-  `expected.json`; see that test for the mechanics (structural- vs.
-  rendered-path keying, which `crate::report`'s module doc also states).
+  a vanishingly rare edge case. See `crate::report`'s module doc for the
+  structural- vs. rendered-path keying rule this follows from.
+  `crates/onix-core/tests/golden.rs` checks this case with its own
+  dedicated test (no panic, valid `DeepDiff`-shaped output, onix's own
+  deterministic survivor) instead of exact-matching `expected.json`.
 
 - **`[1]` vs `[1.0]` inside a list diffs to nothing at all.** This is
   *not* a divergence — it is `DeepDiff`'s own real, faithfully-reproduced

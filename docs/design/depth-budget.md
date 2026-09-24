@@ -16,9 +16,11 @@ enforce it via `deeper_than`/`map_deeper_than`, both iterative.
 
 The traversal reaching a finding and the native `Clone` recording its
 value run on one call stack with no unwinding between, so their
-frames add. A flat `max_depth` for the value regardless of `d` would
-let both together cost roughly `2 * max_depth` frames; the shared
-budget bounds combined native stack by `max_depth` instead.
+depths add: at most `max_depth` levels combined, never two
+independent `max_depth` budgets. A flat `max_depth` for the value
+regardless of `d` would let both together reach roughly `2 *
+max_depth` levels; the shared budget instead bounds the combined
+depth by `max_depth`.
 
 ## Equal inputs of any depth
 
@@ -30,9 +32,21 @@ shallower difference can still trip `MaxDepthExceeded`.
 
 ## Safety contract
 
-No native recursion this budget guards — traversal, `Value`'s
-`Clone`, `Report`'s `Drop`, `Report::to_json_value` — exceeds
-`O(max_depth)` frames; worst case is a clean `MaxDepthExceeded`, never
-a stack overflow. `ignore_order`'s hashing and distance fallback
-recurse natively too, checked against this same budget first — see
-`docs/design/ignore-order.md`'s "Depth safety" section.
+The traversal recurses at most `max_depth` levels; each level costs a
+small constant number of native frames (`diff_at` plus one dispatch
+function, `object_diff` or `array_diff`), so the worst case is
+roughly `2 * max_depth` frames — about 3.5 KiB/level in a debug
+build, measured by `crates/onix-core/examples/stack_frame_cost.rs`
+the same way `crates/onix-py/src/guard.rs` sizes its worker stack
+from it. Every site that clones a whole value into a `Report` calls
+`check_value_depth`/`check_map_depth` first, so no value over the
+combined budget is ever cloned; `Value`'s `Clone` then recurses no
+deeper than that budget, and `Report::to_json_value` renders those
+same already-bounded values through `Value::to_serde_json`'s own
+unguarded recursion safely for the same reason. `Value`'s `Drop` is
+iterative at any depth and outside this budget entirely.
+`ignore_order`'s hashing and distance fallback recurse natively too,
+checked against this same budget before they run — see
+`docs/design/ignore-order.md`'s "Depth safety" section. The worst
+case on adversarial input is a clean `MaxDepthExceeded`, never a
+stack overflow.

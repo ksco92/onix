@@ -5,10 +5,10 @@ use std::fmt;
 /// Errors that can occur while diffing two values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// Diffing `a`/`b` would need more native recursion than the shared
-    /// `max_depth` budget allows — either the traversal itself, or a
-    /// found value's own nesting once combined with its path depth. See
-    /// `docs/design/depth-budget.md` for the exact budget rule.
+    /// Diffing `a`/`b` needs more native recursion than the shared `max_depth` budget allows —
+    /// the traversal itself, or a found value's nesting combined with its path depth —
+    /// replacing an uncatchable stack overflow on adversarially deep input with a recoverable
+    /// error. See `docs/design/depth-budget.md`.
     MaxDepthExceeded {
         /// The DeepDiff-style path (e.g. `"root['a']['b']"`) at which the
         /// bound was exceeded — either where the traversal gave up, or

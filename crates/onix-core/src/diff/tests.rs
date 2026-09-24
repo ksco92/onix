@@ -1121,7 +1121,7 @@ fn shallow_finding_with_a_value_past_the_guard_errors_cleanly() {
     // diff({}, {"x": <deep array>}) at DEFAULT_MAX_DEPTH.
     // `check_value_depth`/`deeper_than` reject a
     // too-deep value by walking at most `max_depth + 1` levels of it
-    // before short-circuiting (see `check_value_depth`'s doc), so
+    // before short-circuiting (see `deeper_than`'s doc), so
     // PAST_DEFAULT_MAX_DEPTH exercises identical behavior to the
     // original 100_000-deep fixture at a fraction of the memory.
     // Runs entirely on the default test thread (no large-stack helper):
