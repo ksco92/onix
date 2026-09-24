@@ -3629,7 +3629,9 @@ fn canonical_floats(array: &ArrayRef) -> Result<ArrayRef, TableDiffError> {
 /// The changed-cell mask of left rows `lo..lo + right_rows.len()`: bit `i` is set
 /// when left row `lo + i` and right row `right_rows[i]` differ under [`hash_cell`]
 /// (null only equals null), and unset for a null (unpaired) index. Every
-/// [`CellCompare`] arm gives the mask the per-cell arm gives.
+/// [`CellCompare`] arm gives the mask the per-cell arm gives. Memory: one bit per row
+/// for the mask, plus, on the kernel and type-change arms, a `take`n copy of the right
+/// column for this row range (a float column also widened to `Float64` on both sides).
 fn changed_mask(
     plan: &ColumnPlan,
     hasher: &RowHasher,
