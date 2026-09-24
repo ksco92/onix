@@ -1,58 +1,16 @@
 //! Table diffing for onix, over Apache Arrow.
 //!
-//! [`diff_tables`] compares two tables presented as [`TableInput`]s and returns
-//! a [`TableDiff`] carrying the **schema** diff — which columns were added,
-//! removed, or changed type — the keyed **row** diff — which rows were added,
-//! removed, or changed, and which keys are duplicated — and the per-cell diff
-//! (`cells_changed`), reporting which columns changed in each changed row and
-//! how.
+//! [`diff_tables`] compares two tables presented as [`TableInput`]s and
+//! returns a [`TableDiff`] carrying the schema diff, the keyed row diff, and
+//! the per-cell diff. The two tables are matched on a required, non-empty
+//! set of key columns, carried in [`TableDiffOptions`]. The row diff reads
+//! each side more than once, so [`diff_tables`] takes a re-openable
+//! [`TableInput`] rather than a single-use `RecordBatchReader`. In-memory
+//! tables use [`MemoryInput`]; a one-shot stream spools to a temporary file
+//! and implements [`TableInput`] over it, as the Python bindings do.
 //!
-//! The two tables are matched on a required, non-empty set of key columns (the
-//! table's primary key), carried in [`TableDiffOptions`]. Every key column must
-//! exist on both sides — a missing one is a [`TableDiffError::KeyColumnMissing`].
-//! Column names must be unique on each side; a repeated name is a
-//! [`TableDiffError::DuplicateColumn`].
-//!
-//! # Inputs
-//!
-//! The row diff reads each side more than once (to hash every row, to
-//! materialize the added/removed rows, and to materialize the changed rows for
-//! the per-cell diff), so [`diff_tables`] takes a re-openable [`TableInput`]
-//! rather than a single-use `RecordBatchReader`.
-//! In-memory tables use [`MemoryInput`]; a caller whose data is a one-shot
-//! stream spools it to a temporary Arrow IPC file first and implements
-//! [`TableInput`] over that file (as the Python bindings do).
-//!
-//! # Row diff
-//!
-//! Rows are matched by a keyed 128-bit hash of the key columns; a row present
-//! only on one side is added or removed, a row on both sides whose non-key
-//! columns differ is changed, and a key appearing more than once on either side
-//! is a duplicate — reported with its per-side counts and excluded from the
-//! added/removed/changed sets. Only the non-key columns present on *both* sides
-//! take part in change detection (a column on one side only is a schema change,
-//! not a cell change), and only scalar columns are compared; a nested non-key
-//! column is skipped, while a nested key column is a
-//! [`TableDiffError::UnsupportedRowType`]. See `src/row_diff.rs` for the exact
-//! value semantics.
-//!
-//! # Type comparison
-//!
-//! Two columns of the same name are "changed type" when their Arrow
-//! [`arrow_schema::DataType`]s differ, comparing every logical parameter
-//! (timestamp unit and timezone, decimal precision and scale). Nullability is
-//! ignored (but reported). Physical encodings that carry the same logical type
-//! are treated as equal — recursively — so a column keeps the same type when a
-//! producer picks a different encoding of it: dictionary encoding, string and
-//! binary views, and the several list variants all normalize together
-//! (`diff_tables(pl.DataFrame, pa.Table)` does not flag every string column, for
-//! instance); a `FixedSizeList` keeps its width; and a list of structs named
-//! exactly `key`/`value` with a nullable key is read as a map, on every list
-//! variant, so a real map and such a list are not distinguished. See
-//! `normalized_type` in `src/schema.rs` for the exact, enumerated rule list.
-//!
-//! The reported `left_type`/`right_type` strings show the actual (un-normalized)
-//! Arrow type, so a real change reports exactly what each side holds.
+//! See `src/row_diff.rs` for the row-matching and value-comparison rules, and
+//! `src/schema.rs` for the column type-normalization rules.
 //!
 //! # Example
 //!
@@ -118,33 +76,10 @@ pub use row_diff::{MemoryInput, TableInput};
 pub use schema::{ChangeKind, SchemaChange, diff_schemas};
 pub use table_diff::{TableDiff, TableDiffSummary};
 
-/// The maximum column-type nesting depth [`diff_tables`] will compare; a
-/// column nested deeper is refused with [`TableDiffError::MaxDepthExceeded`].
-///
-/// Arrow `DataType` nesting depth is attacker-controlled and unbounded, and
-/// every recursive walk over one — the comparison, the type's `Display` (which
-/// renders the report), and its own `Clone`/`Drop` — is a native-stack sink
-/// that would abort the process with an uncatchable overflow, not a Python
-/// exception (pyarrow's own recursive `str()` survives depths where these
-/// die, so the producer is not a backstop). This bound is checked iteratively,
-/// before any recursive walk runs, and converts that hazard into a recoverable
-/// error.
-///
-/// The value, 128, is far above any real Arrow schema (nesting beyond a
-/// handful of levels is exotic; a hundred is unheard of). The per-level native
-/// stack cost of those recursive walks is measured by a committed example,
-/// `crates/onix-arrow/examples/type_stack_cost.rs` (`cargo run -p onix-arrow
-/// --example type_stack_cost`, and `--release`), which builds a type nested to
-/// a given depth and binary-searches the deepest one that survives a
-/// clone + `Display` + drop on a fixed-size stack. The worst case is nested
-/// structs in a debug build (the profile `cargo test` uses) at roughly
-/// 5.0 KiB per level; release is roughly 0.7 KiB. So 128 levels costs on the
-/// order of 640 KiB debug / 90 KiB release. The Python bindings run the whole
-/// operation — the recursive FFI import and the drop of the imported types
-/// included — on the large stack-sized worker thread `crate::guard` sizes for
-/// the JSON path (hundreds of MiB), which clears the debug worst case by
-/// roughly 500x, so this bound is the clean-error ceiling rather than the sole
-/// backstop.
+/// The maximum column-type nesting depth [`diff_tables`] will compare; deeper is refused
+/// with [`TableDiffError::MaxDepthExceeded`], turning a native-stack overflow (recursive
+/// comparison, `Display`, `Clone`/`Drop`) into an error before it can run.
+/// Per-level cost is measured by `crates/onix-arrow/examples/type_stack_cost.rs`.
 pub const MAX_NESTING_DEPTH: usize = 128;
 
 /// The maximum worker-thread count for the row diff. A larger `threads` is
@@ -153,8 +88,9 @@ pub const MAX_THREADS: usize = 1024;
 
 /// Diffs two tables presented as re-openable [`TableInput`]s.
 ///
-/// See the [crate-level docs](crate) for the type-comparison rules, the
-/// key-column contract, and the row-diff semantics.
+/// See the [crate-level docs](crate) for the key-column contract; the
+/// row-diff rules are in `row_diff.rs` and the type-comparison rules in
+/// `schema.rs`.
 ///
 /// # Errors
 ///
@@ -164,24 +100,18 @@ pub const MAX_THREADS: usize = 1024;
 /// - [`TableDiffError::DuplicateColumn`] if either input has two columns with
 ///   the same name.
 /// - [`TableDiffError::KeyColumnMissing`] if a key column is absent from
-///   either input's schema, naming the column and the side.
+///   either input's schema.
 /// - [`TableDiffError::KeyTypeMismatch`] if a key column's normalized type
-///   differs across the two inputs (a primary key that changed type is refused,
-///   not coerced).
+///   differs across the two inputs.
 /// - [`TableDiffError::UnsupportedRowType`] if a key column's type, or any
-///   non-nested column's type on either side, cannot be hashed by value — a
-///   nested key, a run-end-encoded column, or a type combination Arrow cannot
-///   build.
+///   non-nested column's type on either side, cannot be hashed by value.
 /// - [`TableDiffError::Read`] if a batch cannot be read from either input.
-/// - [`TableDiffError::Render`] if a changed cell's value cannot be rendered to
-///   its canonical string — for example an out-of-range temporal value the
-///   formatter cannot format.
+/// - [`TableDiffError::Render`] if a changed cell's value cannot be rendered
+///   to its canonical string.
 /// - [`TableDiffError::TooManyChangedRows`] if one side has more than
-///   `u32::MAX` changed rows, which the per-cell diff's row-index arrays cannot
-///   address.
-/// - [`TableDiffError::EqualRenderings`] never fires for real input: it guards
-///   the internal invariant that a `value_changed` cell always renders two
-///   different strings.
+///   `u32::MAX` changed rows.
+/// - [`TableDiffError::EqualRenderings`] never fires for real input; it
+///   guards an internal invariant.
 pub fn diff_tables(
     left: &impl TableInput,
     right: &impl TableInput,
