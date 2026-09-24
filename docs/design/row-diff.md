@@ -26,7 +26,8 @@ each row against the indexed left instead of keeping its own hashes
 partition to anonymous temporary IPC files (`RightFuse`); the left is
 then re-read and materialized in the same pass (`reread_left`), and
 the cell pass compares and renders one partition at a time across the
-workers (`diff_cells_streaming`). Every partitioning is by key hash
+workers (`diff_cells_streaming`), finding each column's changed cells
+in one mask (`changed_mask`) that equals the per-cell decision. Every partitioning is by key hash
 and every reduction is order-independent or restored to batch order,
 so parallel output is byte-identical to the single-threaded path.
 
