@@ -12,7 +12,7 @@
 //! | `int` | `Number` | any magnitude — `i64`/`u64` fast path, arbitrary precision beyond it |
 //! | `float` | `Number` | `NaN`/`Infinity`/`-Infinity` included |
 //! | `str` | `Str` | UTF-8 the fast, common way; a lone surrogate code point survives too, see below |
-//! | `dict` (keys below), or a subclass | `Object` | a `str` key (including a surrogate one) interned across the whole walk |
+//! | `dict` (keys below), or a subclass | `Object` | a UTF-8 `str` key interned across the whole walk (a lone-surrogate key is not) |
 //! | `list`, or a subclass | `Array` | |
 //! | `tuple`, or a subclass (including a `namedtuple`) | `Tuple` | diffed positionally even for a `namedtuple` — `tests/golden/README.md`'s "Known `DeepDiff` quirks" section, its "A `namedtuple` is diffed positionally" point |
 //! | `set`, or a subclass | `Set` | members restricted, see below |
@@ -23,10 +23,10 @@
 //! | `datetime.timedelta`, or a subclass | `TimeDelta` | |
 //! | any other object | `Object` (custom) | diffed by its attributes, see below |
 //!
-//! Every subclass converts and compares like its base type, carrying its class name into a
-//! `type_changes` finding (a `set`/`frozenset` member excepted, see below); see the two
-//! "Subclasses" sections (`docs/design/value-model.md`, `docs/design/value-conversion.md`). An
-//! `int` of any magnitude converts exactly through [`exact_big_int`], matching `DeepDiff`.
+//! Every subclass's classification and comparison rules (a `set`/`frozenset` member excepted,
+//! see below): `docs/design/value-model.md`'s and `docs/design/value-conversion.md`'s
+//! "Subclasses" sections. An `int` of any magnitude converts exactly through [`exact_big_int`],
+//! matching `DeepDiff`.
 //!
 //! Every other type raises a Python exception instead of converting:
 //!
@@ -1416,7 +1416,7 @@ fn next_dict_entry<'py>(
 }
 
 /// Classifies one Python dict key into an [`ObjectKey`] — the `str` case
-/// (interned, as always — including a lone-surrogate one, see
+/// (a UTF-8 key interned, a lone-surrogate one kept per occurrence; see
 /// [`pystring_to_cstr`]) plus every other key `DeepDiff` also accepts:
 /// `None`, `bool`, `int`, `float`, `datetime`, `date`, or a `tuple` of those
 /// (never a nested `tuple` — see the module doc's dict-key bullet and
