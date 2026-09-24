@@ -948,6 +948,36 @@ fn count_object_diff_leaves_ratio_at_exactly_the_threshold_does_not_collapse() {
 }
 
 #[test]
+fn mixed_key_union_sums_shared_and_one_sided_keys() {
+    // Three Python-equal shared keys (`1` matches `1.0`) and three one-sided keys per side:
+    // 3 / 9 is the threshold itself, so no collapse; a product of any two counts collapses.
+    let object = |keys: [serde_json::Value; 6]| {
+        crate::value::Object::from_pairs(
+            keys.iter()
+                .map(|key| (ObjectKey::Other(Box::new(cv(key))), cv(&json!(0))))
+                .collect(),
+        )
+    };
+    let a = object([
+        json!(1),
+        json!(2),
+        json!(3),
+        json!(10),
+        json!(11),
+        json!(12),
+    ]);
+    let b = object([
+        json!(1.0),
+        json!(2),
+        json!(3),
+        json!(20),
+        json!(21),
+        json!(22),
+    ]);
+    assert!(!super::is_below_threshold_to_diff_deeper(&a, &b));
+}
+
+#[test]
 fn count_object_diff_leaves_shared_key_recursion_depth_boundary_is_exact() {
     // Shared key "x" holds arrays whose one element (a dict) needs 3
     // levels of recursion (array-element -> dict "a" -> dict "b") to
