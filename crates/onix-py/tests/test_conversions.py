@@ -1479,6 +1479,19 @@ def test_a_chain_of_deep_class_attributes_diffs_like_deepdiff() -> None:
     assert onix == real
 
 
+def test_two_class_attributes_nesting_each_other_12000_levels_deep_diff_without_a_crash() -> None:
+    """Two classes whose class attribute nests the previous class 12,000 levels deep diff at max_depth=20000."""
+    previous = type("C0", (), {})
+    roots = []
+    for i in range(1, 3):
+        cls = type(f"C{i}", (), {"a": _nest(previous(), 12000)})
+        roots.append(cls())
+        previous = cls
+    assert json.loads(DeepDiff(roots, roots[:-1], max_depth=20000).to_json()) == {
+        "iterable_item_removed": {"root[1]": {}}
+    }
+
+
 def test_a_deep_class_attribute_converts_on_a_small_thread() -> None:
     """A class attribute nested 2,000 levels deep diffs on a 512 KiB thread without overflowing it."""
     holder = type("Holder", (), {"a": _nest(1, 2000)})
