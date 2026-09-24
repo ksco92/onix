@@ -3721,3 +3721,17 @@ fn the_diff_returns_the_tokens_it_compared_without_a_resolved_value() {
     .unwrap();
     assert_eq!(unresolved, vec![Box::from("2")]);
 }
+
+#[test]
+fn a_second_side_cycle_token_is_compared_as_its_resolved_value() {
+    let mut resolved = crate::diff::Resolved::new();
+    resolved.insert(Box::from("9"), cv(&json!(1)));
+    let (report, unresolved) = crate::diff::diff_with_resolved(
+        &carr(vec![cv(&json!(1)), cobject_at(1, None)]),
+        &carr(vec![ccycle(), cobject_at(2, None)]),
+        &DiffOptions::default(),
+        &resolved,
+    )
+    .unwrap();
+    assert_eq!((report.finding_count(), unresolved), (1, Vec::new()));
+}
