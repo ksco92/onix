@@ -1,58 +1,16 @@
 //! Table diffing for onix, over Apache Arrow.
 //!
-//! [`diff_tables`] compares two tables presented as [`TableInput`]s and returns
-//! a [`TableDiff`] carrying the **schema** diff — which columns were added,
-//! removed, or changed type — the keyed **row** diff — which rows were added,
-//! removed, or changed, and which keys are duplicated — and the per-cell diff
-//! (`cells_changed`), reporting which columns changed in each changed row and
-//! how.
+//! [`diff_tables`] compares two tables presented as [`TableInput`]s and
+//! returns a [`TableDiff`] carrying the schema diff, the keyed row diff, and
+//! the per-cell diff. The two tables are matched on a required, non-empty
+//! set of key columns, carried in [`TableDiffOptions`]. The row diff reads
+//! each side more than once, so [`diff_tables`] takes a re-openable
+//! [`TableInput`] rather than a single-use `RecordBatchReader`. In-memory
+//! tables use [`MemoryInput`]; a one-shot stream spools to a temporary file
+//! and implements [`TableInput`] over it, as the Python bindings do.
 //!
-//! The two tables are matched on a required, non-empty set of key columns (the
-//! table's primary key), carried in [`TableDiffOptions`]. Every key column must
-//! exist on both sides — a missing one is a [`TableDiffError::KeyColumnMissing`].
-//! Column names must be unique on each side; a repeated name is a
-//! [`TableDiffError::DuplicateColumn`].
-//!
-//! # Inputs
-//!
-//! The row diff reads each side more than once (to hash every row, to
-//! materialize the added/removed rows, and to materialize the changed rows for
-//! the per-cell diff), so [`diff_tables`] takes a re-openable [`TableInput`]
-//! rather than a single-use `RecordBatchReader`.
-//! In-memory tables use [`MemoryInput`]; a caller whose data is a one-shot
-//! stream spools it to a temporary Arrow IPC file first and implements
-//! [`TableInput`] over that file (as the Python bindings do).
-//!
-//! # Row diff
-//!
-//! Rows are matched by a keyed 128-bit hash of the key columns; a row present
-//! only on one side is added or removed, a row on both sides whose non-key
-//! columns differ is changed, and a key appearing more than once on either side
-//! is a duplicate — reported with its per-side counts and excluded from the
-//! added/removed/changed sets. Only the non-key columns present on *both* sides
-//! take part in change detection (a column on one side only is a schema change,
-//! not a cell change), and only scalar columns are compared; a nested non-key
-//! column is skipped, while a nested key column is a
-//! [`TableDiffError::UnsupportedRowType`]. See `src/row_diff.rs` for the exact
-//! value semantics.
-//!
-//! # Type comparison
-//!
-//! Two columns of the same name are "changed type" when their Arrow
-//! [`arrow_schema::DataType`]s differ, comparing every logical parameter
-//! (timestamp unit and timezone, decimal precision and scale). Nullability is
-//! ignored (but reported). Physical encodings that carry the same logical type
-//! are treated as equal — recursively — so a column keeps the same type when a
-//! producer picks a different encoding of it: dictionary encoding, string and
-//! binary views, and the several list variants all normalize together
-//! (`diff_tables(pl.DataFrame, pa.Table)` does not flag every string column, for
-//! instance); a `FixedSizeList` keeps its width; and a list of structs named
-//! exactly `key`/`value` with a nullable key is read as a map, on every list
-//! variant, so a real map and such a list are not distinguished. See
-//! `normalized_type` in `src/schema.rs` for the exact, enumerated rule list.
-//!
-//! The reported `left_type`/`right_type` strings show the actual (un-normalized)
-//! Arrow type, so a real change reports exactly what each side holds.
+//! See `src/row_diff.rs` for the row-matching and value-comparison rules, and
+//! `src/schema.rs` for the column type-normalization rules.
 //!
 //! # Example
 //!
@@ -153,8 +111,8 @@ pub const MAX_THREADS: usize = 1024;
 
 /// Diffs two tables presented as re-openable [`TableInput`]s.
 ///
-/// See the [crate-level docs](crate) for the type-comparison rules, the
-/// key-column contract, and the row-diff semantics.
+/// See the [crate-level docs](crate) for the key-column contract and
+/// pointers to the type-comparison and row-diff rules.
 ///
 /// # Errors
 ///
