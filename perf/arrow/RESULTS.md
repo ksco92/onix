@@ -104,6 +104,56 @@ noise of the 0.10.0/#85 figures above (6.992 s / 22671.2 MB; 324.44 ms / 1228.2 
 helps nor hurts it measurably; the wide fixture (nearly every row changed) is where the change shows
 (see the wide section's before/after tables).
 
+## Fused reads (issue #90)
+
+`deepdiff-rs` 0.13.0 decodes the right input once and the left twice on the parallel path, where
+0.11.2 decoded each three times (see the Per-pass profile section for where the time went). The full
+pairs' headline comes from an interleaved run: `bench_tables.py`'s own per-run worker (one
+subprocess per measurement, parquet read inside the timed window) for onix 0.13.0, onix 0.11.2,
+DuckDB and polars, in six rounds whose tool order rotates by one each round, the first round
+discarded as warm-up and the median taken over the other five. It started at 2026-09-24T11:56Z at
+load average 3.8 and ended at 12:02Z; the load rose to 16 to 22 during it, largely from the
+benchmark's own 18-thread processes, and rotation spreads that across all four tools.
+
+| Fixture | onix 0.11.2 | onix 0.13.0 | Speedup | DuckDB | polars | onix / DuckDB | onix / polars | Peak RSS 0.11.2 → 0.13.0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| narrow full | 5.727 s | **3.879 s** | 1.48x | 2.275 s | 2.012 s | 1.71x | 1.93x | 22648.3 → 22026.3 MB |
+| wide full | 21.294 s | **14.968 s** | 1.42x | 5.164 s | 2.738 s | 2.90x | 5.47x | 33164.0 → 28801.2 MB |
+
+The same interleaving earlier the same day, begun at load average 6 that rose to 46 within the first
+round (2026-09-24T11:42Z to 11:49Z), measured narrow full at 4.686 s against DuckDB's 2.655 s
+(1.76x) and wide full at 16.690 s against 5.473 s (3.05x). The run above is the representative one:
+it started in a quiet window and its load came mostly from the tools themselves.
+
+`bench_tables.py` itself, both versions in one session (2026-09-24T11:15Z to 11:26Z, 0.13.0 first
+for each kind, same machine and tool versions as the Environment table, same fixture pairs,
+correctness precheck passed for every tool at both sizes) while other jobs ran on the machine (load
+average 18 to 29); DuckDB and polars rows come from the 0.13.0 run:
+
+| Fixture | Tool | Wall (0.11.2) | Wall (0.13.0) | Speedup | RSS (0.11.2) | RSS (0.13.0) | CPU (0.13.0) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| narrow 1M | onix (`diff_tables`) | 362.07 ms | **285.75 ms** | 1.27x | 1187.5 MB | 1183.5 MB | 0.886 s |
+| narrow 1M | DuckDB (oracle SQL) | — | 238.35 ms | — | — | 807.1 MB | 0.819 s |
+| narrow 1M | polars (anti-join/inner-join) | — | 66.91 ms | — | — | 914.2 MB | 0.395 s |
+| narrow full | onix (`diff_tables`) | 6.981 s | **5.089 s** | 1.37x | 22701.2 MB | 22083.0 MB | 32.490 s |
+| narrow full | DuckDB (oracle SQL) | — | 2.514 s | — | — | 15978.1 MB | 30.980 s |
+| narrow full | polars (anti-join/inner-join) | — | 2.709 s | — | — | 26799.2 MB | 20.492 s |
+| wide 1M | onix (`diff_tables`) | 1.487 s | **1.185 s** | 1.25x | 3058.4 MB | 2720.4 MB | 5.593 s |
+| wide 1M | DuckDB (oracle SQL) | — | 592.99 ms | — | — | 3363.2 MB | 4.652 s |
+| wide 1M | polars (anti-join/inner-join) | — | 210.62 ms | — | — | 1967.9 MB | 1.429 s |
+| wide full | onix (`diff_tables`) | 26.724 s | **17.336 s** | 1.54x | 33145.2 MB | 28827.1 MB | 93.712 s |
+| wide full | DuckDB (oracle SQL) | — | 5.332 s | — | — | 11908.9 MB | 66.373 s |
+| wide full | polars (anti-join/inner-join) | — | 3.489 s | — | — | 29818.0 MB | 27.030 s |
+
+In this sequential, loaded run `onix` trails DuckDB by 2.02x on the narrow full pair (5.089 against
+2.514 s) and 3.25x on the wide full pair; the interleaved run above measures 1.71x and 2.90x. Peak
+RSS falls on every cell: the wide pair's by 4.3 GB, because rows kept for
+`rows_added`/`rows_removed` no longer hold whole decoded input batches through a `Utf8View` column,
+and the narrow pair's by 0.6 GB, because the right side keeps no per-row hashes, only a map entry
+per key the left lacks (the Memory section's "Fused reads" table). The remaining wall on the wide
+pair is the cell pass's compare, render and reorder; on the narrow pair, the parquet read, the
+bindings' input spool and the spool decode.
+
 ## Thread-count scaling
 
 `diff_tables` wall time (median) as the `threads` knob varies, with the tables preloaded so the
@@ -128,21 +178,24 @@ so the 50,000-row threshold runs the workers only where they win.
 
 ## Per-pass profile
 
-Measured on `deepdiff-rs` 0.11.2 (2026-09-24T01:06Z to 01:18Z), same machine as the Environment
-table above, with no other `cargo`/`rustc`/`maturin`/`pytest`/`python`/`duckdb` process running at
-the start and end of each sweep. The numbers come from the committed `row_diff_profile` example
-(built with the `profile` feature; the commands are in `perf/arrow/README.md`'s "Profiling" section
-and the method in the example's module docstring). Every figure is the median of independent
-processes (**11 at 1M, 5 at full**, the file's convention), each row's median taken on its own, so a
-column's rows need not add up exactly, and each pass's share of the net wall is likewise the median
-of the per-process shares rather than a ratio of two medians. Each process runs a discarded
-warm-up diff, a timed uninstrumented diff, and an instrumented diff:
+Measured on `deepdiff-rs` 0.13.0 from 2026-09-24T11:01Z to 11:15Z, same machine as the Environment
+table above, while other jobs ran on it (a `cargo-mutants` run and five `rustc` processes at the
+start, load average 9 at the start and 18 to 29 by the end); the 1M and `narrow full` columns vary
+most between processes as a result. The numbers
+come from the committed `row_diff_profile` example (built with the `profile` feature; the commands
+are in `perf/arrow/README.md`'s "Profiling" section and the method in the example's module
+docstring). Every figure is the median of independent processes (**11 at 1M, 5 at full**, the file's
+convention), each row's median taken on its own, so a column's rows need not add up exactly, and
+each pass's share of the net wall is likewise the median of the per-process shares rather than a
+ratio of two medians. Each process runs a discarded warm-up diff, a timed uninstrumented diff, and an
+instrumented diff:
 
 - `total wall (uninstrumented run)` is the uninstrumented diff's wall.
 - Every other row is the instrumented diff: a pass cell is `wall s (peak RSS MB)`, where the peak is
   the process's resident set while the pass ran (the third diff in the process, so it includes
   allocator-retained memory from the first two); a `—` row is an additive sub-cost of the pass above
-  it, with no RSS.
+  it, with no RSS. A sub-cost `summed over threads` adds up every worker's time, so it can exceed
+  its pass's wall.
 - `net wall` is the instrumented wall minus the profiler's own boundary `ps` reads, and `residual` is
   `net wall` minus the sum of the passes: untimed code outside every pass, such as building the
   changed-key set and freeing each pass's state.
@@ -150,52 +203,54 @@ warm-up diff, a timed uninstrumented diff, and an instrumented diff:
 ### Real fixtures (file mode, 18 threads)
 
 Both parquet fixture pairs (`narrow`/`wide`, 1M and full) converted once to uncompressed Arrow IPC
-and read in file mode, so each pass re-reads and re-decodes its side as the Python bindings' input
-spool does. Full sizes are 37M rows (`narrow`) and 16.875M rows (`wide`).
+and read in file mode, as the Python bindings' input spool is. Full sizes are 37M rows (`narrow`)
+and 16.875M rows (`wide`).
 
 | Pass | narrow 1M | wide 1M | narrow full | wide full |
 | --- | --- | --- | --- | --- |
-| set-up | 0.000 (289) | 0.000 (1493) | 0.000 (961) | 0.000 (10586) |
-| hash and classify | 0.046 (305) | 0.151 (1519) | 1.223 (3962) | 1.760 (11092) |
-| — spool decode | 0.027 | 0.078 | 0.978 | 1.574 |
-| materialize | 0.034 (305) | 0.075 (1489) | 1.597 (3644) | 1.380 (16025) |
-| — spool decode | 0.024 | 0.072 | 0.791 | 1.368 |
-| cell: spill | 0.031 (305) | 0.392 (1801) | 1.437 (1616) | 7.459 (17847) |
-| — spool decode | 0.024 | 0.082 | 0.757 | 1.198 |
-| — spill route (take + cast) | 0.002 | 0.212 | 0.094 | 3.597 |
-| — spill write | 0.002 | 0.055 | 0.014 | 0.803 |
-| cell: render sort keys | 0.000 (305) | 0.020 (1804) | 0.014 (1617) | 0.332 (16911) |
-| cell: read-back and render | 0.009 (305) | 0.320 (1887) | 0.133 (1710) | 5.417 (18748) |
-| — partition read-back | 0.001 | 0.053 | 0.019 | 0.776 |
-| — compare and render | 0.007 | 0.215 | 0.069 | 3.746 |
-| cell: sort and interleave | 0.003 (305) | 0.168 (1964) | 0.097 (1605) | 3.249 (19461) |
-| passes sum | 0.124 | 1.127 | 4.498 | 19.592 |
-| net wall | 0.127 | 1.150 | 4.523 | 20.275 |
-| residual | 0.003 (2.3%) | 0.023 (2.0%) | 0.026 (0.6%) | 0.663 (3.3%) |
-| **total wall (uninstrumented run)** | **0.129** | **1.148** | **4.540** | **20.176** |
+| set-up | 0.000 (329) | 0.000 (1243) | 0.000 (1093) | 0.000 (6627) |
+| hash and classify | 0.067 (364) | 0.378 (1354) | 2.849 (2970) | 2.457 (6802) |
+| — spool decode (reader.next) | 0.028 | 0.101 | 1.381 | 1.597 |
+| — index left keys | 0.003 | 0.004 | 0.190 | 0.044 |
+| — spill route (take + cast), summed over threads | 0.001 | 0.157 | 0.116 | 2.027 |
+| — spill write, summed over threads | 0.001 | 0.087 | 0.011 | 0.562 |
+| — classify | 0.004 | 0.006 | 0.169 | 0.073 |
+| materialize and cell spill (left re-read) | 0.020 (364) | 0.179 (1408) | 0.828 (2419) | 1.086 (7805) |
+| — spool decode (reader.next) | 0.013 | 0.051 | 0.728 | 0.782 |
+| — spill route (take + cast), summed over threads | 0.001 | 0.139 | 0.078 | 1.979 |
+| — spill write, summed over threads | 0.002 | 0.081 | 0.013 | 0.492 |
+| materialize added (right candidates) | 0.000 (364) | 0.000 (1408) | 0.019 (2389) | 0.005 (7408) |
+| cell: render sort keys | 0.001 (364) | 0.028 (1408) | 0.026 (2389) | 0.362 (7503) |
+| cell: partition read-back and render | 0.014 (364) | 0.484 (1436) | 0.254 (2509) | 5.585 (9512) |
+| — cell: partition read-back | 0.001 | 0.066 | 0.029 | 0.752 |
+| — cell: compare and render | 0.011 | 0.342 | 0.151 | 3.935 |
+| cell: sort and interleave | 0.003 (364) | 0.242 (1479) | 0.138 (2516) | 3.284 (10155) |
+| passes sum | 0.111 | 1.329 | 4.173 | 12.803 |
+| net wall | 0.116 | 1.388 | 4.213 | 13.429 |
+| residual | 0.003 (3.0%) | 0.046 (3.3%) | 0.041 (1.0%) | 0.620 (4.5%) |
+| **total wall (uninstrumented run)** | **0.114** | **1.461** | **3.949** | **13.451** |
 
-Serial share. Each re-read pass decodes its side on one reader thread while the workers hash, so
-the decode sub-row is that pass's serial floor; the spill's route and write run on one consumer
-thread, concurrently with the decode, not after it. The partition read-back, the sort-key render and
-the final sort and interleave run on the calling thread; only compare and render is split across
-the workers.
+`hash and classify` reads each side once: it hashes the left, sorts and indexes the left's hashes
+(`index left keys`), then hashes the right while its workers tally each row against the left key it
+matches, keep the right's added rows and spill its changed value rows, and finally classifies each
+partition from the tallies (`classify`). `materialize and cell spill (left re-read)` is the only
+second read: the left's removed rows, its duplicate-key capture and its changed-row spill come from
+one scan. `materialize added (right candidates)` filters the rows the right's hash pass kept.
 
-| Serial term, share of its pass | narrow 1M | wide 1M | narrow full | wide full |
-| --- | --- | --- | --- | --- |
-| hash and classify: decode | 59% | 52% | 80% | 89% |
-| materialize: decode | 71% | 96% | 50% | 99% |
-| cell: spill: decode | 77% | 21% | 53% | 16% |
-| cell: spill: route + write | 13% | 68% | 8% | 59% |
+Each process alternated with one of 0.11.2's, under the same load, whose medians (0.177, 1.859,
+7.855 and 20.430 s uninstrumented) run above this section's quieter earlier figures (0.133, 1.181,
+4.667 and 19.789 s); against them the uninstrumented wall falls 1.6x on `narrow 1M` (0.177 to 0.114
+s), 1.3x on `wide 1M` (1.859 to 1.461 s), 2.0x on `narrow full` (7.855 to 3.949 s) and 1.5x on `wide
+full` (20.430 to 13.451 s). The spool decode summed over the passes falls from 4.13 to 2.11 s on
+`narrow full` and from 4.27 to 2.38 s on `wide full`.
 
-Each pass's share of the net wall (narrow full / wide full): hash and classify 27% / 9%,
-materialize 35% / 7%, cell spill 32% / 37%, render sort keys 0.3% / 1.6%, read-back and render
-3% / 26%, sort and interleave 2% / 16%.
-
-On the narrow fixture the three re-read passes (hash, materialize, spill) are 94% of the net wall at
-full size (4.26 of 4.52 s), and their decode alone is 2.53 s (56%). On the wide fixture they are 52%
-(10.60 of 20.28 s), decode is 4.14 s (20%), and the spill's route (3.60 s), compare and render
-(3.75 s), and sort and interleave (3.25 s) are the other large terms. Decode is 59% to 68% of the
-re-read passes' wall on the narrow fixture and 38% to 39% on the wide one.
+Serial share. Each read decodes its side on one reader thread while the workers hash and route, so a
+pass's decode sub-row is its serial floor. On `narrow full` the decode is 50% of the net wall (2.11
+of 4.21 s), and the left's second read (0.73 s) is the only decode left to remove. On `wide full` it
+is 18% (2.38 of 13.43 s); the cell pass's read-back, compare and render (5.59 s, 42%) and its sort
+and interleave (3.28 s, 24%) dominate, and only compare and render is split across the workers. Each
+pass's share of the net wall (narrow full / wide full): hash and classify 68% / 19%, left re-read
+20% / 8%, render sort keys 0.6% / 2.7%, read-back and render 6% / 42%, sort and interleave 4% / 24%.
 
 ### Proxy shapes (generated mode, 1M rows, 18 threads)
 
@@ -205,34 +260,150 @@ fixtures**: `linear` is two int64 columns (the narrow fixture has five typed col
 `Utf8` columns with every row changed (the wide fixture has 34 distinct scalar types — decimals,
 timestamps, intervals, binary — with ~2% of rows modified plus a zone-awareness retype), so the
 proxy walls do not match the real-fixture walls above. `spool write` is the IPC writer's time
-spooling both generated sides before the diff (file mode has no spool write).
+spooling both generated sides before the diff (file mode has no spool write). Measured
+2026-09-24T11:27Z to 11:31Z, load average 11 to 17.
 
 | Pass | `linear` 1M | `manycols` 1M |
 | --- | --- | --- |
-| set-up | 0.000 (204) | 0.000 (1478) |
-| hash and classify | 0.014 (228) | 0.543 (2205) |
-| — spool decode | 0.002 | 0.451 |
-| materialize | 0.032 (229) | 0.396 (2203) |
-| — spool decode | 0.002 | 0.395 |
-| cell: spill | 0.024 (229) | 1.472 (5773) |
-| — spool decode | 0.002 | 0.462 |
-| — spill route (take + cast) | 0.000 | 0.916 |
-| — spill write | 0.001 | 0.323 |
-| cell: render sort keys | 0.000 (229) | 0.020 (767) |
-| cell: read-back and render | 0.005 (229) | 0.693 (1558) |
-| — partition read-back | 0.000 | 0.399 |
-| — compare and render | 0.004 | 0.240 |
-| cell: sort and interleave | 0.001 (229) | 0.088 (1674) |
-| passes sum | 0.076 | 3.218 |
-| net wall | 0.078 | 3.269 |
-| residual | 0.002 (2.5%) | 0.048 (1.5%) |
-| **total wall (uninstrumented run)** | **0.078** | **3.259** |
-| spool write | 0.002 | 0.342 |
+| set-up | 0.000 (166) | 0.000 (2860) |
+| hash and classify | 0.025 (176) | 0.830 (4896) |
+| — spool decode (reader.next) | 0.002 | 0.431 |
+| — index left keys | 0.002 | 0.003 |
+| — spill route (take + cast), summed over threads | 0.000 | 0.656 |
+| — spill write, summed over threads | 0.000 | 0.159 |
+| — classify | 0.003 | 0.004 |
+| materialize and cell spill (left re-read) | 0.006 (176) | 0.561 (5039) |
+| — spool decode (reader.next) | 0.001 | 0.297 |
+| — spill route (take + cast), summed over threads | 0.000 | 0.529 |
+| — spill write, summed over threads | 0.000 | 0.153 |
+| materialize added (right candidates) | 0.000 (176) | 0.000 (2987) |
+| cell: render sort keys | 0.000 (176) | 0.021 (2989) |
+| cell: partition read-back and render | 0.006 (176) | 0.655 (3027) |
+| — cell: partition read-back | 0.000 | 0.353 |
+| — cell: compare and render | 0.005 | 0.249 |
+| cell: sort and interleave | 0.002 (176) | 0.089 (3173) |
+| passes sum | 0.039 | 2.158 |
+| net wall | 0.041 | 2.214 |
+| residual | 0.002 (4.5%) | 0.055 (2.5%) |
+| **total wall (uninstrumented run)** | **0.043** | **2.201** |
+| spool write | 0.002 | 0.333 |
 
 ## Memory
 
+### Fused reads (issue #90)
+
+0.13.0 keeps the 32-byte hashes of the left side only: the right side's hash pass tallies each row
+against the left key it matches (an 8-byte count per left row), and keeps a 32-byte map entry per
+distinct right key absent from the left. A selection kept for `rows_added`, `rows_removed` or the
+right's candidates copies a buffer it shares with a much larger allocation when it keeps at most
+half its batch; the duplicate-key report always does, and a candidate's key columns follow its
+full-width rows. Peak resident
+set of one fresh process per run, measured 2026-09-24 alongside 0.11.2's build (the same example
+shapes on both); a cell with several runs is their median:
+
+| Shape (`row_diff_rss`, rows/side) | threads | 0.11.2 | 0.13.0 | runs |
+| --- | --- | --- | --- | --- |
+| `linear` 8M | 1 / 18 | 600 / 814 MB | 600 / 618 MB | 1 |
+| `linear` 37M | 1 | 2734 MB | 2729 MB | 4 |
+| `linear` 37M | 18 | 3.40 GB | 2.49 GB | 4 |
+| `wide` 100k x 1 KB | 18 | 706 MB | 480 MB | 5 |
+| `wide` 200k x 1 KB | 18 | 1256 MB | 962 MB | 3 |
+| `wide` 1M x 1 KB | 18 | 4.76 GB | 4.62 GB | 3 |
+| `wide` 1M x 1 KB | 1 | 7.91 GB | 8.10 GB | 3 |
+| `wide` 200k x 1 KB | 2 / 64 | 1892 / 1660 MB | 1454 / 1254 MB | 3 |
+| `manycols` 150k x 8 x 512 B | 18 | 1991 MB | 1555 MB | 5 |
+| `manycols` 150k x 1 x 512 B | 18 | 798 MB | 551 MB | 5 |
+| `manycols` 150k x 8 x 512 B | 2 / 64 | 2316 / 1997 MB | 2389 / 1959 MB | 3 |
+| `allchange` 1M | 18 | 353 MB | 348 MB | 5 |
+| `dup` 200k, 16 B / 1 KB keys | 18 | 42 / 1031 MB | 39 / 831 MB | 3 |
+| `dup` 1M, 16 B keys | 18 | 218 MB | 196 MB | 3 |
+| `viewremoved` 1M (every row removed) | 1 / 18 | 2130 / 2108 MB | 2127 / 2112 MB | 3 |
+| `viewadded` 1M (every row added) | 1 / 18 | 2126 / 2105 MB | 2127 / 2190 MB | 3 |
+| `viewadded` 1M | 2 / 64 | 2171 / 2138 MB | 2242 / 2230 MB | 3 |
+| `viewaddedbyvalue` 1M (every row added, keyed on a 1 KB view column) | 1 / 2 | 2125 / 2174 MB | 2141 / 2243 MB | 3 |
+| `viewaddedbyvalue` 1M | 18 / 64 | 2110 / 2132 MB | 2191 / 2228 MB | 3 |
+| `viewaddedrepeat` 1M (every row added but one right-only repeat per batch) | 1 / 2 | 2125 / 2173 MB | 2125 / 2244 MB | 3 |
+| `viewaddedrepeat` 1M | 18 / 64 | 2110 / 2138 MB | 2192 / 2236 MB | 3 |
+| `viewsparse` 1M (one row in 10,000 removed) | 1 | 2176 MB | 2172 MB | 5 |
+| `viewsparse` 1M | 18 | 2166 MB | 1978 MB | 3 |
+| `duprightonce` 1M (500k left keys each twice on the right) | 1 / 18 | 1401 / 1368 MB | 1397 / 2320 MB | 3 |
+| `duprightonce` 1M | 2 / 64 | 1478 / 1398 MB | 1867 / 2298 MB | 3 |
+| `duprightabsent` 1M (500k right-only keys each twice) | 1 / 18 | 2363 / 2317 MB | 2361 / 2247 MB | 3 |
+| `repeatabsent` 1M (one right-only key once per 10,000 rows) | 1 / 18 | 2176 / 2124 MB | 2171 / 1979 MB | 3 |
+| `chain` 4M, 16-row batches | 18 | 9160 MB | 9505 MB | 3 |
+
+The `view*`, `dup*`, `repeatabsent` and `chain` shapes carry two `Utf8View` columns (1 KB, and 64 B
+for `chain`), and the `dupright*` shapes repeat each key half a side apart, so the parallel path
+meets a key's repeat batches after its first row. `chain` is a right side of keys the left lacks,
+each batch half new keys and half the previous batch's.
+
+Two spooled Arrow IPC shapes test the candidates' compaction (file-mode harness, one diff per
+process, median of 3): a 50,000-row left; a right of 2,001 batches of about 1,000 rows, each with
+499 new keys the left lacks, the previous batch's 499 again, and either one key the left lacks that
+never repeats (attack) or one left key (control); columns `id` Int64, `v` 64 B `Utf8View`, `w` 1 KB
+`Utf8`. Attack: 2586 → 603 MB at 2 threads, 2564 → 754 MB at 64. Control: 400 → 471 MB at 2 threads,
+424 → 647 MB at 64.
+
+A spooled all-added right side (1M rows of `id` Int64, two 1 KB `Utf8View` columns, a 1 KB `Utf8`
+column and a 30 B `Utf8View` column; an empty left) keyed on a 1 KB `Utf8View` column measures 4183
+→ 4185 MB at 1 thread, 4220 → 4273 MB at 2, 4211 → 4239 MB at 18 and 4226 → 4281 MB at 64 (0.11.2 →
+0.13.0, median of 3), the same as keyed on `id` (4217 → 4273 MB at 2 threads, 4212 → 4240 at 18,
+4225 → 4277 at 64): a candidate's key columns stay shared with its rows until a compaction copies
+those rows out.
+
+A spooled partial selection (`halfall`: a left of 980,000 keys; a right of 2,000 batches, each with
+510 keys the left lacks, 490 unchanged left keys and one repeat of the previous batch's first new
+key; columns `id` Int64, `w` 1 KB `Utf8`, `v` 64 B `Utf8View`) measures 4420 → 4684 MB at 2 threads
+and 4298 → 4483 MB at 64 (0.11.2 → 0.13.0, median of 3). The added rows are materialized one
+candidate at a time and each candidate is freed once its selection is taken; holding every candidate
+until the concatenation measured 5522 and 5403 MB. What remains is the map entry per key the left
+lacks.
+
+`chain` wall time at 18 threads (`row_diff_rss`, median of 3), 0.11.2 → 0.13.0: 2-row batches at
+100k / 200k / 400k rows 0.73 / 1.46 / 2.94 s → 0.65 / 1.22 / 2.55 s; 16-row batches at 1M / 2M / 4M
+rows 1.79 / 3.61 / 7.31 s → 1.50 / 3.15 / 6.19 s. Each compaction visits only candidates still
+holding full-width rows.
+
+Four terms remain above 0.11.2, all right-side keys on the parallel path:
+
+- Every right key absent from the left holds a map entry until classification: about 85 MB for 1M
+  such keys (`viewadded`, 18 threads).
+- The first right row of a key the left holds once with a different row hash is spilled for the cell
+  pass even when a later batch repeats the key, making it a duplicate that is never compared: 1.032
+  GB of spill for 500k such keys with 2 KB of value columns, at 2 and at 64 threads alike, and 952
+  MB of peak RSS at 18 threads (`duprightonce`). A repeat within the same batch spills nothing.
+- The first right row of a key absent from the left is held at full width until the right repeats
+  the key and the next compaction runs, which bounds the full-width rows at about twice those whose
+  key has not repeated; afterwards only its key columns stay.
+- Each right batch holding a kept row keeps a small fixed record even once reduced to key columns:
+  `chain` at 4M rows in 16-row batches peaks 345 MB above 0.11.2 at 18 threads.
+
+A kept selection of more than half its batch keeps that whole input batch resident, every column,
+per side; one of at most half copies its buffers out, but a byte-view column's data buffers are
+written to the output as they are (Arrow IPC writes a view array's data buffers whole), so each
+batch with a kept row still keeps its whole view data resident: `viewsparse` removes 100 rows spread
+over all 16 batches and holds about the whole side's 2.0 GB of view data on both versions, at 1 and
+at 18 threads.
+
+The single-threaded `wide` 1M peak is 2.3% higher (8.10 against 7.91 GB, in every run). That path
+still reads each side three times with the same filtering, and building its changed-key set at
+0.11.2's point instead measured 8.30 GB, so the figure follows allocation order rather than an added
+resident term. The size-gate peek shapes of the section below measure within 3 MB of 0.11.2 except
+the whole side in one batch at 18 threads, which falls from 1580 to 1190 MB.
+
+The real fixtures, one diff per fresh process of the file-mode harness (no parquet reader, so no
+input tables resident), at 2 / 18 / 64 threads: `narrow full` 3.25 / 2.76 / 2.83 GB (0.11.2: 4.13 /
+3.62 / 3.22 GB) and `wide full` 19.23 / 7.87 / 10.87 GB (0.11.2: 24.61 / 12.27 / 14.70 GB). Through
+the Python bindings (both input tables resident, the product path), the `wide full` pair's
+whole-process peak is about 39.8 / 28.8 / 31.4 GB (0.11.2: 45.6 / 32.9 / 34.2 GB). The spill is the
+same at every thread count: 11.505 / 11.506 / 11.506 GB for `wide full` and 0.227 GB for `narrow
+full`.
+
+### Earlier releases
+
 `row_diff_rss` (the example, `ROW_DIFF_THREADS` sets the worker count) peak resident set, the row
-diff's own state (no parquet), at 18 threads versus single-threaded:
+diff's own state (no parquet), at 18 threads versus single-threaded, on the parallel row diff of
+issue #81:
 
 | Rows/side | threads=1 | threads=18 | delta |
 | --- | --- | --- | --- |
@@ -307,13 +478,13 @@ sequential, and the byte check runs between whole batches, so the peek holds at 
 producer batch per side. This is the peak RSS of a 49,999-row/side pair of 8 KB `string` cells,
 identical on both sides (zero changes, so only the peek and hash vectors are resident), generated at
 three batch sizes (`ROW_DIFF_BATCH`); the default is the example's 65,536, at which the whole side is
-one batch and the peek necessarily holds it:
+one batch and the peek necessarily holds it. Medians of 3 runs, 2026-09-24:
 
-| Rows per batch | threads=1 | threads=18 |
-| --- | --- | --- |
-| 100 | 14 MB | 78 MB |
-| 1,000 | 548 MB | 610 MB |
-| 65,536 (default, whole side in one batch) | 1654 MB | 1657 MB |
+| Rows per batch | threads=1 (0.11.2) | threads=18 (0.11.2) | threads=1 (0.13.0) | threads=18 (0.13.0) |
+| --- | --- | --- | --- | --- |
+| 100 | 12 MB | 68 MB | 12 MB | 65 MB |
+| 1,000 | 524 MB | 559 MB | 524 MB | 558 MB |
+| 65,536 (default, whole side in one batch) | 1578 MB | 1580 MB | 1578 MB | 1190 MB |
 
 So a caller that streams small batches keeps the peek tiny; a caller that hands the whole side over
 as one giant batch makes the peek hold that batch. Bound the producer's batch size for untrusted
@@ -403,7 +574,8 @@ partition's rows are resident. onix now trails DuckDB by 3.8x (was 29.1x) and po
 run (5.1-6.5 s) so the ratio hovers around 4x. The cell-pass target of this change is met (its
 compare-and-render is now parallel); the remaining wall gap is the serial spool re-read passes --
 onix re-reads each spooled input several times where the SQL and join baselines read the parquet
-once -- the same cost the narrow fixture shows (6.08 s vs 2.39 s), tracked in issue #90. Peak RSS is
+once -- the same cost the narrow fixture shows (6.08 s vs 2.39 s), which 0.13.0 reduces (see
+[Fused reads](#fused-reads-issue-90)). Peak RSS is
 bounded by one partition's changed rows plus the reordered `cells_changed` output plus the per-row
 hash vectors, not by both sides' full changed rows; the Memory section states the measured per-cell
 term.
@@ -450,14 +622,14 @@ each other. `diff_tables` is 2.3-3.5x phase (b)'s wall time here (narrow: 354 ms
 1.592 s vs. 461 ms), now that issue #87's streaming, parallel cell pass has closed most of the gap
 the pre-#87 cell pass left ([Results (wide)](#results-wide)'s own, otherwise-idle 0.11.0 figure was
 11.8x here at the wide size: 5.460 s against this section's 461 ms phase-(b) figure) --
-`diff_tables` still re-reads and re-hashes the whole table three times over per
-[`row_diff.rs`](crates/onix-arrow/src/row_diff.rs)'s module doc, against polars' single in-memory
-pass. The full ~5 GB wide pair (16.875M rows) was not measured here (see
-[Wide fixture pair](#wide-fixture-pair-84) for `diff_tables`'s own cost at that size, about 24 s on
-0.11.1, down from about 150 s pre-#87). `bench_tables.py`'s correctness precheck
-(`rows_added`/`rows_removed`/`cells_changed`/`duplicate_keys` against `generate_fixtures.py`'s
-manifest) passes for `polars_spike.py`'s counts on both fixtures, matching `_polars_counts`'s
-existing baseline exactly (narrow: 10,000/10,000/20,000/0; wide: 10,000/10,000/229,077/0).
+`diff_tables` 0.11.1 re-read and re-hashed the whole table three times over (0.13.0 reads the right
+once and the left twice), against polars' single in-memory pass. The full ~5 GB wide pair (16.875M
+rows) was not measured here (see [Wide fixture pair](#wide-fixture-pair-84) for `diff_tables`'s own
+cost at that size, about 24 s on 0.11.1, down from about 150 s pre-#87). `bench_tables.py`'s
+correctness precheck (`rows_added`/`rows_removed`/`cells_changed`/`duplicate_keys` against
+`generate_fixtures.py`'s manifest) passes for `polars_spike.py`'s counts on both fixtures, matching
+`_polars_counts`'s existing baseline exactly (narrow: 10,000/10,000/20,000/0; wide:
+10,000/10,000/229,077/0).
 
 ## Disk usage
 
@@ -465,31 +637,36 @@ Both fixture pairs (narrow and wide) at both sizes, all resident at once, from t
 pair" tables above: narrow 1M (269.4 MB) + narrow full (9,970.9 MB) + wide 1M (593.3 MB) + wide
 full (10,011.4 MB) — about 20.8 GB, plus `bench_raw/`'s per-run JSON files (under 1 MB total,
 measured at 192 KB for the wide runs alone). Nothing under `perf/arrow/fixtures/` or
-`perf/arrow/bench_raw/` is committed. On 0.11.1 the full-size `wide` run's peak resident memory for
-`onix` alone is about 33.1 GB at the default 18 threads (was about 67 GB on the pre-#87 cell pass; see the wide
-results table); size the runner accordingly.
+`perf/arrow/bench_raw/` is committed. On 0.13.0 the full-size `wide` run's peak resident memory for
+`onix` alone is about 28.8 GB at the default 18 threads (33.1 GB on 0.11.2, about 67 GB on the pre-#87
+cell pass; see the results tables); size the runner accordingly.
 
-`onix` 0.11.1 also uses temporary disk (an anonymous `tempfile`, unlinked at creation, so nothing is
-left on disk on abnormal exit; on Linux this is typically a RAM-backed `tmpfs`): the two input spools
-(both inputs' decoded Arrow IPC, resident for the whole diff so each side can be re-read) plus, during
-the cell pass, both sides' changed value rows spilled by key-hash partition. The partition spill is
-compact: the two Arrow types whose `take` retains data beyond the selected rows are decoded first --
-byte-view columns (`Utf8View`/`BinaryView`, whose `take` keeps the source's whole variadic buffers)
-are cast to their large i64-offset non-view type (`LargeUtf8`/`LargeBinary`, not the i32-offset
-`Utf8`/`Binary`, whose ~2 GiB offset ceiling a single input batch's retained view buffers can
-exceed), and dictionaries (what polars and DuckDB emit for strings, whose
-`take` keeps the whole values array) are decoded to their value type. Without these a spilled
-partition would carry the entire side's view data or dictionary and the spill would grow with the
-partition count; measured with a 40,000-row all-distinct dictionary string column, the total spill is
-6.6 / 57.7 / 204.6 MB at 2 / 18 / 64 partitions before the decode versus 3.19 / 3.20 / 3.22 MB after.
-A `Utf8View` column shows the same flat shape (3.36 / 3.36 / 3.38 MB at 2 / 18 / 64, casting to
-`LargeUtf8`), as does a dictionary whose value type is itself a `Utf8View` (3.36 / 3.36 / 3.38 MB,
-the dictionary decode composing with the view cast). `LargeUtf8`, `LargeBinary`, and `FixedSizeBinary`
-already compact on `take` and spill as themselves (measured flat, 3.35 MB at 2 vs 64 for `LargeUtf8`).
-With the decode the spill is `changed rows x total value-column width`, independent of the
-thread/partition count: the full-size `wide` pair's whole-process peak RSS (input spool + partition
-spill + working set, all resident) is about 45 GB at 2 threads, 33 GB at 18, and 34 GB at 64 -- it
-falls as more, smaller partitions shrink the resident chunk, and does not blow up with the thread
-count (before the byte-view cast it would reach about 97 GB at 64 threads). Bound the changed
-fraction and the total value-column width for untrusted input. A full temp filesystem raises
+`onix` also uses temporary disk (an anonymous `tempfile`, unlinked at creation, so nothing is left
+on disk on abnormal exit; on Linux this is typically a RAM-backed `tmpfs`): the two input spools
+(both inputs' decoded Arrow IPC, resident for the whole diff so a side can be re-read) plus both
+sides' changed value rows spilled by key-hash partition (on 0.13.0 the right's while it is hashed
+and the left's while it is re-read, both resident until the cell pass ends). With every file
+resident at once that is about 23.8 GB for the full `wide` pair (12.26 GB of input spool, the
+inputs' uncompressed Arrow IPC size, plus 11.51 GB of spill at 2, 18 and 64 threads alike) and 11.9
+GB for the full `narrow` pair (11.66 GB plus 0.23 GB). The partition spill is compact: the two Arrow
+types whose `take` retains data beyond the selected rows are decoded first -- byte-view columns
+(`Utf8View`/`BinaryView`, whose `take` keeps the source's whole variadic buffers) are cast to their
+large i64-offset non-view type (`LargeUtf8`/`LargeBinary`, not the i32-offset `Utf8`/`Binary`, whose
+~2 GiB offset ceiling a single input batch's retained view buffers can exceed), and dictionaries
+(what polars and DuckDB emit for strings, whose `take` keeps the whole values array) are decoded to
+their value type. Without these a spilled partition would carry the entire side's view data or
+dictionary and the spill would grow with the partition count; measured with a 40,000-row
+all-distinct dictionary string column, the total spill is 6.6 / 57.7 / 204.6 MB at 2 / 18 / 64
+partitions before the decode versus 3.19 / 3.20 / 3.22 MB after. A `Utf8View` column shows the same
+flat shape (3.36 / 3.36 / 3.38 MB at 2 / 18 / 64, casting to `LargeUtf8`), as does a dictionary
+whose value type is itself a `Utf8View` (3.36 / 3.36 / 3.38 MB, the dictionary decode composing with
+the view cast). `LargeUtf8`, `LargeBinary`, and `FixedSizeBinary` already compact on `take` and
+spill as themselves (measured flat, 3.35 MB at 2 vs 64 for `LargeUtf8`). With the decode the spill
+is `changed rows x total value-column width` (plus, on the parallel path, the first right row of
+each key the left holds once that a later right batch repeats), independent of the thread/partition
+count: the full-size `wide` pair's whole-process peak RSS (input tables + partition spill + working
+set) is about 40 GB at 2 threads, 29 GB at 18, and 31 GB at 64 on 0.13.0 (46, 33 and 34 GB on
+0.11.2) -- it falls as more, smaller partitions shrink the resident chunk, and does not blow up with
+the thread count (before the byte-view cast it would reach about 97 GB at 64 threads). Bound the
+changed fraction and the total value-column width for untrusted input. A full temp filesystem raises
 `ValueError` naming `TMPDIR`.

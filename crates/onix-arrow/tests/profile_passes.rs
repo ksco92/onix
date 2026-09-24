@@ -76,13 +76,14 @@ fn profiled(threads: usize, batches: i64, rows: i64) -> Vec<(&'static str, f64)>
     passes
 }
 
-/// Asserts `passes` are `expected` in order and every re-read pass decoded
-/// both sides' `batches` batches.
-fn assert_passes(passes: &[(&str, f64)], expected: &[&str], rereads: usize, batches: u32) {
+/// Asserts `passes` are `expected` in order and that each `(pass, sides)` in
+/// `reads` decoded `sides` sides' `batches` batches.
+fn assert_passes(passes: &[(&str, f64)], expected: &[&str], reads: &[(usize, u32)], batches: u32) {
     let labels: Vec<&str> = passes.iter().map(|&(label, _)| label).collect();
     assert_eq!(labels, expected);
-    let floor = (DELAY * 2 * batches).as_secs_f64();
-    for &(label, decode) in &passes[1..=rereads] {
+    for &(pass, sides) in reads {
+        let (label, decode) = passes[pass];
+        let floor = (DELAY * sides * batches).as_secs_f64();
         assert!(
             decode >= floor,
             "{label}: {decode} s decoding, under {floor} s"
@@ -98,19 +99,21 @@ fn each_pass_records_the_decode_of_every_batch_it_reads() {
         "materialize",
         "cell (sequential)",
     ];
+    let both_sides_each_pass = [(1, 2), (2, 2), (3, 2)];
     // One thread: the plain sequential scans.
-    assert_passes(&profiled(1, 4, 100), &sequential, 3, 4);
+    assert_passes(&profiled(1, 4, 100), &sequential, &both_sides_each_pass, 4);
     // Two threads under the size gate: the peek decodes every batch.
-    assert_passes(&profiled(2, 4, 100), &sequential, 3, 4);
-    // Two threads over the size gate: the peek, then the parallel scans.
+    assert_passes(&profiled(2, 4, 100), &sequential, &both_sides_each_pass, 4);
+    // Two threads over the size gate: the peek, then the parallel scans, which
+    // read the right once and the left twice.
     let parallel = [
         "set-up",
         "hash and classify",
-        "materialize",
-        "cell: spill (re-read, hash, route, write)",
+        "materialize and cell spill (left re-read)",
+        "materialize added (right candidates)",
         "cell: render sort keys",
         "cell: partition read-back and render",
         "cell: sort and interleave",
     ];
-    assert_passes(&profiled(2, 8, 10_000), &parallel, 3, 8);
+    assert_passes(&profiled(2, 8, 10_000), &parallel, &[(1, 2), (2, 1)], 8);
 }

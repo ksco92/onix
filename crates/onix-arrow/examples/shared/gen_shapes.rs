@@ -10,7 +10,9 @@
 
 use std::sync::Arc;
 
-use arrow_array::{ArrayRef, Int64Array, RecordBatch, RecordBatchReader, StringArray};
+use arrow_array::{
+    ArrayRef, Int64Array, RecordBatch, RecordBatchReader, StringArray, StringViewArray,
+};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use onix_arrow::{TableDiffError, TableInput};
 
@@ -50,6 +52,60 @@ pub enum Shape {
         width: usize,
         first_fill: u8,
     },
+    /// `(id, v0, v1)`, two `width`-byte `Utf8View` columns starting with `fill`;
+    /// `keys` maps row `i` to its id, or omits it.
+    View {
+        width: usize,
+        fill: u8,
+        keys: ViewKeys,
+    },
+}
+
+/// How a [`Shape::View`] side keys its rows.
+#[derive(Clone, Copy)]
+pub enum ViewKeys {
+    /// Id `i`, omitting every row when `omit_every` is 1, every
+    /// `omit_every`-th row when above 1, and none when 0.
+    Plain { omit_every: i64 },
+    /// Id `offset + i % period`, so each id repeats every `period` rows.
+    Wrap { offset: i64, period: i64 },
+    /// Id `i`, except every `every`-th row, whose id is `-1`.
+    RepeatAbsent { every: i64 },
+    /// In `batch`-row batches, the first half new ids from `offset` up and the
+    /// second half the previous batch's new ids.
+    Chain { offset: i64, batch: i64 },
+    /// Id `i`, except each batch's last row after the first, which repeats the
+    /// previous batch's first id.
+    RepeatPrevFirst { batch: i64 },
+}
+
+impl ViewKeys {
+    fn id(self, i: i64) -> Option<i64> {
+        match self {
+            ViewKeys::Plain { omit_every } => (omit_every == 0 || i % omit_every != 0).then_some(i),
+            ViewKeys::Wrap { offset, period } => Some(offset + i % period),
+            ViewKeys::RepeatAbsent { every } => Some(if i % every == 0 { -1 } else { i }),
+            ViewKeys::RepeatPrevFirst { batch } => {
+                let (b, j) = (i / batch, i % batch);
+                Some(if b > 0 && j == batch - 1 {
+                    (b - 1) * batch
+                } else {
+                    i
+                })
+            }
+            ViewKeys::Chain { offset, batch } => {
+                let (b, j, half) = (i / batch, i % batch, (batch / 2).max(1));
+                Some(
+                    offset
+                        + if j < half {
+                            b * half + j
+                        } else {
+                            (b - 1) * half + j - half
+                        },
+                )
+            }
+        }
+    }
 }
 
 /// A generated two-sided case, with its size parameters already defaulted by
@@ -70,9 +126,98 @@ pub enum Case {
     ManyCols { ncols: usize, width: usize },
     /// Every `key_width`-byte string key appearing twice on each side.
     Dup(usize),
+    /// Two `width`-byte view columns; every left row removed (right empty).
+    ViewRemoved(usize),
+    /// [`Case::ViewRemoved`] mirrored: every right row added (left empty).
+    ViewAdded(usize),
+    /// [`Case::ViewAdded`] keyed on the `width`-byte view column `v0`.
+    ViewAddedByValue(usize),
+    /// [`Case::ViewAdded`] with each right batch's last row repeating the
+    /// previous batch's first key, so every batch keeps a right-only duplicate.
+    ViewAddedRepeat(usize),
+    /// Two `width`-byte view columns, equal sides except every `every`-th left
+    /// row, which the right lacks.
+    ViewSparse { width: usize, every: i64 },
+    /// Left ids once; the right holds the first half of them twice each, half
+    /// a side apart and with different values, so each is a duplicate key.
+    DupRightOnce(usize),
+    /// Left ids once; the right holds ids the left lacks, each twice, half a
+    /// side apart.
+    DupRightAbsent(usize),
+    /// Equal sides except every `every`-th right row, keyed by one id the left
+    /// lacks.
+    RepeatAbsent { width: usize, every: i64 },
+    /// A right side of ids the left lacks, each batch repeating the previous
+    /// batch's new ids.
+    Chain(usize),
 }
 
 impl Case {
+    /// [`Case::build`] for the two-view-column shapes.
+    fn view(self, rows: i64) -> (SchemaRef, Shape, Shape, &'static str) {
+        let (Case::ViewRemoved(width)
+        | Case::ViewAdded(width)
+        | Case::ViewAddedByValue(width)
+        | Case::ViewAddedRepeat(width)
+        | Case::ViewSparse { width, .. }
+        | Case::DupRightOnce(width)
+        | Case::DupRightAbsent(width)
+        | Case::RepeatAbsent { width, .. }
+        | Case::Chain(width)) = self
+        else {
+            unreachable!("only view cases reach this method")
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("v0", DataType::Utf8View, false),
+            Field::new("v1", DataType::Utf8View, false),
+        ]));
+        let view = |fill, keys| Shape::View { width, fill, keys };
+        let period = (rows / 2).max(1);
+        let all = ViewKeys::Plain { omit_every: 0 };
+        let (left, right) = match self {
+            Case::ViewRemoved(_) => (all, ViewKeys::Plain { omit_every: 1 }),
+            Case::ViewAdded(_) | Case::ViewAddedByValue(_) => {
+                (ViewKeys::Plain { omit_every: 1 }, all)
+            }
+            Case::ViewAddedRepeat(_) => (
+                ViewKeys::Plain { omit_every: 1 },
+                ViewKeys::RepeatPrevFirst {
+                    batch: batch_rows(),
+                },
+            ),
+            Case::ViewSparse { every, .. } => (all, ViewKeys::Plain { omit_every: every }),
+            Case::DupRightOnce(_) => (all, ViewKeys::Wrap { offset: 0, period }),
+            Case::DupRightAbsent(_) => (
+                all,
+                ViewKeys::Wrap {
+                    offset: rows,
+                    period,
+                },
+            ),
+            Case::RepeatAbsent { every, .. } => (all, ViewKeys::RepeatAbsent { every }),
+            Case::Chain(_) => (
+                all,
+                ViewKeys::Chain {
+                    offset: 2 * rows,
+                    batch: batch_rows(),
+                },
+            ),
+            _ => unreachable!("only view cases reach this arm"),
+        };
+        let right_fill = if matches!(self, Case::DupRightOnce(_)) {
+            b'b'
+        } else {
+            b'a'
+        };
+        let key = if matches!(self, Case::ViewAddedByValue(_)) {
+            "v0"
+        } else {
+            "id"
+        };
+        (schema, view(b'a', left), view(right_fill, right), key)
+    }
+
     /// The schema, the left and right shapes, and the key column.
     pub fn build(self, rows: i64) -> (SchemaRef, Shape, Shape, &'static str) {
         let int_schema = || {
@@ -130,6 +275,15 @@ impl Case {
                     "id",
                 )
             }
+            Case::ViewRemoved(_)
+            | Case::ViewAdded(_)
+            | Case::ViewAddedByValue(_)
+            | Case::ViewAddedRepeat(_)
+            | Case::ViewSparse { .. }
+            | Case::DupRightOnce(_)
+            | Case::DupRightAbsent(_)
+            | Case::RepeatAbsent { .. }
+            | Case::Chain(_) => self.view(rows),
             Case::Dup(key_width) => {
                 let schema = Arc::new(Schema::new(vec![
                     Field::new("key", DataType::Utf8, false),
@@ -230,6 +384,22 @@ impl Iterator for GenReader {
                     columns.push(Arc::new(values));
                 }
                 columns
+            }
+            Shape::View { width, fill, keys } => {
+                let (ids, rows): (Vec<i64>, Vec<i64>) = (self.next..end)
+                    .filter_map(|i| keys.id(i).map(|id| (id, i)))
+                    .unzip();
+                let cell = |column: u8| {
+                    let cells: StringViewArray = rows
+                        .iter()
+                        .map(|&i| {
+                            let pad = width.saturating_sub(2);
+                            Some(format!("{}{column}{i:0>pad$}", char::from(fill)))
+                        })
+                        .collect();
+                    Arc::new(cells) as ArrayRef
+                };
+                vec![Arc::new(Int64Array::from(ids)), cell(0), cell(1)]
             }
         };
         self.next = end;

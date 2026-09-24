@@ -18,6 +18,19 @@
 //! /usr/bin/time -l target/release/examples/row_diff_rss 200000 wide 1024
 //! # wide rows, few changed cells: id + 8 512-byte columns, only one differing
 //! ROW_DIFF_THREADS=18 /usr/bin/time -l target/release/examples/row_diff_rss 150000 manycols 8 512
+//! # two 1 KB `Utf8View` columns: every row removed, every row added, every
+//! # 10,000th row removed; the right repeating left keys, repeating keys the
+//! # left lacks, and repeating one key the left lacks once per 10,000 rows
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 viewremoved 1024
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 viewadded 1024
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 viewaddedbyvalue 1024
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 viewaddedrepeat 1024
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 viewsparse 1024 10000
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 duprightonce 1024
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 duprightabsent 1024
+//! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 repeatabsent 1024 10000
+//! # a right side of keys the left lacks, each batch repeating the last one's
+//! ROW_DIFF_BATCH=16 target/release/examples/row_diff_rss 1000000 chain 64
 //! # duplicate-heavy shape: every key duplicated, wide string key
 //! /usr/bin/time -l target/release/examples/row_diff_rss 1000000 dup 16
 //! /usr/bin/time -l target/release/examples/row_diff_rss 200000 dup 1024
@@ -98,9 +111,26 @@ fn main() {
             )
         }
         "dup" => (Case::Dup(width), format!(" (dup, key_width={width})")),
+        "viewremoved" | "viewadded" | "viewaddedbyvalue" | "viewaddedrepeat" | "viewsparse"
+        | "duprightonce" | "duprightabsent" | "repeatabsent" | "chain" => {
+            let width: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(1024);
+            let every: i64 = args.get(4).and_then(|a| a.parse().ok()).unwrap_or(10_000);
+            let case = match mode {
+                "viewremoved" => Case::ViewRemoved(width),
+                "viewadded" => Case::ViewAdded(width),
+                "viewaddedbyvalue" => Case::ViewAddedByValue(width),
+                "viewaddedrepeat" => Case::ViewAddedRepeat(width),
+                "viewsparse" => Case::ViewSparse { width, every },
+                "duprightonce" => Case::DupRightOnce(width),
+                "duprightabsent" => Case::DupRightAbsent(width),
+                "chain" => Case::Chain(width),
+                _ => Case::RepeatAbsent { width, every },
+            };
+            (case, format!(" ({mode}, width={width}, every={every})"))
+        }
         other => {
             eprintln!(
-                "unknown mode {other:?}; expected linear (the default), nochange, allchange, wide, widesame, manycols or dup"
+                "unknown mode {other:?}; expected linear (the default), nochange, allchange, wide, widesame, manycols, dup, viewremoved, viewadded, viewaddedbyvalue, viewaddedrepeat, viewsparse, duprightonce, duprightabsent, repeatabsent or chain"
             );
             std::process::exit(2);
         }

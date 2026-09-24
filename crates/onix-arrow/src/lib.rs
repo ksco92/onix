@@ -3,8 +3,8 @@
 //! [`diff_tables`] compares two tables presented as [`TableInput`]s and
 //! returns a [`TableDiff`] carrying the schema diff, the keyed row diff, and
 //! the per-cell diff. The two tables are matched on a required, non-empty
-//! set of key columns, carried in [`TableDiffOptions`]. The row diff reads
-//! each side more than once, so [`diff_tables`] takes a re-openable
+//! set of key columns, carried in [`TableDiffOptions`]. The row diff may read
+//! a side more than once, so [`diff_tables`] takes a re-openable
 //! [`TableInput`] rather than a single-use `RecordBatchReader`. In-memory
 //! tables use [`MemoryInput`]; a one-shot stream spools to a temporary file
 //! and implements [`TableInput`] over it, as the Python bindings do.

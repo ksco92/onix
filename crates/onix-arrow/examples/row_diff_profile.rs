@@ -9,7 +9,7 @@
 //! over that net wall. Peak RSS is the process's, third diff in the process.
 //!
 //! - **file**: reads each side from an uncompressed Arrow IPC file, re-opened
-//!   and re-decoded by every pass. Convert a parquet fixture once with
+//!   by each pass that reads it. Convert a parquet fixture once with
 //!   `python -c "import pyarrow.parquet as p, pyarrow.feather as f;
 //!   f.write_feather(p.read_table('a.parquet'), 'a.arrow', compression='uncompressed')"`.
 //! - **generated**: spools both sides of a deterministic proxy shape to anonymous

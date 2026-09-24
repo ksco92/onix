@@ -17,66 +17,63 @@
 //!    both with equal row hashes (unchanged, never materialized), or appearing
 //!    more than once on either side (a duplicate key, excluded from the other
 //!    three and reported with its per-side counts).
-//! 2. **Materialize pass.** Each side is opened again (a [`TableInput`] is
+//! 2. **Materialize pass.** Each side is read again (a [`TableInput`] is
 //!    re-openable) and filtered to the rows whose keys landed in the added /
 //!    removed sets, plus one row per duplicate key for the duplicate-key report.
-//!    Only the differing rows are ever built into an output batch.
-//! 3. **Cell pass.** Each side is opened once more and filtered to the rows
-//!    whose key is in the *changed* set (present on both sides, differing row
-//!    hash); the two sides' changed rows are paired by key hash and every common
-//!    non-key column is compared cell by cell, one output record per differing
-//!    cell. Below the size gate this runs single-threaded and materializes both
-//!    sides' changed rows at once (see [`diff_cells`]); above it, the changed
-//!    value rows are spilled by key-hash partition to anonymous temporary IPC
-//!    files and one partition is compared and rendered at a time across the
-//!    workers (see [`diff_cells_streaming`]), so the pass holds one partition's
-//!    rows plus the output, never both sides' full changed rows.
+//!    Only the differing rows are ever built into an output batch, and a kept
+//!    selection copies any buffer it shares with its decoded input batch (see
+//!    [`unshared`]).
+//! 3. **Cell pass.** The rows whose key is in the *changed* set are paired by
+//!    key hash and every common non-key column is compared cell by cell, one
+//!    output record per differing cell (see [`diff_cells`]).
+//!
+//! Single-threaded, every pass re-reads both sides and the cell pass holds both
+//! sides' changed rows at once. The parallel path reads the right side once: the
+//! left is hashed and indexed first ([`KeyIndex`]), so the right's hash pass
+//! tallies each row against the left key it matches instead of keeping its
+//! hashes ([`classify_indexed`]), keeps its added candidates, and spills its
+//! changed value rows by key-hash partition to anonymous temporary IPC files
+//! ([`RightFuse`]); one re-read of the left then materializes it and spills its
+//! changed rows ([`reread_left`]), and the cell pass compares and renders one
+//! partition at a time across the workers ([`diff_cells_streaming`]), holding one
+//! partition plus the output.
 //!
 //! # Parallelism
 //!
-//! By default the diff hashes and classifies across `TableDiffOptions::threads`
-//! workers (the machine's available parallelism, capped at
-//! [`crate::MAX_THREADS`]): the hash pass hashes each batch on a worker and
-//! appends its rows straight into shared per-key-hash partition buffers, the
-//! classify pass merge-joins each partition on its own worker, the materialize
-//! pass hashes its key columns on workers while the sequential filtering runs in
-//! batch order, and the cell pass spills each side's changed value rows by
-//! key-hash partition and compares and renders one partition at a time across
-//! the workers (see [`diff_cells_streaming`]). The partition count is capped
-//! independently of the worker count (see [`partition_count`] and
-//! [`MAX_PARTITIONS`]), so it never grows with the requested threads. Every
-//! partitioning is by key hash and every reduction is order-independent or
-//! reordered back to batch order, so the output is byte-identical at any thread
-//! count; `threads == 1` runs the original single-threaded path. The
-//! parallel-vs-single-threaded choice is made
-//! by peeking up to [`MIN_PARALLEL_ROWS`] rows or [`MAX_PEEK_BYTES`] of each
-//! side (whichever comes first) before spawning: a diff whose sides both fit
-//! under that bound runs single-threaded, and the peek reads the left side first
-//! so a large left never also buffers the right.
+//! By default the diff runs across `TableDiffOptions::threads` workers (the
+//! machine's available parallelism, capped at [`crate::MAX_THREADS`]): the hash
+//! passes hash each batch on a worker and append its rows straight into shared
+//! per-key-hash partition buffers, the classify step merge-joins each partition
+//! on its own worker, the left re-read classifies and routes each batch on a
+//! worker while the order-dependent filtering runs in batch order, and the cell
+//! pass renders each partition across the workers. The partition count is
+//! capped independently of the worker count (see [`partition_count`] and
+//! [`MAX_PARTITIONS`]). Every partitioning is by key hash and every reduction is
+//! order-independent or reordered back to batch order, so the output is
+//! byte-identical at any thread count; `threads == 1` runs the single-threaded
+//! path. The choice is made by peeking up to [`MIN_PARALLEL_ROWS`] rows or
+//! [`MAX_PEEK_BYTES`] of each side (whichever comes first) before spawning: a
+//! diff whose sides both fit under that bound runs single-threaded, and the peek
+//! reads the left side first so a large left never also buffers the right.
 //!
-//! Memory beyond the per-row hash vectors: workers append directly into the
-//! shared partition buffers — the resident hashes are one copy per side, as in
-//! the single-threaded path — so the parallel path's structural addition is the
-//! in-flight batches, one batch's rows buffered per worker between flushes plus
-//! a few decoded batches held over the bounded channels (worker count times
-//! batch size), on top of the shared buffers' reallocation slack and the size
-//! gate's peek buffer (at most [`MAX_PEEK_BYTES`] plus one producer batch per
-//! side, since the byte check runs between whole batches, and at most two sides
-//! resident); the README's Known-limitations bullet states the measured
-//! figures. The duplicate-key report holds the actual key values of every
-//! *distinct duplicated* key, so a duplicate-heavy input adds a term
-//! proportional to the number of distinct duplicated keys times the key width.
-//! The cell pass spills both sides' changed value rows — every common value
-//! column of every changed row, changed or not — to anonymous temporary IPC
-//! files and holds one key-hash partition plus the reordered output resident.
-//! Its peak term is the spilled changed value rows (the changed-row count times
-//! the total width of the common value columns, both sides — resident where
-//! written temp pages count, e.g. macOS or a RAM-backed tmpfs) plus about twice
-//! the `cells_changed` output (its one out-of-place reorder) plus the per-row
-//! hash vectors; the spill term dominates for wide rows with few changed cells,
-//! the output term for many changed cells. It is not bounded by the changed
-//! *cell* count alone. The README's Known-limitations bullet states these with
-//! measured figures.
+//! Per-row state: 32 bytes a row per side single-threaded; in parallel, 32 on
+//! the left plus an 8-byte tally and under a byte of bucket directory, and a
+//! 32-byte map entry (first-row position and count) per right key absent from
+//! the left. Beyond that: in-flight batches (workers times batch size), buffer
+//! slack, the size gate's peek (at most [`MAX_PEEK_BYTES`] plus one producer
+//! batch per side), and every distinct duplicated key's values. In parallel, a
+//! key the left lacks keeps its first right row at full width until the key
+//! repeats, and each right batch holding such a row keeps a candidate record of
+//! those rows' key columns (shared with the rows until compaction copies them).
+//! The first right row of a key the left holds once with another row hash is
+//! spilled unless its batch repeats the key. A selection kept past its scan
+//! keeps its whole input batch resident, per side, if it keeps over half of it;
+//! a smaller one copies its buffers out, but byte-view data buffers reach the
+//! output whole, so its view data stays. The duplicate-key report always copies
+//! its key columns out. The cell pass holds a spill of every common value
+//! column of every changed row, both sides (resident where written temp pages
+//! count), and about twice the `cells_changed` output, not bounded by the
+//! changed *cell* count. The README's Known-limitations bullet has the figures.
 //!
 //! # Hashing
 //!
@@ -185,9 +182,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::hash::Hasher;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use siphasher::sip128::{Hasher128, SipHasher13};
 
@@ -206,7 +203,7 @@ use arrow_array::{
     Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, RecordBatchReader, StringArray,
     UInt32Array,
 };
-use arrow_buffer::i256;
+use arrow_buffer::{BooleanBuffer, Buffer, NullBuffer, i256};
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use arrow_schema::{ArrowError, DataType, Field, IntervalUnit, Schema, SchemaRef, TimeUnit};
 
@@ -253,10 +250,9 @@ macro_rules! accum {
 
 /// A re-openable source of one table's record batches.
 ///
-/// The row diff reads each side more than once — to hash every row, to
-/// materialize the added/removed rows, and to materialize the changed rows for
-/// the per-cell diff — so it needs a source it can open more than once rather
-/// than a single-use [`RecordBatchReader`]. A caller whose input is a one-shot
+/// The row diff may read a side more than once — to hash every row, then to
+/// materialize the added, removed and changed rows — so it needs a source it can
+/// open more than once rather than a single-use [`RecordBatchReader`]. A caller whose input is a one-shot
 /// reader (a Python Arrow stream, say) spools it to an anonymous temporary Arrow
 /// IPC file first and re-reads that file through a fresh, rewound handle on each
 /// `open`; an in-memory table is re-openable directly (see [`MemoryInput`]).
@@ -264,8 +260,8 @@ pub trait TableInput {
     /// The table's schema, without opening a reader.
     fn schema(&self) -> SchemaRef;
 
-    /// A fresh reader over the whole table. Called several times per diff (the
-    /// hash pass, the added/removed materialize pass, and the per-cell pass).
+    /// A fresh reader over the whole table, opened once by each pass that reads
+    /// this side: up to three times per diff.
     ///
     /// # Errors
     ///
@@ -1145,11 +1141,14 @@ thread_local! {
     static FAIL_SPILL_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// In tests, forces a spill write to fail so the write-failure error mapping is
-/// exercised; production always returns the writer's own outcome.
+/// In tests, forces a spill write to fail when the spill was opened with
+/// [`FAIL_SPILL_WRITE`] set, so the write-failure error mapping is exercised.
 #[cfg(test)]
-fn inject_spill_write_failure(outcome: Result<(), ArrowError>) -> Result<(), ArrowError> {
-    if FAIL_SPILL_WRITE.with(std::cell::Cell::get) {
+fn inject_spill_write_failure(
+    fail: bool,
+    outcome: Result<(), ArrowError>,
+) -> Result<(), ArrowError> {
+    if fail {
         return Err(ArrowError::ComputeError(
             "injected spill write failure".to_string(),
         ));
@@ -1179,38 +1178,39 @@ fn min_parallel_rows() -> usize {
     MIN_PARALLEL_ROWS
 }
 
-/// Hashes and classifies both sides, and reports the thread count the
-/// materialize and cell passes should use (the requested threads for a large
-/// diff, `1` for a small one). A side under [`MIN_PARALLEL_ROWS`] rows and
+/// How [`hash_and_classify`] ran. The parallel path has already captured the
+/// right side's added candidates and spilled its changed rows, so only the left
+/// is read again.
+enum Hashed {
+    Sequential,
+    Parallel(RightCapture),
+}
+
+/// Hashes and classifies both sides. A side under [`MIN_PARALLEL_ROWS`] rows and
 /// [`MAX_PEEK_BYTES`] of decoded data is small; at `threads == 1`, or when both
-/// sides are small, the whole diff runs single-threaded. Otherwise the hash and
-/// classify passes run across the workers. Every path yields the same null-key
-/// set and [`Classified`], so the output is byte-identical.
+/// sides are small, the whole diff runs single-threaded, otherwise across the
+/// workers (see [`hash_parallel`]). Every path yields the same null-key set and
+/// [`Classified`], so the output is byte-identical.
 fn hash_and_classify(
     left: &impl TableInput,
     right: &impl TableInput,
     left_columns: &SideColumns,
     right_columns: &SideColumns,
     config: &HashConfig<'_>,
-) -> Result<(HashSet<u128>, Classified, usize), TableDiffError> {
+) -> Result<(HashSet<u128>, Classified, Hashed), TableDiffError> {
     if config.threads <= 1 {
         let left_pass = hash_reader_and_prefix(Vec::new(), left.open()?, left_columns, config)?;
         let right_pass = hash_reader_and_prefix(Vec::new(), right.open()?, right_columns, config)?;
         return Ok(sequential_result(left_pass, right_pass));
     }
 
-    let partitions = partition_count(config.threads);
     // Peek the left side only — up to the row or byte bound — before deciding.
     let (left_buf, left_reader, left_small) = peek_side(left.open()?)?;
+    let columns = (left_columns, right_columns);
     if !left_small {
-        // Left is large, so the whole diff is parallel. Hash left first (which
-        // consumes and frees its peek buffer), then read the right side fresh:
-        // the right peek buffer is never allocated, so at most one side's peek
-        // is ever resident.
-        let left = hash_side_parallel(left_buf, left_reader, left_columns, config, partitions)?;
-        let right =
-            hash_side_parallel(Vec::new(), right.open()?, right_columns, config, partitions)?;
-        return combine_sides(left, right, config.threads);
+        // The right is opened only after the left is hashed, so at most one
+        // side's peek is ever resident.
+        return hash_parallel((left_buf, left_reader), None, right, columns, config);
     }
 
     // Left fits under the bound; only now is the right side peeked, so a small
@@ -1222,32 +1222,91 @@ fn hash_and_classify(
         let right_pass = hash_reader_and_prefix(right_buf, right_reader, right_columns, config)?;
         return Ok(sequential_result(left_pass, right_pass));
     }
-    let left = hash_side_parallel(left_buf, left_reader, left_columns, config, partitions)?;
-    let right = hash_side_parallel(right_buf, right_reader, right_columns, config, partitions)?;
-    combine_sides(left, right, config.threads)
+    let right_side = Some((right_buf, right_reader));
+    hash_parallel((left_buf, left_reader), right_side, right, columns, config)
 }
 
-/// Assembles the single-threaded result: the union of both sides' null keys,
-/// their merge-join classification, and `1` (the materialize and cell passes
-/// stay single-threaded for a small diff).
-fn sequential_result(left: SidePass, right: SidePass) -> (HashSet<u128>, Classified, usize) {
+/// Assembles the single-threaded result: the union of both sides' null keys and
+/// their merge-join classification.
+fn sequential_result(left: SidePass, right: SidePass) -> (HashSet<u128>, Classified, Hashed) {
     let mut null_keys = left.null_keys;
     null_keys.extend(&right.null_keys);
-    (null_keys, classify(left.entries, right.entries), 1)
+    (
+        null_keys,
+        classify(left.entries, right.entries),
+        Hashed::Sequential,
+    )
 }
 
-/// Assembles the parallel result from the two hashed sides: the union of their
-/// null keys, the per-partition classification, and the worker count (so the
-/// materialize and cell passes parallelize too).
-fn combine_sides(
-    left: SidePartitions,
-    right: SidePartitions,
-    threads: usize,
-) -> Result<(HashSet<u128>, Classified, usize), TableDiffError> {
+/// A side's buffered prefix batches and the still-open reader for the rest.
+type OpenSide = (Vec<RecordBatch>, Box<dyn RecordBatchReader + Send>);
+
+/// The parallel hash pass: hashes the left, indexes its keys, then reads the
+/// right exactly once, hashing it and capturing on the same workers every row
+/// the later passes need from it (see [`RightFuse`]). `right_side` is the
+/// peeked right, or `None` to open `right` once the left is hashed.
+fn hash_parallel(
+    left_side: OpenSide,
+    right_side: Option<OpenSide>,
+    right: &impl TableInput,
+    (left_columns, right_columns): (&SideColumns, &SideColumns),
+    config: &HashConfig<'_>,
+) -> Result<(HashSet<u128>, Classified, Hashed), TableDiffError> {
+    let partitions = partition_count(config.threads);
+    let (prefix, reader) = left_side;
+    let no_hook = |_: u64, _: &RecordBatch, _: &[(u128, u128, bool)]| Ok(());
+    let left = hash_side_parallel(
+        prefix,
+        reader,
+        left_columns,
+        config,
+        partitions,
+        &no_hook,
+        true,
+    )?;
+    let index = accum!("index left keys", KeyIndex::build(left.parts)?);
+
+    let (prefix, reader) = match right_side {
+        Some(side) => side,
+        None => (Vec::new(), right.open()?),
+    };
+    let value_schema = spill_schema(&right.schema(), &right_columns.value);
+    let fuse = RightFuse {
+        index: &index,
+        key_columns: &right_columns.key,
+        value_columns: &right_columns.value,
+        value_schema: &value_schema,
+        spill: SpillSink::open(partitions, &value_schema)?,
+        candidates: Mutex::new(CandidateStore::default()),
+        absent: (0..partitions)
+            .map(|_| Mutex::new(HashMap::new()))
+            .collect(),
+    };
+    let hook =
+        |at: u64, batch: &RecordBatch, pairs: &[(u128, u128, bool)]| fuse.visit(at, batch, pairs);
+    let right_parts = hash_side_parallel(
+        prefix,
+        reader,
+        right_columns,
+        config,
+        partitions,
+        &hook,
+        false,
+    )?;
+    let capture = RightCapture {
+        candidates: fuse
+            .candidates
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+            .into_candidates(),
+        spill: fuse.spill.finish()?,
+    };
+    let absent = fuse.absent;
+
     let mut null_keys = left.null_keys;
-    null_keys.extend(right.null_keys);
-    let classified = classify_parallel(left.parts, right.parts)?;
-    Ok((null_keys, classified, threads))
+    null_keys.extend(right_parts.null_keys);
+    let classified = accum!("classify", classify_indexed(index, absent)?);
+    Ok((null_keys, classified, Hashed::Parallel(capture)))
 }
 
 /// A peeked side: the buffered prefix batches, the still-open reader for the
@@ -1323,6 +1382,12 @@ fn hash_reader_and_prefix(
     Ok(SidePass { entries, null_keys })
 }
 
+/// A per-batch step run on a hash-pass worker: the position of the batch's
+/// first row in the side, the batch, and its `(key_hash, row_hash,
+/// key_is_null)` rows.
+type BatchHook<'a> =
+    dyn Fn(u64, &RecordBatch, &[(u128, u128, bool)]) -> Result<(), TableDiffError> + Sync + 'a;
+
 /// The shared, per-partition destination the hash-pass workers append into
 /// directly, so the per-row hashes are never copied a second time into a
 /// combined layout: each worker holds only one batch's worth of buffered rows
@@ -1336,15 +1401,19 @@ struct SharedSink {
 /// appending its rows straight into the shared per-partition buffers by key
 /// hash. Only the fixed-size hashes are retained (one copy per side), plus at
 /// most one batch's rows buffered per worker before each flush — the parallel
-/// path's only memory term over the single-threaded hash vectors. Joins every
-/// worker on every exit path (including a read error) so a concurrent worker
-/// panic surfaces as [`TableDiffError::WorkerPanicked`], never an abort.
+/// path's only memory term over the single-threaded hash vectors. `hook` runs
+/// on the worker with each batch's first-row position and row hashes; with
+/// `keep_pairs` false only the null keys are kept. Joins every worker on every
+/// exit path (including a read error) so a concurrent worker panic surfaces as
+/// [`TableDiffError::WorkerPanicked`], never an abort.
 fn hash_side_parallel(
     prefix: Vec<RecordBatch>,
     reader: Box<dyn RecordBatchReader + Send>,
     columns: &SideColumns,
     config: &HashConfig<'_>,
     partitions: usize,
+    hook: &BatchHook<'_>,
+    keep_pairs: bool,
 ) -> Result<SidePartitions, TableDiffError> {
     #[cfg(test)]
     PARALLEL_HASH_PASSES.with(|count| count.set(count.get() + 1));
@@ -1362,7 +1431,7 @@ fn hash_side_parallel(
         // panics (e.g. an OS thread-spawn failure), the unwind drops the
         // receiver and disconnects any already-spawned worker, which would
         // otherwise block on the channel forever and hang the scope's join.
-        let (tx, rx) = sync_channel::<RecordBatch>(threads);
+        let (tx, rx) = sync_channel::<(u64, RecordBatch)>(threads);
         let rx = Arc::new(Mutex::new(rx));
         let mut handles = Vec::with_capacity(threads);
         for _ in 0..threads {
@@ -1379,14 +1448,17 @@ fn hash_side_parallel(
                         let Ok(guard) = rx.lock() else { break };
                         guard.recv()
                     };
-                    let Ok(batch) = batch else { break };
-                    for (key_hash, row_hash, key_is_null) in
-                        hash_batch_row_pairs(&batch, columns, key_names, value_names, hasher)?
-                    {
+                    let Ok((at, batch)) = batch else { break };
+                    let pairs =
+                        hash_batch_row_pairs(&batch, columns, key_names, value_names, hasher)?;
+                    hook(at, &batch, &pairs)?;
+                    for (key_hash, row_hash, key_is_null) in pairs {
                         if key_is_null {
                             local_nulls.insert(key_hash);
                         }
-                        local[partition_of(key_hash, partitions)].push((key_hash, row_hash));
+                        if keep_pairs {
+                            local[partition_of(key_hash, partitions)].push((key_hash, row_hash));
+                        }
                     }
                     for (partition, rows) in local.iter_mut().enumerate() {
                         if rows.is_empty() {
@@ -1413,8 +1485,13 @@ fn hash_side_parallel(
         // Feed the peeked prefix batches first, then the rest of the reader, so
         // the workers see the whole side in order.
         'feed: {
+            let mut at = 0u64;
+            let mut send = |batch: RecordBatch| {
+                at += batch.num_rows() as u64;
+                tx.send((at - batch.num_rows() as u64, batch))
+            };
             for batch in prefix {
-                if tx.send(batch).is_err() {
+                if send(batch).is_err() {
                     break 'feed;
                 }
             }
@@ -1425,7 +1502,7 @@ fn hash_side_parallel(
                 };
                 match batch {
                     Ok(b) => {
-                        if tx.send(b).is_err() {
+                        if send(b).is_err() {
                             break 'feed;
                         }
                     }
@@ -1453,28 +1530,6 @@ fn hash_side_parallel(
         .collect();
     let null_keys = sink.null_keys.into_inner().unwrap_or_default();
     Ok(SidePartitions { parts, null_keys })
-}
-
-/// Classifies every partition on its own worker and unions the per-partition
-/// results. Partitions are disjoint by key, so the unions never conflict.
-fn classify_parallel(
-    left_parts: Vec<HashPartition>,
-    right_parts: Vec<HashPartition>,
-) -> Result<Classified, TableDiffError> {
-    let jobs: Vec<(HashPartition, HashPartition)> =
-        left_parts.into_iter().zip(right_parts).collect();
-
-    let partials = std::thread::scope(|scope| -> Result<Vec<Classified>, TableDiffError> {
-        let mut handles = Vec::with_capacity(jobs.len());
-        for (left, right) in jobs {
-            handles.push(scope.spawn(move || -> Result<Classified, TableDiffError> {
-                Ok(classify(left, right))
-            }));
-        }
-        join_results(handles)
-    })?;
-
-    Ok(combine_classified(partials))
 }
 
 /// Unions the per-partition classifications. Because partitions are disjoint by
@@ -1568,53 +1623,29 @@ fn hash_batch_keys(
     Ok(key_hashes)
 }
 
-/// Runs a key-hashing scan sequentially or across `threads` workers, calling
-/// `visit` on every batch and its per-row key hashes in the input's batch
-/// order either way. The parallel path hashes each batch on a worker but runs
-/// `visit` — the caller's sequential reduction (filtering, duplicate capture) —
-/// on this thread in batch order, so the output is byte-identical to the
-/// sequential path.
-fn drive_key_hashes<F>(
-    source: &impl TableInput,
-    key_columns: &[usize],
-    key_names: &[&str],
-    hasher: &RowHasher,
-    threads: usize,
-    visit: F,
-) -> Result<(), TableDiffError>
-where
-    F: FnMut(&RecordBatch, &[u128]) -> Result<(), TableDiffError>,
-{
-    if threads <= 1 {
-        for_each_batch_with_key_hashes(source, key_columns, key_names, hasher, visit)
-    } else {
-        for_each_batch_key_hashed_parallel(source, key_columns, key_names, hasher, threads, visit)
-    }
-}
-
-/// One hashed batch flowing back from a worker: its input index, the batch, and
-/// its per-row key hashes.
-type OrderedPayload = (usize, RecordBatch, Vec<u128>);
+/// One hashed batch flowing back from a worker: its input index, the batch, its
+/// per-row key hashes, and the worker's prepared result for it.
+type OrderedPayload<T> = (usize, RecordBatch, Vec<u128>, T);
 
 /// Reorders the workers' hashed batches by input index and runs `visit` on each
 /// in order, stopping (and setting `stop`) on the first `visit` or read error.
-fn consume_reordered<F>(
-    back_rx: &std::sync::mpsc::Receiver<Result<OrderedPayload, TableDiffError>>,
+fn consume_reordered<T, F>(
+    back_rx: &std::sync::mpsc::Receiver<Result<OrderedPayload<T>, TableDiffError>>,
     stop: &AtomicBool,
     mut visit: F,
 ) -> Result<(), TableDiffError>
 where
-    F: FnMut(&RecordBatch, &[u128]) -> Result<(), TableDiffError>,
+    F: FnMut(&RecordBatch, &[u128], T) -> Result<(), TableDiffError>,
 {
     let mut next = 0usize;
-    let mut pending: BTreeMap<usize, (RecordBatch, Vec<u128>)> = BTreeMap::new();
+    let mut pending: BTreeMap<usize, (RecordBatch, Vec<u128>, T)> = BTreeMap::new();
     let mut outcome: Result<(), TableDiffError> = Ok(());
     for msg in back_rx {
         match msg {
-            Ok((idx, batch, key_hashes)) => {
-                pending.insert(idx, (batch, key_hashes));
-                while let Some((batch, key_hashes)) = pending.remove(&next) {
-                    if let Err(e) = visit(&batch, &key_hashes) {
+            Ok((idx, batch, key_hashes, prepared)) => {
+                pending.insert(idx, (batch, key_hashes, prepared));
+                while let Some((batch, key_hashes, prepared)) = pending.remove(&next) {
+                    if let Err(e) = visit(&batch, &key_hashes, prepared) {
                         outcome = Err(e);
                         break;
                     }
@@ -1631,25 +1662,28 @@ where
     outcome
 }
 
-/// The forward and reordering machinery of [`drive_key_hashes`]'s parallel
-/// path: a reader thread feeds batches in order to a pool of `threads` key-
-/// hashing workers over a bounded channel; results flow back over a second
-/// bounded channel and are reordered by batch index so `visit` runs in batch
-/// order. Both channels are bounded by `threads`, so at most a few batches per
-/// worker are ever in flight (the parallel path's added memory term). A read
-/// error, a `visit` error, or a worker panic aborts the scan: the `stop` flag
-/// and the drain release every blocked thread so the scope can join without
-/// deadlocking.
-fn for_each_batch_key_hashed_parallel<F>(
+/// The parallel counterpart of [`for_each_batch_with_key_hashes`]: a reader
+/// thread feeds batches in order to a pool of `threads` workers over a bounded
+/// channel; each worker hashes a batch's key columns and runs `prep` on it, and
+/// the results flow back over a second bounded channel, reordered by batch index
+/// so `visit` runs on this thread in batch order. Both channels are bounded by
+/// `threads`, so at most a few batches per worker are ever in flight. A read
+/// error, a `prep` or `visit` error, or a worker panic aborts the scan: the
+/// `stop` flag and the drain release every blocked thread so the scope can join
+/// without deadlocking.
+fn for_each_batch_key_hashed_parallel<T, P, F>(
     source: &impl TableInput,
     key_columns: &[usize],
     key_names: &[&str],
     hasher: &RowHasher,
     threads: usize,
+    prep: P,
     mut visit: F,
 ) -> Result<(), TableDiffError>
 where
-    F: FnMut(&RecordBatch, &[u128]) -> Result<(), TableDiffError>,
+    T: Send,
+    P: Fn(&RecordBatch, &[u128]) -> Result<T, TableDiffError> + Sync,
+    F: FnMut(&RecordBatch, &[u128], T) -> Result<(), TableDiffError>,
 {
     let reader = source.open()?;
 
@@ -1659,7 +1693,7 @@ where
         // producers instead of hanging the join).
         let (fwd_tx, fwd_rx) = sync_channel::<(usize, RecordBatch)>(threads);
         let fwd_rx = Arc::new(Mutex::new(fwd_rx));
-        let (back_tx, back_rx) = sync_channel::<Result<OrderedPayload, TableDiffError>>(threads);
+        let (back_tx, back_rx) = sync_channel::<Result<OrderedPayload<T>, TableDiffError>>(threads);
         let stop = Arc::new(AtomicBool::new(false));
         let reader_handle = {
             let stop = Arc::clone(&stop);
@@ -1696,6 +1730,7 @@ where
             let fwd_rx = Arc::clone(&fwd_rx);
             let back_tx = back_tx.clone();
             let stop = Arc::clone(&stop);
+            let prep = &prep;
             worker_handles.push(scope.spawn(move || {
                 loop {
                     let msg = {
@@ -1708,8 +1743,12 @@ where
                     if stop.load(Ordering::Acquire) {
                         continue;
                     }
-                    let result = hash_batch_keys(&batch, key_columns, key_names, hasher)
-                        .map(|key_hashes| (idx, batch, key_hashes));
+                    let result = hash_batch_keys(&batch, key_columns, key_names, hasher).and_then(
+                        |key_hashes| {
+                            let prepared = prep(&batch, &key_hashes)?;
+                            Ok((idx, batch, key_hashes, prepared))
+                        },
+                    );
                     let failed = result.is_err();
                     if back_tx.send(result).is_err() || failed {
                         break;
@@ -1775,9 +1814,9 @@ fn worker_panic_error(panic: &(dyn std::any::Any + Send)) -> TableDiffError {
     TableDiffError::WorkerPanicked { message }
 }
 
-/// Filters `batch` by `mask` and pushes the result to `out` when it is
-/// non-empty. An empty batch is dropped because [`concat_or_empty`]'s
-/// `concat_batches` would ignore it anyway.
+/// Filters `batch` by `mask` and pushes the selection, copied out of its input
+/// batch (see [`owned_batch`]), to `out` when it keeps a row (`concat_batches`
+/// does not skip an empty batch).
 fn push_filtered(
     batch: &RecordBatch,
     mask: Vec<bool>,
@@ -1786,16 +1825,108 @@ fn push_filtered(
     let selected = arrow_select::filter::filter_record_batch(batch, &BooleanArray::from(mask))
         .map_err(|e| read_error(&e))?;
     if selected.num_rows() > 0 {
-        out.push(selected);
+        out.push(owned_batch(selected, batch.num_rows())?);
     }
     Ok(())
 }
 
+/// `batch`, a selection from a `source_rows`-row batch, with each column passed
+/// through [`unshared`] when it keeps at most half the source's rows, so a small
+/// selection held past its scan does not keep its input batch alive; a larger
+/// one is kept as is, since the copy would cost more than it frees.
+fn owned_batch(batch: RecordBatch, source_rows: usize) -> Result<RecordBatch, TableDiffError> {
+    if batch.num_rows() * 2 > source_rows {
+        return Ok(batch);
+    }
+    unshared_batch(batch)
+}
+
+/// `batch` with each column passed through [`unshared`], whatever its share of
+/// the source.
+fn unshared_batch(batch: RecordBatch) -> Result<RecordBatch, TableDiffError> {
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    let mut copied = false;
+    for column in batch.columns() {
+        match unshared(column)? {
+            Some(owned) => {
+                copied = true;
+                columns.push(owned);
+            }
+            None => columns.push(column.clone()),
+        }
+    }
+    if !copied {
+        return Ok(batch);
+    }
+    let options = arrow_array::RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+    RecordBatch::try_new_with_options(batch.schema(), columns, &options).map_err(|e| read_error(&e))
+}
+
+/// A copy of `array` in which every buffer that is a slice of a much larger
+/// allocation is copied byte for byte (a filtered view array's data buffers
+/// point into the whole decoded input batch), or `None` when there is none.
+/// Dictionary values stay shared, since `concat` merges dictionaries by pointer
+/// identity. Recurses once per nesting level, which the schema check bounds at
+/// [`crate::MAX_NESTING_DEPTH`].
+fn unshared(array: &ArrayRef) -> Result<Option<ArrayRef>, TableDiffError> {
+    if matches!(array.data_type(), DataType::Dictionary(..)) {
+        return Ok(None);
+    }
+    let data = array.to_data();
+    let mut copied = false;
+    let mut owned = |buffer: &Buffer| {
+        if buffer.capacity() > 2 * buffer.len() + 64 {
+            copied = true;
+            Buffer::from_slice_ref(buffer.as_slice())
+        } else {
+            buffer.clone()
+        }
+    };
+    let buffers: Vec<Buffer> = data.buffers().iter().map(&mut owned).collect();
+    let nulls = data.nulls().map(|nulls| {
+        NullBuffer::new(BooleanBuffer::new(
+            owned(nulls.buffer()),
+            nulls.offset(),
+            nulls.len(),
+        ))
+    });
+    let mut children = Vec::with_capacity(data.child_data().len());
+    for child in data.child_data() {
+        match unshared(&arrow_array::make_array(child.clone()))? {
+            Some(owned_child) => {
+                copied = true;
+                children.push(owned_child.to_data());
+            }
+            None => children.push(child.clone()),
+        }
+    }
+    if !copied {
+        return Ok(None);
+    }
+    let rebuilt = data
+        .into_builder()
+        .buffers(buffers)
+        .nulls(nulls)
+        .child_data(children)
+        .build()
+        .map_err(|e| read_error(&e))?;
+    Ok(Some(arrow_array::make_array(rebuilt)))
+}
+
 /// A batch of captured key columns, in duplicate-report order, with the key
 /// hashes captured so the per-side counts can be attached afterwards.
+#[derive(Default)]
 struct DupCapture {
     key_batches: Vec<RecordBatch>,
     order: Vec<u128>,
+}
+
+/// One side's materialized rows so far: the selected (added or removed) row
+/// batches and the duplicate-key capture.
+#[derive(Default)]
+struct MaterializeOut {
+    selected: Vec<RecordBatch>,
+    capture: DupCapture,
 }
 
 /// The read-only context shared by both materialize-pass calls: how to find and
@@ -1820,48 +1951,47 @@ struct MemberPass<'a> {
     key_output_types: &'a [DataType],
 }
 
-/// Materializes the removed and added row batches and the duplicate-key report,
-/// re-reading each side once. The duplicate-key report holds one captured key
-/// row per distinct duplicated key across both sides.
+impl<'a> MemberPass<'a> {
+    /// The left and right [`Materialize`] contexts over `key_only_schema`.
+    fn sides(&self, key_only_schema: &'a SchemaRef) -> (Materialize<'a>, Materialize<'a>) {
+        let left = Materialize {
+            columns: self.left_columns,
+            key_names: self.key_names,
+            hasher: self.hasher,
+            key_only_schema,
+            key_output_types: self.key_output_types,
+        };
+        let right = Materialize {
+            columns: self.right_columns,
+            ..left
+        };
+        (left, right)
+    }
+}
+
+/// The duplicate-key report's schema without its two count columns.
+fn key_only_schema(dup_schema: &Schema) -> SchemaRef {
+    let key_field_count = dup_schema.fields().len() - 2;
+    SchemaRef::new(Schema::new(dup_schema.fields()[..key_field_count].to_vec()))
+}
+
+/// Materializes the removed and added row batches and the duplicate-key report
+/// on the single-threaded path, re-reading each side once. The duplicate-key
+/// report holds one captured key row per distinct duplicated key across both
+/// sides.
 fn materialize_row_members<L: TableInput, R: TableInput>(
     left: &L,
     right: &R,
     ctx: &MemberPass<'_>,
     classified: &Classified,
-    scan_threads: usize,
 ) -> Result<(RecordBatch, RecordBatch, RecordBatch), TableDiffError> {
-    let key_field_count = ctx.dup_schema.fields().len() - 2;
-    let key_only_schema = SchemaRef::new(Schema::new(
-        ctx.dup_schema.fields()[..key_field_count].to_vec(),
-    ));
+    let key_only_schema = key_only_schema(ctx.dup_schema);
+    let (left_ctx, right_ctx) = ctx.sides(&key_only_schema);
     let mut pending_dups: HashSet<u128> = classified.duplicates.keys().copied().collect();
-
-    let left_ctx = Materialize {
-        columns: ctx.left_columns,
-        key_names: ctx.key_names,
-        hasher: ctx.hasher,
-        key_only_schema: &key_only_schema,
-        key_output_types: ctx.key_output_types,
-    };
-    let right_ctx = Materialize {
-        columns: ctx.right_columns,
-        ..left_ctx
-    };
-
-    let (rows_removed, left_dup_capture) = materialize_side(
-        left,
-        &left_ctx,
-        &classified.removed,
-        &mut pending_dups,
-        scan_threads,
-    )?;
-    let (rows_added, right_dup_capture) = materialize_side(
-        right,
-        &right_ctx,
-        &classified.added,
-        &mut pending_dups,
-        scan_threads,
-    )?;
+    let (rows_removed, left_dup_capture) =
+        materialize_side(left, &left_ctx, &classified.removed, &mut pending_dups)?;
+    let (rows_added, right_dup_capture) =
+        materialize_side(right, &right_ctx, &classified.added, &mut pending_dups)?;
 
     let duplicate_keys = build_duplicate_keys(
         ctx.dup_schema,
@@ -1879,49 +2009,55 @@ fn materialize_side(
     ctx: &Materialize<'_>,
     select: &HashSet<u128>,
     pending_dups: &mut HashSet<u128>,
-    threads: usize,
 ) -> Result<(RecordBatch, DupCapture), TableDiffError> {
-    let full_schema = source.schema();
-
-    let mut selected_batches = Vec::new();
-    let mut capture = DupCapture {
-        key_batches: Vec::new(),
-        order: Vec::new(),
-    };
-
-    drive_key_hashes(
+    let mut out = MaterializeOut::default();
+    for_each_batch_with_key_hashes(
         source,
         &ctx.columns.key,
         ctx.key_names,
         ctx.hasher,
-        threads,
         |batch, key_hashes| {
-            let select_mask: Vec<bool> = key_hashes.iter().map(|h| select.contains(h)).collect();
-
-            let mut dup_mask = Vec::with_capacity(key_hashes.len());
-            for &key_hash in key_hashes {
-                // `remove` returns true only the first time a given duplicate key
-                // is seen, so exactly one row per duplicate key is captured.
-                let capture_this = pending_dups.remove(&key_hash);
-                dup_mask.push(capture_this);
-                if capture_this {
-                    capture.order.push(key_hash);
-                }
-            }
-
-            push_filtered(batch, select_mask, &mut selected_batches)?;
-
-            if dup_mask.iter().any(|&keep| keep) {
-                let dup_predicate = BooleanArray::from(dup_mask);
-                let key_batch = dup_key_batch(batch, ctx, &dup_predicate)?;
-                capture.key_batches.push(key_batch);
-            }
-            Ok(())
+            let mask = key_hashes.iter().map(|h| select.contains(h)).collect();
+            materialize_batch(
+                batch,
+                key_hashes,
+                mask,
+                0..key_hashes.len(),
+                ctx,
+                pending_dups,
+                &mut out,
+            )
         },
     )?;
+    let selected = concat_or_empty(&source.schema(), &out.selected)?;
+    Ok((selected, out.capture))
+}
 
-    let selected = concat_or_empty(&full_schema, &selected_batches)?;
-    Ok((selected, capture))
+/// Filters one batch to the rows `select` marks, and captures the key columns of
+/// each row among `dup_rows` (ascending) whose key is still pending, so exactly
+/// one row per duplicate key is captured, the first in scan order.
+fn materialize_batch(
+    batch: &RecordBatch,
+    key_hashes: &[u128],
+    select: Vec<bool>,
+    dup_rows: impl IntoIterator<Item = usize>,
+    ctx: &Materialize<'_>,
+    pending_dups: &mut HashSet<u128>,
+    out: &mut MaterializeOut,
+) -> Result<(), TableDiffError> {
+    let mut dup_mask: Option<Vec<bool>> = None;
+    for row in dup_rows {
+        if pending_dups.remove(&key_hashes[row]) {
+            dup_mask.get_or_insert_with(|| vec![false; key_hashes.len()])[row] = true;
+            out.capture.order.push(key_hashes[row]);
+        }
+    }
+    push_filtered(batch, select, &mut out.selected)?;
+    if let Some(mask) = dup_mask {
+        let key_batch = dup_key_batch(batch, ctx, &BooleanArray::from(mask))?;
+        out.capture.key_batches.push(key_batch);
+    }
+    Ok(())
 }
 
 /// Builds the key-columns-only batch for the duplicate rows selected by
@@ -1941,7 +2077,10 @@ fn dup_key_batch(
             .map_err(|e| read_error(&e))?;
         key_columns.push(cast);
     }
-    RecordBatch::try_new(ctx.key_only_schema.clone(), key_columns).map_err(|e| read_error(&e))
+    unshared_batch(
+        RecordBatch::try_new(ctx.key_only_schema.clone(), key_columns)
+            .map_err(|e| read_error(&e))?,
+    )
 }
 
 /// Concatenates batches into one, or returns an empty batch of `schema` when
@@ -1993,11 +2132,7 @@ fn build_duplicate_keys(
     right_capture: DupCapture,
     duplicates: &HashMap<u128, (usize, usize)>,
 ) -> Result<RecordBatch, TableDiffError> {
-    let key_field_count = dup_key_schema.fields().len() - 2;
-    let key_only_schema = SchemaRef::new(Schema::new(
-        dup_key_schema.fields()[..key_field_count].to_vec(),
-    ));
-
+    let key_only_schema = key_only_schema(dup_key_schema);
     let mut key_batches = left_capture.key_batches;
     key_batches.extend(right_capture.key_batches);
     let key_columns = concat_or_empty(&key_only_schema, &key_batches)?;
@@ -2328,7 +2463,6 @@ fn collect_changed(
     hasher: &RowHasher,
     changed: &HashSet<u128>,
     projected_schema: &SchemaRef,
-    threads: usize,
 ) -> Result<ChangedRows, TableDiffError> {
     let projection: Vec<usize> = columns
         .key
@@ -2339,24 +2473,17 @@ fn collect_changed(
 
     let mut batches = Vec::new();
     let mut key_hashes = Vec::new();
-    drive_key_hashes(
-        source,
-        &columns.key,
-        key_names,
-        hasher,
-        threads,
-        |batch, hashes| {
-            let mask: Vec<bool> = hashes.iter().map(|h| changed.contains(h)).collect();
-            for (&keep, &key_hash) in mask.iter().zip(hashes) {
-                if keep {
-                    key_hashes.push(key_hash);
-                }
+    for_each_batch_with_key_hashes(source, &columns.key, key_names, hasher, |batch, hashes| {
+        let mask: Vec<bool> = hashes.iter().map(|h| changed.contains(h)).collect();
+        for (&keep, &key_hash) in mask.iter().zip(hashes) {
+            if keep {
+                key_hashes.push(key_hash);
             }
-            let projected = batch.project(&projection).map_err(|e| read_error(&e))?;
-            push_filtered(&projected, mask, &mut batches)?;
-            Ok(())
-        },
-    )?;
+        }
+        let projected = batch.project(&projection).map_err(|e| read_error(&e))?;
+        push_filtered(&projected, mask, &mut batches)?;
+        Ok(())
+    })?;
 
     let batch = concat_or_empty(projected_schema, &batches)?;
     Ok(ChangedRows { batch, key_hashes })
@@ -2430,7 +2557,6 @@ fn diff_cells(
         ctx.hasher,
         changed,
         &left_proj,
-        ctx.threads,
     )?;
     let right_rows = collect_changed(
         right,
@@ -2439,7 +2565,6 @@ fn diff_cells(
         ctx.hasher,
         changed,
         &right_proj,
-        ctx.threads,
     )?;
 
     let key_count = ctx.key.len();
@@ -2677,17 +2802,7 @@ fn build_cells_changed(
     RecordBatch::try_new(out_schema.clone(), columns).map_err(|e| read_error(&e))
 }
 
-// --- Streaming, partitioned cell pass (parallel path) ---------------------
-//
-// The sequential [`diff_cells`] materializes both sides' full changed rows and
-// renders on one thread. For a large diff the parallel path below instead
-// spills each side's changed *value* rows to anonymous per-key-hash-partition
-// IPC files, then processes one partition at a time — pairing, comparing and
-// rendering its rows across the worker threads — so its resident memory is one
-// partition's rows plus the growing output, not both sides' full changed rows.
-// The output is reassembled in the same total order [`diff_cells`] produces
-// (rendered key, then left-schema column order, then scan-order row index), so
-// it is byte-identical at every thread count.
+// --- Parallel path: partition spills, the fused reads, the streaming cell pass
 
 /// The schema of a projection of `schema` to `indices` (in that order): the
 /// value-column schema each partition spill file carries, or the key-column
@@ -2750,7 +2865,7 @@ fn cast_batch_to(batch: &RecordBatch, schema: &SchemaRef) -> Result<RecordBatch,
 /// [`crate::spool`] IPC files so the cell pass holds one partition at a time.
 struct SideSpill {
     files: Vec<File>,
-    /// Per partition, the key hash of each spilled row in spill (scan) order.
+    /// Per partition, the key hash of each spilled row in spill order.
     key_hashes: Vec<Vec<u128>>,
 }
 
@@ -2779,106 +2894,184 @@ fn spill_flush_rows() -> usize {
     SPILL_FLUSH_ROWS
 }
 
-/// The open per-partition spill writers for one side, over anonymous temp
-/// files, each with a small buffer of routed slices coalesced on flush. `finish`
-/// flushes the buffers and the streams and yields the re-openable files.
-struct PartitionWriters {
-    files: Vec<File>,
-    writers: Vec<crate::spool::SpoolWriter>,
-    value_schema: SchemaRef,
-    buffers: Vec<Vec<RecordBatch>>,
-    buffered_rows: Vec<usize>,
+/// A batch's selected rows grouped by key-hash partition, row order kept within
+/// a partition: `rows[bounds[p]..bounds[p + 1]]` are partition `p`'s rows, with
+/// their key hashes, their ranks among the selected rows, and, once
+/// [`Routed::take_values`] has run, their value columns.
+struct Routed {
+    rows: Vec<u32>,
+    ranks: Vec<u32>,
+    key_hashes: Vec<u128>,
+    bounds: Vec<usize>,
+    values: Option<RecordBatch>,
 }
 
-impl PartitionWriters {
-    fn open(partitions: usize, value_schema: &SchemaRef) -> Result<Self, TableDiffError> {
-        let mut files = Vec::with_capacity(partitions);
-        let mut writers = Vec::with_capacity(partitions);
+impl Routed {
+    /// Groups the rows `selected` marks, each keyed by `key_hash(row)`, with a
+    /// counting sort; a batch too long for the `u32` row indices is refused.
+    // `selected.len()` fits `u32`, so every row index and rank does.
+    #[allow(clippy::cast_possible_truncation)]
+    fn group(
+        partitions: usize,
+        selected: &[bool],
+        key_hash: impl Fn(usize) -> u128,
+    ) -> Result<Self, TableDiffError> {
+        if u32::try_from(selected.len()).is_err() {
+            return Err(TableDiffError::TooManyChangedRows {
+                rows: selected.len(),
+            });
+        }
+        let chosen = || (0..selected.len()).filter(|&row| selected[row]);
+        let mut bounds = vec![0; partitions + 1];
+        for row in chosen() {
+            bounds[partition_of(key_hash(row), partitions) + 1] += 1;
+        }
+        for partition in 1..=partitions {
+            bounds[partition] += bounds[partition - 1];
+        }
+        let total = bounds[partitions];
+        let mut next = bounds.clone();
+        let mut routed = Self {
+            rows: vec![0; total],
+            ranks: vec![0; total],
+            key_hashes: vec![0; total],
+            bounds,
+            values: None,
+        };
+        for (rank, row) in chosen().enumerate() {
+            let hash = key_hash(row);
+            let slot = &mut next[partition_of(hash, partitions)];
+            routed.rows[*slot] = row as u32;
+            routed.ranks[*slot] = rank as u32;
+            routed.key_hashes[*slot] = hash;
+            *slot += 1;
+        }
+        Ok(routed)
+    }
+
+    /// Takes the routed rows' `value_columns` in partition order with one
+    /// reorder `take`, cast to `schema` so a spilled partition holds only its own
+    /// rows' data (see [`spill_field_type`]).
+    fn take_values(
+        &mut self,
+        batch: &RecordBatch,
+        value_columns: &[usize],
+        schema: &SchemaRef,
+    ) -> Result<(), TableDiffError> {
+        if self.rows.is_empty() {
+            return Ok(());
+        }
+        let values = accum!("spill route (take + cast), summed over threads", {
+            let indices = UInt32Array::from(self.rows.clone());
+            let projected = batch.project(value_columns).map_err(|e| read_error(&e))?;
+            let taken = arrow_select::take::take_record_batch(&projected, &indices)
+                .map_err(|e| read_error(&e))?;
+            cast_batch_to(&taken, schema)?
+        });
+        self.values = Some(values);
+        Ok(())
+    }
+}
+
+/// One partition's spill file, the slices buffered for its next coalesced
+/// write, and the key hash of every row routed to it, in write order.
+struct PartitionSpill {
+    file: File,
+    writer: crate::spool::SpoolWriter,
+    buffer: Vec<RecordBatch>,
+    buffered_rows: usize,
+    key_hashes: Vec<u128>,
+    #[cfg(test)]
+    fail_writes: bool,
+}
+
+impl PartitionSpill {
+    /// Coalesces the buffered slices into a single batch and writes it, so the
+    /// file holds few, large batches.
+    fn flush(&mut self, schema: &SchemaRef) -> Result<(), TableDiffError> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let batches = std::mem::take(&mut self.buffer);
+        self.buffered_rows = 0;
+        let coalesced = concat_or_empty(schema, &batches)?;
+        let outcome = accum!(
+            "spill write, summed over threads",
+            self.writer.write(&coalesced)
+        );
+        #[cfg(test)]
+        let outcome = inject_spill_write_failure(self.fail_writes, outcome);
+        outcome.map_err(|e| crate::spool::error("write to", &e))
+    }
+}
+
+/// One side's per-partition spill files, written by whichever thread routes a
+/// batch, each partition under its own lock. A lock poisoned by a panicking
+/// writer is taken anyway: that panic fails the diff when its worker is joined.
+struct SpillSink {
+    parts: Vec<Mutex<PartitionSpill>>,
+    schema: SchemaRef,
+    flush_rows: usize,
+}
+
+impl SpillSink {
+    fn open(partitions: usize, schema: &SchemaRef) -> Result<Self, TableDiffError> {
+        let mut parts = Vec::with_capacity(partitions);
         for _ in 0..partitions {
-            let (file, writer) = crate::spool::open(value_schema)?;
-            files.push(file);
-            writers.push(writer);
+            let (file, writer) = crate::spool::open(schema)?;
+            parts.push(Mutex::new(PartitionSpill {
+                file,
+                writer,
+                buffer: Vec::new(),
+                buffered_rows: 0,
+                key_hashes: Vec::new(),
+                #[cfg(test)]
+                fail_writes: FAIL_SPILL_WRITE.with(std::cell::Cell::get),
+            }));
         }
         Ok(Self {
-            files,
-            writers,
-            value_schema: value_schema.clone(),
-            buffers: (0..partitions).map(|_| Vec::new()).collect(),
-            buffered_rows: vec![0; partitions],
+            parts,
+            schema: schema.clone(),
+            flush_rows: spill_flush_rows(),
         })
     }
 
-    /// Groups the batch's selected rows by partition with a single reorder
-    /// `take`, then buffers each partition's contiguous slice (zero-copy except
-    /// for a byte-view or dictionary compaction cast), flushing a partition once
-    /// it holds [`SPILL_FLUSH_ROWS`] rows.
-    fn write_routed(
-        &mut self,
-        value_batch: &RecordBatch,
-        part_rows: &[Vec<u32>],
-    ) -> Result<(), TableDiffError> {
-        let total: usize = part_rows.iter().map(Vec::len).sum();
-        if total == 0 {
+    /// Buffers each partition's contiguous slice of `routed` (zero-copy),
+    /// flushing a partition once it holds the flush threshold's rows.
+    fn write(&self, routed: &Routed) -> Result<(), TableDiffError> {
+        let Some(values) = &routed.values else {
             return Ok(());
-        }
-        let mut perm = Vec::with_capacity(total);
-        for rows in part_rows {
-            perm.extend_from_slice(rows);
-        }
-        let indices = UInt32Array::from(perm);
-        let reordered = accum!("cell: spill route (take + cast)", {
-            let taken = arrow_select::take::take_record_batch(value_batch, &indices)
-                .map_err(|e| read_error(&e))?;
-            // Compact byte-view columns so a spilled partition holds only its
-            // rows' view data, not the whole side's retained variadic buffers.
-            cast_batch_to(&taken, &self.value_schema)?
-        });
-        let mut offset = 0;
-        for (partition, rows) in part_rows.iter().enumerate() {
-            if rows.is_empty() {
+        };
+        for (part, bounds) in self.parts.iter().zip(routed.bounds.windows(2)) {
+            let (start, end) = (bounds[0], bounds[1]);
+            if start == end {
                 continue;
             }
-            self.buffers[partition].push(reordered.slice(offset, rows.len()));
-            self.buffered_rows[partition] += rows.len();
-            offset += rows.len();
-            if self.buffered_rows[partition] >= spill_flush_rows() {
-                self.flush(partition)?;
+            let mut part = part.lock().unwrap_or_else(PoisonError::into_inner);
+            part.buffer.push(values.slice(start, end - start));
+            part.buffered_rows += end - start;
+            part.key_hashes
+                .extend_from_slice(&routed.key_hashes[start..end]);
+            if part.buffered_rows >= self.flush_rows {
+                part.flush(&self.schema)?;
             }
         }
         Ok(())
     }
 
-    /// Coalesces one partition's buffered slices into a single batch and writes
-    /// it, so its file holds few, large batches.
-    fn flush(&mut self, partition: usize) -> Result<(), TableDiffError> {
-        if self.buffers[partition].is_empty() {
-            return Ok(());
-        }
-        let batches = std::mem::take(&mut self.buffers[partition]);
-        self.buffered_rows[partition] = 0;
-        let coalesced = accum!(
-            "cell: spill route (take + cast)",
-            concat_or_empty(&self.value_schema, &batches)?
-        );
-        let outcome = accum!(
-            "cell: spill write (of spill pass)",
-            self.writers[partition].write(&coalesced)
-        );
-        #[cfg(test)]
-        let outcome = inject_spill_write_failure(outcome);
-        outcome.map_err(|e| crate::spool::error("write to", &e))
-    }
-
-    fn finish(mut self) -> Result<Vec<File>, TableDiffError> {
-        for partition in 0..self.writers.len() {
-            self.flush(partition)?;
-        }
-        for writer in &mut self.writers {
-            writer
+    fn finish(self) -> Result<SideSpill, TableDiffError> {
+        let mut files = Vec::with_capacity(self.parts.len());
+        let mut key_hashes = Vec::with_capacity(self.parts.len());
+        for part in self.parts {
+            let mut part = part.into_inner().unwrap_or_else(PoisonError::into_inner);
+            part.flush(&self.schema)?;
+            part.writer
                 .finish()
                 .map_err(|e| crate::spool::error("finish writing", &e))?;
+            files.push(part.file);
+            key_hashes.push(part.key_hashes);
         }
-        Ok(self.files)
+        Ok(SideSpill { files, key_hashes })
     }
 }
 
@@ -2908,137 +3101,550 @@ fn concat_decoded_column(
     arrow_select::concat::concat(&refs).map_err(|e| read_error(&e))
 }
 
-/// The scan parameters shared by both spill passes.
-struct SpillPlan<'a> {
-    columns: &'a SideColumns,
-    key_names: &'a [&'a str],
-    hasher: &'a RowHasher,
-    changed: &'a HashSet<u128>,
-    partitions: usize,
-    threads: usize,
-    value_schema: &'a SchemaRef,
+/// Target rows per bucket of a [`KeyIndex`] directory.
+const INDEX_BUCKET_ROWS: usize = 8;
+
+/// A [`KeyIndex`] count's flag bit: some other-side row of this key had a
+/// different row hash. The low bits count the other side's rows of the key.
+const ROW_DIFFERS: u64 = 1 << 63;
+
+/// One side's `(key_hash, row_hash)` rows sorted per partition, with a directory
+/// per partition from a hash's top `bits` bits to its bucket's first row, so a
+/// lookup binary-searches a bucket of about [`INDEX_BUCKET_ROWS`] rows; and, at
+/// each key's first row, a count of the other side's rows of that key.
+struct KeyIndex {
+    parts: Vec<HashPartition>,
+    dirs: Vec<Vec<usize>>,
+    bits: Vec<u32>,
+    counts: Vec<Vec<AtomicU64>>,
 }
 
-/// The per-partition writers and buffers shared by both spill passes.
-struct SpillState {
-    writers: PartitionWriters,
-    key_hashes: Vec<Vec<u128>>,
-    part_rows: Vec<Vec<u32>>,
+/// How [`KeyIndex::tally`] found an other-side row's key.
+#[derive(Debug, PartialEq)]
+enum Tally {
+    /// The key is not on the indexed side.
+    Absent,
+    /// The key is on the indexed side once, with a different row hash; the
+    /// key's count is at `slot` (see [`KeyIndex::repeated`]).
+    Changed { partition: usize, slot: usize },
+    /// Any other key on the indexed side.
+    Present,
 }
 
-impl SpillState {
-    fn open(partitions: usize, value_schema: &SchemaRef) -> Result<Self, TableDiffError> {
-        Ok(Self {
-            writers: PartitionWriters::open(partitions, value_schema)?,
-            key_hashes: (0..partitions).map(|_| Vec::new()).collect(),
-            part_rows: (0..partitions).map(|_| Vec::new()).collect(),
-        })
+impl KeyIndex {
+    /// Sorts and indexes each partition on its own thread.
+    fn build(parts: Vec<HashPartition>) -> Result<Self, TableDiffError> {
+        let built = std::thread::scope(|scope| {
+            let handles = parts
+                .into_iter()
+                .map(|mut part| {
+                    scope.spawn(move || -> Result<_, TableDiffError> {
+                        part.sort_unstable_by_key(|&(key, _)| key);
+                        let bits = (part.len() / INDEX_BUCKET_ROWS)
+                            .checked_ilog2()
+                            .unwrap_or(0);
+                        let mut dir = vec![0usize; (1 << bits) + 1];
+                        for &(key, _) in &part {
+                            dir[bucket_of(key, bits) + 1] += 1;
+                        }
+                        for bucket in 1..dir.len() {
+                            dir[bucket] += dir[bucket - 1];
+                        }
+                        let counts = (0..part.len()).map(|_| AtomicU64::new(0)).collect();
+                        Ok((part, dir, bits, counts))
+                    })
+                })
+                .collect();
+            join_results(handles)
+        })?;
+        let mut index = Self {
+            parts: Vec::with_capacity(built.len()),
+            dirs: Vec::with_capacity(built.len()),
+            bits: Vec::with_capacity(built.len()),
+            counts: Vec::with_capacity(built.len()),
+        };
+        for (part, dir, bits, counts) in built {
+            index.parts.push(part);
+            index.dirs.push(dir);
+            index.bits.push(bits);
+            index.counts.push(counts);
+        }
+        Ok(index)
     }
 
-    /// Routes one batch's changed rows to their key-hash partitions, records each
-    /// routed row's key hash and (into `mask`) every row's changed flag, calls
-    /// `on_changed(partition)` per changed row in scan order for the left pass's
-    /// global-index bookkeeping, and writes the routed value columns.
-    // `row as u32` is a batch-local index; the guard below rejects a batch with
-    // more than `u32::MAX` rows, so the cast (and the `u32` `take` indices) fit.
-    #[allow(clippy::cast_possible_truncation)]
-    fn route_batch<F: FnMut(usize)>(
-        &mut self,
+    /// Counts one other-side row of `key` against the key's first indexed row
+    /// and reports how the key was found.
+    fn tally(&self, key: u128, row_hash: u128) -> Tally {
+        let partition = partition_of(key, self.parts.len());
+        let (dir, bucket) = (&self.dirs[partition], bucket_of(key, self.bits[partition]));
+        let start = dir[bucket];
+        let rows = &self.parts[partition][start..dir[bucket + 1]];
+        let at = rows.partition_point(|&(k, _)| k < key);
+        let [(k, indexed_hash), rest @ ..] = &rows[at..] else {
+            return Tally::Absent;
+        };
+        if *k != key {
+            return Tally::Absent;
+        }
+        let count = &self.counts[partition][start + at];
+        count.fetch_add(1, Ordering::Relaxed);
+        if rest.first().is_some_and(|&(next, _)| next == key) || *indexed_hash == row_hash {
+            return Tally::Present;
+        }
+        count.fetch_or(ROW_DIFFERS, Ordering::Relaxed);
+        Tally::Changed {
+            partition,
+            slot: start + at,
+        }
+    }
+
+    /// Whether the other side has tallied more than one row of the key whose
+    /// count is at `slot`.
+    fn repeated(&self, partition: usize, slot: usize) -> bool {
+        self.counts[partition][slot].load(Ordering::Relaxed) & !ROW_DIFFERS > 1
+    }
+}
+
+/// The directory bucket of `key`: its top `bits` bits (bucket 0 when `bits` is 0).
+// The shifted value has at most `bits` (< 64) significant bits.
+#[allow(clippy::cast_possible_truncation)]
+fn bucket_of(key: u128, bits: u32) -> usize {
+    key.checked_shr(128 - bits).unwrap_or(0) as usize
+}
+
+/// Classifies every key from the indexed left and the right's tallies, one
+/// partition per worker: a left key's right count is its tally, and a right key
+/// absent from the left is counted in `absent`.
+fn classify_indexed(index: KeyIndex, absent: AbsentKeys) -> Result<Classified, TableDiffError> {
+    let absent = absent
+        .into_iter()
+        .map(|part| part.into_inner().unwrap_or_else(PoisonError::into_inner));
+    let jobs = index.parts.into_iter().zip(index.counts).zip(absent);
+    let partials = std::thread::scope(|scope| {
+        let handles: Vec<_> = jobs
+            .map(|((left, counts), absent)| {
+                scope.spawn(move || -> Result<Classified, TableDiffError> {
+                    Ok(classify_partition(&left, counts, &absent))
+                })
+            })
+            .collect();
+        join_results(handles)
+    })?;
+    Ok(combine_classified(partials))
+}
+
+/// [`classify_indexed`]'s work for one partition, by [`classify`]'s rules.
+fn classify_partition(
+    left: &[(u128, u128)],
+    counts: Vec<AtomicU64>,
+    absent: &HashMap<u128, FirstRow>,
+) -> Classified {
+    let mut result = Classified {
+        added: HashSet::new(),
+        removed: HashSet::new(),
+        changed: Vec::new(),
+        duplicates: HashMap::new(),
+    };
+    let counts: Vec<u64> = counts.into_iter().map(AtomicU64::into_inner).collect();
+    let mut start = 0;
+    while start < left.len() {
+        let key = left[start].0;
+        let end = start + left[start..].partition_point(|&(k, _)| k == key);
+        let (left_count, tally) = (end - start, counts[start]);
+        let right_count = usize::try_from(tally & !ROW_DIFFERS).unwrap_or(usize::MAX);
+        if left_count > 1 || right_count > 1 {
+            result.duplicates.insert(key, (left_count, right_count));
+        } else if right_count == 0 {
+            result.removed.insert(key);
+        } else if tally & ROW_DIFFERS != 0 {
+            result.changed.push(key);
+        }
+        start = end;
+    }
+    for (&key, first) in absent {
+        if first.count > 1 {
+            let count = usize::try_from(first.count).unwrap_or(usize::MAX);
+            result.duplicates.insert(key, (0, count));
+        } else {
+            result.added.insert(key);
+        }
+    }
+    result
+}
+
+/// A right key absent from the left: the position of its first row seen so
+/// far, and how many right rows carry it.
+struct FirstRow {
+    at: u64,
+    count: u64,
+}
+
+/// Per key-hash partition, every right key absent from the left.
+type AbsentKeys = Vec<Mutex<HashMap<u128, FirstRow>>>;
+
+/// A right-side batch's added candidates, captured by the parallel hash pass so
+/// the right is never read again: the position of the batch's first row, the
+/// key columns of the rows kept for keys absent from the left with those rows'
+/// indices and key hashes, and, at full width, the kept rows at `full_rows`
+/// (those whose key had not repeated when last compacted).
+struct Candidate {
+    at: u64,
+    keys: RecordBatch,
+    rows: Vec<usize>,
+    hashes: Vec<u128>,
+    full: RecordBatch,
+    full_rows: Vec<usize>,
+}
+
+/// The kept candidates, split into those still holding full-width rows and
+/// those holding key columns only; the full-width rows; and how many of those
+/// have since been superseded by an earlier row of their key or seen their key
+/// repeated.
+#[derive(Default)]
+struct CandidateStore {
+    live: Vec<Candidate>,
+    settled: Vec<Candidate>,
+    rows: usize,
+    stale: usize,
+    /// Full-width rows re-scanned across compaction calls.
+    #[cfg(test)]
+    scanned: usize,
+    /// Candidates visited across compaction calls.
+    #[cfg(test)]
+    visited: usize,
+}
+
+impl CandidateStore {
+    fn into_candidates(mut self) -> Vec<Candidate> {
+        self.live.append(&mut self.settled);
+        self.live
+    }
+}
+
+/// The right side's rows captured during its only read on the parallel path.
+struct RightCapture {
+    candidates: Vec<Candidate>,
+    spill: SideSpill,
+}
+
+/// The per-batch step of the right side's parallel hash pass, run on the
+/// workers against the indexed left, where every row is tallied (see
+/// [`KeyIndex::tally`]). A key absent from the left is counted in `absent`, and
+/// its first right row is kept as an added candidate, reduced to its key
+/// columns once the key repeats; the first right row of a key the left holds
+/// once with a different row hash is spilled for the cell pass, even if the
+/// right repeats the key later (making it a duplicate); any other row is
+/// unchanged, or a duplicate.
+struct RightFuse<'a> {
+    index: &'a KeyIndex,
+    key_columns: &'a [usize],
+    value_columns: &'a [usize],
+    value_schema: &'a SchemaRef,
+    spill: SpillSink,
+    candidates: Mutex<CandidateStore>,
+    absent: AbsentKeys,
+}
+
+impl RightFuse<'_> {
+    fn visit(
+        &self,
+        at: u64,
         batch: &RecordBatch,
-        hashes: &[u128],
-        plan: &SpillPlan<'_>,
-        mask: &mut Vec<bool>,
-        mut on_changed: F,
+        pairs: &[(u128, u128, bool)],
     ) -> Result<(), TableDiffError> {
-        if batch.num_rows() > u32::MAX as usize {
-            return Err(TableDiffError::TooManyChangedRows {
-                rows: batch.num_rows(),
-            });
-        }
-        mask.clear();
-        for rows in &mut self.part_rows {
-            rows.clear();
-        }
-        for (row, &hash) in hashes.iter().enumerate() {
-            let is_changed = plan.changed.contains(&hash);
-            mask.push(is_changed);
-            if is_changed {
-                let partition = partition_of(hash, plan.partitions);
-                self.part_rows[partition].push(row as u32);
-                self.key_hashes[partition].push(hash);
-                on_changed(partition);
+        let partitions = self.absent.len();
+        let (mut changed, mut changed_slots) = (vec![false; pairs.len()], Vec::new());
+        let mut absent_rows: Vec<Vec<usize>> = vec![Vec::new(); partitions];
+        for (row, &(key_hash, row_hash, _)) in pairs.iter().enumerate() {
+            match self.index.tally(key_hash, row_hash) {
+                Tally::Absent => absent_rows[partition_of(key_hash, partitions)].push(row),
+                Tally::Changed { partition, slot } => changed_slots.push((row, partition, slot)),
+                Tally::Present => {}
             }
         }
-        let value_proj = batch
-            .project(&plan.columns.value)
-            .map_err(|e| read_error(&e))?;
-        self.writers.write_routed(&value_proj, &self.part_rows)
+        // A key the right has repeated by the end of this batch is a duplicate,
+        // never compared; only a repeat in a later batch finds its row spilled.
+        for (row, partition, slot) in changed_slots {
+            changed[row] = !self.index.repeated(partition, slot);
+        }
+        let (mut kept, mut stale) = (Vec::new(), 0);
+        for (part, rows) in self.absent.iter().zip(&absent_rows) {
+            if rows.is_empty() {
+                continue;
+            }
+            let mut part = part.lock().unwrap_or_else(PoisonError::into_inner);
+            for &row in rows {
+                let row_at = at + row as u64;
+                match part.entry(pairs[row].0) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(FirstRow {
+                            at: row_at,
+                            count: 1,
+                        });
+                        kept.push(row);
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        let first = entry.get_mut();
+                        first.count += 1;
+                        stale += usize::from(first.count == 2);
+                        if row_at < first.at {
+                            first.at = row_at;
+                            kept.push(row);
+                            stale += 1;
+                        }
+                    }
+                }
+            }
+        }
+        drop(absent_rows);
+        if !kept.is_empty() {
+            kept.sort_unstable();
+            let mut mask = vec![false; pairs.len()];
+            for &row in &kept {
+                mask[row] = true;
+            }
+            let rows = arrow_select::filter::filter_record_batch(batch, &BooleanArray::from(mask))
+                .map_err(|e| read_error(&e))
+                .and_then(|rows| owned_batch(rows, pairs.len()))?;
+            let hashes = kept.iter().map(|&row| pairs[row].0).collect();
+            let candidate = Candidate {
+                at,
+                keys: rows.project(self.key_columns).map_err(|e| read_error(&e))?,
+                full_rows: (0..kept.len()).collect(),
+                rows: kept,
+                hashes,
+                full: rows,
+            };
+            self.keep(candidate, stale)?;
+        } else if stale > 0 {
+            self.keep_stale(stale)?;
+        }
+        let mut routed = Routed::group(partitions, &changed, |row| pairs[row].0)?;
+        drop(changed);
+        routed.take_values(batch, self.value_columns, self.value_schema)?;
+        self.spill.write(&routed)
     }
 
-    fn finish(self) -> Result<SideSpill, TableDiffError> {
-        Ok(SideSpill {
-            files: self.writers.finish()?,
-            key_hashes: self.key_hashes,
+    /// Stores `candidate` and counts `stale` kept rows (see [`Self::keep_stale`]).
+    fn keep(&self, candidate: Candidate, stale: usize) -> Result<(), TableDiffError> {
+        let mut store = self
+            .candidates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        store.rows += candidate.rows.len();
+        store.live.push(candidate);
+        self.compact_if_stale(&mut store, stale)
+    }
+
+    /// Counts `stale` kept rows, compacting the store when needed.
+    fn keep_stale(&self, stale: usize) -> Result<(), TableDiffError> {
+        let mut store = self
+            .candidates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.compact_if_stale(&mut store, stale)
+    }
+
+    /// Once stale rows outnumber half the full-width ones, drops every
+    /// full-width row that is no longer its key's first or whose key has
+    /// repeated, so full-width rows are held for at most about twice the keys
+    /// that could still be added.
+    fn compact_if_stale(
+        &self,
+        store: &mut CandidateStore,
+        stale: usize,
+    ) -> Result<(), TableDiffError> {
+        store.stale += stale;
+        if store.stale * 2 <= store.rows {
+            return Ok(());
+        }
+        let partitions = self.absent.len();
+        let mut rows = 0;
+        for mut candidate in std::mem::take(&mut store.live) {
+            let before = candidate.full_rows.len();
+            #[cfg(test)]
+            {
+                store.scanned += before;
+                store.visited += 1;
+            }
+            let mut full_mask = Vec::with_capacity(before);
+            for &i in &candidate.full_rows {
+                let hash = candidate.hashes[i];
+                let part = self.absent[partition_of(hash, partitions)]
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let at = candidate.at + candidate.rows[i] as u64;
+                full_mask.push(part.get(&hash).is_some_and(|e| e.at == at && e.count == 1));
+            }
+            let mut keep = full_mask.iter();
+            candidate
+                .full_rows
+                .retain(|_| keep.next().copied().unwrap_or(false));
+            let full = arrow_select::filter::filter_record_batch(
+                &candidate.full,
+                &BooleanArray::from(full_mask),
+            )
+            .map_err(|e| read_error(&e))?;
+            candidate.full = owned_batch(full, before)?;
+            if candidate.full_rows.len() * 2 <= candidate.rows.len() {
+                candidate.keys = unshared_batch(candidate.keys.clone())?;
+            }
+            rows += candidate.full_rows.len();
+            if candidate.full_rows.is_empty() {
+                store.settled.push(candidate);
+            } else {
+                store.live.push(candidate);
+            }
+        }
+        store.rows = rows;
+        store.stale = 0;
+        Ok(())
+    }
+}
+
+/// Materializes the added rows and the right side's duplicate capture from the
+/// right's added candidates, in input order; `key_ctx` reads a candidate's key
+/// columns.
+fn materialize_candidates(
+    mut candidates: Vec<Candidate>,
+    key_ctx: &Materialize<'_>,
+    schema: &SchemaRef,
+    added: &HashSet<u128>,
+    pending_dups: &mut HashSet<u128>,
+) -> Result<(RecordBatch, DupCapture), TableDiffError> {
+    candidates.sort_unstable_by_key(|candidate| candidate.at);
+    let mut out = MaterializeOut::default();
+    for candidate in candidates {
+        let (keys, hashes) = (&candidate.keys, &candidate.hashes);
+        let none = vec![false; hashes.len()];
+        materialize_batch(
+            keys,
+            hashes,
+            none,
+            0..hashes.len(),
+            key_ctx,
+            pending_dups,
+            &mut out,
+        )?;
+        let mask = candidate
+            .full_rows
+            .iter()
+            .map(|&i| added.contains(&hashes[i]))
+            .collect();
+        push_filtered(&candidate.full, mask, &mut out.selected)?;
+    }
+    Ok((concat_or_empty(schema, &out.selected)?, out.capture))
+}
+
+/// A left batch's rows as the fused re-read acts on them, classified on a
+/// worker: the removed rows, the rows whose key is a duplicate, and the changed
+/// rows routed to their partitions.
+struct LeftRows {
+    removed: Vec<usize>,
+    dup_rows: Vec<usize>,
+    changed: Routed,
+}
+
+/// The inputs of the parallel path's one re-read of the left side.
+struct LeftReread<'a> {
+    ctx: &'a Materialize<'a>,
+    classified: &'a Classified,
+    changed: &'a HashSet<u128>,
+    value_schema: &'a SchemaRef,
+    key_schema: &'a SchemaRef,
+    threads: usize,
+    partitions: usize,
+}
+
+impl LeftReread<'_> {
+    /// Classifies one batch's rows and routes its changed rows (on a worker).
+    fn prepare(&self, batch: &RecordBatch, hashes: &[u128]) -> Result<LeftRows, TableDiffError> {
+        let (mut removed, mut dup_rows) = (Vec::new(), Vec::new());
+        let mut changed_mask = vec![false; hashes.len()];
+        for (row, &key_hash) in hashes.iter().enumerate() {
+            if self.classified.removed.contains(&key_hash) {
+                removed.push(row);
+            } else if self.classified.duplicates.contains_key(&key_hash) {
+                dup_rows.push(row);
+            } else if self.changed.contains(&key_hash) {
+                changed_mask[row] = true;
+            }
+        }
+        let mut changed = Routed::group(self.partitions, &changed_mask, |row| hashes[row])?;
+        drop(changed_mask);
+        changed.take_values(batch, &self.ctx.columns.value, self.value_schema)?;
+        Ok(LeftRows {
+            removed,
+            dup_rows,
+            changed,
         })
     }
 }
 
-/// Streams the right side once, routing each changed row's value columns to its
-/// key-hash partition's spill file and capturing that row's key hash per
-/// partition for the pairing step.
-fn spill_right(
+/// The parallel path's only re-read of the left side, fusing the materialize
+/// and cell-spill passes: filters the removed rows, captures the pending
+/// duplicate keys, and spills the changed rows' value columns by partition with
+/// their key columns and global scan-order indices. The scan-order bookkeeping
+/// runs on this thread in batch order.
+// The global index counts changed rows, which the caller has checked fit `u32`.
+#[allow(clippy::cast_possible_truncation)]
+fn reread_left(
     source: &impl TableInput,
-    plan: &SpillPlan<'_>,
-) -> Result<SideSpill, TableDiffError> {
-    let mut state = SpillState::open(plan.partitions, plan.value_schema)?;
-    let mut mask = Vec::new();
-    drive_key_hashes(
-        source,
-        &plan.columns.key,
-        plan.key_names,
-        plan.hasher,
-        plan.threads,
-        |batch, hashes| state.route_batch(batch, hashes, plan, &mut mask, |_partition| {}),
-    )?;
-    state.finish()
-}
-
-/// Streams the left side once: routes each changed row's value columns to its
-/// key-hash partition, assigns each changed row a global scan-order index, and
-/// accumulates every changed row's key columns into `left_keys` (in scan order).
-fn spill_left(
-    source: &impl TableInput,
-    plan: &SpillPlan<'_>,
-    key_schema: &SchemaRef,
-) -> Result<LeftSpill, TableDiffError> {
-    let mut state = SpillState::open(plan.partitions, plan.value_schema)?;
-    let mut global_index: Vec<Vec<u32>> = (0..plan.partitions).map(|_| Vec::new()).collect();
-    let mut key_batches: Vec<RecordBatch> = Vec::new();
+    plan: &LeftReread<'_>,
+    pending_dups: &mut HashSet<u128>,
+) -> Result<(RecordBatch, DupCapture, LeftSpill), TableDiffError> {
+    let sink = SpillSink::open(plan.partitions, plan.value_schema)?;
+    let mut removed = MaterializeOut::default();
+    let mut global_index: Vec<Vec<u32>> = vec![Vec::new(); plan.partitions];
+    let mut key_batches = Vec::new();
     let mut counter: u32 = 0;
-    let mut mask = Vec::new();
-    drive_key_hashes(
+    let key_columns = &plan.ctx.columns.key;
+    for_each_batch_key_hashed_parallel(
         source,
-        &plan.columns.key,
-        plan.key_names,
-        plan.hasher,
+        key_columns,
+        plan.ctx.key_names,
+        plan.ctx.hasher,
         plan.threads,
-        |batch, hashes| {
-            state.route_batch(batch, hashes, plan, &mut mask, |partition| {
-                global_index[partition].push(counter);
-                counter += 1;
-            })?;
-            let key_proj = batch
-                .project(&plan.columns.key)
-                .map_err(|e| read_error(&e))?;
-            push_filtered(&key_proj, mask.clone(), &mut key_batches)
+        |batch, hashes| plan.prepare(batch, hashes),
+        |batch, hashes, rows| {
+            let mask = |selected: &mut dyn Iterator<Item = usize>| {
+                let mut mask = vec![false; batch.num_rows()];
+                selected.for_each(|row| mask[row] = true);
+                mask
+            };
+            let removed_mask = mask(&mut rows.removed.into_iter());
+            let ctx = plan.ctx;
+            materialize_batch(
+                batch,
+                hashes,
+                removed_mask,
+                rows.dup_rows,
+                ctx,
+                pending_dups,
+                &mut removed,
+            )?;
+            let changed = rows.changed;
+            if changed.rows.is_empty() {
+                return Ok(());
+            }
+            for (index, bounds) in global_index.iter_mut().zip(changed.bounds.windows(2)) {
+                let ranks = &changed.ranks[bounds[0]..bounds[1]];
+                index.extend(ranks.iter().map(|&rank| counter + rank));
+            }
+            counter += changed.rows.len() as u32;
+            let changed_mask = mask(&mut changed.rows.iter().map(|&row| row as usize));
+            let keys = batch.project(key_columns).map_err(|e| read_error(&e))?;
+            push_filtered(&keys, changed_mask, &mut key_batches)?;
+            sink.write(&changed)
         },
     )?;
-    let left_keys = concat_or_empty(key_schema, &key_batches)?;
-    Ok(LeftSpill {
-        spill: state.finish()?,
+    let rows_removed = concat_or_empty(&source.schema(), &removed.selected)?;
+    let left_spill = LeftSpill {
+        spill: sink.finish()?,
         global_index,
-        left_keys,
-    })
+        left_keys: concat_or_empty(plan.key_schema, &key_batches)?,
+    };
+    Ok((rows_removed, removed.capture, left_spill))
 }
 
 /// One compared column of a partition, decoded and prepared for rendering once
@@ -3115,8 +3721,7 @@ struct EmitPlan<'a> {
 /// rendering follow the same rules as [`emit_column_records`]; each record
 /// carries the row's global scan-order index so the output can be reassembled in
 /// [`diff_cells`]'s order.
-// `row as u32` indexes a partition's right rows, bounded by the changed-row
-// count `diff_cells_streaming` has checked fits `u32`.
+// `row as u32` indexes a partition's right rows, checked below to fit `u32`.
 #[allow(clippy::cast_possible_truncation)]
 fn emit_partition(
     data: &PartitionData<'_>,
@@ -3125,6 +3730,10 @@ fn emit_partition(
     let n_left = data.left_key_hashes.len();
     if n_left == 0 {
         return Ok(Vec::new());
+    }
+    let n_right = data.right_key_hashes.len();
+    if u32::try_from(n_right).is_err() {
+        return Err(TableDiffError::TooManyChangedRows { rows: n_right });
     }
     let right_pos: HashMap<u128, u32> = data
         .right_key_hashes
@@ -3285,57 +3894,91 @@ fn cmp_key_rows(key_renders: &[ArrayRef], a: usize, b: usize) -> std::cmp::Order
     std::cmp::Ordering::Equal
 }
 
-/// The streaming, partitioned per-cell diff (the parallel path): spills both
-/// sides' changed value rows by key-hash partition, processes one partition at
-/// a time across the workers, and reassembles the output in [`diff_cells`]'s
-/// total order. Byte-identical to [`diff_cells`] at every thread count.
+/// The parallel path after [`hash_parallel`]: the left side's one re-read, the
+/// added rows from the right's candidates, the duplicate-key report, and the
+/// cell pass over both sides' spills. Returns the removed, added, duplicate-key
+/// and changed-cell batches.
+fn diff_members_parallel<L: TableInput, R: TableInput>(
+    (left, right): (&L, &R),
+    member: &MemberPass<'_>,
+    cells: &CellDiff<'_>,
+    classified: &Classified,
+    changed: &HashSet<u128>,
+    right_capture: RightCapture,
+) -> Result<[RecordBatch; 4], TableDiffError> {
+    // The output addresses each changed left row by a `u32` scan-order index.
+    if u32::try_from(changed.len()).is_err() {
+        return Err(TableDiffError::TooManyChangedRows {
+            rows: changed.len(),
+        });
+    }
+    let key_only_schema = key_only_schema(member.dup_schema);
+    let (left_ctx, right_ctx) = member.sides(&key_only_schema);
+    let value_schema = spill_schema(cells.left_schema, &cells.left_columns.value);
+    let key_schema = indices_schema(cells.left_schema, &cells.left_columns.key);
+    let plan = LeftReread {
+        ctx: &left_ctx,
+        classified,
+        changed,
+        value_schema: &value_schema,
+        key_schema: &key_schema,
+        threads: cells.threads,
+        partitions: partition_count(cells.threads),
+    };
+    let mut pending_dups: HashSet<u128> = classified.duplicates.keys().copied().collect();
+    let (rows_removed, left_capture, left_spill) = pass!(
+        "materialize and cell spill (left re-read)",
+        reread_left(left, &plan, &mut pending_dups)?
+    );
+    let key_side = SideColumns {
+        key: (0..cells.left_columns.key.len()).collect(),
+        value: Vec::new(),
+    };
+    let key_ctx = Materialize {
+        columns: &key_side,
+        ..right_ctx
+    };
+    let (rows_added, right_dup_capture) = pass!(
+        "materialize added (right candidates)",
+        materialize_candidates(
+            right_capture.candidates,
+            &key_ctx,
+            &right.schema(),
+            &classified.added,
+            &mut pending_dups,
+        )?
+    );
+    let duplicate_keys = build_duplicate_keys(
+        member.dup_schema,
+        left_capture,
+        right_dup_capture,
+        &classified.duplicates,
+    )?;
+    let cells_changed = diff_cells_streaming(cells, left_spill, right_capture.spill)?;
+    Ok([rows_removed, rows_added, duplicate_keys, cells_changed])
+}
+
+/// The streaming, partitioned per-cell diff (the parallel path) over both
+/// sides' changed-row spills: processes one partition at a time across the
+/// workers and reassembles the output in [`diff_cells`]'s total order.
+/// Byte-identical to [`diff_cells`] at every thread count.
 // Cell counts (`column_rank`, cumulative partition bounds, the output position
 // range) are cast to `u32` under checks that the changed-row count and the total
 // cell count both fit `u32`.
 #[allow(clippy::cast_possible_truncation)]
 fn diff_cells_streaming(
-    left: &impl TableInput,
-    right: &impl TableInput,
     ctx: &CellDiff<'_>,
-    changed: &HashSet<u128>,
-    partitions: usize,
+    left_spill: LeftSpill,
+    right_spill: SideSpill,
 ) -> Result<RecordBatch, TableDiffError> {
     #[cfg(test)]
     CELL_STREAMING_PASSES.with(|count| count.set(count.get() + 1));
     let out_schema = cells_changed_schema(ctx.left_schema, ctx.key);
-    if changed.is_empty() {
+    if left_spill.left_keys.num_rows() == 0 {
         return Ok(RecordBatch::new_empty(out_schema));
     }
-    // The output addresses each changed left row by a `u32` scan-order index.
-    if changed.len() > u32::MAX as usize {
-        return Err(TableDiffError::TooManyChangedRows {
-            rows: changed.len(),
-        });
-    }
     let key_count = ctx.key.len();
-    let left_value_schema = spill_schema(ctx.left_schema, &ctx.left_columns.value);
-    let right_value_schema = spill_schema(ctx.right_schema, &ctx.right_columns.value);
-    let key_schema = indices_schema(ctx.left_schema, &ctx.left_columns.key);
-
-    let left_plan = SpillPlan {
-        columns: ctx.left_columns,
-        key_names: ctx.key_names,
-        hasher: ctx.hasher,
-        changed,
-        partitions,
-        threads: ctx.threads,
-        value_schema: &left_value_schema,
-    };
-    let right_plan = SpillPlan {
-        columns: ctx.right_columns,
-        value_schema: &right_value_schema,
-        ..left_plan
-    };
-    let (left_spill, right_spill) = pass!("cell: spill (re-read, hash, route, write)", {
-        let left_spill = spill_left(left, &left_plan, &key_schema)?;
-        let right_spill = spill_right(right, &right_plan)?;
-        (left_spill, right_spill)
-    });
+    let partitions = left_spill.global_index.len();
 
     // Compared columns in left-schema order (common_values is name-sorted).
     let mut ranks = Vec::with_capacity(ctx.common_values.len());
@@ -3600,12 +4243,9 @@ pub(crate) fn diff_rows(
         hasher: &hasher,
         threads,
     };
-    // `scan_threads` is the requested threads for a large diff and 1 for a small
-    // one; the materialize and cell passes, which re-scan the full table, follow
-    // the same size gate as the hash pass.
     #[cfg(feature = "profile")]
     drop(setup_guard);
-    let (null_keys, classified, scan_threads) = pass!(
+    let (null_keys, mut classified, how) = pass!(
         "hash and classify",
         hash_and_classify(left, right, &left_columns, &right_columns, &config)?
     );
@@ -3620,13 +4260,10 @@ pub(crate) fn diff_rows(
         dup_schema: &dup_schema,
         key_output_types: &key_output_types,
     };
-    let (rows_removed, rows_added, duplicate_keys) = pass!(
-        "materialize",
-        materialize_row_members(left, right, &member_ctx, &classified, scan_threads)?
-    );
-
-    let changed_set: HashSet<u128> = classified.changed.into_iter().collect();
-    let cell_ctx = CellDiff {
+    let changed_set: HashSet<u128> = std::mem::take(&mut classified.changed)
+        .into_iter()
+        .collect();
+    let mut cell_ctx = CellDiff {
         left_schema,
         right_schema,
         key,
@@ -3636,24 +4273,31 @@ pub(crate) fn diff_rows(
         key_names: &key_names,
         hasher: &hasher,
         key_output_types: &key_output_types,
-        threads: scan_threads,
+        threads: 1,
     };
-    let cells_changed = if scan_threads > 1 {
-        // The cell pass spills its changed value rows into `partition_count`
-        // key-hash partitions (the worker count, capped at `MAX_PARTITIONS`) and
-        // holds one at a time; the resident chunk is one partition's rows.
-        diff_cells_streaming(
-            left,
-            right,
-            &cell_ctx,
-            &changed_set,
-            partition_count(scan_threads),
-        )?
-    } else {
-        pass!(
-            "cell (sequential)",
-            diff_cells(left, right, &cell_ctx, &changed_set)?
-        )
+    let [rows_removed, rows_added, duplicate_keys, cells_changed] = match how {
+        Hashed::Sequential => {
+            let (rows_removed, rows_added, duplicate_keys) = pass!(
+                "materialize",
+                materialize_row_members(left, right, &member_ctx, &classified)?
+            );
+            let cells_changed = pass!(
+                "cell (sequential)",
+                diff_cells(left, right, &cell_ctx, &changed_set)?
+            );
+            [rows_removed, rows_added, duplicate_keys, cells_changed]
+        }
+        Hashed::Parallel(right_capture) => {
+            cell_ctx.threads = threads;
+            diff_members_parallel(
+                (left, right),
+                &member_ctx,
+                &cell_ctx,
+                &classified,
+                &changed_set,
+                right_capture,
+            )?
+        }
     };
 
     let counts = RowCounts {
@@ -3693,7 +4337,7 @@ mod tests {
     use arrow_buffer::{IntervalDayTime, IntervalMonthDayNano, i256};
     use arrow_cast::display::{ArrayFormatter, FormatOptions};
     use arrow_schema::{ArrowError, DataType, Field, IntervalUnit, Schema, SchemaRef, TimeUnit};
-    use std::collections::{BTreeMap, BTreeSet, HashSet};
+    use std::collections::{BTreeMap, BTreeSet};
     use std::num::NonZeroUsize;
     use std::sync::Arc;
 
@@ -6383,28 +7027,20 @@ mod tests {
         let rows = value.len() as i64;
         let id: Int64Array = (0..rows).map(Some).collect();
         let batch = RecordBatch::try_new(sch.clone(), vec![Arc::new(id), value]).unwrap();
-        let source = MemoryInput::new(sch.clone(), vec![batch.clone()]);
         let hasher = super::RowHasher::new().unwrap();
         let key = vec!["id".to_string()];
-        let key_names = vec!["id"];
         let common = vec!["v".to_string()];
         let columns = super::side_columns(&sch, &key, &common);
-        let changed: HashSet<u128> =
-            super::hash_batch_keys(&batch, &columns.key, &key_names, &hasher)
-                .unwrap()
-                .into_iter()
-                .collect();
         let value_schema = super::spill_schema(&sch, &columns.value);
-        let plan = super::SpillPlan {
-            columns: &columns,
-            key_names: &key_names,
-            hasher: &hasher,
-            changed: &changed,
-            partitions,
-            threads: 1,
-            value_schema: &value_schema,
-        };
-        super::spill_right(&source, &plan)
+        let sink = super::SpillSink::open(partitions, &value_schema).unwrap();
+        let key_hashes = super::hash_batch_keys(&batch, &columns.key, &["id"], &hasher).unwrap();
+        let all = vec![true; batch.num_rows()];
+        let mut routed = super::Routed::group(partitions, &all, |row| key_hashes[row]).unwrap();
+        routed
+            .take_values(&batch, &columns.value, &value_schema)
+            .unwrap();
+        sink.write(&routed).unwrap();
+        sink.finish()
             .unwrap()
             .files
             .iter()
@@ -6742,7 +7378,8 @@ mod tests {
             &["id"],
             &hasher,
             4,
-            |_batch: &RecordBatch, _hashes: &[u128]| Err(TableDiffError::EmptyKey),
+            |_: &RecordBatch, _: &[u128]| Ok(()),
+            |_batch: &RecordBatch, _hashes: &[u128], (): ()| Err(TableDiffError::EmptyKey),
         );
         assert!(matches!(result, Err(TableDiffError::EmptyKey)));
     }
@@ -6766,8 +7403,15 @@ mod tests {
             hasher: &hasher,
             threads: 4,
         };
-        let result =
-            super::hash_side_parallel(Vec::new(), input.open().unwrap(), &columns, &config, 4);
+        let result = super::hash_side_parallel(
+            Vec::new(),
+            input.open().unwrap(),
+            &columns,
+            &config,
+            4,
+            &|_, _, _| Ok(()),
+            true,
+        );
         assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
     }
 
@@ -6802,7 +7446,15 @@ mod tests {
             hasher: &hasher,
             threads: 4,
         };
-        let result = super::hash_side_parallel(vec![good], erroring, &columns, &config, 4);
+        let result = super::hash_side_parallel(
+            vec![good],
+            erroring,
+            &columns,
+            &config,
+            4,
+            &|_, _, _| Ok(()),
+            true,
+        );
         assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
     }
 
@@ -6964,7 +7616,8 @@ mod tests {
             &["id"],
             &hasher,
             4,
-            |_batch: &RecordBatch, _hashes: &[u128]| Ok(()),
+            |_: &RecordBatch, _: &[u128]| Ok(()),
+            |_batch: &RecordBatch, _hashes: &[u128], (): ()| Ok(()),
         );
         assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
     }
@@ -6981,7 +7634,8 @@ mod tests {
             &["id"],
             &hasher,
             4,
-            |_batch: &RecordBatch, _hashes: &[u128]| Err(TableDiffError::EmptyKey),
+            |_: &RecordBatch, _: &[u128]| Ok(()),
+            |_batch: &RecordBatch, _hashes: &[u128], (): ()| Err(TableDiffError::EmptyKey),
         );
         assert!(matches!(result, Err(TableDiffError::EmptyKey)));
     }
@@ -7002,7 +7656,8 @@ mod tests {
                 &["id"],
                 &hasher,
                 4,
-                |_batch: &RecordBatch, _hashes: &[u128]| panic!("consumer boom"),
+                |_: &RecordBatch, _: &[u128]| Ok(()),
+                |_batch: &RecordBatch, _hashes: &[u128], (): ()| panic!("consumer boom"),
             )
         }));
         assert!(result.is_err(), "consumer panic must unwind, not hang");
@@ -7229,5 +7884,1013 @@ mod type_coverage_tests {
         let diff = diff_rows(&left, &right, &schema, &schema, &["id".to_string()]).unwrap();
         assert_eq!(diff.counts.rows_added, 1);
         assert_eq!(diff.counts.rows_removed, 1);
+    }
+}
+
+#[cfg(test)]
+mod fused_tests {
+    use super::{KeyIndex, MemoryInput, Routed, RowDiff, TableInput, Tally, bucket_of, unshared};
+    use crate::error::TableDiffError;
+    use arrow_array::builder::{ListBuilder, StringViewBuilder};
+    use arrow_array::types::Int32Type;
+    use arrow_array::{
+        Array, ArrayRef, BooleanArray, DictionaryArray, Int64Array, RecordBatch, RecordBatchReader,
+        StringArray, StringViewArray,
+    };
+    use arrow_ipc::reader::StreamReader;
+    use arrow_ipc::writer::StreamWriter;
+    use arrow_schema::{DataType, Field, Schema, SchemaRef};
+    use std::io::Cursor;
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn ipc_bytes(batches: &[RecordBatch], schema: &SchemaRef) -> Vec<u8> {
+        let mut writer = StreamWriter::try_new(Vec::new(), schema).unwrap();
+        for batch in batches {
+            writer.write(batch).unwrap();
+        }
+        writer.into_inner().unwrap()
+    }
+
+    /// A side re-read from Arrow IPC bytes on every open, as the Python
+    /// bindings' spool is, counting its opens.
+    struct IpcInput {
+        schema: SchemaRef,
+        bytes: Vec<u8>,
+        opens: AtomicUsize,
+    }
+
+    impl IpcInput {
+        fn new(schema: &SchemaRef, batches: &[RecordBatch]) -> Self {
+            IpcInput {
+                schema: schema.clone(),
+                bytes: ipc_bytes(batches, schema),
+                opens: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl TableInput for IpcInput {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+        fn open(&self) -> Result<Box<dyn RecordBatchReader + Send>, TableDiffError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            let reader = StreamReader::try_new(Cursor::new(self.bytes.clone()), None).unwrap();
+            Ok(Box::new(reader))
+        }
+    }
+
+    fn diff_at(left: &IpcInput, right: &IpcInput, threads: usize) -> RowDiff {
+        super::diff_rows(
+            left,
+            right,
+            &left.schema,
+            &right.schema,
+            &["id".to_string()],
+            NonZeroUsize::new(threads).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// The Arrow IPC bytes of every output batch, so equal bytes mean an equal
+    /// physical layout, not only equal values.
+    fn output_bytes(diff: &RowDiff) -> Vec<Vec<u8>> {
+        [
+            &diff.rows_removed,
+            &diff.rows_added,
+            &diff.duplicate_keys,
+            &diff.cells_changed,
+        ]
+        .into_iter()
+        .map(|batch| ipc_bytes(std::slice::from_ref(batch), &batch.schema()))
+        .collect()
+    }
+
+    fn long(text: &str, i: i64) -> String {
+        format!("{text}-{i}-{}", "y".repeat(20))
+    }
+
+    /// Three batches of `id`, a `Utf8View` value, a dictionary value, and a
+    /// nested `List<Utf8View>`, built from `(id, value)` rows.
+    fn view_table(rows: &[&[(Option<i64>, i64)]]) -> (SchemaRef, Vec<RecordBatch>) {
+        let dict = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+        let item = Field::new("item", DataType::Utf8View, true);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("v", DataType::Utf8View, true),
+            Field::new("d", dict, true),
+            Field::new("l", DataType::List(Arc::new(item)), true),
+        ]));
+        let batches = rows
+            .iter()
+            .map(|chunk| {
+                let id: Int64Array = chunk.iter().map(|&(k, _)| k).collect();
+                let v: StringViewArray = chunk.iter().map(|&(_, v)| Some(long("v", v))).collect();
+                let names: Vec<String> =
+                    chunk.iter().map(|&(_, v)| format!("d{}", v % 3)).collect();
+                let d: DictionaryArray<Int32Type> =
+                    names.iter().map(|n| Some(n.as_str())).collect();
+                let mut l = ListBuilder::new(StringViewBuilder::new());
+                for &(_, v) in *chunk {
+                    l.values().append_value(long("l", v));
+                    l.append(true);
+                }
+                let columns: Vec<ArrayRef> =
+                    vec![Arc::new(id), Arc::new(v), Arc::new(d), Arc::new(l.finish())];
+                RecordBatch::try_new(schema.clone(), columns).unwrap()
+            })
+            .collect();
+        (schema, batches)
+    }
+
+    #[test]
+    fn parallel_output_bytes_match_sequential_over_view_dictionary_and_nested_columns() {
+        // Left: 1..=9 with 4 twice (a left duplicate), right: 3..=12 with 11
+        // twice in one batch and 12 in two batches (right-only duplicates), 7
+        // and 8 unchanged, the rest of the shared keys changed, and a null key.
+        let left_rows: [&[(Option<i64>, i64)]; 3] = [
+            &[(Some(1), 1), (Some(2), 2), (Some(4), 4)],
+            &[(Some(3), 3), (Some(4), 40), (Some(5), 5), (None, 0)],
+            &[(Some(6), 6), (Some(7), 7), (Some(8), 8), (Some(9), 9)],
+        ];
+        let right_rows: [&[(Option<i64>, i64)]; 3] = [
+            &[
+                (Some(3), 30),
+                (Some(11), 11),
+                (Some(5), 50),
+                (Some(11), 110),
+            ],
+            &[(Some(12), 12), (Some(6), 60), (Some(7), 7), (None, 1)],
+            &[(Some(8), 8), (Some(9), 90), (Some(10), 10), (Some(12), 120)],
+        ];
+        let (left_schema, left_batches) = view_table(&left_rows);
+        let (right_schema, right_batches) = view_table(&right_rows);
+        let left = IpcInput::new(&left_schema, &left_batches);
+        let right = IpcInput::new(&right_schema, &right_batches);
+        super::MIN_PARALLEL_ROWS_OVERRIDE.with(|gate| gate.set(Some(0)));
+        let sequential = diff_at(&left, &right, 1);
+        assert_eq!(
+            (
+                sequential.counts.rows_removed,
+                sequential.counts.rows_added,
+                sequential.counts.rows_changed,
+                sequential.counts.duplicate_keys,
+            ),
+            (2, 1, 5, 3)
+        );
+        for threads in [2, 4, 8] {
+            let parallel = diff_at(&left, &right, threads);
+            assert_eq!(parallel, sequential, "threads={threads}");
+            assert_eq!(
+                output_bytes(&parallel),
+                output_bytes(&sequential),
+                "threads={threads}"
+            );
+        }
+        super::MIN_PARALLEL_ROWS_OVERRIDE.with(|gate| gate.set(None));
+    }
+
+    #[test]
+    fn parallel_right_only_duplicates_match_with_the_key_after_a_value_column() {
+        let schema = |key_first: bool| {
+            let (id, v) = (
+                Field::new("id", DataType::Int64, true),
+                Field::new("v", DataType::Utf8View, true),
+            );
+            Arc::new(Schema::new(if key_first {
+                vec![id, v]
+            } else {
+                vec![v, id]
+            }))
+        };
+        let batch = |schema: &SchemaRef, ids: &[i64], key_first: bool| {
+            let id: ArrayRef = Arc::new(Int64Array::from(ids.to_vec()));
+            let v: ArrayRef = Arc::new(
+                ids.iter()
+                    .map(|&i| Some(long("v", i)))
+                    .collect::<StringViewArray>(),
+            );
+            let columns = if key_first { vec![id, v] } else { vec![v, id] };
+            RecordBatch::try_new(schema.clone(), columns).unwrap()
+        };
+        let (left_schema, right_schema) = (schema(true), schema(false));
+        let left = IpcInput::new(&left_schema, &[batch(&left_schema, &[1, 2, 3], true)]);
+        // 11 and 12 are right-only keys, each twice; 13 is added.
+        let right_batches = [
+            batch(&right_schema, &[1, 11, 11, 12], false),
+            batch(&right_schema, &[2, 12, 13], false),
+        ];
+        let right = IpcInput::new(&right_schema, &right_batches);
+        super::MIN_PARALLEL_ROWS_OVERRIDE.with(|gate| gate.set(Some(0)));
+        let sequential = diff_at(&left, &right, 1);
+        assert_eq!(sequential.counts.duplicate_keys, 2);
+        for threads in [2, 4] {
+            let parallel = diff_at(&left, &right, threads);
+            assert_eq!(
+                output_bytes(&parallel),
+                output_bytes(&sequential),
+                "threads={threads}"
+            );
+        }
+        super::MIN_PARALLEL_ROWS_OVERRIDE.with(|gate| gate.set(None));
+    }
+
+    #[test]
+    fn parallel_path_reads_the_right_once_and_the_left_twice() {
+        let rows: [&[(Option<i64>, i64)]; 2] = [&[(Some(1), 1), (Some(2), 2)], &[(Some(3), 3)]];
+        let changed: [&[(Option<i64>, i64)]; 2] = [&[(Some(1), 9), (Some(2), 2)], &[(Some(4), 4)]];
+        let (schema, left_batches) = view_table(&rows);
+        let (_, right_batches) = view_table(&changed);
+        let opens = |threads| {
+            let left = IpcInput::new(&schema, &left_batches);
+            let right = IpcInput::new(&schema, &right_batches);
+            diff_at(&left, &right, threads);
+            (
+                left.opens.load(Ordering::SeqCst),
+                right.opens.load(Ordering::SeqCst),
+            )
+        };
+        super::MIN_PARALLEL_ROWS_OVERRIDE.with(|gate| gate.set(Some(0)));
+        assert_eq!(opens(1), (3, 3));
+        assert_eq!(opens(4), (2, 1));
+        super::MIN_PARALLEL_ROWS_OVERRIDE.with(|gate| gate.set(None));
+    }
+
+    /// A column read back from Arrow IPC beside a wide sibling column, so its
+    /// buffers slice a message body much larger than themselves.
+    fn read_back(column: ArrayRef) -> ArrayRef {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", column.data_type().clone(), true),
+            Field::new("wide", DataType::Utf8, true),
+        ]));
+        let wide: StringArray = (0..column.len()).map(|_| Some("w".repeat(1024))).collect();
+        let batch = RecordBatch::try_new(schema.clone(), vec![column, Arc::new(wide)]).unwrap();
+        let bytes = ipc_bytes(&[batch], &schema);
+        let mut reader = StreamReader::try_new(Cursor::new(bytes), None).unwrap();
+        reader.next().unwrap().unwrap().column(0).clone()
+    }
+
+    fn filtered(array: &ArrayRef, keep: &[bool]) -> ArrayRef {
+        arrow_select::filter::filter(array, &BooleanArray::from(keep.to_vec())).unwrap()
+    }
+
+    fn column_bytes(array: &ArrayRef) -> Vec<u8> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "c",
+            array.data_type().clone(),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![array.clone()]).unwrap();
+        ipc_bytes(&[batch], &schema)
+    }
+
+    #[test]
+    fn unshared_copies_buffers_sliced_from_the_decoded_batch() {
+        let views: StringViewArray = (0..200).map(|i| Some(long("view", i))).collect();
+        let mut keep = vec![false; 200];
+        keep[0] = true;
+        let view = filtered(&read_back(Arc::new(views)), &keep);
+        let owned = unshared(&view)
+            .unwrap()
+            .expect("a filtered view points into the body");
+        assert_eq!(column_bytes(&owned), column_bytes(&view));
+        let data = owned.to_data();
+        assert!(
+            data.buffers()
+                .iter()
+                .all(|b| b.capacity() <= 2 * b.len() + 64)
+        );
+
+        let mut list = ListBuilder::new(StringViewBuilder::new());
+        for i in 0..50 {
+            list.values().append_value(long("item", i));
+            list.append(true);
+        }
+        let mut keep = vec![false; 50];
+        keep[3] = true;
+        let nested = filtered(&read_back(Arc::new(list.finish())), &keep);
+        let owned = unshared(&nested)
+            .unwrap()
+            .expect("the list's view child is copied");
+        assert_eq!(column_bytes(&owned), column_bytes(&nested));
+
+        // Keeping every row returns the decoded array itself, validity included.
+        let ints = read_back(Arc::new(Int64Array::from(vec![Some(1), None, Some(3)])));
+        let all = filtered(&ints, &[true, true, true]);
+        let owned = unshared(&all)
+            .unwrap()
+            .expect("an unfiltered column is copied");
+        assert_eq!(column_bytes(&owned), column_bytes(&all));
+        assert!(
+            owned
+                .to_data()
+                .nulls()
+                .is_some_and(|n| n.buffer().capacity() < 128)
+        );
+    }
+
+    #[test]
+    fn owned_batch_copies_a_selection_of_at_most_half_its_source() {
+        let source = read_back(Arc::new(Int64Array::from((0..100).collect::<Vec<i64>>())));
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Int64, true)]));
+        // A slice shares the IPC message body, so a copy shows as new buffers.
+        let kept_shared = |rows: usize| {
+            let selection =
+                RecordBatch::try_new(schema.clone(), vec![source.slice(0, rows)]).unwrap();
+            let owned = super::owned_batch(selection.clone(), 100).unwrap();
+            owned
+                .column(0)
+                .to_data()
+                .ptr_eq(&selection.column(0).to_data())
+        };
+        assert!(!kept_shared(50));
+        assert!(kept_shared(51));
+    }
+
+    #[test]
+    fn unshared_leaves_owned_columns_and_dictionary_values_alone() {
+        let ints = read_back(Arc::new(Int64Array::from((0..100).collect::<Vec<i64>>())));
+        let mut keep = vec![false; 100];
+        keep[7] = true;
+        assert!(unshared(&filtered(&ints, &keep)).unwrap().is_none());
+        let names: Vec<String> = (0..100).map(|i| long("dict", i % 10)).collect();
+        let dict: DictionaryArray<Int32Type> = names.iter().map(|n| Some(n.as_str())).collect();
+        let dict = filtered(&read_back(Arc::new(dict)), &keep);
+        assert!(unshared(&dict).unwrap().is_none());
+    }
+
+    /// Asserts no buffer of `batch`'s columns is a slice of a much larger
+    /// allocation.
+    fn assert_owned(batch: &RecordBatch) {
+        for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+            for buffer in column.to_data().buffers() {
+                assert!(
+                    buffer.capacity() <= 2 * buffer.len() + 64,
+                    "{}: a {} byte buffer holds {} bytes",
+                    field.name(),
+                    buffer.len(),
+                    buffer.capacity()
+                );
+            }
+        }
+    }
+
+    /// [`view_keyed`]'s columns with every key in one IPC-read batch.
+    fn view_keyed_in_one_batch(keys: &[&str]) -> IpcInput {
+        let sides = view_keyed(keys, 0);
+        let batches: Vec<RecordBatch> = sides.open().unwrap().map(Result::unwrap).collect();
+        let one = arrow_select::concat::concat_batches(&sides.schema, &batches).unwrap();
+        IpcInput::new(&sides.schema, &[one])
+    }
+
+    /// A side keyed by a `Utf8View` column `k`, with a `Utf8View` value and a
+    /// wide filler column that makes each IPC message body far larger than the
+    /// selected rows.
+    fn view_keyed(keys: &[&str], shift: usize) -> IpcInput {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8View, true),
+            Field::new("v", DataType::Utf8View, true),
+            Field::new("wide", DataType::Utf8, true),
+        ]));
+        let batches: Vec<RecordBatch> = keys
+            .chunks(3)
+            .map(|chunk| {
+                let k: StringViewArray = chunk
+                    .iter()
+                    .map(|k| Some(format!("{k}{}", "-".repeat(20))))
+                    .collect();
+                let v: StringViewArray = chunk
+                    .iter()
+                    .map(|k| Some(format!("{k}{}", "=".repeat(20 + shift))))
+                    .collect();
+                let wide: StringArray = chunk.iter().map(|_| Some("w".repeat(4096))).collect();
+                let columns: Vec<ArrayRef> = vec![Arc::new(k), Arc::new(v), Arc::new(wide)];
+                RecordBatch::try_new(schema.clone(), columns).unwrap()
+            })
+            .collect();
+        IpcInput::new(&schema, &batches)
+    }
+
+    #[test]
+    fn materialized_rows_do_not_keep_their_input_batches_alive() {
+        let left = view_keyed(&["a", "b", "c", "d", "d", "e"], 0);
+        let right = view_keyed(&["b", "c", "f", "g", "g", "e"], 1);
+        super::MIN_PARALLEL_ROWS_OVERRIDE.with(|gate| gate.set(Some(0)));
+        for threads in [1, 4] {
+            let diff = super::diff_rows(
+                &left,
+                &right,
+                &left.schema,
+                &right.schema,
+                &["k".to_string()],
+                NonZeroUsize::new(threads).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                (diff.rows_removed.num_rows(), diff.rows_added.num_rows()),
+                (1, 1)
+            );
+            assert_eq!(diff.duplicate_keys.num_rows(), 2);
+            assert_owned(&diff.rows_removed);
+            assert_owned(&diff.rows_added);
+            assert_owned(&diff.duplicate_keys);
+        }
+        super::MIN_PARALLEL_ROWS_OVERRIDE.with(|gate| gate.set(None));
+    }
+
+    /// A right-side fuse over `index` with one spill partition per index
+    /// partition, spilling value column 1.
+    fn right_fuse<'a>(index: &'a KeyIndex, value_schema: &'a SchemaRef) -> super::RightFuse<'a> {
+        let partitions = index.parts.len();
+        super::RightFuse {
+            index,
+            key_columns: &[0],
+            value_columns: &[1],
+            value_schema,
+            spill: super::SpillSink::open(partitions, value_schema).unwrap(),
+            candidates: std::sync::Mutex::new(super::CandidateStore::default()),
+            absent: (0..partitions)
+                .map(|_| std::sync::Mutex::new(std::collections::HashMap::new()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn right_side_candidates_do_not_keep_their_input_batches_alive() {
+        let right = view_keyed(&["a", "b", "c"], 0);
+        let batch = right.open().unwrap().next().unwrap().unwrap();
+        let index = KeyIndex::build(vec![vec![(1, 1), (2, 2)]]).unwrap();
+        let value_schema = super::spill_schema(&right.schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        let pairs: Vec<(u128, u128, bool)> = (1..=3).map(|k| (k, k, false)).collect();
+        fuse.visit(0, &batch, &pairs).unwrap();
+        let store = fuse.candidates.into_inner().unwrap();
+        assert_eq!(store.live.len(), 1);
+        assert_eq!(store.live[0].full.num_rows(), 1);
+        assert_owned(&store.live[0].full);
+    }
+
+    #[test]
+    fn right_side_spills_only_the_first_row_of_a_changed_key() {
+        let right = view_keyed(&["a", "b", "c", "d", "e"], 0);
+        let mut batches = right.open().unwrap();
+        let (first, second) = (
+            batches.next().unwrap().unwrap(),
+            batches.next().unwrap().unwrap(),
+        );
+        let index = KeyIndex::build(vec![vec![(1, 10), (2, 20), (3, 30)]]).unwrap();
+        let value_schema = super::spill_schema(&right.schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        // Keys 2 and 3 differ from the left, but the batch repeats key 3, so
+        // only key 2 is spilled, and a later batch repeating key 2 spills
+        // nothing more; key 1, equal to the left, is never spilled.
+        fuse.visit(0, &first, &[(2, 21, false), (3, 31, false), (3, 32, false)])
+            .unwrap();
+        fuse.visit(3, &second, &[(2, 22, false), (1, 10, false)])
+            .unwrap();
+        // Key 1 repeats in a later batch with a differing row hash; its first
+        // row was unchanged, and a repeated key is a duplicate, so no spill.
+        fuse.visit(5, &second, &[(1, 11, false), (2, 23, false)])
+            .unwrap();
+        assert_eq!(fuse.spill.finish().unwrap().key_hashes, vec![vec![2]]);
+    }
+
+    /// Visits, at each `(position, key)`, a one-row `view_keyed` batch whose
+    /// key hash is 7, a key the (empty) left does not hold.
+    fn visit_absent_key(fuse: &super::RightFuse<'_>, rows: &[(u64, &str)]) {
+        let hashed: Vec<(u64, &str, u128)> = rows.iter().map(|&(at, key)| (at, key, 7)).collect();
+        visit_absent_keys(fuse, &hashed);
+    }
+
+    /// [`visit_absent_key`] with a key hash per row.
+    fn visit_absent_keys(fuse: &super::RightFuse<'_>, rows: &[(u64, &str, u128)]) {
+        for &(at, key, hash) in rows {
+            let batch = view_keyed(&[key], 0)
+                .open()
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            fuse.visit(at, &batch, &[(hash, 0, false)]).unwrap();
+        }
+    }
+
+    /// The kept candidates' positions and full-width row counts, by position.
+    fn kept(store: &super::CandidateStore) -> Vec<(u64, usize)> {
+        let mut kept: Vec<(u64, usize)> = store
+            .live
+            .iter()
+            .chain(&store.settled)
+            .map(|c| (c.at, c.full.num_rows()))
+            .collect();
+        kept.sort_unstable();
+        kept
+    }
+
+    #[test]
+    fn right_side_keeps_one_key_only_candidate_for_a_repeated_absent_key() {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        visit_absent_key(&fuse, &[(0, "x"), (1, "x")]);
+        assert_eq!(kept(&fuse.candidates.lock().unwrap()), vec![(0, 0)]);
+        let rows: Vec<(u64, &str)> = (2..10).map(|at| (at, "x")).collect();
+        visit_absent_key(&fuse, &rows);
+        let store = fuse.candidates.into_inner().unwrap();
+        assert_eq!((kept(&store), store.rows), (vec![(0, 0)], 0));
+        assert_eq!(store.settled[0].keys.num_columns(), 1);
+        let absent = fuse.absent[0].lock().unwrap();
+        assert_eq!((absent[&7].at, absent[&7].count), (0, 10));
+    }
+
+    #[test]
+    fn right_side_compacts_once_repeats_outnumber_half_the_kept_rows() {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
+        // Two kept keys and one repeat: one stale row against two kept rows
+        // leaves the store as it is.
+        let fuse = right_fuse(&index, &value_schema);
+        visit_absent_keys(&fuse, &[(0, "a", 1), (1, "b", 2), (2, "a", 1)]);
+        {
+            let store = fuse.candidates.lock().unwrap();
+            assert_eq!(
+                (kept(&store), store.rows, store.stale),
+                (vec![(0, 1), (1, 1)], 2, 1)
+            );
+        }
+        // A repeat that is also an earlier row supersedes the kept one: the
+        // compaction drops it, reduces the repeated key to its key columns, and
+        // keeps the unrepeated key's row at full width.
+        let fuse = right_fuse(&index, &value_schema);
+        visit_absent_keys(&fuse, &[(5, "a", 1), (3, "b", 2), (1, "b", 2)]);
+        let store = fuse.candidates.lock().unwrap();
+        assert_eq!(
+            (kept(&store), store.rows, store.stale),
+            (vec![(1, 0), (3, 0), (5, 1)], 1, 0)
+        );
+    }
+
+    #[test]
+    fn right_side_drops_repeated_rows_from_a_batch_that_also_keeps_a_new_key() {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        // Each batch keeps one key that never repeats (100+) next to a new key
+        // (1, 2, 3) the following batch repeats.
+        let batches: [(u64, &[&str], &[u128]); 3] = [
+            (0, &["a", "n"], &[1, 100]),
+            (2, &["b", "a", "m"], &[2, 1, 101]),
+            (5, &["c", "b", "o"], &[3, 2, 102]),
+        ];
+        for (at, keys, hashes) in batches {
+            let batch = view_keyed(keys, 0).open().unwrap().next().unwrap().unwrap();
+            let pairs: Vec<(u128, u128, bool)> = hashes.iter().map(|&h| (h, 0, false)).collect();
+            fuse.visit(at, &batch, &pairs).unwrap();
+        }
+        let mut store = fuse.candidates.lock().unwrap();
+        fuse.compact_if_stale(&mut store, 100).unwrap();
+        // Only the rows whose key has not repeated stay at full width.
+        assert_eq!(
+            (kept(&store), store.rows),
+            (vec![(0, 1), (2, 1), (5, 2)], 4)
+        );
+        let keys: Vec<usize> = store.live.iter().map(|c| c.keys.num_rows()).collect();
+        assert_eq!(keys, vec![2, 2, 2]);
+    }
+
+    #[test]
+    fn right_side_compaction_scans_rows_linearly_on_a_chain_of_repeats() {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        // Batch j holds a new key and a repeat of batch j - 1's new key.
+        let batches = 2_000u128;
+        let batch = view_keyed(&["a", "b"], 0)
+            .open()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        for j in 0..batches {
+            let pairs = [(1_000 + j, 0, false), (999 + j, 0, false)];
+            let at = u64::try_from(2 * j).unwrap();
+            fuse.visit(at, &batch, &pairs).unwrap();
+        }
+        let store = fuse.candidates.lock().unwrap();
+        assert!(store.scanned > 0 && store.visited > 0, "the chain compacts");
+        assert!(
+            store.visited <= 4 * 2_000,
+            "{} candidates visited for 2,000 batches",
+            store.visited
+        );
+        assert!(
+            store.scanned <= 4 * 2 * 2_000,
+            "{} rows scanned for 4,000 visited",
+            store.scanned
+        );
+    }
+
+    /// A batch of `rows` keys the left lacks, a second batch, then one
+    /// compaction after each group of `repeats` (the right repeating the first
+    /// keys in order); the first batch's candidate key columns.
+    fn compacted_after_repeats(rows: u128, repeats: &[u128]) -> RecordBatch {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let names: Vec<String> = (0..=rows).map(|i| format!("k{i}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let right = view_keyed_in_one_batch(&names);
+        let value_schema = super::spill_schema(&right.schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        let batch = right.open().unwrap().next().unwrap().unwrap();
+        let first = batch.slice(0, usize::try_from(rows).unwrap());
+        let pairs: Vec<(u128, u128, bool)> = (1..=rows).map(|k| (k, 0, false)).collect();
+        fuse.visit(0, &first, &pairs).unwrap();
+        let rows_u64 = u64::try_from(rows).unwrap();
+        fuse.visit(rows_u64, &batch.slice(0, 1), &[(1_000, 0, false)])
+            .unwrap();
+        let again = batch.slice(0, 1);
+        let mut key = 0;
+        for &group in repeats {
+            for _ in 0..group {
+                key += 1;
+                let at = rows_u64 + 1 + u64::try_from(key).unwrap();
+                fuse.visit(at, &again, &[(key, 0, false)]).unwrap();
+            }
+            let mut store = fuse.candidates.lock().unwrap();
+            fuse.compact_if_stale(&mut store, 100).unwrap();
+        }
+        let store = fuse.candidates.lock().unwrap();
+        store
+            .live
+            .iter()
+            .chain(&store.settled)
+            .find(|c| c.at == 0)
+            .unwrap()
+            .keys
+            .clone()
+    }
+
+    /// Whether a key batch's view data buffer is still a slice of its input batch.
+    fn shares_input(keys: &RecordBatch) -> bool {
+        let data = keys.column(0).to_data();
+        let buffer = &data.buffers()[1];
+        buffer.capacity() > 2 * buffer.len() + 64
+    }
+
+    #[test]
+    fn candidate_keys_are_copied_once_compaction_keeps_at_most_half_the_rows() {
+        // Full-width rows left after the repeats, of the candidate's before:
+        // 1 of 3 and 1 of 2 copy the keys out; 2 of 3 keeps them shared.
+        assert!(!shares_input(&compacted_after_repeats(3, &[2])));
+        assert!(!shares_input(&compacted_after_repeats(2, &[1])));
+        assert!(shares_input(&compacted_after_repeats(3, &[1])));
+        // 5 rows shrink to 3, then 2: the second compaction leaves at most half
+        // of the batch's rows, so it copies, though 2 is more than half of 3.
+        assert!(shares_input(&compacted_after_repeats(5, &[2])));
+        assert!(!shares_input(&compacted_after_repeats(5, &[2, 1])));
+    }
+
+    #[test]
+    fn right_side_keeps_a_candidate_until_its_key_repeats() {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let value_schema = super::spill_schema(&view_keyed(&["x"], 0).schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        visit_absent_key(&fuse, &[(5, "x")]);
+        let store = fuse.candidates.lock().unwrap();
+        assert_eq!(
+            (kept(&store), store.rows, store.stale),
+            (vec![(5, 1)], 1, 0)
+        );
+    }
+
+    #[test]
+    fn superseded_candidates_capture_their_key_s_first_row() {
+        let index = KeyIndex::build(vec![Vec::new()]).unwrap();
+        let right = view_keyed(&["x"], 0);
+        let value_schema = super::spill_schema(&right.schema, &[1]);
+        let fuse = right_fuse(&index, &value_schema);
+        // Later positions arrive first; each earlier one supersedes the last.
+        visit_absent_key(&fuse, &[(3, "d"), (2, "c"), (1, "b"), (0, "a")]);
+        let candidates = fuse.candidates.into_inner().unwrap().into_candidates();
+        assert!(candidates.iter().all(|c| c.full.num_rows() == 0));
+        assert!(candidates.iter().any(|c| c.at == 0));
+        let hasher = super::RowHasher::new().unwrap();
+        let key_only_schema = Arc::new(Schema::new(vec![right.schema.field(0).clone()]));
+        let columns = super::SideColumns {
+            key: vec![0],
+            value: vec![1, 2],
+        };
+        let key_side = super::SideColumns {
+            key: vec![0],
+            value: Vec::new(),
+        };
+        let ctx = super::Materialize {
+            columns: &columns,
+            key_names: &["k"],
+            hasher: &hasher,
+            key_only_schema: &key_only_schema,
+            key_output_types: &[DataType::Utf8View],
+        };
+        let key_ctx = super::Materialize {
+            columns: &key_side,
+            ..ctx
+        };
+        let mut pending = std::collections::HashSet::from([7u128]);
+        let (added, capture) = super::materialize_candidates(
+            candidates,
+            &key_ctx,
+            &right.schema,
+            &std::collections::HashSet::new(),
+            &mut pending,
+        )
+        .unwrap();
+        assert_eq!(added.num_rows(), 0);
+        assert_eq!(capture.order, vec![7]);
+        let captured = capture.key_batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .unwrap()
+            .value(0)
+            .to_string();
+        assert_eq!(captured, format!("a{}", "-".repeat(20)));
+    }
+
+    #[test]
+    fn push_filtered_drops_an_empty_selection() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2]))]).unwrap();
+        let mut out = Vec::new();
+        super::push_filtered(&batch, vec![false, false], &mut out).unwrap();
+        assert!(out.is_empty());
+        super::push_filtered(&batch, vec![false, true], &mut out).unwrap();
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn unshared_keeps_a_buffer_allocated_at_most_twice_its_length_plus_64() {
+        // 100 values (800 bytes) in an allocation of exactly 2 * 800 + 64 bytes.
+        let mut values: Vec<i64> = Vec::with_capacity(208);
+        values.extend(0..100);
+        let array: ArrayRef = Arc::new(Int64Array::from(values));
+        assert_eq!(array.to_data().buffers()[0].capacity(), 1664);
+        assert!(unshared(&array).unwrap().is_none());
+    }
+
+    #[test]
+    fn spill_partitions_flush_at_the_threshold_rows() {
+        super::SPILL_FLUSH_ROWS_OVERRIDE.with(|rows| rows.set(Some(2)));
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        let sink = super::SpillSink::open(2, &schema).unwrap();
+        super::SPILL_FLUSH_ROWS_OVERRIDE.with(|rows| rows.set(None));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
+        for _ in 0..3 {
+            // Key hashes 2 and 1 route one row to each of the two partitions.
+            let mut routed = Routed::group(2, &[true, true], |row| [2, 1][row]).unwrap();
+            routed.take_values(&batch, &[0], &schema).unwrap();
+            sink.write(&routed).unwrap();
+        }
+        let spill = sink.finish().unwrap();
+        for file in &spill.files {
+            let rows: Vec<usize> = super::read_partition_batches(file)
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .collect();
+            assert_eq!(rows, vec![2, 1]);
+        }
+    }
+
+    #[test]
+    fn key_index_directory_has_a_bit_per_doubling_of_eight_rows() {
+        let part = |rows: u128| (0..rows).map(|i| (i << 100, i)).collect::<Vec<_>>();
+        let index = KeyIndex::build(vec![part(3), part(800), part(1_000)]).unwrap();
+        assert_eq!(index.bits, vec![0, 6, 6]);
+    }
+
+    #[test]
+    fn hash_side_parallel_hands_each_batch_its_first_row_position() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch = |ids: Vec<i64>| {
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(ids))]).unwrap()
+        };
+        let prefix = vec![batch(vec![1, 2, 3])];
+        let rest = MemoryInput::new(schema.clone(), vec![batch(vec![4]), batch(vec![5, 6])]);
+        let hasher = super::RowHasher::new().unwrap();
+        let columns = super::SideColumns {
+            key: vec![0],
+            value: Vec::new(),
+        };
+        let config = super::HashConfig {
+            key_names: &["id"],
+            value_names: &[],
+            hasher: &hasher,
+            threads: 2,
+        };
+        let seen = std::sync::Mutex::new(Vec::new());
+        let hook = |at: u64, batch: &RecordBatch, _: &[(u128, u128, bool)]| {
+            seen.lock().unwrap().push((at, batch.num_rows()));
+            Ok(())
+        };
+        super::hash_side_parallel(
+            prefix,
+            rest.open().unwrap(),
+            &columns,
+            &config,
+            2,
+            &hook,
+            true,
+        )
+        .unwrap();
+        let mut seen = seen.into_inner().unwrap();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![(0, 3), (3, 1), (4, 2)]);
+    }
+
+    #[test]
+    fn hash_side_parallel_without_pairs_keeps_only_null_keys() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![Some(1), None]))],
+        )
+        .unwrap();
+        let input = MemoryInput::new(schema, vec![batch]);
+        let hasher = super::RowHasher::new().unwrap();
+        let columns = super::SideColumns {
+            key: vec![0],
+            value: Vec::new(),
+        };
+        let config = super::HashConfig {
+            key_names: &["id"],
+            value_names: &[],
+            hasher: &hasher,
+            threads: 2,
+        };
+        let side = super::hash_side_parallel(
+            Vec::new(),
+            input.open().unwrap(),
+            &columns,
+            &config,
+            2,
+            &|_, _, _| Ok(()),
+            false,
+        )
+        .unwrap();
+        assert!(side.parts.iter().all(Vec::is_empty));
+        assert_eq!(side.null_keys.len(), 1);
+    }
+
+    #[test]
+    fn key_index_tallies_each_row_like_a_naive_scan() {
+        let partitions = 3;
+        // Partition sizes up to a few hundred, so the directory runs with zero and
+        // with several bits.
+        let mut parts: Vec<Vec<(u128, u128)>> = vec![Vec::new(); partitions];
+        let key = |i: u128| (i + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835);
+        for i in 0..900u128 {
+            let k = key(i % 700);
+            parts[super::partition_of(k, partitions)].push((k, i));
+        }
+        let index = KeyIndex::build(parts).unwrap();
+        assert!(index.bits.iter().any(|&bits| bits > 0));
+        for i in 0..700u128 {
+            // Keys under 200 are on the left twice; the rest once, row hash `i`.
+            let row_hash = if i % 2 == 1 { i + 1 } else { i };
+            let changed = matches!(index.tally(key(i), row_hash), Tally::Changed { .. });
+            assert_eq!(changed, i >= 200 && i % 2 == 1, "key {i}");
+        }
+        for absent in [key(5_000), 0, u128::MAX] {
+            assert_eq!(index.tally(absent, 0), Tally::Absent);
+        }
+        let tallied: u64 = index
+            .counts
+            .iter()
+            .flatten()
+            .map(|count| count.load(std::sync::atomic::Ordering::Relaxed) & !super::ROW_DIFFERS)
+            .sum();
+        assert_eq!(tallied, 700);
+    }
+
+    fn sorted<T: Ord>(mut items: Vec<T>) -> Vec<T> {
+        items.sort();
+        items
+    }
+
+    proptest::proptest! {
+        // The tally-based classification of the parallel path equals the
+        // merge-join `classify` over the same rows, duplicates included.
+        #[test]
+        fn classify_indexed_matches_classify(
+            left in proptest::collection::vec((0u128..12, 0u128..3), 0..40usize),
+            right in proptest::collection::vec((0u128..12, 0u128..3), 0..40usize),
+            partitions in 1usize..5,
+        ) {
+            let mut parts = vec![Vec::new(); partitions];
+            for &(k, r) in &left {
+                parts[super::partition_of(k, partitions)].push((k, r));
+            }
+            let index = KeyIndex::build(parts).unwrap();
+            let absent: Vec<_> = (0..partitions)
+                .map(|_| std::sync::Mutex::new(std::collections::HashMap::new()))
+                .collect();
+            for (row, &(k, r)) in right.iter().enumerate() {
+                if index.tally(k, r) == Tally::Absent {
+                    let mut part = absent[super::partition_of(k, partitions)].lock().unwrap();
+                    part.entry(k)
+                        .or_insert(super::FirstRow { at: row as u64, count: 0 })
+                        .count += 1;
+                }
+            }
+            let indexed = super::classify_indexed(index, absent).unwrap();
+            let merged = super::classify(left, right);
+            proptest::prop_assert_eq!(&indexed.added, &merged.added);
+            proptest::prop_assert_eq!(&indexed.removed, &merged.removed);
+            proptest::prop_assert_eq!(&indexed.duplicates, &merged.duplicates);
+            proptest::prop_assert_eq!(sorted(indexed.changed), sorted(merged.changed));
+        }
+    }
+
+    #[test]
+    fn bucket_of_takes_the_top_bits() {
+        assert_eq!(bucket_of(u128::MAX, 0), 0);
+        assert_eq!(bucket_of(u128::MAX, 3), 7);
+        assert_eq!(bucket_of(1 << 125, 3), 1);
+        assert_eq!(bucket_of((1 << 125) - 1, 3), 0);
+    }
+
+    #[test]
+    fn routed_groups_rows_by_partition_keeping_row_order_and_ranks() {
+        let selected = [
+            true, false, true, false, false, true, false, true, false, true,
+        ];
+        let hashes = [4, 0, 3, 0, 0, 7, 0, 6, 0, 1];
+        let routed = Routed::group(3, &selected, |row| hashes[row]).unwrap();
+        assert_eq!(routed.bounds, vec![0, 2, 5, 5]);
+        assert_eq!(routed.rows, vec![2, 7, 0, 5, 9]);
+        assert_eq!(routed.ranks, vec![1, 3, 0, 2, 4]);
+        assert_eq!(routed.key_hashes, vec![3, 6, 4, 7, 1]);
+    }
+
+    #[test]
+    fn ordered_driver_surfaces_a_prep_error() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batches: Vec<RecordBatch> = (0..20)
+            .map(|i| {
+                RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![i]))])
+                    .unwrap()
+            })
+            .collect();
+        let input = MemoryInput::new(schema, batches);
+        let hasher = super::RowHasher::new().unwrap();
+        let result = super::for_each_batch_key_hashed_parallel(
+            &input,
+            &[0],
+            &["id"],
+            &hasher,
+            4,
+            |_: &RecordBatch, _: &[u128]| -> Result<(), TableDiffError> {
+                Err(TableDiffError::EmptyKey)
+            },
+            |_: &RecordBatch, _: &[u128], (): ()| Ok(()),
+        );
+        assert!(matches!(result, Err(TableDiffError::EmptyKey)));
+    }
+
+    #[test]
+    fn hash_side_parallel_surfaces_a_hook_panic() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batches: Vec<RecordBatch> = (0..20)
+            .map(|i| {
+                RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![i]))])
+                    .unwrap()
+            })
+            .collect();
+        let input = MemoryInput::new(schema, batches);
+        let hasher = super::RowHasher::new().unwrap();
+        let columns = super::SideColumns {
+            key: vec![0],
+            value: Vec::new(),
+        };
+        let config = super::HashConfig {
+            key_names: &["id"],
+            value_names: &[],
+            hasher: &hasher,
+            threads: 4,
+        };
+        let result = super::hash_side_parallel(
+            Vec::new(),
+            input.open().unwrap(),
+            &columns,
+            &config,
+            4,
+            &|_, _, _| -> Result<(), TableDiffError> { panic!("hook boom") },
+            true,
+        );
+        assert!(matches!(result, Err(TableDiffError::WorkerPanicked { .. })));
     }
 }
