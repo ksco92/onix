@@ -3657,3 +3657,42 @@ fn a_resolved_token_counts_the_distance_of_its_value() {
         1
     );
 }
+
+#[test]
+fn a_cycle_token_against_a_dict_reports_nothing() {
+    let report = crate::diff::diff_with_options(
+        &carr(vec![cv(&json!({"k": 1}))]),
+        &carr(vec![ccycle()]),
+        &DiffOptions::default(),
+    )
+    .unwrap();
+    assert!(report.is_empty());
+}
+
+#[test]
+fn two_tokens_for_one_object_are_equal_without_comparing_their_resolved_value() {
+    let mut resolved = crate::diff::Resolved::new();
+    resolved.insert(
+        Box::from("1"),
+        CValue::Number(crate::value::Number::from_f64(f64::NAN)),
+    );
+    let holding = |b: i64| {
+        crate::value::Builder::new().object(vec![("token", copaque("1")), ("b", cv(&json!(b)))])
+    };
+    let report = crate::diff::diff_with_resolved(
+        &holding(1),
+        &holding(2),
+        &DiffOptions::default(),
+        &resolved,
+    )
+    .unwrap();
+    assert_eq!(report.finding_count(), 1);
+}
+
+#[test]
+fn a_token_and_an_object_whose_class_identity_matches_it_are_not_the_same_instance() {
+    let object = crate::test_support::ccustom_id("A", "1", json!({}).as_object().unwrap());
+    let report =
+        crate::diff::diff_with_options(&copaque("1"), &object, &DiffOptions::default()).unwrap();
+    assert_eq!(report.finding_count(), 1);
+}
