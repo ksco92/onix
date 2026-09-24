@@ -1141,7 +1141,7 @@ IGNORE_ORDER_CASES: dict[str, tuple[TaggedValue, TaggedValue, dict[str, bool]]] 
     # tuple inherits the digest of an earlier Python-equal one in the same
     # run: `(1,)`, `(1.0,)` and `(True,)` are one key to a Python dict. These
     # pin that collision (and its absence for an unhashable tuple) — see
-    # crates/onix-core/src/ignore_order/memo.rs's "Tuple digests" section.
+    # docs/design/ignore-order.md's "Distance memo" section.
     "ignore_order_tuple_digest_collides_int_float": (
         [(1,)],
         [(1.0,)],

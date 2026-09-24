@@ -1,82 +1,22 @@
 //! A compact, JSON-shaped value model — a memory-frugal stand-in for
 //! [`serde_json::Value`] with byte-identical rendering.
 //!
-//! [`serde_json::Value`] is convenient but heavy on the shapes this engine
-//! diffs most: its object type is a `BTreeMap<String, Value>` whose leaf
-//! node is a fixed ~640-byte, 11-slot allocation regardless of how few
-//! entries it holds, so a tree dominated by small maps (`{"tag": "..."}`)
-//! spends most of its footprint on empty slots, and repeats every key
-//! `String` once per occurrence. [`Value`] replaces both costs:
-//!
-//! * **Objects** are an exactly-sized, key-sorted `Box<[(ObjectKey, Value)]>`
-//!   — one heap block holding precisely the entries present, no spare slots.
-//!   Sorted by key means lookups are a binary search and iteration is in the
-//!   same order [`serde_json`]'s `BTreeMap` produces for a `str`-only
-//!   object, so anything rendered from a [`Value`] stays byte-identical. See
+//! * **Objects** are an exactly-sized, key-sorted `Box<[(ObjectKey, Value)]>`,
+//!   one heap block per object with no spare slots, iterating in the same
+//!   order [`serde_json`]'s `BTreeMap` produces for a `str`-only object. See
 //!   [`ObjectKey`] for the (additive) non-`str` key case.
-//! * **`str` keys** are interned within one conversion/parse session (see
-//!   `Interner`): the handful of distinct keys a real payload repeats
-//!   thousands of times collapse to one `Arc<str>` each, shared by cheap
-//!   refcount bumps.
-//! * **Numbers** preserve [`serde_json`]'s exact three-way `i64`/`u64`/`f64`
-//!   distinction (see [`Number`]), which is load-bearing for byte-compatible
-//!   output: `1` and `1.0` must render differently, and a `u64` above
-//!   [`i64::MAX`] must survive as an integer. A Python `int` beyond that
-//!   range keeps its exact value in a fourth, arbitrary-precision arm.
+//! * **`str` keys** are interned within one conversion/parse session: the
+//!   handful of distinct keys a real payload repeats collapse to one
+//!   `Arc<str>` each, shared by cheap refcount bumps.
+//! * **Numbers** preserve [`serde_json`]'s exact `i64`/`u64`/`f64`
+//!   distinction (see [`Number`]), plus a fourth, arbitrary-precision arm
+//!   for a Python `int` outside `i64::MIN..=u64::MAX`.
+//! * **Conversions** in both directions ([`From`]`<`[`serde_json::Value`]`>`
+//!   and [`Value::to_serde_json`]) and a direct streaming [`Deserialize`]
+//!   (no transient [`serde_json::Value`] tree) let this type sit at the
+//!   parse boundary; the diff engine consumes it directly.
 //!
-//! Conversions in both directions ([`From`]`<`[`serde_json::Value`]`>` and
-//! [`Value::to_serde_json`]) and a direct streaming
-//! [`Deserialize`] (no transient [`serde_json::Value`] tree) let this type
-//! sit at the parse boundary; the diff engine consumes it directly. See the
-//! crate root's architecture map for how each caller produces a `Value`;
-//! [`From`] is the path for one that already holds a [`serde_json::Value`].
-//!
-//! # Stack safety
-//!
-//! [`Value`] nests through `Box<[Value]>` (both [`Value::Array`] and
-//! [`Value::Tuple`]), through [`SetItems`] (both [`Value::Set`] and
-//! [`Value::FrozenSet`]) and through [`Object`]'s entries, so a naive derived `Drop` would
-//! recurse natively — an uncatchable process abort on adversarially deep
-//! input, the same latent sink [`serde_json::Value`]'s derived `Drop` has.
-//! This type instead implements an **iterative `Drop`** (see the `impl Drop`
-//! below) that hoists children onto a heap work-stack, so teardown uses
-//! `O(1)` native stack regardless of nesting depth — strictly safer than
-//! [`serde_json::Value`], not merely equal. Construction paths
-//! ([`From`]/[`Value::to_serde_json`]) remain ordinary recursion, matching
-//! [`serde_json`]'s own posture at those bounded API-boundary calls; the
-//! streaming [`Deserialize`] path is bounded by
-//! [`serde_json`]'s own parser recursion limit.
-//!
-//! Structural equality ([`PartialEq`]) is likewise iterative (an explicit
-//! work-stack, the same posture as `Drop`), so deep comparison — which the
-//! engine migration will run on attacker-shaped input — cannot overflow the
-//! native stack either. So is the canonical set ordering `canonical_cmp`
-//! that [`SetItems::new`] sorts with, and for a sharper reason: a set is
-//! built during *conversion*, on whatever thread the caller is on, before
-//! any depth guard has seen the value and with no sized worker underneath
-//! it — a recursive comparator there was an uncatchable abort on a set of
-//! two deep members. The derived [`Debug`] and [`Clone`] are deliberately
-//! left recursive: `Debug` is debug/test-only, and the diff engine only ever
-//! clones a value that has already passed its combined path-plus-value depth
-//! guard (`crate::diff`'s internal `check_value_depth`), so clone recursion
-//! is bounded by `max_depth` — the same guarded posture `serde_json::Value`'s
-//! own recursive `Clone` had before the engine migrated onto this type. A
-//! caller cloning an untrusted value outside that guard should reject
-//! over-deep input up front with [`crate::exceeds_depth`].
-//!
-//! # Subclasses
-//!
-//! Every [`Value`] variant that can carry a subclass name wraps its payload
-//! in [`Typed`], except [`SetItems`]/[`Object`], which carry an equivalent
-//! `type_name` field instead — see `same_class`'s doc (`crate::diff::dispatch`)
-//! for the exact list, so this one stays in sync with it. Either way, a
-//! Python subclass instance keeps the source class name it needs to report
-//! a `type_changes` finding, while comparing, hashing, and rendering
-//! exactly like its base type everywhere else — every matching identity in
-//! the crate (`SetItems` dedup, `crate::lcs`'s scalar-list matching,
-//! `crate::ignore_order`'s hashing) is unaffected, since none of them read
-//! the class name. `diff_at` (`crate::diff`) is the one place that does,
-//! checking it before recursing into any of those variants.
+//! See `docs/design/value-model.md` for stack safety and subclass identity.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -1008,7 +948,7 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
                 // By instant, not by field: this backs the engine's own
                 // "equal inputs report nothing" fast path, and `DeepDiff`
                 // compares two datetimes by instant with a naive value read
-                // as UTC (see `crate::datetime`).
+                // as UTC (see `docs/design/value-model.md`).
                 if x.instant() != y.instant() {
                     return false;
                 }
@@ -1022,7 +962,7 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
                 // `times_equal`, not the struct's own derived `==`: real
                 // `_diff_time` never normalizes, so this is the exact rule a
                 // naive value can never equal an aware one (see
-                // `crate::datetime`'s module doc).
+                // `docs/design/value-model.md`).
                 if !times_equal(x.value(), y.value()) {
                     return false;
                 }

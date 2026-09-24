@@ -605,8 +605,8 @@ fn time_scalar_keys_follow_pythons_own_equality_not_the_engines() {
     // Two aware values at one instant are Python-equal...
     assert_eq!(utc, plus_two);
     // ...but a naive value never equals an aware one -- unlike a datetime,
-    // no "read naive as UTC" rule applies here (see `crate::datetime`'s
-    // module doc).
+    // no "read naive as UTC" rule applies here (see
+    // `docs/design/value-model.md`).
     assert_ne!(naive, utc);
 }
 

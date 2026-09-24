@@ -78,8 +78,8 @@ pub(crate) fn object_diff(
     // cloned into a finding: cloning first and checking after would hand
     // an attacker-controlled, arbitrarily deep `a`/`b` straight to the
     // compact `Value`'s natively recursive (but depth-guarded) `Clone` with
-    // no bound in place yet — see `check_map_depth`'s own doc and the
-    // `value` module's "Stack safety" note on why `Clone` stays recursive.
+    // no bound in place yet — see `check_map_depth`'s own doc and
+    // `docs/design/value-model.md` on why `Clone` stays recursive.
     if crate::ignore_order::is_below_threshold_to_diff_deeper(a, b) {
         check_map_depth(path, a, depth, opts.max_depth)?;
         check_map_depth(path, b, depth, opts.max_depth)?;

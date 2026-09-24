@@ -125,7 +125,7 @@ pub(crate) enum ScalarKey {
     Date(i64),
     /// A `time`, keyed by whether it is aware and by
     /// [`crate::datetime::Time::sort_instant`] — real `time.__eq__`'s exact
-    /// rule (see `crate::datetime`'s module doc): a naive value is never
+    /// rule (see `docs/design/value-model.md`): a naive value is never
     /// equal to an aware one, and two aware values compare by an
     /// offset-adjusted instant, at full microsecond precision (unlike the
     /// truncated `ignore_order` hash rule — this key backs `difflib`

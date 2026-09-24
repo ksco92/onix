@@ -1,89 +1,9 @@
-//! The two calendar values [`crate::Value`] carries beyond JSON's own
-//! shapes: [`Date`] (a Python `datetime.date`) and [`DateTime`] (a Python
-//! `datetime.datetime`, naive or with a fixed UTC offset).
+//! Calendar types beyond JSON's own shapes; see `docs/design/value-model.md`.
 //!
-//! # Representation
-//!
-//! Both hold plain wall-clock fields — a [`Date`] is a year/month/day, a
-//! [`DateTime`] adds hour/minute/second/microsecond plus an optional UTC
-//! offset in whole seconds (`None` is Python's *naive* datetime). Nothing
-//! here needs a calendar crate: the only arithmetic the engine performs is
-//! civil-date to day-number conversion in both directions
-//! ([`Date::ordinal`] and [`Date::from_ordinal`], Howard Hinnant's
-//! `days_from_civil`/`civil_from_days`), which is a few lines of integer
-//! math and no lookup tables.
-//!
-//! # Comparison: by instant, naive as UTC
-//!
-//! `DeepDiff` compares two datetimes by *instant*, after normalizing each
-//! through `helper.py::datetime_normalize`: an aware value is converted with
-//! `astimezone(timezone.utc)`, a naive one is *stamped* with UTC
-//! (`replace(tzinfo=utc)`) rather than interpreted in local time. So
-//! `datetime(2024, 1, 1, 10)` and `datetime(2024, 1, 1, 10, tzinfo=utc)` are
-//! one instant, and `10:00+00:00` equals `12:00+02:00`. [`DateTime::instant`]
-//! is that rule as one integer, and [`DateTime::to_utc`] is
-//! `datetime_normalize` itself.
-//!
-//! Two [`Date`]s compare by value, and a [`Date`] never equals a
-//! [`DateTime`] — matching Python, where `date(2024, 1, 1) ==
-//! datetime(2024, 1, 1)` is `False` in both directions
-//! (`datetime.__eq__` returns `False`, not `NotImplemented`, for a plain
-//! `date`, and its subclass position gives it first refusal).
-//!
-//! # Rendering
-//!
-//! [`Date::isoformat`] and [`DateTime::isoformat`] reproduce Python's own
-//! `isoformat()` byte for byte: microseconds only when non-zero, an offset
-//! suffix only when the value is aware, and that suffix widening from
-//! `+HH:MM` to `+HH:MM:SS` when the offset is not a whole number of minutes.
-//! `DeepDiff`'s `to_json()` renders a datetime through exactly this method
-//! (`serialization.py`'s `JSON_CONVERTOR` maps `datetime.datetime` to
-//! `lambda x: x.isoformat()`); it has no entry for `date` at all and raises
-//! `TypeError` on one, which this crate renders as `YYYY-MM-DD` instead — a
-//! documented superset, see `tests/golden/README.md`.
-//!
-//! # `Time` and `TimeDelta`
-//!
-//! [`Time`] is a `datetime.time`: the same wall-clock/offset fields as
-//! [`DateTime`] minus the calendar date. Unlike [`DateTime`], Python never
-//! reads a naive `time` as if it were UTC: `_diff_time` (the function real
-//! `DeepDiff` uses for `time`, `date` *and* `timedelta` alike) is a plain
-//! `!=`, with no normalization step, so [`Time`]'s own equality
-//! (`times_equal`) is exactly that plain-`!=` rule — a naive value is
-//! never equal to an aware one, and two aware values compare by an
-//! offset-adjusted micros-of-day, both confirmed against real Python
-//! (`time.__eq__`'s documented "if both are aware... adjusted by
-//! subtracting their UTC offsets" rule, live-verified including negative
-//! and sub-minute offsets, with no modular wraparound past midnight).
-//! [`Time::isoformat`] reproduces `time.isoformat()` byte for byte, which is
-//! the same `HH:MM:SS[.ffffff][±offset]` shape [`DateTime::isoformat`]'s
-//! time portion uses (always-present seconds included) — the two share the
-//! `render_time_fields` helper. `DeepDiff`'s `to_json()` has no
-//! `datetime.time` entry either and raises the same way it does for `date`;
-//! this crate again renders the same superset, `time.isoformat()`'s bytes.
-//!
-//! [`TimeDelta`] is a `datetime.timedelta`: an exact signed duration, stored
-//! as Python's own normalized `(days, seconds, microseconds)` triple
-//! (`total_seconds`/`subsecond_microseconds` — a flattened total-microsecond
-//! count would overflow `i64` at Python's own extreme `days=999_999_999`,
-//! see [`TimeDelta`]'s own doc); a `timedelta` always compares and hashes by
-//! this exact value — no analogous naive/aware split. [`TimeDelta::python_str`]
-//! reproduces `str(timedelta)` (`"[-]D day(s), H:MM:SS[.ffffff]"`, the day
-//! prefix present only when non-zero); `to_json()` again has no entry for
-//! `timedelta` and raises, and this crate renders the same `str()` bytes as
-//! its documented superset — there being no `timedelta.isoformat()` to
-//! mirror instead, `str()` is the natural, deterministic choice.
-//!
-//! Both hash under `ignore_order` the way real `DeepHash` does, which for
-//! `time` is a genuine, confirmed quirk: `_prep_datetime` reduces a `time`
-//! to `(hour*60+minute)*60+second` — dropping *both* the microsecond and any
-//! offset entirely — before hashing, so two times equal only in whole
-//! seconds-of-day hash-match under `ignore_order` even when plain `==` would
-//! call them different (live-confirmed: a microsecond-only or an
-//! offset-only difference both hash-match). `timedelta` hashes exactly (no
-//! truncation) via `_prep_number`. See `crate::ignore_order::hash`'s
-//! `hash_seconds_of_day` for the `time` quirk and `tests/golden/README.md`
-//! for the citations.
+//! - [`Date`]: a Python `datetime.date`.
+//! - [`DateTime`]: a Python `datetime.datetime`, naive or fixed-offset.
+//! - [`Time`]: a Python `datetime.time`.
+//! - [`TimeDelta`]: a Python `datetime.timedelta`.
 
 use std::fmt::Write as _;
 

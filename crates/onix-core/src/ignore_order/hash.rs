@@ -227,8 +227,8 @@ pub(crate) enum ItemKey {
     /// A `time`, keyed by [`crate::datetime::Time::hash_seconds_of_day`] —
     /// `DeepHash._prep_datetime` reduces a `time` to `time_to_seconds`
     /// before formatting, dropping the microsecond *and* any offset
-    /// entirely (a genuine, confirmed quirk — see `crate::datetime`'s
-    /// module doc), so two times equal only in whole seconds-of-day
+    /// entirely (see `docs/design/value-model.md`), so two times
+    /// equal only in whole seconds-of-day
     /// hash-match here even when ordinary `==` would call them different.
     Time(i64),
     /// A `timedelta`, keyed by the value itself — `_prep_number` hashes a
@@ -242,7 +242,8 @@ pub(crate) enum ItemKey {
     /// holding the same items never hash-match — see this type's own doc.
     /// A *hashable* tuple can also inherit an earlier Python-equal tuple's
     /// key outright, which is `DeepHash`'s own cache behavior: see
-    /// [`item_key`] and `super::memo`'s "Tuple digests" section.
+    /// [`item_key`] and `docs/design/ignore-order.md`'s "Distance memo"
+    /// section.
     ///
     /// The entries sit behind an [`Rc`] so that a nested tuple's key is
     /// *shared* between the parent key that contains it and the digest cache
@@ -339,7 +340,7 @@ pub(crate) enum PyHashPart {
 /// order-insensitive *content* digest [`item_key`] computes).
 ///
 /// This is the key `DeepHash`'s shared `hashes` dict is looked up by (see
-/// `super::memo`'s "Tuple digests" section), so it mirrors Python exactly:
+/// `docs/design/ignore-order.md`'s "Distance memo" section), so it mirrors Python exactly:
 /// scalars go through the crate's one definition of Python scalar equality
 /// ([`python_scalar_key`], which makes `1`, `1.0` and `True` one key), and a
 /// list or dict is unhashable, which also makes any tuple containing one
@@ -514,9 +515,10 @@ pub(crate) fn set_difference<'a>(
 /// and stores it. Because both members of a comparison are hashed against one
 /// shared cache (`diff.py::_create_hashtable`), a node can take the content
 /// path at its root and still hit the cache at a child. `onix` reproduces this
-/// with two interning tables per run (see `super::memo`'s "Set-member digests"
-/// section): a Python-equality one ([`MemberHashKey`] → ([`NodeId`], [`RepId`]),
-/// collapsing `1`/`1.0`) and a content one ([`MemberContent`] → [`RepId`],
+/// with two interning tables per run (see `docs/design/ignore-order.md`'s
+/// "Distance memo" section): a Python-equality one
+/// ([`MemberHashKey`] → ([`NodeId`], [`RepId`]), collapsing `1`/`1.0`)
+/// and a content one ([`MemberContent`] → [`RepId`],
 /// normalising a `datetime` to its instant). A hashable container's `RepId` is
 /// the cache's on a hit, its content's on a miss; a parent's Python-equality key
 /// names a nested container by its `NodeId` (Python class) while its content and
@@ -766,9 +768,8 @@ fn number_key(n: &crate::value::Number) -> ItemKey {
 /// Computes `value`'s [`ItemKey`], consulting `memo` for every hashable
 /// tuple it walks — a tuple that is Python-equal to one hashed earlier in
 /// this diff inherits that tuple's key, exactly as `DeepHash`'s shared cache
-/// makes it inherit its digest (see `super::memo`'s "Tuple digests" section
-/// for the mechanism, the source citations, and why the ordering is
-/// observable).
+/// makes it inherit its digest (see `docs/design/ignore-order.md`'s
+/// "Distance memo" section for the mechanism).
 ///
 /// Recurses natively — safe only because
 /// every caller in this module first proves `value`'s nesting is within the

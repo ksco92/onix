@@ -93,9 +93,9 @@
 //!
 //! This conversion checks the *exact* type first, falling through to a
 //! second, non-exact `isinstance`-style cast that additionally records
-//! `type(obj).__name__` for a subclass — see [`onix_core::value`]'s
-//! "Subclasses" section for how that name flows through the rest of the
-//! value model and diff engine. A
+//! `type(obj).__name__` for a subclass — see
+//! `docs/design/value-model.md`'s "Subclasses" section for how that name
+//! flows through the rest of the value model and diff engine. A
 //! `namedtuple` is accepted as an ordinary `tuple` subclass and diffed
 //! **positionally** (`root[0][1]`), not by field (`root[0].y`) the way real
 //! `DeepDiff` does — a documented divergence (see `tests/golden/README.md`),
@@ -179,7 +179,7 @@
 //! input is nested. The same has to hold for anything `onix_core` runs while
 //! a value is being built — a set sorts its members into canonical order at
 //! construction, and that comparison is iterative for exactly this reason
-//! (see `onix_core::value`'s "Stack safety" section). Because every step of
+//! (see `docs/design/value-model.md`'s "Stack safety" section). Because every step of
 //! the build is iterative and the compact [`onix_core::Value`]'s own `Drop`
 //! is iterative too, conversion — and the teardown of a partially built tree
 //! on any error path — is stack-safe on *any* thread at *any* depth, without

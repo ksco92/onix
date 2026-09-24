@@ -71,8 +71,7 @@ pub(crate) fn diff_at(
         (Value::Time(old), Value::Time(new)) => {
             if same_class(a, b) {
                 // Plain `_diff_time` equality — no normalization step,
-                // unlike `datetime_diff` (see `crate::datetime`'s module
-                // doc).
+                // unlike `datetime_diff` (see `docs/design/value-model.md`).
                 scalar_diff(
                     path,
                     crate::datetime::times_equal(old.value(), new.value()),
@@ -168,8 +167,8 @@ fn object_pair_diff(
 /// "equal inputs of any depth return an empty report" fast path.
 ///
 /// Delegates to [`Value`]'s own [`PartialEq`], which is iterative (an
-/// explicit heap work-stack, no native recursion — see the `value` module's
-/// "Stack safety" doc) and whose semantics are exactly this engine's: an int
+/// explicit heap work-stack, no native recursion — see
+/// `docs/design/value-model.md`) and whose semantics are exactly this engine's: an int
 /// and a float are never equal, ints compare by value, floats by exact
 /// IEEE-754 `==`, objects by key set plus per-key values, arrays by length
 /// plus per-index values. Because every value the engine sees comes from
@@ -233,7 +232,7 @@ pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
 /// compact `Value`'s natively recursive (depth-guarded) `Clone`, or to
 /// [`crate::report::Report::to_json_value`]'s recursive render, never
 /// happens. (The compact `Value`'s own `Drop` is iterative, so teardown is
-/// safe regardless — see the `value` module's "Stack safety" note.)
+/// safe regardless — see `docs/design/value-model.md`.)
 ///
 /// `depth` is how deep the *path* to this finding already is (the same
 /// convention as [`diff_at`]'s own `depth`: root `0`, one more per dict-key
