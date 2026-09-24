@@ -584,6 +584,7 @@ struct ClassAttribute(Py<PyAny>);
 
 /// How many class-attribute conversions may nest inside one another on the
 /// native stack before a further one becomes an opaque token.
+// ponytail: fixed nesting bound, raise it if a real shadowed default nests deeper.
 const MAX_CLASS_ATTRIBUTE_NESTING: usize = 16;
 
 /// The class attribute `value` at `depth`, converted by its own walk and
