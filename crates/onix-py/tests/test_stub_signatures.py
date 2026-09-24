@@ -52,18 +52,6 @@ def _runtime_params(func: object) -> list[tuple[str, bool, bool]]:
     return result
 
 
-def _stub_module() -> ast.Module:
-    return ast.parse(STUB_PATH.read_text())
-
-
-def _stub_functions(module: ast.Module) -> dict[str, ast.FunctionDef]:
-    return {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
-
-
-def _stub_classes(module: ast.Module) -> dict[str, ast.ClassDef]:
-    return {node.name: node for node in module.body if isinstance(node, ast.ClassDef)}
-
-
 def _is_property(node: ast.FunctionDef) -> bool:
     return any(isinstance(d, ast.Name) and d.id == "property" for d in node.decorator_list)
 
@@ -72,19 +60,14 @@ def _class_members(node: ast.ClassDef) -> dict[str, ast.FunctionDef]:
     return {n.name: n for n in node.body if isinstance(n, ast.FunctionDef)}
 
 
-def _stub_constants(module: ast.Module) -> set[str]:
-    """Names of module-level annotated assignments (``NAME: type``) in the stub."""
-    return {
-        node.target.id
-        for node in module.body
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-    }
+MODULE = ast.parse(STUB_PATH.read_text())
+FUNCTIONS = {node.name: node for node in MODULE.body if isinstance(node, ast.FunctionDef)}
+CLASSES = {node.name: node for node in MODULE.body if isinstance(node, ast.ClassDef)}
 
-
-MODULE = _stub_module()
-FUNCTIONS = _stub_functions(MODULE)
-CLASSES = _stub_classes(MODULE)
-CONSTANTS = _stub_constants(MODULE)
+# Module-level annotated assignments (``NAME: type``) in the stub.
+CONSTANTS = {
+    node.target.id for node in MODULE.body if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+}
 
 
 def test_stub_declares_the_whole_public_surface() -> None:

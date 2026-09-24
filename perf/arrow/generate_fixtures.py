@@ -402,33 +402,6 @@ def _build_added_chunk(start_id: int, count: int, rng: random.Random) -> pa.Reco
 # Top-level generation + manifest
 
 
-def _schema_a() -> pa.Schema:
-    """:return: `a.parquet`'s schema."""
-    return pa.schema(
-        [
-            ("id", pa.int64()),
-            ("ts", pa.timestamp("us", tz="UTC")),
-            ("category", pa.string()),
-            ("amount", pa.decimal128(18, 4)),
-            ("payload", pa.string()),
-        ],
-    )
-
-
-def _schema_b() -> pa.Schema:
-    """:return: `b.parquet`'s schema."""
-    return pa.schema(
-        [
-            ("id", pa.int64()),
-            ("ts", pa.timestamp("ms", tz="UTC")),
-            ("category", pa.dictionary(pa.int32(), pa.string())),
-            ("amount", pa.decimal128(18, 4)),
-            ("payload", pa.string()),
-            (ADDED_COLUMN, pa.string()),
-        ],
-    )
-
-
 def _stream_fixture_pair(
     rows: int,
     row_group_size: int,
@@ -499,8 +472,29 @@ def generate_narrow(rows: int, seed: int, out_dir: Path) -> dict[str, object]:
         )
         return batch_a, batch_b
 
+    schema_a = pa.schema(
+        [
+            ("id", pa.int64()),
+            ("ts", pa.timestamp("us", tz="UTC")),
+            ("category", pa.string()),
+            ("amount", pa.decimal128(18, 4)),
+            ("payload", pa.string()),
+        ],
+    )
+
+    schema_b = pa.schema(
+        [
+            ("id", pa.int64()),
+            ("ts", pa.timestamp("ms", tz="UTC")),
+            ("category", pa.dictionary(pa.int32(), pa.string())),
+            ("amount", pa.decimal128(18, 4)),
+            ("payload", pa.string()),
+            (ADDED_COLUMN, pa.string()),
+        ],
+    )
+
     _stream_fixture_pair(
-        rows, ROW_GROUP_SIZE, added_n, out_dir, _schema_a(), _schema_b(),
+        rows, ROW_GROUP_SIZE, added_n, out_dir, schema_a, schema_b,
         build_chunk_pair, lambda start_id, count: _build_added_chunk(start_id, count, rng),
     )
 
