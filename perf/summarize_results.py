@@ -463,8 +463,7 @@ vs. `DeepDiff(..., ignore_order=True)` comparison, not a deepdiff-only
 baseline, and it clears the exact same precheck as every other fixture.
 It's also an all-numeric flat list, so it never reaches the one case
 `KNOWN_DIVERGENT_CASES` holds in `crates/onix-core/tests/golden.rs`
-(`path_rendering_collision`, an adversarial-key path collision);
-no special-casing was needed here.
+(`path_rendering_collision`, an adversarial-key path collision).
 
 `api_payloads` wraps each scalar in its `tags`/`metadata.flags` lists in a one-key dict; see `build_api_payloads`.
 """
@@ -764,8 +763,8 @@ def render_threshold_summary(report: Report) -> str:
     )
 
     lines.append("")
-    verdict = "All thresholds met" if majority_meet_threshold and api_strictly_better and not any_slower else "Thresholds not met"
-    lines.append(f"### Result: **{verdict}**")
+    result = "All thresholds met" if majority_meet_threshold and api_strictly_better and not any_slower else "Thresholds not met"
+    lines.append(f"### Result: **{result}**")
     lines.append("")
     lines.append(
         "CLI figures exclude Python-object conversion, which "

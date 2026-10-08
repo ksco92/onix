@@ -76,8 +76,7 @@ vs. `DeepDiff(..., ignore_order=True)` comparison, not a deepdiff-only
 baseline, and it clears the exact same precheck as every other fixture.
 It's also an all-numeric flat list, so it never reaches the one case
 `KNOWN_DIVERGENT_CASES` holds in `crates/onix-core/tests/golden.rs`
-(`path_rendering_collision`, an adversarial-key path collision);
-no special-casing was needed here.
+(`path_rendering_collision`, an adversarial-key path collision).
 
 `api_payloads` wraps each scalar in its `tags`/`metadata.flags` lists in a one-key dict; see `build_api_payloads`.
 
