@@ -123,7 +123,6 @@ proptest! {
         prop_assert_eq!(report, serde_json::json!({}));
     }
 
-    /// Always returns valid JSON (an empty object at minimum).
     #[test]
     fn two_independent_lists_never_panic_under_ignore_order(
         a in proptest::collection::vec(arb_json_value(), 0..10),
