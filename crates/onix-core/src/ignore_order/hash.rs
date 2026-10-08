@@ -57,7 +57,8 @@ impl Hash for DistKey {
 
 /// Hashes a value consistently with its structural `PartialEq` (equal values hash equal) for
 /// [`DistKey`] (issue #31). Iterative; nesting is user-controlled up to `max_depth`, so a
-/// recursive hasher would overflow the native stack.
+/// recursive hasher would overflow the native stack. Per-lookup cost:
+/// [`super::memo::IgnoreOrderMemo`]'s doc.
 fn hash_value<H: Hasher>(root: &Value, state: &mut H) {
     let mut stack: Vec<&Value> = vec![root];
     while let Some(value) = stack.pop() {
@@ -105,9 +106,8 @@ fn hash_value<H: Hasher>(root: &Value, state: &mut H) {
 /// A canonical hash-equivalence key for one value under `ignore_order=True`, matching
 /// `DeepHash`'s item matching, not [`crate::lcs::all_basic_scalars`]'s:
 ///
-/// - Numbers are type-tagged: `1`, `1.0` and `true` are three keys.
-/// - A nested list's key is order- and count-insensitive (`DeepHash`'s defaults), so `[[1, 2]]`
-///   and `[[2, 1]]` match.
+/// - Numbers are type-tagged.
+/// - A nested list's key is order- and count-insensitive (`DeepHash`'s defaults).
 /// - A nested dict's key sorts by key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ItemKey {
@@ -118,7 +118,7 @@ pub(crate) enum ItemKey {
     Int(i128),
     /// An integer beyond `i128`, boxed so this arm does not widen the enum.
     BigInt(Box<BigInt>),
-    /// A float by [`deephash_float_bits`]; `5.0` never collides with `Int(5)`.
+    /// A float by [`deephash_float_bits`].
     Float(u64),
     /// WTF-8 bytes, so a lone surrogate keeps a distinct key.
     Str(Vec<u8>),
@@ -594,7 +594,7 @@ fn tuple_keyed(items: &[Value], memo: &IgnoreOrderMemo) -> (ItemKey, Option<PyHa
 // ---------------------------------------------------------------------
 
 /// One list's items hashed via [`item_key`] and reduced to first-occurrence distinct entries, as
-/// `DeepDiff`'s `_create_hashtable` does; no `report_repetition=False` path reads another index.
+/// `DeepDiff`'s `_create_hashtable` does.
 pub(crate) struct HashedList<'a> {
     /// Distinct keys in first-occurrence order, shared by [`Rc`] with [`Self::info`].
     pub(crate) distinct_order: Vec<Rc<ItemKey>>,

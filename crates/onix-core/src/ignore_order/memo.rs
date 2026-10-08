@@ -15,9 +15,7 @@ use super::hash::{
     DistKey, ItemKey, MemberContent, MemberHashKey, NodeId, PyHashKey, RepId, TupleId,
 };
 
-/// A `(removed, added)` container-pair cache key, each side a value's
-/// exact structural identity (not the order/repetition-insensitive
-/// `ItemKey`).
+/// A `(removed, added)` container-pair cache key; see [`DistKey`].
 type DistanceKey = (DistKey, DistKey);
 
 /// The per-diff caches described in `docs/design/ignore-order.md`'s
