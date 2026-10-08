@@ -15,7 +15,7 @@ tests/golden/<case_name>/
 ├── expected.json  # DeepDiff(t1, t2, verbose_level=2, **kwargs) rendered
 │                  # through golden_tags.canonical_report (see "JSON
 │                  # supersets"), re-dumped with sort_keys=True
-└── options.json   # {"ignore_order": bool}: onix's DiffOptions for the case;
+└── options.json   # {"ignore_order": bool}: DiffOptions for the case;
                    # kwargs above mirrors it (currently the only option
                    # this corpus varies)
 ```
