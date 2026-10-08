@@ -1,4 +1,5 @@
-//! Tests for `Date`/`DateTime`; expected literals come from `CPython`, not this module's arithmetic.
+//! Tests for `Date`/`DateTime`; expected literals come from `CPython`, not this module's
+//! arithmetic.
 
 use super::{Date, DateTime, Time, TimeDelta, times_equal};
 
@@ -88,7 +89,8 @@ fn date_from_ordinal_inverts_ordinal_across_the_python_range() {
 
 #[test]
 fn date_from_ordinal_inverts_every_ordinal_in_the_python_range() {
-    // Exhaustive: every era position, including the one day in 400 years the `/146_096` term is non-zero.
+    // Exhaustive: every era position, including the one day in 400 years the
+    // `/146_096` term is non-zero.
     for ordinal in 1_i64..=3_652_059 {
         assert_eq!(
             Date::from_ordinal(ordinal).expect("in range").ordinal(),
