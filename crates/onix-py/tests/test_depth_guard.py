@@ -557,8 +557,8 @@ def _nested_json_array(depth: int, leaf: int) -> str:
 
 
 def test_diff_json_moderately_deep_input_raises_max_depth_error() -> None:
-    """A JSON array past a small max_depth but under `serde_json`'s 128-level parser
-    limit parses, then raises MaxDepthError from the diff.
+    """A JSON array past a small max_depth but under `serde_json`'s parser limit
+    (127 nested arrays) parses, then raises MaxDepthError from the diff.
     """
     a = _nested_json_array(50, leaf=1)
     b = _nested_json_array(50, leaf=2)
@@ -567,13 +567,15 @@ def test_diff_json_moderately_deep_input_raises_max_depth_error() -> None:
         diff_json(a, b, max_depth=10)
 
 
-def test_diff_json_past_parser_recursion_limit_raises_value_error() -> None:
-    """A JSON array nested past `serde_json`'s 128-level parser limit raises ValueError."""
-    a = _nested_json_array(200, leaf=1)
-    b = _nested_json_array(200, leaf=2)
+def test_diff_json_127_nested_arrays_parse() -> None:
+    """127 nested arrays, the deepest `serde_json` accepts, diff without error."""
+    assert diff_json(_nested_json_array(127, leaf=1), _nested_json_array(127, leaf=1)) == "{}"
 
-    with pytest.raises(ValueError):
-        diff_json(a, b)
+
+def test_diff_json_128_nested_arrays_raise_value_error() -> None:
+    """128 nested arrays exceed `serde_json`'s parser recursion limit."""
+    with pytest.raises(ValueError, match="recursion limit exceeded"):
+        diff_json(_nested_json_array(128, leaf=1), _nested_json_array(128, leaf=1))
 
 
 def test_diff_json_reference_parses_with_standard_json_module() -> None:
