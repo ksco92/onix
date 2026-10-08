@@ -2,7 +2,7 @@
 
 onix is the diff engine behind the `deepdiff-rs` Python package and the `onix`
 CLI (see the [README](README.md) for what it does and how to use it). This
-guide is for working on onix itself: building from source, the quality gates,
+guide is for working on onix itself: building from source, the quality checks,
 the compatibility corpus, benchmarking, mutation testing, and publishing.
 
 Issues and pull requests are welcome. To report a DeepDiff divergence, open an
@@ -24,7 +24,7 @@ command from the repository root.
    (Rust 1.98.0 with `clippy`, `rustfmt`, and `llvm-tools-preview`); rustup
    installs it automatically the first time you run `cargo` in this repo.
 
-2. Install the gate tooling that `make check` needs:
+2. Install the tooling that `make check` needs:
 
    ```sh
    brew install cargo-llvm-cov cargo-deny   # macOS

@@ -50,7 +50,7 @@ bench:
 	perf/run_bench.sh
 
 # The pytest suite for crates/onix-py. Not part of `check`: it needs a Python venv (uv)
-# and a release build of the extension module, which the Rust-only gate does not set up.
+# and a release build of the extension module, which the Rust-only check does not set up.
 python-test:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not installed: see https://docs.astral.sh/uv/"; exit 1; }
 	@command -v maturin >/dev/null 2>&1 || { echo "maturin not installed: uv tool install maturin"; exit 1; }

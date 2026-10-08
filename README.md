@@ -260,7 +260,7 @@ perf/              # cross-language benchmark harness and RESULTS.md
 
 ## Contributing
 
-Issues and pull requests are welcome. Open an issue to report a bug, a DeepDiff divergence (include both inputs and the report each engine produces), or a question. Building from source, the quality gates, the golden corpus, benchmarking, mutation testing, and publishing are all in [CONTRIBUTING.md](CONTRIBUTING.md).
+Issues and pull requests are welcome. Open an issue to report a bug, a DeepDiff divergence (include both inputs and the report each engine produces), or a question. Building from source, the quality checks, the golden corpus, benchmarking, mutation testing, and publishing are all in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
