@@ -7,46 +7,25 @@ use crate::path::{PathSegment, render_path};
 /// Errors that can occur while diffing two values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// Diffing `a`/`b` needs more native recursion than the shared `max_depth` budget allows —
-    /// the traversal itself, or a found value's nesting combined with its path depth —
-    /// replacing an uncatchable stack overflow on adversarially deep input with a recoverable
-    /// error. See `docs/design/depth-budget.md`.
+    /// Diffing needs more native recursion than the shared `max_depth` budget allows.
+    /// See `docs/design/depth-budget.md`.
     MaxDepthExceeded {
-        /// The DeepDiff-style path (e.g. `"root['a']['b']"`) at which the
-        /// bound was exceeded — either where the traversal gave up, or
-        /// where an over-budget finding's value would have been recorded.
+        /// The DeepDiff-style path (e.g. `"root['a']['b']"`) at which the bound was exceeded.
         path: String,
         /// The configured maximum depth that was exceeded.
         max_depth: usize,
     },
-    /// Comparing two datetimes needs both normalized to UTC (see
-    /// [`crate::datetime`]), and for one of this pair the normalized value
-    /// falls outside the `1..=9999` year range a Python `datetime` can hold
-    /// — at most one day past either end, reachable only from an extreme
-    /// aware value such as `9999-12-31T23:00-01:00`.
-    ///
-    /// Real `DeepDiff` raises `OverflowError: date value out of range` on
-    /// exactly this pair, so there is no report to produce.
-    ///
-    /// On the ordered path only `_diff_datetime` normalizes, so both tools
-    /// raise only when two datetimes are actually compared. Under
-    /// `ignore_order`, `deephash.py::_prep_datetime` normalizes *every*
-    /// datetime it hashes, so real `DeepDiff` raises for such a value even
-    /// when it is merely added, removed, or shuffled, where onix hashes by
-    /// instant and reports it raw — a documented divergence under the
-    /// project's compatibility policy (a crash is not a semantic to
-    /// reproduce), not a gap.
+    /// A compared datetime pair normalizes to UTC outside the `1..=9999` year range. See
+    /// `tests/golden/README.md`, "Known `DeepDiff` quirks", "Datetime outside year `1..=9999`".
     DateTimeOutOfRange {
-        /// The DeepDiff-style path (e.g. `"root['a']"`) of the pair that
-        /// could not be normalized.
+        /// The DeepDiff-style path (e.g. `"root['a']"`) of the pair.
         path: String,
     },
 }
 
 impl Error {
-    /// This error with its path, rendered relative to a sub-diff's root,
-    /// re-rooted under `prefix`. Cold and never inlined, so the recursive
-    /// distance frames that call it reserve no stack for the rendering.
+    /// This error with its sub-diff-relative path re-rooted under `prefix`. Cold and never
+    /// inlined, so the recursive distance frames reserve no stack for the rendering.
     #[cold]
     #[inline(never)]
     #[allow(

@@ -11,8 +11,7 @@ use std::fmt::Write as _;
 const MICROS_PER_SECOND: i64 = 1_000_000;
 /// Seconds in one day.
 pub(crate) const SECONDS_PER_DAY: i64 = 86_400;
-/// Days from `0001-01-01` to the Unix epoch — the shift between Python's
-/// `date.toordinal()` origin and this module's civil-date arithmetic.
+/// Days from `0001-01-01` to the Unix epoch.
 const DAYS_FROM_YEAR_ONE_TO_EPOCH: i64 = 719_162;
 /// The first year Python's `date`/`datetime` can represent.
 const MIN_YEAR: i32 = 1;
@@ -23,9 +22,7 @@ const MIN_ORDINAL: i64 = 1;
 /// `Date::new(MAX_YEAR, 12, 31).ordinal()`, i.e. Python's `date.max.toordinal()`.
 const MAX_ORDINAL: i64 = 3_652_059;
 
-/// A Python `datetime.date`: a proleptic-Gregorian year, month and day.
-///
-/// # Examples
+/// A Python `datetime.date`: a proleptic-Gregorian year in `1..=9999`, month and day.
 ///
 /// ```
 /// use onix_core::datetime::Date;
@@ -42,15 +39,7 @@ pub struct Date {
 }
 
 impl Date {
-    /// Builds a date, returning `None` unless `year`/`month`/`day` are a real
-    /// calendar date (leap years included) inside Python's own year range,
-    /// `1..=9999`. An out-of-range month has no days at all
-    /// (`days_in_month` returns `0` for one), so the `day` bound rejects it
-    /// without a separate month check.
-    ///
-    /// Enforcing the year range here is what lets every other method on this
-    /// type be total: the ordinal arithmetic stays far inside [`i64`], and
-    /// the field widths in [`Date::from_ordinal`] are guaranteed.
+    /// Builds a date, or `None` unless the fields are a real calendar date with year `1..=9999`.
     #[must_use]
     pub fn new(year: i32, month: u8, day: u8) -> Option<Self> {
         ((MIN_YEAR..=MAX_YEAR).contains(&year) && day >= 1 && day <= days_in_month(year, month))
@@ -75,17 +64,13 @@ impl Date {
         self.day
     }
 
-    /// Days since `0001-01-01`, counting that day as `1` — Python's
-    /// `date.toordinal()`, which is what `DeepDiff` measures a date-pair
-    /// distance with (`distance.py::_get_date_distance`).
+    /// Days since `0001-01-01`, counting that day as `1`: Python's `date.toordinal()`.
     #[must_use]
     pub fn ordinal(self) -> i64 {
         days_from_civil(self.year, self.month, self.day) + DAYS_FROM_YEAR_ONE_TO_EPOCH + 1
     }
 
-    /// The inverse of [`Date::ordinal`], or `None` for an ordinal outside
-    /// the representable range (`1..=3_652_059`, Python's
-    /// `date.min`/`date.max`).
+    /// The inverse of [`Date::ordinal`], or `None` outside `1..=3_652_059`.
     #[must_use]
     pub fn from_ordinal(ordinal: i64) -> Option<Self> {
         if !(MIN_ORDINAL..=MAX_ORDINAL).contains(&ordinal) {
@@ -102,24 +87,16 @@ impl Date {
         format!("{:04}-{:02}-{:02}", self.year, self.month, self.day)
     }
 
-    /// Python's `str(date)`, which for a date is exactly its
-    /// [`isoformat`](Date::isoformat) — the two differ only for a datetime.
-    /// See [`DateTime::python_str`] for why `str()` is worth a method of its
-    /// own at all.
+    /// Python's `str(date)`, identical to [`Date::isoformat`].
     #[must_use]
     pub fn python_str(self) -> String {
         self.isoformat()
     }
 }
 
-/// A Python `datetime.datetime`: a [`Date`] plus a wall-clock time to
-/// microsecond precision, and an optional fixed UTC offset in whole seconds
-/// (`None` is a *naive* datetime).
-///
-/// See `docs/design/value-model.md`'s "Calendar types" section for the
-/// instant-comparison rule and the exact `isoformat()` reproduction.
-///
-/// # Examples
+/// A Python `datetime.datetime`: a [`Date`], a wall-clock time to the microsecond and an
+/// optional fixed UTC offset in whole seconds (`None` is naive). Comparison rule:
+/// `docs/design/value-model.md`, "Calendar types".
 ///
 /// ```
 /// use onix_core::datetime::{Date, DateTime};
@@ -143,15 +120,12 @@ pub struct DateTime {
     utc_offset_seconds: Option<i32>,
 }
 
-/// The exclusive bound Python puts on a `timezone` offset: strictly less
-/// than one day, in either direction.
+/// The exclusive bound on a `timezone` offset, in either direction.
 const SECONDS_PER_DAY_U32: u32 = 86_400;
 
 impl DateTime {
-    /// Builds a datetime, returning `None` if the time fields are out of
-    /// range (`hour <= 23`, `minute`/`second <= 59`, `microsecond <=
-    /// 999_999`) or the offset is not strictly within ±1 day — the same
-    /// bounds Python's own `datetime`/`timezone` constructors enforce.
+    /// Builds a datetime, or `None` if a time field is out of range or the offset is not
+    /// strictly within ±1 day.
     #[must_use]
     pub fn new(
         date: Date,
@@ -213,13 +187,7 @@ impl DateTime {
         self.utc_offset_seconds
     }
 
-    /// This value's instant, as microseconds from `1970-01-01T00:00:00Z`,
-    /// with a naive value counted as UTC — `DeepDiff`'s comparison key (see
-    /// `docs/design/value-model.md`'s "Calendar types" section).
-    ///
-    /// Exact across the whole Python-representable range: year `9999`'s
-    /// microsecond count is under `2.6e17`, three orders of magnitude inside
-    /// [`i64`].
+    /// Microseconds from `1970-01-01T00:00:00Z`, a naive value counted as UTC.
     #[must_use]
     pub fn instant(self) -> i64 {
         let seconds_of_day =
@@ -231,26 +199,8 @@ impl DateTime {
             - DAYS_FROM_YEAR_ONE_TO_EPOCH * SECONDS_PER_DAY * MICROS_PER_SECOND
     }
 
-    /// This value normalized to UTC — `helper.py::datetime_normalize` with
-    /// the default `default_timezone=timezone.utc`, i.e. the values
-    /// `DeepDiff` puts in a `values_changed` entry for a datetime pair.
-    ///
-    /// The result is always aware with offset `0`, so two normalized values
-    /// are equal exactly when the originals are the same instant.
-    ///
-    /// Returns `None` for the one case that has no answer: an extreme aware
-    /// value whose UTC wall clock falls outside Python's own `1..=9999` year
-    /// range, by at most one day (`9999-12-31T23:00-01:00`, say). Real
-    /// `astimezone(timezone.utc)` raises `OverflowError: date value out of
-    /// range` there, and so `DeepDiff` raises rather than reporting anything.
-    ///
-    /// *When* each tool reaches that point differs, verified live. On the
-    /// ordered path only `_diff_datetime` normalizes, so both raise only when
-    /// two datetimes are actually compared. Under `ignore_order`,
-    /// `deephash.py::_prep_datetime` normalizes every datetime it hashes, so
-    /// real `DeepDiff` raises for such a value even when it is merely added,
-    /// removed, or shuffled, where onix hashes by instant (see
-    /// `crate::ignore_order`) and reports it raw.
+    /// This value normalized to UTC (aware, offset `0`), or `None` when that leaves the year
+    /// range `1..=9999`; see `tests/golden/README.md`, "Datetime outside year `1..=9999`".
     #[must_use]
     pub fn to_utc(self) -> Option<Self> {
         let instant =
@@ -274,33 +224,20 @@ impl DateTime {
         })
     }
 
-    /// Python's `datetime.isoformat()`: `YYYY-MM-DDTHH:MM:SS`, plus
-    /// `.ffffff` when the microsecond is non-zero and an offset suffix when
-    /// the value is aware — see `docs/design/value-model.md`'s "Calendar
-    /// types" section.
+    /// Python's `datetime.isoformat()`; see `docs/design/value-model.md`, "Calendar types".
     #[must_use]
     pub fn isoformat(self) -> String {
         self.rendered('T')
     }
 
-    /// Python's `str(datetime)`, which is `isoformat(sep=" ")` — the same
-    /// rendering with a space where the `T` goes.
-    ///
-    /// This is the one place the `str()`-versus-`isoformat()` distinction is
-    /// explained, for both calendar types. They are kept apart because they
-    /// have different jobs: `isoformat()` is what `to_json()` prints, while
-    /// `str()` is what `DeepDiff` reproduces when it tests whether a
-    /// `type_changes` pair's new value is reachable by coercion
-    /// (`model.py`'s `new_t1 = new_type(change.t1)`), and what `DeepHash`
-    /// embeds in a `frozenset` member's digest.
+    /// Python's `str(datetime)`: `isoformat(sep=" ")`. It differs from `isoformat()`
+    /// because `DeepDiff` coerces and hashes through `str()`.
     #[must_use]
     pub fn python_str(self) -> String {
         self.rendered(' ')
     }
 
-    /// The shared rendering behind [`isoformat`](DateTime::isoformat) and
-    /// [`python_str`](DateTime::python_str), which differ only in the
-    /// separator between the date and the time.
+    /// The rendering behind `isoformat` and `python_str`, which differ in `separator`.
     fn rendered(self, separator: char) -> String {
         let mut rendered = format!("{}{separator}", self.date.isoformat());
         render_time_fields(
@@ -315,13 +252,7 @@ impl DateTime {
     }
 }
 
-/// Writes `HH:MM:SS[.ffffff][±offset]` into `out` — the time-of-day
-/// rendering [`DateTime::rendered`] and [`Time::isoformat`] share, since a
-/// `time.isoformat()` is byte-for-byte the same shape as a
-/// `datetime.isoformat()`'s own time portion (seconds always present,
-/// microseconds only when non-zero, and the offset suffix widening from
-/// `+HH:MM` to `+HH:MM:SS` when it is not a whole number of minutes) —
-/// confirmed against real Python for both types.
+/// Writes `HH:MM:SS[.ffffff][±HH:MM[:SS]]` into `out`, shared by [`DateTime`] and [`Time`].
 fn render_time_fields(
     out: &mut String,
     hour: u8,
@@ -351,12 +282,9 @@ fn render_time_fields(
     }
 }
 
-/// A Python `datetime.time`: a wall-clock time to microsecond precision plus
-/// an optional fixed UTC offset in whole seconds (`None` is naive) — see
-/// `docs/design/value-model.md`'s "Calendar types" section for how its
-/// equality and hashing genuinely diverge from [`DateTime`]'s.
-///
-/// # Examples
+/// A Python `datetime.time`: a wall-clock time to the microsecond and an optional fixed UTC
+/// offset in whole seconds (`None` is naive). Equality and hashing differ from [`DateTime`]'s:
+/// `docs/design/value-model.md`, "Calendar types".
 ///
 /// ```
 /// use onix_core::datetime::Time;
@@ -377,8 +305,7 @@ pub struct Time {
 }
 
 impl Time {
-    /// Builds a time, returning `None` if any field is out of range — the
-    /// same bounds [`DateTime::new`] enforces on its own time fields.
+    /// Builds a time, or `None` under the bounds [`DateTime::new`] enforces.
     #[must_use]
     pub fn new(
         hour: u8,
@@ -432,32 +359,22 @@ impl Time {
         self.utc_offset_seconds
     }
 
-    /// Wall-clock microseconds since midnight, ignoring any offset — the
-    /// quantity two *naive* values compare by, and the base
-    /// [`Time::adjusted_micros_of_day`] adjusts for an aware one.
+    /// Wall-clock microseconds since midnight, ignoring any offset.
     fn wall_micros_of_day(self) -> i64 {
         (i64::from(self.hour) * 3600 + i64::from(self.minute) * 60 + i64::from(self.second))
             * MICROS_PER_SECOND
             + i64::from(self.microsecond)
     }
 
-    /// [`Time::wall_micros_of_day`] shifted by this value's own UTC offset (a
-    /// naive value's offset is `0`) — the quantity [`times_equal`] compares
-    /// two *aware* values by, deliberately not reduced modulo a day (real
-    /// Python does not wrap either; a large offset difference simply never
-    /// compares equal, live-confirmed).
+    /// [`Time::wall_micros_of_day`] shifted by the UTC offset (`0` if naive), not reduced
+    /// modulo a day.
     fn adjusted_micros_of_day(self) -> i64 {
         self.wall_micros_of_day()
             - i64::from(self.utc_offset_seconds.unwrap_or(0)) * MICROS_PER_SECOND
     }
 
-    /// The quantity two same-awareness values order by in the crate's
-    /// canonical set order (`value::canonical_cmp`): [`Time::wall_micros_of_day`]
-    /// for a naive value, [`Time::adjusted_micros_of_day`] for an aware one —
-    /// i.e. exactly the quantity [`times_equal`] compares by within one
-    /// awareness bucket, so two values with equal `sort_instant`s (and equal
-    /// awareness, and equal raw offset) are exactly the values `times_equal`
-    /// calls equal.
+    /// The quantity [`times_equal`] compares by within one awareness bucket, which
+    /// `value::canonical_cmp` orders by.
     #[must_use]
     pub(crate) fn sort_instant(self) -> i64 {
         if self.utc_offset_seconds.is_some() {
@@ -467,19 +384,14 @@ impl Time {
         }
     }
 
-    /// The whole seconds-of-day `(hour*60+minute)*60+second`, dropping the
-    /// microsecond and any offset entirely — real `DeepHash`'s own
-    /// `time_to_seconds`, the quantity a `time` hashes and is ranked by
-    /// under `ignore_order` (see `docs/design/value-model.md`'s "Calendar
-    /// types" section and `crate::ignore_order::hash`).
+    /// Whole seconds since midnight, dropping the microsecond and the offset: `DeepHash`'s
+    /// `time_to_seconds`, which `ignore_order` hashes a `time` by.
     #[must_use]
     pub fn hash_seconds_of_day(self) -> i64 {
         (i64::from(self.hour) * 60 + i64::from(self.minute)) * 60 + i64::from(self.second)
     }
 
-    /// Python's `time.isoformat()`, which is also `str(time)` — the same
-    /// `render_time_fields` rendering [`DateTime::isoformat`]'s time portion
-    /// shares (see `docs/design/value-model.md`'s "Calendar types" section).
+    /// Python's `time.isoformat()`, which is also `str(time)`.
     #[must_use]
     pub fn isoformat(self) -> String {
         let mut rendered = String::new();
@@ -494,23 +406,16 @@ impl Time {
         rendered
     }
 
-    /// Python's `str(time)`, identical to [`Time::isoformat`] — kept as its
-    /// own method for symmetry with [`Date::python_str`]/
-    /// [`DateTime::python_str`], the call sites that need "the `str()` form"
-    /// by name rather than "the `isoformat()` form".
+    /// Python's `str(time)`, identical to [`Time::isoformat`].
     #[must_use]
     pub fn python_str(self) -> String {
         self.isoformat()
     }
 }
 
-/// `time.__eq__`'s exact rule (see `docs/design/value-model.md`'s
-/// "Calendar types" section): a
-/// naive value is never equal to an aware one; two naive values compare by
-/// wall-clock fields; two aware values compare by their offset-adjusted
-/// micros-of-day. This is the *only* equality [`Time`] has — unlike
-/// [`DateTime`], nothing here treats a naive value as if it carried an
-/// implicit UTC offset, because real `_diff_time` never normalizes at all.
+/// `time.__eq__`: a naive value never equals an aware one, naive values compare by wall clock
+/// and aware ones by offset-adjusted micros-of-day. Unlike [`DateTime`], a naive value is never
+/// read as UTC.
 #[must_use]
 pub(crate) fn times_equal(a: Time, b: Time) -> bool {
     match (a.utc_offset_seconds, b.utc_offset_seconds) {
@@ -520,20 +425,9 @@ pub(crate) fn times_equal(a: Time, b: Time) -> bool {
     }
 }
 
-/// A Python `datetime.timedelta`: an exact signed duration, stored as
-/// [`TimeDelta::new`]'s `(days, seconds, microseconds)` triple already
-/// combined into `total_seconds` (`days*86_400 + seconds`, always exactly
-/// representable — Python's own extreme `days=±999_999_999` keeps this far
-/// inside [`i64`], where the *microsecond* count of the same extreme does
-/// not: `total_seconds` avoids ever forming that overflowing product) plus
-/// the separate non-negative `subsecond_microseconds` field. This is exactly
-/// Python's own internal normalized form (`timedelta.days`/`.seconds`/
-/// `.microseconds`, `.seconds` and `.microseconds` both folded to be
-/// non-negative, every sign living in `days`/`total_seconds`), so both `==`
-/// and `total_seconds()` read it directly with no re-derivation (see
-/// `docs/design/value-model.md`'s "Calendar types" section).
-///
-/// # Examples
+/// A Python `datetime.timedelta` in Python's normalized form, `days*86_400 + seconds` plus a
+/// non-negative microsecond part, within `timedelta.min..=timedelta.max`; see
+/// `docs/design/value-model.md`, "Calendar types".
 ///
 /// ```
 /// use onix_core::datetime::TimeDelta;
@@ -543,33 +437,20 @@ pub(crate) fn times_equal(a: Time, b: Time) -> bool {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TimeDelta {
-    /// `days*86_400 + seconds` (Python's own `.days`/`.seconds`, combined) —
-    /// ordering/equality by `(total_seconds, subsecond_microseconds)` is
-    /// exactly Python's own `(days, seconds, microseconds)` lexicographic
-    /// comparison, since `total_seconds` alone already carries the same
-    /// information as `(days, seconds)` together.
+    /// `days*86_400 + seconds`; the derived ordering matches Python's.
     total_seconds: i64,
-    /// Python's `timedelta.microseconds`, always `0..=999_999` regardless of
-    /// `total_seconds`'s sign.
+    /// Python's `timedelta.microseconds`, `0..=999_999`.
     subsecond_microseconds: u32,
 }
 
-/// Python's `timedelta.min` is `timedelta(days=-999_999_999)`.
+/// `timedelta.min`, in days.
 const TIMEDELTA_MIN_DAYS: i64 = -999_999_999;
-/// Python's `timedelta.max` is `timedelta(days=999_999_999, hours=23,
-/// minutes=59, seconds=59, microseconds=999_999)`.
+/// `timedelta.max`, in days.
 const TIMEDELTA_MAX_DAYS: i64 = 999_999_999;
 
 impl TimeDelta {
-    /// Builds a duration from Python's own already-normalized
-    /// `(days, seconds, microseconds)` triple — exactly what reading a real
-    /// `timedelta` object's `.days`/`.seconds`/`.microseconds` attributes
-    /// gives, so a caller never has to normalize a raw, possibly negative or
-    /// out-of-component-range combination itself.
-    ///
-    /// Returns `None` if `seconds`/`microseconds` are outside their
-    /// documented `0..86_400`/`0..1_000_000` component ranges, or the
-    /// resulting duration falls outside Python's own
+    /// Builds a duration from a normalized `(days, seconds, microseconds)` triple, or `None`
+    /// if `seconds` or `microseconds` leave `0..86_400` or `0..1_000_000` or the result leaves
     /// `timedelta.min..=timedelta.max`.
     #[must_use]
     pub fn new(days: i64, seconds: i64, microseconds: i64) -> Option<Self> {
@@ -624,14 +505,8 @@ impl TimeDelta {
             + f64::from(self.subsecond_microseconds) / MICROS_PER_SECOND as f64
     }
 
-    /// Python's `str(timedelta)`: `"[-]D day(s), H:MM:SS[.ffffff]"`, the day
-    /// prefix present only when non-zero (singular "day" at magnitude `1`,
-    /// "days" otherwise, sign included), the hour unpadded, and the
-    /// microsecond suffix only when non-zero — verified against real Python
-    /// across zero, negative, sub-day and multi-day durations. There is no
-    /// `timedelta.isoformat()` to mirror for `to_json()`, so this is the
-    /// chosen documented superset (see `docs/design/value-model.md`'s
-    /// "Calendar types" section).
+    /// Python's `str(timedelta)`: `"[-]D day(s), H:MM:SS[.ffffff]"`. `to_json()` renders this,
+    /// as `timedelta` has no `isoformat()`.
     #[must_use]
     pub fn python_str(self) -> String {
         let (days, seconds, microseconds) = (self.days(), self.seconds(), self.microseconds());
@@ -658,16 +533,12 @@ impl TimeDelta {
     }
 }
 
-/// Floored division and its remainder, both taken toward negative infinity —
-/// the split [`DateTime::to_utc`] needs to turn a possibly-negative
-/// microsecond count into a whole day plus a non-negative offset into it.
+/// Floored division and its non-negative remainder.
 pub(crate) fn div_rem_euclid(value: i64, divisor: i64) -> (i64, i64) {
     (value.div_euclid(divisor), value.rem_euclid(divisor))
 }
 
-/// Days from `1970-01-01` to `year-month-day`, negative before the epoch —
-/// Howard Hinnant's `days_from_civil`, valid for any proleptic-Gregorian
-/// date.
+/// Days from `1970-01-01` to the date, negative before the epoch (Hinnant's `days_from_civil`).
 fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
     let year = i64::from(year) - i64::from(month <= 2);
     let era = year.div_euclid(400);
@@ -705,8 +576,7 @@ fn civil_from_days(days: i64) -> (i32, u8, u8) {
     )
 }
 
-/// The number of days in `month` of `year`, or `0` if `month` is not a real
-/// month — which is what makes it [`Date::new`]'s only bound.
+/// The days in `month` of `year`, or `0` for a month that does not exist.
 fn days_in_month(year: i32, month: u8) -> u8 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,

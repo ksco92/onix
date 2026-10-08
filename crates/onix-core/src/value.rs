@@ -1147,20 +1147,9 @@ impl Key {
     }
 }
 
-/// What an [`Object`]'s entries represent: a Python `dict` (mapping) or a
-/// custom object's attributes.
-///
-/// Both share [`Object`]'s key-sorted storage — a custom object's attributes
-/// are `str`-keyed entries exactly like a `dict`'s `str` keys — but they
-/// render two different ways, matching `DeepDiff`: a `dict` entry is a
-/// subscript (`root['key']`, `dictionary_item_added`/`removed`), a custom
-/// object's attribute is a dotted access (`root.attr`,
-/// `attribute_added`/`removed`). `crate::diff::object_diff` reads this to
-/// choose the path segment and report category; `crate::ignore_order`'s
-/// hashing and distance read it to keep a custom object from ever
-/// hash-matching or pairing with a plain `dict` (`DeepDiff`'s own `DeepHash`
-/// tags an object with its class name and a `dict` with the bare word
-/// `dict`, so the two never share a bucket).
+/// What an [`Object`]'s entries represent. A `dict` entry renders as a subscript
+/// (`root['key']`), a custom object's attribute as a dotted access (`root.attr`), and the two
+/// never hash-match or pair under `ignore_order`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectKind {
     /// A Python `dict` (or a `dict` subclass), rendered with subscript paths.
@@ -1170,20 +1159,16 @@ pub enum ObjectKind {
     /// A value onix cannot diff, held by the identity of its Python object: it
     /// has no entries and equals only a token for the same object.
     Opaque,
-    /// An object already on the conversion path above this position: the
-    /// diff reports nothing where it is on the first side, as `DeepDiff`'s
-    /// `parents_ids` skips it.
+    /// An object already on the conversion path above this position; the diff reports nothing
+    /// where it is on the first side, as `DeepDiff`'s `parents_ids` does.
     Cycle,
-    /// A custom object whose attributes could not be read, holding its instance
-    /// `__dict__` entries: equal only to the same object, and walked against
-    /// an object of its class as a finding whose opaque token's identity is
-    /// its instance address in lowercase hex.
+    /// A custom object whose attributes could not be read, holding its instance `__dict__`
+    /// entries; equal only to the same object.
     Failed,
 }
 
 impl ObjectKind {
-    /// The kind whose walk this kind shares: a failed object is walked as the
-    /// custom object it is.
+    /// The kind walked in its place: a failed object walks as a custom object.
     fn walked(self) -> ObjectKind {
         match self {
             ObjectKind::Failed => ObjectKind::CustomObject,
@@ -1192,65 +1177,38 @@ impl ObjectKind {
     }
 }
 
-/// A JSON object: key-sorted, exactly-sized entries backed by a single
-/// `Box<[(ObjectKey, Value)]>`, with binary-search lookup
-/// ([`get`](Object::get)/[`contains_key`](Object::contains_key)) and
-/// ascending-key iteration.
-///
-/// See the [module documentation](self) for why entries are sorted and
-/// `str` keys interned, and [`ObjectKey`]'s own doc for why every other key kind is a second,
-/// additive case rather than a change to that representation. A custom
-/// object's attributes reuse this same storage, distinguished only by
-/// [`Object::kind`] — see [`ObjectKind`].
+/// A JSON object: key-sorted, exactly-sized entries with binary-search lookup and
+/// ascending-key iteration. Non-`str` keys are an additive case ([`ObjectKey::Other`]) so the
+/// `str` path keeps its allocation-free lookup. A custom object's attributes reuse the storage,
+/// told apart by [`Object::kind`].
 #[derive(Debug, Clone)]
 pub struct Object {
-    /// Key-sorted, duplicate-free entries. Invariant: strictly ascending by
-    /// [`ObjectKey`]'s own [`Ord`] (enforced by [`Object::from_pairs`]) —
-    /// every [`ObjectKey::Str`] entry before every [`ObjectKey::Other`] one,
-    /// so [`Object::has_non_str_keys`] can check the last entry alone.
+    /// Strictly ascending by [`ObjectKey`]'s `Ord` ([`Object::from_pairs`] enforces it), so
+    /// every `Str` entry precedes every `Other` one.
     entries: Box<[(ObjectKey, Value)]>,
-    /// The subclass name and kind, or `None` for a plain `dict` (the
-    /// overwhelming common case, so it costs one null pointer, not an inline
-    /// name-plus-kind). Boxed rather than an inline
-    /// `Option<Arc<str>>`-plus-kind so [`Value`] stays within its
-    /// frame-budget size cap (`value_is_compact`): a plain `dict` pays a
-    /// single pointer here, and only a `dict` subclass or a custom object —
-    /// both rare — pays the one small heap allocation. See the `ObjectClass` struct.
+    /// `None` for a plain `dict`; boxed so [`Value`] stays within its size cap
+    /// (`value_is_compact`).
     class: Option<Box<ObjectClass>>,
 }
 
-/// A non-plain-`dict` [`Object`]'s class: the class name, an identity,
-/// and whether the entries are a `dict`'s items or a custom object's
-/// attributes. Held behind [`Object::class`]'s `Box` so a plain `dict` carries
-/// none of it.
+/// A non-plain-`dict` [`Object`]'s class name, identity and kind.
 #[derive(Debug, Clone)]
 struct ObjectClass {
-    /// The Python class *name* (`__name__`): a `dict` subclass's name, or a
-    /// custom object's class — the name `DeepDiff` renders in `old_type`/
-    /// `new_type`. Used only for *rendering*, never for identity: two
-    /// different classes can share a `__name__`.
+    /// The class `__name__`, for rendering only: two classes can share one.
     name: Arc<str>,
-    /// The class *identity*, which decides whether two objects are the same
-    /// class. `DeepDiff` compares the `type` objects themselves, so the caller
-    /// keys it on the type object's address and keeps that object alive for
-    /// the whole diff; for an [`ObjectKind::Opaque`] token it is the address of
-    /// the value itself.
+    /// Decides whether two objects share a class: the type object's address, which the caller
+    /// keeps alive for the diff (the value's own address for an [`ObjectKind::Opaque`] token).
     identity: Arc<str>,
-    /// Whether these entries are a `dict`'s items or a custom object's
-    /// attributes.
     kind: ObjectKind,
     lengths: ObjectLengths,
-    /// The sorted names of the entries read from the class rather than the
-    /// instance, which a whole-object render leaves out.
+    /// Sorted names of the entries read from the class, which a whole-object render omits.
     class_attributes: Box<[Arc<str>]>,
-    /// The address of the Python object a custom object was converted from,
-    /// held alive for the diff: two equal addresses at one position are the
+    /// The converted object's address, held alive for the diff; equal addresses are the
     /// identical object, which `DeepDiff` never walks.
     instance: Option<usize>,
 }
 
-/// The lengths `DeepDiff`'s `ignore_order` distance reads off a custom object
-/// that its attributes do not carry.
+/// The lengths `ignore_order`'s distance reads off a custom object beyond its attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectLengths {
     /// `len(obj.__dict__)`, `0` without one: `_get_item_length` of the object.
@@ -1274,14 +1232,10 @@ impl Default for ObjectLengths {
 }
 
 impl Object {
-    /// Builds an object from arbitrary `(key, value)` pairs: sorts them by
-    /// [`ObjectKey`]'s own order and collapses duplicate keys keeping the
-    /// last value seen (matching [`serde_json`], whose `BTreeMap` insert
-    /// overwrites), so the stored entries satisfy the strictly-ascending
-    /// invariant.
+    /// Builds an object from `(key, value)` pairs in any order, sorting by [`ObjectKey`]'s order;
+    /// a duplicate key keeps the last value, as [`serde_json`] does.
     pub(crate) fn from_pairs(mut pairs: Vec<(ObjectKey, Value)>) -> Self {
-        // Stable sort keeps duplicate keys in their original order, so the
-        // overwrite loop below retains the *last* occurrence's value.
+        // Stable, so the loop below keeps the last occurrence of a duplicate.
         pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
         let mut entries: Vec<(ObjectKey, Value)> = Vec::with_capacity(pairs.len());
         for (key, value) in pairs {
@@ -1299,10 +1253,7 @@ impl Object {
         }
     }
 
-    /// Attaches a `dict` subclass's `name` and `identity` (`None`
-    /// for the exact base `dict`), for a caller (`onix-py`'s converter) that
-    /// already has a built [`Object`] and knows which concrete class it came
-    /// from. See the `ObjectClass` struct for the name-versus-identity split.
+    /// Attaches a `dict` subclass's `(name, identity)`; `None` is the exact base `dict`.
     #[must_use]
     pub fn with_dict_class(mut self, class: Option<(Arc<str>, Arc<str>)>) -> Self {
         self.class = class.map(|(name, identity)| {
@@ -1318,10 +1269,7 @@ impl Object {
         self
     }
 
-    /// Marks these entries as `kind`'s (a custom object's attributes, or an
-    /// opaque token's none) under class `name`, `identity`, `lengths`,
-    /// `class_attributes` and `instance` — see [`ObjectKind`] and the
-    /// `ObjectClass` struct.
+    /// Marks these entries as `kind`'s, under the given class parts.
     #[must_use]
     pub fn into_class(
         mut self,
@@ -1356,8 +1304,7 @@ impl Object {
         self.kind() == ObjectKind::Cycle
     }
 
-    /// Whether `self` and `other` stand for the identical Python object: two
-    /// custom objects converted from one address, or two tokens for one.
+    /// Whether `self` and `other` stand for the identical Python object.
     #[must_use]
     pub fn same_instance(&self, other: &Object) -> bool {
         match (self.class.as_ref(), other.class.as_ref()) {
@@ -1369,8 +1316,7 @@ impl Object {
         }
     }
 
-    /// Whether `key` names an entry read from the class rather than the
-    /// instance.
+    /// Whether `key` names an entry read from the class rather than the instance.
     #[must_use]
     pub fn is_class_attribute(&self, key: &ObjectKey) -> bool {
         self.class.as_ref().is_some_and(|class| {
@@ -1383,21 +1329,15 @@ impl Object {
         })
     }
 
-    /// The class *name* (`__name__`) this object carries, or `None` for the
-    /// exact base type — the name for *rendering*, not identity (see
-    /// [`Object::same_class`]).
+    /// The class `__name__` for rendering, or `None` for a plain `dict`; identity is
+    /// [`Object::same_class`].
     #[must_use]
     pub fn type_name(&self) -> Option<&str> {
         self.class.as_ref().map(|class| class.name.as_ref())
     }
 
-    /// Whether `self` and `other` are the same Python class: same class
-    /// identity *and* same kind. `DeepDiff` reports `type_changes` between two
-    /// values whose `type()` objects are not identical, so a `dict` subclass
-    /// and a custom object sharing a `__name__`, or two same-named classes from
-    /// different modules, are *not* the same class here — matched by the
-    /// `ObjectClass::identity` proxy, not the render name. Two plain `dict`s
-    /// (no class) are the same class.
+    /// Whether `self` and `other` are the same Python class: equal class identity and kind
+    /// (not name), as `DeepDiff` compares `type()` objects. Two plain `dicts` are.
     #[must_use]
     pub fn same_class(&self, other: &Object) -> bool {
         match (self.class.as_ref(), other.class.as_ref()) {
@@ -1419,9 +1359,7 @@ impl Object {
         Some(Builder::new().opaque(class.name.clone(), Arc::from(identity)))
     }
 
-    /// Whether these entries are a `dict`'s items or a custom object's
-    /// attributes — see [`ObjectKind`]. A plain `dict` (no class) is
-    /// [`ObjectKind::Dict`].
+    /// Whether these entries are a `dict`'s items or a custom object's attributes.
     #[must_use]
     pub fn kind(&self) -> ObjectKind {
         self.class
@@ -1435,8 +1373,7 @@ impl Object {
         matches!(self.kind(), ObjectKind::CustomObject)
     }
 
-    /// The identity of an [`ObjectKind::Opaque`] token, which a report cannot
-    /// show, `None` otherwise.
+    /// The identity of an [`ObjectKind::Opaque`] token, `None` otherwise.
     #[must_use]
     pub fn opaque_identity(&self) -> Option<&str> {
         self.class
@@ -1445,8 +1382,7 @@ impl Object {
             .map(|class| class.identity.as_ref())
     }
 
-    /// The identity of any token: [`Object::opaque_identity`], or a
-    /// [`ObjectKind::Cycle`] token's.
+    /// The identity of an opaque or [`ObjectKind::Cycle`] token.
     #[must_use]
     pub fn token_identity(&self) -> Option<&str> {
         self.opaque_identity().or_else(|| {
@@ -1465,8 +1401,7 @@ impl Object {
             .map_or_else(ObjectLengths::default, |class| class.lengths)
     }
 
-    /// Returns the value for `key`, or `None` if the object has no such key.
-    /// `O(log n)` binary search over the sorted entries.
+    /// The value for `key`, `O(log n)`.
     #[must_use]
     pub fn get(&self, key: &ObjectKey) -> Option<&Value> {
         self.entries
@@ -1475,7 +1410,7 @@ impl Object {
             .map(|index| &self.entries[index].1)
     }
 
-    /// Returns `true` if the object contains `key`. `O(log n)`.
+    /// Whether the object contains `key`, `O(log n)`.
     #[must_use]
     pub fn contains_key(&self, key: &ObjectKey) -> bool {
         self.entries
@@ -1483,13 +1418,7 @@ impl Object {
             .is_ok()
     }
 
-    /// [`Object::get`] for a plain `&str`, with no [`ObjectKey`] to
-    /// construct: every [`ObjectKey::Str`] entry sorts before every
-    /// [`ObjectKey::Other`] one (see [`ObjectKey`]'s `Ord`), so comparing an
-    /// `Other` entry as "greater than any `str`" keeps the binary search
-    /// correct without allocating — the same `O(log n)`, zero-allocation
-    /// lookup this crate has always given a `str`-only object, now also
-    /// available on one that mixes in a non-`str` key elsewhere.
+    /// [`Object::get`] for a plain `&str`, with no [`ObjectKey`] allocated.
     #[must_use]
     pub fn get_str(&self, key: &str) -> Option<&Value> {
         self.entries
@@ -1513,26 +1442,19 @@ impl Object {
         self.entries.len()
     }
 
-    /// Returns `true` if the object has no entries.
+    /// Whether the object has no entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Returns `true` if any key is an [`ObjectKey::Other`] — `O(1)`, since
-    /// `Object::from_pairs`'s sort always puts every `Other` key after
-    /// every `Str` one, so the last entry alone answers the question. Every
-    /// dict-diffing call site that would otherwise pay for python-equality
-    /// key matching (`crate::diff::object`, `crate::ignore_order::distance`)
-    /// checks this first and takes an unchanged, allocation-free path when
-    /// both sides answer `false`.
+    /// Whether any key is an [`ObjectKey::Other`], `O(1)`: those sort last.
     #[must_use]
     pub fn has_non_str_keys(&self) -> bool {
         matches!(self.entries.last(), Some((ObjectKey::Other(_), _)))
     }
 
-    /// Iterates `(key, value)` pairs in ascending key order, with the exact
-    /// [`ObjectKey`] (never lossily rendered — see [`Key`]'s doc).
+    /// Iterates `(key, value)` pairs in ascending key order.
     #[must_use]
     pub fn iter(&self) -> Entries<'_> {
         Entries {
@@ -1560,8 +1482,7 @@ impl<'a> IntoIterator for &'a Object {
     }
 }
 
-/// Iterator over an [`Object`]'s `(key, value)` entries in ascending key
-/// order, yielded by [`Object::iter`] and `&Object`'s [`IntoIterator`].
+/// Iterator over an [`Object`]'s entries in ascending key order.
 pub struct Entries<'a> {
     inner: std::slice::Iter<'a, (ObjectKey, Value)>,
 }
@@ -1586,14 +1507,8 @@ impl DoubleEndedIterator for Entries<'_> {
 
 impl ExactSizeIterator for Entries<'_> {}
 
-/// A per-session string interner sharing one `Arc<str>` per distinct
-/// UTF-8 key.
-///
-/// A single [`Interner`] is threaded through one whole conversion or parse
-/// (see [`from_serde`] and the [`Deserialize`] impl); it exists only during
-/// construction, and the finished [`Value`] holds the shared handles while
-/// the lookup table is dropped. See the [module documentation](self) for
-/// how keys are interned.
+/// A per-session interner sharing one `Arc<str>` per distinct UTF-8 key; dropped once the
+/// [`Value`] is built.
 #[derive(Debug, Default)]
 struct Interner {
     seen: HashSet<Arc<str>>,
@@ -1605,8 +1520,7 @@ impl Interner {
         Self::default()
     }
 
-    /// Returns a shared `Arc<str>` for `key`, allocating one only the first
-    /// time a given key string is seen this session.
+    /// A shared `Arc<str>` for `key`, allocated on first sight.
     fn intern(&mut self, key: &str) -> Arc<str> {
         if let Some(existing) = self.seen.get(key) {
             return Arc::clone(existing);
@@ -1616,9 +1530,7 @@ impl Interner {
         shared
     }
 
-    /// Converts `key` into an [`Object`] [`Key`]: an interned handle for the
-    /// common [`Str::Utf8`] case (see [`Interner::intern`]), or an owned,
-    /// un-interned allocation for the rare [`Str::Wtf8`] one
+    /// An interned [`Key`] for [`Str::Utf8`]; a [`Str::Wtf8`] key is never interned
     /// (`docs/design/value-conversion.md`, "Key interning").
     fn intern_key(&mut self, key: Str) -> Key {
         match key {
@@ -1628,18 +1540,8 @@ impl Interner {
     }
 }
 
-/// Builds compact [`Value`]s while interning object keys across one
-/// construction session.
-///
-/// A caller assembling a large tree from an external source — the Python
-/// bindings walking a live object graph, say — threads one `Builder` through
-/// the whole walk and routes every object through [`Builder::object`], so a
-/// key repeated across many objects costs a single `Arc<str>` allocation
-/// shared by reference count. This is the same interning [`From`] and
-/// [`Deserialize`] perform internally, exposed for callers that build a
-/// [`Value`] some other way (e.g. from Python objects rather than JSON).
-///
-/// # Examples
+/// Builds [`Value`]s, interning object keys across one construction session so a key repeated
+/// across objects shares one `Arc<str>`; route every object through [`Builder::object`].
 ///
 /// ```
 /// use onix_core::Value;
@@ -1650,7 +1552,6 @@ impl Interner {
 ///     ("b".to_owned(), Value::Bool(true)),
 ///     ("a".to_owned(), Value::Null),
 /// ]);
-/// // Rendered back out, keys are in canonical (sorted) order.
 /// assert_eq!(value.to_serde_json().to_string(), r#"{"a":null,"b":true}"#);
 /// ```
 #[derive(Debug, Default)]
@@ -1665,14 +1566,8 @@ impl Builder {
         Self::default()
     }
 
-    /// Builds an object [`Value`] from `entries`, interning each
-    /// [`Str::Utf8`] key against this builder's session (a rare
-    /// [`Str::Wtf8`] key — one holding a lone surrogate — is never interned,
-    /// see [`Key`]'s doc) and sorting into the canonical ascending key
-    /// order. A duplicate key keeps the last value, matching [`From`] and
-    /// [`Deserialize`]. Accepts anything convertible to [`Str`], so a plain
-    /// `String` key (every call site that predates [`Str::Wtf8`]) keeps
-    /// working unchanged.
+    /// Builds an object [`Value`] from `entries` in any order, sorting by key; a duplicate key
+    /// keeps the last value.
     #[must_use]
     pub fn object<K: Into<Str>>(&mut self, entries: Vec<(K, Value)>) -> Value {
         let pairs = entries
@@ -1682,42 +1577,26 @@ impl Builder {
         Value::Object(Object::from_pairs(pairs))
     }
 
-    /// Interns `key` against this builder's session, exactly as
-    /// [`Builder::object`] does internally — exposed so a caller building an
-    /// [`ObjectKey`] directly (for [`Builder::object_with_keys`], because the
-    /// dict it is converting has a non-`str` key somewhere) still shares one
-    /// `str` key's allocation across every object that repeats it.
+    /// Interns `key` against this builder's session.
     #[must_use]
     pub fn intern(&mut self, key: &str) -> Arc<str> {
         self.interner.intern(key)
     }
 
-    /// [`Builder::intern`]'s [`Str`]-aware twin: interns a plain `str` key
-    /// exactly as that method does, or passes a key holding a lone
-    /// surrogate code point through un-interned. For a caller building an
-    /// [`ObjectKey::Str`] directly (for [`Builder::object_with_keys`])
-    /// alongside a mix of other key kinds.
+    /// [`Builder::intern`] for a [`Str`]; a lone-surrogate key passes through un-interned.
     #[must_use]
     pub fn intern_key(&mut self, key: Str) -> Key {
         self.interner.intern_key(key)
     }
 
-    /// Builds an object [`Value`] from `entries`, which may carry any
-    /// [`ObjectKey`] — the general form of [`Builder::object`] for a caller
-    /// that has already classified its keys (`onix-py`'s conversion, which
-    /// must tell a `str` key needing [`Builder::intern`] apart from any other
-    /// kind).
+    /// [`Builder::object`] for entries that may carry any [`ObjectKey`].
     #[must_use]
     pub fn object_with_keys(&mut self, entries: Vec<(ObjectKey, Value)>) -> Value {
         Value::Object(Object::from_pairs(entries))
     }
 
-    /// [`Builder::object_with_keys`], additionally attaching a `dict`
-    /// subclass's `(name, identity)` (`None` for the exact base `dict`) — the
-    /// entry point `onix-py`'s converter uses for every `dict` subclass,
-    /// whether or not its keys are all `str`. See [`Object::with_dict_class`]
-    /// for the name-versus-identity split and `docs/design/value-model.md`'s
-    /// "Subclasses" section.
+    /// [`Builder::object_with_keys`] plus a `dict` subclass's `(name, identity)`; see
+    /// `docs/design/value-model.md`, "Subclasses".
     #[must_use]
     pub fn object_with_keys_and_class(
         &mut self,
@@ -1727,9 +1606,7 @@ impl Builder {
         Value::Object(Object::from_pairs(entries).with_dict_class(class))
     }
 
-    /// Builds a custom object [`Value`] from its attribute `entries` (all
-    /// `str`-keyed), with the class parts [`Object::into_class`] takes — see
-    /// [`ObjectKind::CustomObject`] and [`Object::same_class`].
+    /// Builds a custom object [`Value`] from its attribute `entries` and class parts.
     #[must_use]
     pub fn custom_object(
         &mut self,
@@ -1750,8 +1627,7 @@ impl Builder {
         ))
     }
 
-    /// Builds an [`ObjectKind::Opaque`] token for a value of type `name` whose
-    /// Python object is identified by `identity`.
+    /// Builds an [`ObjectKind::Opaque`] token for a `name` value identified by `identity`.
     #[must_use]
     pub fn opaque(&mut self, name: Arc<str>, identity: Arc<str>) -> Value {
         Value::Object(Object::from_pairs(Vec::new()).into_class(
@@ -1764,9 +1640,7 @@ impl Builder {
         ))
     }
 
-    /// Builds an [`ObjectKind::Failed`] object of type `name` from its instance
-    /// `__dict__` `entries`, for the Python object at `instance` identified by
-    /// `identity`.
+    /// Builds an [`ObjectKind::Failed`] object from its instance `__dict__` `entries`.
     #[must_use]
     pub fn failed_object(
         &mut self,
@@ -1785,8 +1659,7 @@ impl Builder {
         ))
     }
 
-    /// Builds an [`ObjectKind::Cycle`] token for the object of type `name`
-    /// identified by `identity`.
+    /// Builds an [`ObjectKind::Cycle`] token for a `name` object identified by `identity`.
     #[must_use]
     pub fn cycle(&mut self, name: Arc<str>, identity: Arc<str>) -> Value {
         Value::Object(Object::from_pairs(Vec::new()).into_class(
@@ -1800,11 +1673,8 @@ impl Builder {
     }
 }
 
-/// A copy of `value` as a report shows it: every custom object's class
-/// attributes left out, at any depth, as `DeepDiff`'s whole-object render leaves them out.
-///
-/// Recurses natively over `value`'s nesting; a caller runs a deep value on a
-/// sized stack.
+/// A copy of `value` as a report shows it, with every custom object's class attributes left
+/// out at any depth. Recurses natively; a caller runs a deep value on a sized stack.
 ///
 /// # Errors
 ///
@@ -1819,8 +1689,7 @@ pub fn rendered(value: &Value) -> Result<Value, Vec<Unrendered>> {
     }
 }
 
-/// An opaque token a report would have to show: its path below the rendered
-/// value, its type name and its identity.
+/// An opaque token a report would have to show.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Unrendered {
     /// The token's path below the rendered value.
@@ -1879,11 +1748,8 @@ fn rendered_at(
 }
 
 impl<'de> Deserialize<'de> for Value {
-    /// Streams a [`Value`] directly from any [`Deserializer`] with no
-    /// transient [`serde_json::Value`] tree, interning object keys across the
-    /// whole parse in one session. Driven by [`serde_json`]'s own
-    /// deserializer (e.g. via [`serde_json::from_str`]), this is the
-    /// peak-memory path for parsing untrusted input.
+    /// Streams a [`Value`] from any [`Deserializer`] with no [`serde_json::Value`] tree,
+    /// interning keys across the parse.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -1896,9 +1762,7 @@ impl<'de> Deserialize<'de> for Value {
     }
 }
 
-/// A [`DeserializeSeed`] carrying the session [`Interner`] down through
-/// nested containers, so every object key parsed anywhere in the tree is
-/// interned against the same table.
+/// A [`DeserializeSeed`] carrying the session [`Interner`] through nested containers.
 struct ValueSeed<'i> {
     interner: &'i mut Interner,
 }
@@ -1916,10 +1780,8 @@ impl<'de> DeserializeSeed<'de> for ValueSeed<'_> {
     }
 }
 
-/// The [`Visitor`] that maps each self-describing input token onto a
-/// [`Value`], mirroring [`serde_json::Value`]'s own visitor semantics
-/// (including non-finite floats collapsing to `Null`) so parsing the same
-/// input yields byte-identical output.
+/// The [`Visitor`] mapping each input token onto a [`Value`], as [`serde_json::Value`]'s
+/// does (non-finite floats become `Null`).
 struct ValueVisitor<'i> {
     interner: &'i mut Interner,
 }
@@ -1968,11 +1830,6 @@ impl<'de> Visitor<'de> for ValueVisitor<'_> {
         if value.is_finite() {
             return Ok(Value::Number(Number::from_f64(value)));
         }
-        // Non-finite floats have no JSON representation; collapse to Null,
-        // exactly as serde_json::Value's own visitor does. Unreachable
-        // through serde_json's own parser (its grammar has no
-        // `NaN`/`Infinity` literal), so this only matters for another
-        // `Deserializer` implementation driving this same `Visitor`.
         Ok(Value::Null)
     }
 
