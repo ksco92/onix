@@ -47,9 +47,12 @@ bytes/level, as the range across macOS and Linux:
 
 `pairing` is the worst case (an `ignore_order` list nested at every
 level beside two shared strings). `guard.rs` (in `onix-py`) sizes its
-worker stack from the debug `pairing` figure rounded up to a power of
-two and doubled, 2.4 times the measured cost; `make stack-check` fails
-CI above the rounded figure.
+worker stack at `max(max_depth * 8,192 * 2, 512 KiB)` bytes, the debug
+`pairing` figure rounded up to a power of two and doubled (2.4 times
+the measured cost) with a floor over the handoff cost that the
+example's `--handoff` mode measures, except `diff_tables`, whose Arrow
+import recurses before any depth is known and which reserves the
+ceiling's share; `make stack-check` fails CI above the rounded figure.
 
 Every site that clones a whole value into a `Report` calls
 `check_value_depth`/`check_map_depth` first, so no value over the
