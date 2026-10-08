@@ -100,11 +100,24 @@ fn ignore_order_diff_ok(a: &Value, b: &Value) -> Value {
 fn permutation_strategy_draws_non_identity_orders() {
     let mut runner = TestRunner::new(config());
     let strategy = arb_list_and_permutation();
-    let non_identity = (0..PROPTEST_CASES)
+    let perms: Vec<Vec<usize>> = (0..PROPTEST_CASES)
         .map(|_| strategy.new_tree(&mut runner).unwrap().current().1)
-        .filter(|perm| perm.len() >= 2 && perm.iter().enumerate().any(|(i, &p)| i != p))
-        .count();
-    assert!(non_identity > 0, "every drawn permutation was the identity");
+        .filter(|perm| perm.len() >= 2)
+        .collect();
+    let moved: Vec<&Vec<usize>> = perms
+        .iter()
+        .filter(|perm| perm.iter().enumerate().any(|(i, &p)| i != p))
+        .collect();
+    assert!(
+        moved.len() * 4 >= perms.len(),
+        "{} of {} permutations were non-identity",
+        moved.len(),
+        perms.len()
+    );
+    assert!(
+        moved.iter().any(|perm| perm.len() >= 3),
+        "no non-identity permutation of 3 or more elements"
+    );
 }
 
 proptest! {
