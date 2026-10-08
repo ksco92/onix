@@ -47,7 +47,7 @@ FLAT_DICT_SIZES: Final[dict[str, int]] = {"10k": 10_000, "100k": 100_000, "1m": 
 FLAT_LIST_SIZE: Final[int] = 100_000
 NESTED_DEPTH: Final[int] = 6
 NESTED_BRANCH: Final[int] = 10
-# See RESULTS.md's "Finding: onix's practical depth ceiling is lower than expected" section.
+# See RESULTS.md's "Depth ceiling" section.
 DEEP_NESTING_DEPTH: Final[int] = 120
 IGNORE_ORDER_LIST_SIZE: Final[int] = 10_000
 

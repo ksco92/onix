@@ -63,10 +63,10 @@ wall-clock and CPU cells are hyperfine means over the same runs.
 
 ## Correctness precheck
 
-**Every fixture below reached this file only after its onix and DeepDiff
+Every fixture below reached this file only after its onix and DeepDiff
 outputs were canonicalized (`jq -S`, matching `crates/onix-core/tests/golden.rs`'s
 own "sorted-keys, order-sensitive-arrays" notion of canonical equality) and
-found byte-identical.** `run_bench.sh` aborts the entire run (no
+found byte-identical. `run_bench.sh` aborts the entire run (no
 `RESULTS.md` gets written at all) the moment any fixture's outputs
 diverge: a perf number on divergent output is void.
 
@@ -81,7 +81,7 @@ no special-casing was needed here.
 
 `api_payloads` wraps each scalar in its `tags`/`metadata.flags` lists in a one-key dict; see `build_api_payloads`.
 
-## Finding: onix's practical depth ceiling is lower than expected
+## Depth ceiling
 
 DeepDiff 9.1.0 raises `RecursionError` near depth 495 at the default
 recursion limit. `onix-cli` fails to parse past 128 levels (`serde_json`'s
@@ -90,7 +90,7 @@ is. `deep_narrow_d120` uses depth 120, which both tools handle.
 
 ## Headline: diff-only time + peak RSS
 
-Diff-only time excludes process startup and JSON parsing on both sides (self-instrumented: onix via `--timing`'s `diff_ns`, deepdiff via `time.perf_counter_ns()` around only the `DeepDiff(...)` call). Peak RSS is the median of hyperfine's per-run `memory_usage_byte` over the full process, same runs as the wall-clock sweep.
+Diff-only time excludes process startup and JSON parsing on both sides (self-instrumented: onix via `--timing`'s `diff_ns`, deepdiff via `time.perf_counter_ns()` around only the `DeepDiff(...)` call). Peak RSS is over the full process.
 
 | Fixture | onix diff-only (median, min-max) | deepdiff diff-only (median, min-max) | Speedup | onix peak RSS | deepdiff peak RSS | Memory ratio | ≥5x threshold |
 |---|---|---|---|---|---|---|---|
@@ -220,9 +220,9 @@ This is a **CPU-time-only** cost model (excludes egress, storage, and
 per-request platform overhead) meant to illustrate the *relative* economic
 gap, not a production cost estimate.
 
-## GO / NO-GO evaluation
+## Thresholds
 
-This harness's success thresholds: **≥5x faster (diff-only) OR ≥5x less peak memory on the majority of fixtures, and strictly better on `api_payloads`; no fixture where onix is slower**.
+The thresholds: **≥5x faster (diff-only) OR ≥5x less peak memory on the majority of fixtures, and strictly better on `api_payloads`; no fixture where onix is slower**.
 
 | Fixture | Meets ≥5x threshold | Diff-only speedup | Memory ratio |
 |---|---|---|---|
@@ -242,7 +242,7 @@ This harness's success thresholds: **≥5x faster (diff-only) OR ≥5x less peak
 - **No fixture where onix is slower (diff-only) than deepdiff.**
 - **Why the largest flat dicts show the slimmest margin:** onix's diff-only speedup and memory ratio bottom out on `flat_dict_1m` (1M unique keys). The compact model stores each object as a sorted key/value slice looked up by binary search, so at this size the dominant cost is key `memcmp` during lookup (worse cache behavior than a `BTreeMap` descent), and unique keys defeat the interner. It is an accepted constant-factor representation tradeoff: the same compact layout is what earns the large memory wins on realistic record and nested data.
 
-### Verdict: **GO**
+### Result: **All thresholds met**
 
 CLI figures exclude Python-object conversion, which `crates/onix-py/benchmarks/bench_bindings.py` measures (see the README's Performance section).
 
@@ -252,4 +252,3 @@ CLI figures exclude Python-object conversion, which `crates/onix-py/benchmarks/b
 - `api_payloads` is capped at 50,000 records, about 90 s per deepdiff diff.
 - No Rust allocation counter: onix memory is reported as peak RSS only.
 - No Criterion micro-benchmark suite.
-- No energy figure: it needs a manual `sudo` run (see Energy above).

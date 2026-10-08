@@ -217,7 +217,7 @@ class ToolMetrics:
 
 
 class DiffOnlySamples:
-    """Self-instrumented diff-only timing samples for one tool on one fixture (run counts per `run_bench.sh`'s `tier_for`)."""
+    """Self-instrumented diff-only timing samples for one tool on one fixture (run counts per `tier_for`)."""
 
     def __init__(self: Self, samples_ns: list[float]) -> None:
         """
@@ -361,7 +361,6 @@ def render_environment_header(env: JsonValue) -> str:
     Render the environment block (hardware and tool versions).
 
     :param env: The parsed `env.json`.
-    :return: A markdown section.
     """
     env = as_object(env)
 
@@ -451,10 +450,10 @@ def render_correctness_section(report: Report) -> str:
 
     return f"""## Correctness precheck
 
-**Every fixture below reached this file only after its onix and DeepDiff
+Every fixture below reached this file only after its onix and DeepDiff
 outputs were canonicalized (`jq -S`, matching `crates/onix-core/tests/golden.rs`'s
 own "sorted-keys, order-sensitive-arrays" notion of canonical equality) and
-found byte-identical.** `run_bench.sh` aborts the entire run (no
+found byte-identical. `run_bench.sh` aborts the entire run (no
 `RESULTS.md` gets written at all) the moment any fixture's outputs
 diverge: a perf number on divergent output is void.
 
@@ -482,9 +481,7 @@ def render_headline_table(report: Report) -> str:
         "Diff-only time excludes process startup and JSON parsing on both "
         "sides (self-instrumented: onix via `--timing`'s `diff_ns`, "
         "deepdiff via `time.perf_counter_ns()` around only the `DeepDiff(...)` "
-        "call). Peak RSS is the median of hyperfine's per-run "
-        "`memory_usage_byte` over the full process, same runs as the "
-        "wall-clock sweep.",
+        "call). Peak RSS is over the full process.",
         "",
         "| Fixture | onix diff-only (median, min-max) | deepdiff diff-only (median, min-max) | "
         "Speedup | onix peak RSS | deepdiff peak RSS | Memory ratio | ≥5x threshold |",
@@ -519,7 +516,7 @@ def render_headline_table(report: Report) -> str:
 def render_wall_clock_table(report: Report) -> str:
     """
     :param report: The loaded benchmark report.
-    :return: End-to-end wall-clock table (includes process startup).
+    :return: The table, which includes process startup.
     """
     lines = [
         "## End-to-end wall clock",
@@ -711,10 +708,9 @@ gap, not a production cost estimate.
 """
 
 
-def render_go_no_go(report: Report) -> str:
+def render_threshold_summary(report: Report) -> str:
     """
     :param report: The loaded benchmark report.
-    :return: The GO/NO-GO evaluation section.
     """
     api_row = report.row("api_payloads")
     non_identical_rows = [r for r in report.rows if r.name not in {"identical_1m", "startup_trivial"}]
@@ -723,9 +719,9 @@ def render_go_no_go(report: Report) -> str:
     any_slower = [r for r in report.rows if r.is_slower]
 
     lines = [
-        "## GO / NO-GO evaluation",
+        "## Thresholds",
         "",
-        "This harness's success thresholds: **≥5x faster (diff-only) OR ≥5x "
+        "The thresholds: **≥5x faster (diff-only) OR ≥5x "
         "less peak memory on the majority of fixtures, and strictly better "
         "on `api_payloads`; no fixture where onix is slower**.",
         "",
@@ -768,8 +764,8 @@ def render_go_no_go(report: Report) -> str:
     )
 
     lines.append("")
-    verdict = "GO" if majority_meet_threshold and api_strictly_better and not any_slower else "CONDITIONAL / NO-GO"
-    lines.append(f"### Verdict: **{verdict}**")
+    verdict = "All thresholds met" if majority_meet_threshold and api_strictly_better and not any_slower else "Thresholds not met"
+    lines.append(f"### Result: **{verdict}**")
     lines.append("")
     lines.append(
         "CLI figures exclude Python-object conversion, which "
@@ -781,9 +777,9 @@ def render_go_no_go(report: Report) -> str:
 
 
 def render_depth_ceiling_note() -> str:
-    """:return: The prominent note on onix's real (lower-than-expected) depth ceiling."""
+    """:return: The depth-ceiling note."""
 
-    return """## Finding: onix's practical depth ceiling is lower than expected
+    return """## Depth ceiling
 
 DeepDiff 9.1.0 raises `RecursionError` near depth 495 at the default
 recursion limit. `onix-cli` fails to parse past 128 levels (`serde_json`'s
@@ -792,16 +788,13 @@ is. `deep_narrow_d120` uses depth 120, which both tools handle.
 """
 
 
-def render_deferred_work_note() -> str:
-    """:return: The closing list of what this benchmark does not measure."""
-
+def render_not_measured() -> str:
     return """## Not measured
 
 - No multi-million-item list fixture; `flat_list_100k` is the largest list.
 - `api_payloads` is capped at 50,000 records, about 90 s per deepdiff diff.
 - No Rust allocation counter: onix memory is reported as peak RSS only.
 - No Criterion micro-benchmark suite.
-- No energy figure: it needs a manual `sudo` run (see Energy above).
 """
 
 
@@ -848,8 +841,8 @@ def main() -> None:
         render_ignore_order_design_notes(report),
         render_energy_section(),
         render_derived_economics(report),
-        render_go_no_go(report),
-        render_deferred_work_note(),
+        render_threshold_summary(report),
+        render_not_measured(),
     ]
 
     RESULTS_PATH.write_text("\n".join(sections), encoding="utf-8")
