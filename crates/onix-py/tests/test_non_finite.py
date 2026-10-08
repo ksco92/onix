@@ -1,4 +1,4 @@
-"""Non-finite floats: comparison, JSON rendering, `ignore_order`, and the one divergence (tests/golden/README.md, "Non-finite floats")."""
+"""Non-finite floats: see tests/golden/README.md, "Non-finite floats"."""
 
 import json
 import math
@@ -151,7 +151,7 @@ def test_to_dict_returns_real_floats() -> None:
 
 
 def test_non_finite_dict_key_renders_without_crashing() -> None:
-    # DeepDiff garbles this key; onix renders it deterministically ("Non-finite floats").
+    # See "Non-finite floats".
     report = OnixDeepDiff({}, {float("nan"): 1})
     assert report.to_json() == '{"dictionary_item_added":{"root[nan]":1}}'
 
@@ -178,7 +178,7 @@ def test_same_nan_object_compared_to_itself_is_onixs_one_divergence() -> None:
 
 
 def test_two_distinct_bit_identical_nans_in_a_carried_set_dedup_in_onix_not_deepdiff() -> None:
-    # Divergence pinned as onix's own behavior ("Non-finite floats").
+    # See "Non-finite floats".
     nans = {float("nan"), float("nan")}
     assert len(nans) == 2
 

@@ -3,7 +3,7 @@
 Directed regression cases plus two differential batches, reusing
 ``test_differential_fuzz``'s generators: one over plain lists, one over
 sets/frozensets directly. A real `set`/`frozenset` never holds both `-0.0`
-and `0.0`, so the set batch pins the single-representative case.
+and `0.0`, so the set batch covers only the single-representative case.
 """
 
 import json
