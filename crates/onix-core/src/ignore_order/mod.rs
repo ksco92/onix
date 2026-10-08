@@ -40,16 +40,10 @@ pub(crate) use hash::set_difference;
 pub(crate) use hash::set_member_digest;
 
 /// `cutoff_intersection_for_pairs`'s default (`DeepDiff`'s own name;
-/// `CUTOFF_INTERSECTION_FOR_PAIRS_DEFAULT`, diff.py) — the get-pairs gate
-/// threshold (see `docs/design/ignore-order.md`'s "Pair" stage). Out of
-/// scope for MVP as a *tunable* parameter; the default value itself is
-/// very much in scope.
+/// `CUTOFF_INTERSECTION_FOR_PAIRS_DEFAULT`, diff.py): the get-pairs gate threshold.
 const CUTOFF_INTERSECTION_FOR_PAIRS: f64 = 0.7;
 
-/// `DeepDiff`'s `_diff_iterable_with_deephash` (diff.py) for one list level
-/// — see `docs/design/ignore-order.md` for the full algorithm. Called from
-/// [`crate::diff::array_diff`] whenever
-/// [`crate::diff::DiffOptions::ignore_order`] is set.
+/// `DeepDiff`'s `_diff_iterable_with_deephash` (diff.py) for one list level.
 pub(crate) fn ignore_order_array_diff(
     path: &mut Vec<PathSegment>,
     a: &[Value],

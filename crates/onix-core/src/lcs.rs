@@ -70,13 +70,11 @@ use crate::value::Value;
 /// This is the "hashable" finding: Python treats `1 == 1.0 == True` (and
 /// `0 == 0.0 == False`) as equal regardless of type, so `difflib` can match
 /// an `int` in one list against a `float` (or `bool`) of the same numeric
-/// value in the other — and, critically, a `difflib` `'equal'` opcode is
-/// *never* diffed further (see `crate::diff::array_diff`'s doc), so two
-/// cross-type-equal numbers matched this way produce **no** `type_changes`
-/// finding at all, unlike every other numeric comparison in this engine
-/// (which always treats int/float and bool/int as a type change — see
-/// `crate::diff::numbers_equal`'s doc). Confirmed empirically: real
-/// `DeepDiff` reports `{}` for `[1]` vs `[1.0]`.
+/// value in the other — and a `difflib` `'equal'` opcode is never diffed
+/// further (`docs/design/list-diff.md`, "Opcode-to-finding mapping"), so two
+/// cross-type-equal numbers matched this way produce no `type_changes`
+/// finding at all (every other numeric comparison treats int/float and
+/// bool/int as a type change; see `crate::diff::numbers_equal`'s doc).
 ///
 /// Integral values (including both bools and float values with no
 /// fractional part, within the range a `f64` can represent exactly) are

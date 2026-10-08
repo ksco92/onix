@@ -50,14 +50,16 @@ is what was verified independently of any single run's labels.
 ### Kinds of mutant that survive, and why none is a real test gap
 
 1. **Equivalent viable mutants** — a mutation that compiles and runs but
-   cannot change any output, so no test can kill it. Confined to these spots,
-   each with the argument written at the source:
+   cannot change any output, so no test can kill it. Confined to these spots:
    - `onix-core/src/lcs.rs`'s `find_longest_match` / `get_matching_blocks`:
      these either force a non-terminating loop (reported as a timeout) or
      produce a wrong-but-terminating result the surrounding comments prove is
      equivalent or non-actionable.
    - `onix-core/src/diff/array.rs`'s `lcs_or_positional_array_diff` `> 1`
-     threshold: replacing `> 1` with `>= 1` is verified output-neutral, and
+     threshold: replacing `> 1` with `>= 1` is output-neutral (at exactly one
+     LCS finding the positional report holds the same finding or at least two,
+     so both thresholds return a report with the same single finding; the
+     `>= 1` variant returns the identical positional report), and
      `cargo mutants -p onix-core -f '**/diff/array.rs' -F '> with >= in
      lcs_or_positional'` lists this `>=` mutant, reported missed with the
      sibling `==` and `<` mutants caught (the expected signature of an

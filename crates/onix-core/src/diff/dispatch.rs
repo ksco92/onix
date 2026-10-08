@@ -16,21 +16,12 @@ use super::{
     type_change_report,
 };
 
-/// The recursive core of [`diff_with_max_depth()`](super::diff_with_max_depth): identical dispatch, but
-/// carrying the path and depth accumulated so far, so that nested findings
-/// get their full deep path and the recursion-depth bound can be enforced.
+/// The recursive core of [`diff_with_max_depth()`](super::diff_with_max_depth): identical
+/// dispatch, carrying the path and depth accumulated so far, so nested findings get their full
+/// deep path and the recursion-depth bound can be enforced.
 ///
-/// `path` is a single buffer *shared* across the whole traversal, not a
-/// fresh copy per call: [`object_diff`]/[`array_diff`] push the child
-/// segment before recursing one level deeper and pop it again immediately
-/// after (see their docs), so a traversal to depth `D` allocates each path
-/// segment once, not once per level it is copied through — `O(D)` total
-/// rather than the `O(D²)` a naive "clone the whole path at every step"
-/// approach costs. Every read of the path (rendering it, or measuring a
-/// found value's depth budget against it) takes a `&[PathSegment]` slice
-/// view of the buffer *at that point in the traversal*, which is exactly
-/// the path to the current call — the mutable buffer and the immutable path
-/// it represents are the same data, just viewed at different moments.
+/// `path` is the one buffer shared across the traversal; its segments are pushed and popped by
+/// [`scoped`].
 pub(crate) fn diff_at(
     path: &mut Vec<PathSegment>,
     a: &Value,
@@ -160,41 +151,14 @@ fn object_pair_diff(
         _ => type_change_report(path, a, b, depth, opts.max_depth),
     }
 }
-/// Deep structural equality of two values, used by
-/// [`diff_with_options`](super::diff_with_options) for its top-level
-/// "equal inputs of any depth return an empty report" fast path.
-///
-/// Delegates to [`Value`]'s own [`PartialEq`], which is iterative (an
-/// explicit heap work-stack, no native recursion — see
-/// `docs/design/value-model.md`) and whose semantics are exactly this engine's: an int
-/// and a float are never equal, ints compare by value, floats by exact
-/// IEEE-754 `==`, objects by key set plus per-key values, arrays by length
-/// plus per-index values. Because every value the engine sees comes from
-/// [`Value`]'s canonical construction (`From`/`Deserialize`), a given
-/// integer has exactly one representation, so `PartialEq`'s
-/// variant-sensitive `Number` comparison and the
-/// separately-maintained [`numbers_equal`](super::numbers_equal) walk agree
-/// on every reachable input.
+/// Deep structural equality, for the top-level equal-inputs fast path; delegates to [`Value`]'s
+/// iterative [`PartialEq`] (`docs/design/value-model.md`).
 #[must_use]
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     a == b
 }
-/// Returns `true` if `value`'s own internal nesting exceeds `limit`,
-/// treating `value` as if it were its own root (depth `0`) — independent of
-/// whatever path depth it may be found at within a diff.
-///
-/// A scalar (null/bool/number/string) is depth `0`; a non-empty
-/// array/object is `1 + max(depth of its elements/values)` (`0` if empty) —
-/// the same root-is-depth-`0` convention used throughout this module.
-///
-/// Iterative (an explicit heap-allocated work-stack, no native recursion),
-/// so this cannot itself overflow the very thing it exists to guard
-/// against. It exits as soon as one node's depth exceeds `limit`, without
-/// visiting the rest of `value`; when it does *not* trip, it visits every
-/// node of `value` once (`O(nodes)`). As with [`values_equal`], pushing a
-/// whole container's children at once means peak heap usage tracks input
-/// size, not depth alone — again an acceptable trade for eliminating native
-/// stack recursion.
+/// Returns `true` if `value`'s own nesting exceeds `limit`, with `value` as depth `0`. Iterative,
+/// so it cannot overflow the stack it guards; peak heap tracks input size.
 pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
     let mut stack: Vec<(&Value, usize)> = vec![(value, 0)];
 
@@ -223,9 +187,8 @@ pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
 
     false
 }
-/// Rejects `value` (see [`deeper_than`]) if its nesting exceeds the
-/// budget remaining at `depth` (`max_depth.saturating_sub(depth)`), not
-/// a flat `max_depth` — shared with path depth (`docs/design/depth-budget.md`).
+/// Rejects `value` (see [`deeper_than`]) if its nesting exceeds the budget remaining at `depth`
+/// (`max_depth.saturating_sub(depth)`), not a flat `max_depth`.
 pub(crate) fn check_value_depth(
     path: &[PathSegment],
     value: &Value,
@@ -240,9 +203,8 @@ pub(crate) fn check_value_depth(
     }
     Ok(())
 }
-/// Like [`deeper_than`], but walks a dict's fields directly. `limit`
-/// is the caller's already-reduced remaining budget, shared between
-/// path depth and value depth (`docs/design/depth-budget.md`).
+/// Like [`deeper_than`], but walks a dict's fields directly. `limit` is the caller's already
+/// reduced remaining budget.
 pub(crate) fn map_deeper_than(map: &Object, limit: usize) -> bool {
     if limit == 0 {
         !map.is_empty()
@@ -250,13 +212,7 @@ pub(crate) fn map_deeper_than(map: &Object, limit: usize) -> bool {
         map.values().any(|value| deeper_than(value, limit - 1))
     }
 }
-/// [`check_value_depth`]'s twin for a dict that hasn't been cloned into a
-/// `Value` yet: checks `map`'s own nesting directly ([`map_deeper_than`])
-/// so a caller that is *deciding whether to clone* an untrusted dict — like
-/// [`object_diff`]'s `threshold_to_diff_deeper` collapse, which would
-/// otherwise clone the whole dict into a finding before any depth check
-/// could reject it — can check first and only pay for the clone once this
-/// passes.
+/// [`check_value_depth`] for a dict not yet cloned into a `Value`, so the check precedes the clone.
 pub(crate) fn check_map_depth(
     path: &[PathSegment],
     map: &Object,
@@ -271,9 +227,8 @@ pub(crate) fn check_map_depth(
     }
     Ok(())
 }
-/// Rejects if the path depth itself (`depth`) exceeds `max_depth`;
-/// [`check_value_depth`] enforces the other half of this same shared
-/// budget (`docs/design/depth-budget.md`).
+/// Rejects if the path depth itself (`depth`) exceeds `max_depth`; [`check_value_depth`] enforces
+/// the other half of the shared budget.
 pub(crate) fn check_traversal_depth(
     path: &[PathSegment],
     depth: usize,
@@ -287,9 +242,8 @@ pub(crate) fn check_traversal_depth(
     }
     Ok(())
 }
-/// Pushes `seg`, runs `f`, then pops it again — even on failure —
-/// restoring `path` for the next sibling; `path.len()` is what every
-/// depth check measures against the shared budget (`docs/design/depth-budget.md`).
+/// Pushes `seg`, runs `f`, then pops it again, even on failure; `path.len()` is what every depth
+/// check measures against the shared budget.
 pub(crate) fn scoped<T>(
     path: &mut Vec<PathSegment>,
     seg: PathSegment,
