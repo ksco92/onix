@@ -1056,8 +1056,7 @@ mod tests {
         }
     }
 
-    /// No escaping of control characters either: newline, tab, NUL, and DEL
-    /// all pass through as their literal (unescaped) characters.
+    /// `quote_key` leaves control characters unescaped.
     #[test]
     fn quote_key_does_not_escape_control_characters() {
         let mut key = String::new();
