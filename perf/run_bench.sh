@@ -45,8 +45,8 @@ log() { echo "[run_bench] $*"; }
 # `run_deepdiff.py` both spell it `--ignore-order`) — empty for every
 # fixture except `ignore_order_10k` (the `ignore_order=True` headline
 # comparison). `ignore_order_10k` is an all-numeric flat list, so it never
-# reaches the disclosed, pre-existing `threshold_to_diff_deeper` dict-vs-dict
-# divergence (see `crates/onix-core/tests/golden.rs`'s `KNOWN_DIVERGENT_CASES`)
+# reaches the one case `KNOWN_DIVERGENT_CASES` holds in
+# `crates/onix-core/tests/golden.rs` (`path_rendering_collision`)
 # — the correctness precheck below applies to it exactly like every other
 # fixture, with no special-casing.
 extra_diff_flags_for() {
