@@ -63,7 +63,7 @@ pub(crate) fn compute_pairs(
         let (_, added_value) = t2.get(added_key);
         for (removed_idx, removed_key) in hashes_removed.iter().enumerate() {
             let (old_idx, removed_value) = t1.get(removed_key);
-            // Only container pairs are memoized; the key is content only (issue #31).
+            // Only container pairs are memoized; the key is content only.
             let cache_key = match (&removed_dist[removed_idx], &added_dist[added_idx]) {
                 (Some(removed_dist_key), Some(added_dist_key)) if memo.caching_enabled() => {
                     Some((removed_dist_key.clone(), added_dist_key.clone()))
@@ -124,7 +124,6 @@ pub(crate) fn compute_pairs(
                 if !used.contains(&to_hash) {
                     used.insert(Rc::clone(&from_hash));
                     used.insert(Rc::clone(&to_hash));
-                    // No `break`: each later unused candidate overwrites this entry.
                     pairs.insert(Rc::clone(&from_hash), to_hash);
                 }
             }

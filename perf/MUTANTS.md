@@ -58,7 +58,8 @@ is what was verified independently of any single run's labels.
    - `onix-core/src/diff/array.rs`'s `lcs_or_positional_array_diff` `> 1`
      threshold: replacing `> 1` with `>= 1` is output-neutral (at exactly one
      LCS finding the positional report holds the same finding or at least two,
-     so both thresholds return the LCS report), and
+     so both thresholds return a report with the same single finding; the
+     `>= 1` variant returns the identical positional report), and
      `cargo mutants -p onix-core -f '**/diff/array.rs' -F '> with >= in
      lcs_or_positional'` lists this `>=` mutant, reported missed with the
      sibling `==` and `<` mutants caught (the expected signature of an

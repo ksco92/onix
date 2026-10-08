@@ -21,8 +21,8 @@ use super::{
 ///
 /// # Stack-footprint note
 ///
-/// The scalar branch's [`Report`] locals live in [`lcs_or_positional_array_diff`], off this
-/// recursion's frame, so `DEFAULT_MAX_DEPTH` traversal fits a 2 MiB thread.
+/// The scalar branch's [`Report`] locals live in [`lcs_or_positional_array_diff`], off this frame.
+/// Plain-list `DEFAULT_MAX_DEPTH` fits a 2 MiB thread in debug (`docs/design/depth-budget.md`).
 pub(crate) fn array_diff(
     path: &mut Vec<PathSegment>,
     a: &[Value],
@@ -157,9 +157,7 @@ fn insert_lcs_pair_finding(
         Ok(())
     })
 }
-/// Diffs two scalar lists via a `difflib`-style LCS match; see `docs/design/list-diff.md`,
-/// "Opcode-to-finding mapping". Only [`insert_lcs_pair_finding`] can return
-/// [`Error::MaxDepthExceeded`].
+/// Diffs two scalar lists via a `difflib`-style LCS match.
 fn lcs_array_diff(
     path: &mut Vec<PathSegment>,
     a: &[Value],
