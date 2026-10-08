@@ -16,34 +16,16 @@ workspace = true
 profile = []
 
 [dependencies]
-# Pinned to an exact Arrow version so this crate and the `pyo3-arrow` bridge
-# in `onix-py` (which requires `arrow` ^59) resolve to the identical Arrow
-# types — a mismatch would make the record batches handed across the FFI
-# boundary a different, incompatible type. 59.3.0 is the newest 59.x at the
-# time this crate landed. Only the schema/array sub-crates are pulled in: the
-# C Data Interface glue lives in `onix-py` behind `pyo3-arrow`, so this crate
-# needs no `ffi` feature.
+# Exact pin shared with onix-py and pyo3-arrow (^59), so record batches crossing the FFI boundary are the same Rust types.
 arrow-schema = "=59.3.0"
 arrow-array = "=59.3.0"
 # `i256` for hashing `Decimal256` cells the same way as `Decimal128`.
 arrow-buffer = "=59.3.0"
-# `arrow-cast` decodes dictionary-encoded columns to their value type before
-# hashing, casts a right-only duplicate key's columns to the left key types,
-# strips a timestamp's timezone before rendering, and renders each changed
-# cell's value to its canonical string (`display::ArrayFormatter`);
-# `arrow-select` filters the materialized rows, concatenates the output row
-# batches, and `take`s the key columns into the per-cell diff. The row diff
-# re-reads each *input* side through the caller's re-openable `TableInput`. The
-# `spool` module owns the anonymous temporary Arrow IPC primitive used both by
-# the Python bindings' input spool and by the parallel cell pass, which spills
-# its changed-row key-hash partitions so it holds one partition in memory at a
-# time rather than both sides' full changed rows.
+# Dictionary decode, key casts, cell rendering.
 arrow-cast = "=59.3.0"
+# Filter, concat, take.
 arrow-select = "=59.3.0"
-# The `spool` module writes to an anonymous `tempfile::tempfile()` as an Arrow
-# IPC stream and re-reads it; the cell pass spills one key-hash partition per
-# file so only one is resident at once. Pinned to the same 59.3.0 as the other
-# arrow crates.
+# The anonymous spool.
 arrow-ipc = "=59.3.0"
 # `arrow-ord`'s null-aware `distinct` kernel finds a partition's changed cells one
 # column at a time in the parallel cell pass.
