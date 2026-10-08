@@ -188,13 +188,12 @@ fn decode_tagged_dict(
 
 /// Decodes an `$object` fixture — a custom object (issue #66): its payload is
 /// `{"class": "<name>", "attrs": {…}, ["identity": "<module.qualname>"]}`.
-/// Builds
-/// the same class-tagged, attribute-diffed value onix's own bindings build for
-/// a live instance. `identity` (the qualified type identity onix decides
-/// `type_changes` by) defaults to `class` when a fixture omits it — every
-/// committed object fixture uses a distinct `class` per distinct type, so name
-/// and identity coincide for them; the same-name-different-identity cases are
-/// pinned by the Python differential suite against live `DeepDiff` instead.
+/// Builds the same class-tagged, attribute-diffed value onix's own bindings
+/// build for a live instance. `identity` (the qualified type identity onix
+/// decides `type_changes` by) defaults to `class` when a fixture omits it —
+/// every committed object fixture uses a distinct `class` per distinct type, so
+/// name and identity coincide for them; the same-name-different-identity cases
+/// are pinned by the Python differential suite against live `DeepDiff` instead.
 fn decode_tagged_object(
     map: &serde_json::Map<String, Value>,
     builder: &mut onix_core::value::Builder,
