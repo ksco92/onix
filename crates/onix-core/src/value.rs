@@ -1232,8 +1232,8 @@ impl Default for ObjectLengths {
 }
 
 impl Object {
-    /// Builds an object from `(key, value)` pairs sorted by [`ObjectKey`]'s order; a duplicate
-    /// key keeps the last value, as [`serde_json`] does.
+    /// Builds an object from `(key, value)` pairs in any order, sorting by [`ObjectKey`]'s order;
+    /// a duplicate key keeps the last value, as [`serde_json`] does.
     pub(crate) fn from_pairs(mut pairs: Vec<(ObjectKey, Value)>) -> Self {
         // Stable, so the loop below keeps the last occurrence of a duplicate.
         pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -1566,8 +1566,8 @@ impl Builder {
         Self::default()
     }
 
-    /// Builds an object [`Value`] from `entries` in sorted key order; a duplicate key keeps the
-    /// last value.
+    /// Builds an object [`Value`] from `entries` in any order, sorting by key; a duplicate key
+    /// keeps the last value.
     #[must_use]
     pub fn object<K: Into<Str>>(&mut self, entries: Vec<(K, Value)>) -> Value {
         let pairs = entries

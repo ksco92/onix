@@ -230,7 +230,7 @@ impl DateTime {
         self.rendered('T')
     }
 
-    /// Python's `str(datetime)`: `isoformat(sep=" ")`. It stays distinct from `isoformat()`
+    /// Python's `str(datetime)`: `isoformat(sep=" ")`. It differs from `isoformat()`
     /// because `DeepDiff` coerces and hashes through `str()`.
     #[must_use]
     pub fn python_str(self) -> String {

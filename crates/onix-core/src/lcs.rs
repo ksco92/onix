@@ -134,7 +134,7 @@ pub(crate) enum ScalarKey {
     },
     /// A `timedelta`, keyed by the value itself (already an exact,
     /// `Eq`/`Hash`/`Ord` total-duration type — see
-    /// [`crate::datetime::TimeDelta`]'s own doc for why it is not a
+    /// `docs/design/value-model.md`, "Calendar types", for why it is not a
     /// flattened microsecond count) — always comparable, with no naive/aware
     /// split.
     TimeDelta(crate::datetime::TimeDelta),
