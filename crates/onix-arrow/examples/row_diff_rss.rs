@@ -44,11 +44,11 @@
 //!
 //! Each side is generated on the fly, batch by batch, and nothing is retained
 //! between batches (except `int64diff`'s shared equal columns, about 0.3 GB at
-//! 500k rows, which its figures include), so the process's peak RSS is the diff's own state, not the
-//! table data. The shapes run are `linear`, `nochange`, `allchange`, `wide`,
-//! `widesame`, `manycols`, `int64diff`, `dup`, and the remaining shapes in the
-//! commands above, each defined by its `Case` variant in
-//! `examples/shared/gen_shapes.rs`. The peak RSS of `linear` over `nochange` is
+//! 500k rows, which its figures include), so the process's peak RSS is the
+//! diff's own state, not the table data. The shapes run are `linear`,
+//! `nochange`, `allchange`, `wide`, `widesame`, `manycols`, `int64diff`,
+//! `dup`, and the remaining shapes in the commands above, each defined by its
+//! `Case` variant in `examples/shared/gen_shapes.rs`. The peak RSS of `linear` over `nochange` is
 //! the cell pass's cost; `wide` scales with changed cells times cell width, and
 //! `dup` with distinct duplicated keys times the key width.
 

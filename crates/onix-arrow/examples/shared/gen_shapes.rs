@@ -1,10 +1,8 @@
 //! Shared streaming table generator and cases for the row-diff examples
 //! (`row_diff_rss` and `row_diff_profile`), included with `#[path]` by both.
 //! Each shape's data is a deterministic function of the row index, so nothing
-//! is retained between batches (except `int64diff`'s equal columns, one set
-//! per batch length, shared by both sides: about 0.3 GB at 500k rows and 1 KB
-//! width) and two runs at the same size produce
-//! byte-identical data.
+//! is retained between batches (except `int64diff`'s equal columns, shared by
+//! both sides) and two runs at the same size produce byte-identical data.
 
 // Each example includes this module and uses a subset of the shapes, so a shape
 // unused by one example is not dead across the pair.
