@@ -1,9 +1,6 @@
 """Checks that a built wheel actually ships the type stub and py.typed marker.
 
-Builds a real release wheel with maturin — the same `--release` publish.yml
-uses — into a scratch directory and inspects its zip contents directly,
-rather than trusting that maturin picking up ``deepdiff_rs.pyi`` at develop
-time also means it is packaged into what actually ships.
+Builds a release wheel with maturin into a scratch directory and inspects its zip contents.
 """
 
 import shutil

@@ -1,6 +1,4 @@
-"""Runs ``mypy --strict`` over a script that exercises every stub-declared
-callable, so the stub is proven usable — not just present — by an actual
-type checker rather than only by the signature-comparison test.
+"""Runs ``mypy --strict`` over a script that exercises every stub-declared callable.
 """
 
 import subprocess

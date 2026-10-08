@@ -1,9 +1,7 @@
 """One guard on the suite itself: no test name may be defined twice.
 
 Python's later definition silently shadows the earlier one, so a duplicate
-does not fail — it deletes a test, and pytest reports the same green count it
-did before. That is exactly what a bad merge produces, and it hid a defective
-test behind a fixed one here once already.
+deletes a test without failing.
 """
 
 import ast

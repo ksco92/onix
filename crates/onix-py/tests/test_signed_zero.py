@@ -2,11 +2,8 @@
 
 Directed regression cases plus two differential batches, reusing
 ``test_differential_fuzz``'s generators: one over plain lists, one over
-sets/frozensets directly (issue #46). A real `set`/`frozenset` can never
-hold both `-0.0` and `0.0` (the pair collapses before reaching onix), so
-the set batch pins the single-representative case; two-zero normalization
-is implemented in onix-core's ``ignore_order::hash::item_key`` float branch
-and ``value::number_cmp``, and covered by that crate's own suite.
+sets/frozensets directly. A real `set`/`frozenset` never holds both `-0.0`
+and `0.0`, so the set batch covers only the single-representative case.
 """
 
 import json
@@ -34,7 +31,6 @@ def _onix(a: JsonValue, b: JsonValue, *, ignore_order: bool) -> dict:
 
 
 def test_signed_zero_dedup_exact_repro() -> None:
-    # The reported repro: two signed zeros collapse to a single removed item.
     assert _diverges([0.0, -0.0], [], ignore_order=True) is None
     assert _onix([0.0, -0.0], [], ignore_order=True) == {
         "iterable_item_removed": {"root[0]": 0.0}

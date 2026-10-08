@@ -1,9 +1,7 @@
 """Peak-RSS regression guard for the direct compact-value build.
 
-The bindings convert both inputs into `onix_core::Value` directly, with no
-intermediate `serde_json::Value` tree. Measures the incremental process RSS
-of converting an ``api_payloads``-shaped fixture and asserts it stays under
-a bound the old `serde_json::Value` intermediate would blow past.
+Asserts the incremental process RSS of converting an ``api_payloads``-shaped
+fixture stays under ``_OVERHEAD_BOUND_MB``.
 
 Run in its own subprocess (isolates the RSS reading from pytest), via
 ``ru_maxrss`` normalized across macOS (bytes) and Linux (KiB).
@@ -75,6 +73,5 @@ def test_api_payloads_conversion_overhead_is_bounded() -> None:
     overhead = data["overhead_mb"]
     assert overhead < _OVERHEAD_BOUND_MB, (
         f"compact conversion overhead {overhead:.1f} MB for {data['records']} "
-        f"api_payloads-shaped records exceeds the {_OVERHEAD_BOUND_MB} MB bound "
-        f"(a regression to the serde_json::Value intermediate would land here)"
+        f"api_payloads-shaped records exceeds the {_OVERHEAD_BOUND_MB} MB bound"
     )
