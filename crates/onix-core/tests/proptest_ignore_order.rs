@@ -1,12 +1,4 @@
-//! Property-based tests for `ignore_order=True`'s algebraic invariants.
-//!
-//! Complements `proptest_diff.rs` (the ordered-path invariants) with
-//! the one invariant genuinely specific to `ignore_order`: a shuffled copy of
-//! any list diffs to an empty report, for arbitrary JSON-shaped list
-//! elements (scalars and small nested containers), not just the hand-picked
-//! examples in `ignore_order/tests.rs`'s own unit tests. Reuses the same bounded,
-//! seeded generator shape as `proptest_diff.rs` — see that file's doc for
-//! the rationale behind the depth/node/case-count bounds and the fixed seed.
+//! Property tests for `ignore_order=True`: a shuffled list diffs empty; independent lists never panic.
 
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -123,10 +115,7 @@ fn permutation_strategy_draws_non_identity_orders() {
 proptest! {
     #![proptest_config(config())]
 
-    /// The one invariant genuinely specific to `ignore_order`: shuffling a
-    /// list's elements (any permutation, including the identity one) never
-    /// produces a difference, for arbitrary JSON-shaped elements — not just
-    /// scalars.
+    /// Any permutation of a list diffs to an empty report.
     #[test]
     fn shuffled_copy_of_any_list_diffs_to_empty((a, perm) in arb_list_and_permutation()) {
         let shuffled: Vec<Value> = perm.into_iter().map(|i| a[i].clone()).collect();
@@ -136,8 +125,7 @@ proptest! {
 
     /// A basic robustness property: diffing two independently-generated
     /// lists under `ignore_order` never panics and always returns valid
-    /// JSON (an empty object at minimum) — generated depth/size are both
-    /// far under `DEFAULT_MAX_DEPTH`, so `Err` would itself be a bug.
+    /// JSON (an empty object at minimum).
     #[test]
     fn two_independent_lists_never_panic_under_ignore_order(
         a in proptest::collection::vec(arb_json_value(), 0..10),
