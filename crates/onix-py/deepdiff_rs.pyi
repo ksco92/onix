@@ -1,11 +1,4 @@
-"""Type stub for the compiled ``deepdiff_rs`` extension module.
-
-Packaged into the wheel by maturin (which finds this file next to
-``Cargo.toml`` because ``deepdiff_rs`` is a pure-extension module) alongside
-an auto-generated ``py.typed`` marker — see ``crates/onix-py/tests/`` for the
-test that checks both ship and that every signature here still matches the
-built module's real ``inspect.signature()``.
-"""
+"""Type stub for the compiled ``deepdiff_rs`` extension module."""
 
 from typing import Any
 
@@ -15,8 +8,7 @@ __version__: str
 class MaxDepthError(ValueError):
     """Raised when diffing (or importing an Arrow schema) would need to
     recurse past the configured ``max_depth`` — a catchable Python
-    exception in place of a native stack overflow. A ``ValueError``
-    subclass, so callers that only catch ``ValueError`` still catch this.
+    exception in place of a native stack overflow.
     """
 
 MAX_DEPTH_CEILING: int
@@ -54,15 +46,15 @@ class DeepDiff:
             ``datetime.date``, or a ``tuple`` of those, never nested),
             ``list``, ``tuple``, ``set``, ``frozenset``,
             ``datetime.datetime``, ``datetime.date``, ``datetime.time``, or
-            ``datetime.timedelta``, arbitrarily nested, or a subclass of the
-            last nine (a ``namedtuple``, a ``set`` subclass, a pandas
-            ``Timestamp``), which converts and compares as its base type but
-            reports its own class name in a ``type_changes`` entry. Any other
-            object is diffed by its attributes as a custom object
-            (``attribute_added``/``attribute_removed``, ``root.attr`` paths,
-            ``type_changes`` between two different classes), except a type
-            DeepDiff routes to a handler onix lacks, which raises
-            ``TypeError``.
+            ``datetime.timedelta``, arbitrarily nested, or a subclass of
+            any of the container or calendar types above (a ``namedtuple``, a
+            ``set`` subclass, a pandas ``Timestamp``), which converts and
+            compares as its base type but reports its own class name in a
+            ``type_changes`` entry. Any other object is diffed by its
+            attributes as a custom object (``attribute_added``/
+            ``attribute_removed``, ``root.attr`` paths, ``type_changes``
+            between two different classes), except a type DeepDiff routes to
+            a handler onix lacks, which raises ``TypeError``.
         :param t2: The right value to compare, of the same supported types.
         :param ignore_order: Mirrors ``DeepDiff(..., ignore_order=True)``.
         :param max_depth: Recursion-depth bound; defaults to 512. Raises
@@ -79,8 +71,7 @@ class DeepDiff:
         sets, datetimes) preserved rather than rendered to JSON. A custom
         object, however, comes back as a plain ``dict`` of its attributes
         (onix cannot reconstruct the instance), unlike DeepDiff's own
-        ``to_dict()`` which returns the original object -- a documented
-        divergence (see ``tests/golden/README.md``)."""
+        ``to_dict()`` which returns the original object."""
 
     def __bool__(self) -> bool: ...
     def __repr__(self) -> str: ...
@@ -174,8 +165,7 @@ class TableDiff:
         a JSON string.
 
         :raises ValueError: If the row-level members would together embed
-            more rows than the documented cap (see the Diffing tables
-            section of the README); use the row-level accessors below, or
+            more than 10,000 rows; use the row-level accessors, or
             :meth:`ArrowTable.to_pyarrow`/``__arrow_c_stream__``, instead.
         """
 
@@ -205,10 +195,7 @@ class ArrowTable:
     def __arrow_c_stream__(self, requested_schema: object | None = ...) -> object:
         """Exports this table as an Arrow C stream capsule — the protocol
         pyarrow, polars, and pandas all use to import it. Polars needs no
-        pyarrow dependency of its own to do so; pandas' own consumption of
-        this protocol (``pd.api.interchange.from_dataframe``) requires
-        pyarrow to be installed regardless, a pandas-side requirement, not
-        one of this method's.
+        pyarrow dependency of its own to do so.
 
         :param requested_schema: An optional requested-schema capsule, as
             the Arrow PyCapsule interface defines it.

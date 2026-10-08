@@ -19,8 +19,7 @@ import pytest
 from deepdiff_rs import MaxDepthError, diff_tables
 
 # The library-pair matrix reused by every cross-library test: same-library on
-# each side, plus mixed pairs (the acceptance example diffs a polars table
-# against a pyarrow one).
+# each side, plus mixed pairs.
 _LIBRARY_PAIRS = [
     ("pyarrow", "pyarrow"),
     ("polars", "polars"),
@@ -196,7 +195,7 @@ def test_record_batch_stream_protocol_input() -> None:
 
 
 def test_record_batch_reader_input() -> None:
-    """A pyarrow RecordBatchReader is accepted; only its schema is read in this version."""
+    """A pyarrow RecordBatchReader is accepted."""
     left_pa, right_pa = _int_tables()
     left = pa.RecordBatchReader.from_batches(left_pa.schema, left_pa.to_batches())
     right = pa.RecordBatchReader.from_batches(right_pa.schema, right_pa.to_batches())
@@ -206,7 +205,7 @@ def test_record_batch_reader_input() -> None:
 
 
 def test_multi_chunk_table_input() -> None:
-    """A table with more than one chunk is accepted (schema read only)."""
+    """A table with more than one chunk is accepted."""
     left_pa, right_pa = _int_tables()
     left = pa.concat_tables([left_pa, left_pa])
     right = pa.concat_tables([right_pa, right_pa])
@@ -671,7 +670,7 @@ def test_bad_requested_schema_capsule_raises_value_error() -> None:
 
 # Optional-dependency tests
 
-# Shared by every test below that needs pyarrow genuinely unimportable in the
+# Shared by every test below that needs pyarrow unimportable in the
 # subprocess (not merely unimported): a meta-path finder that raises
 # ModuleNotFoundError for "pyarrow" and any of its submodules.
 _BLOCK_PYARROW_IMPORT = textwrap.dedent(
@@ -796,7 +795,7 @@ def test_row_member_exports_to_pandas_via_the_interchange_protocol() -> None:
 
 
 def test_row_member_exports_to_pandas_raises_without_pyarrow() -> None:
-    """pandas' interchange path raises when pyarrow is genuinely unimportable."""
+    """pandas' interchange path raises when pyarrow is unimportable."""
     result = _run_isolated(
         _BLOCK_PYARROW_IMPORT
         + textwrap.dedent(
@@ -868,7 +867,7 @@ def test_to_pyarrow_propagates_a_broken_pyarrow() -> None:
             diff.schema_arrow.to_pyarrow()
         except ImportError as error:
             # The real failure is propagated; the install-the-extra hint is only
-            # for a genuinely-absent pyarrow (ModuleNotFoundError).
+            # for an absent pyarrow (ModuleNotFoundError).
             assert "installed but broken" in str(error), str(error)
             assert "deepdiff-rs[arrow]" not in str(error), str(error)
         else:
