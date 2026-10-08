@@ -195,8 +195,7 @@ fn run_diff_ignore_order_flag_reports_a_pure_shuffle_as_empty() {
 fn run_diff_without_ignore_order_flag_reports_the_shuffle_as_index_aligned_changes() {
     // Same input as the test above, without --ignore-order: the default
     // ordered path compares index by index instead, so the shuffle is
-    // NOT empty — proves the flag is actually wired to DiffOptions, not
-    // a no-op.
+    // NOT empty.
     let a = write_temp_file("shuffle_ordered_a.json", "[1, 2, 3]");
     let b = write_temp_file("shuffle_ordered_b.json", "[3, 2, 1]");
     let (code, stdout, _stderr) =
@@ -207,16 +206,7 @@ fn run_diff_without_ignore_order_flag_reports_the_shuffle_as_index_aligned_chang
 
 #[test]
 fn run_diff_uses_real_default_max_depth_when_no_flag_or_env_is_set() {
-    // Regression test for a cargo-mutants survivor: mutating
-    // resolve_default_max_depth to always return 1 passed every other
-    // test in this file, because none of them needed more than
-    // max_depth == 1 to succeed (a change at path depth 1 fits under
-    // that bound too). A change at path depth 2 needs max_depth >= 2,
-    // which onix_core::DEFAULT_MAX_DEPTH (512) comfortably clears but
-    // the hardcoded-1 mutant does not — so this fails loudly (exit 3
-    // instead of 0) under that mutant. Relies on the ambient test
-    // environment not exporting ONIX_MAX_DEPTH, same as every other
-    // test here that never sets or clears it.
+    // A depth-2 change needs the real default, not a max_depth of 1.
     let a = write_temp_file("default_depth_a.json", r#"{"a": {"b": 1}}"#);
     let b = write_temp_file("default_depth_b.json", r#"{"a": {"b": 2}}"#);
     let (code, stdout, stderr) =
@@ -265,9 +255,6 @@ fn run_diff_invalid_json_exits_two() {
 
 #[test]
 fn run_diff_b_file_invalid_json_exits_two() {
-    // Same as run_diff_invalid_json_exits_two, but with the *second*
-    // (b) file the invalid one and a valid — exercises run()'s separate
-    // error-handling arm for b_value specifically, not just a_value's.
     let a = write_temp_file("good_a.json", "{}");
     let b = write_temp_file("bad_only_b.json", "not json");
     let (code, stdout, stderr) =
@@ -313,15 +300,6 @@ fn run_diff_timing_flag_emits_parse_and_diff_ns_on_stderr_and_clean_stdout_json(
     assert!(timing.get("diff_ns").is_some());
 }
 
-// --- parse_max_depth_env_value ----------------------------------------
-//
-// The real end-to-end "ONIX_MAX_DEPTH is respected" behavior (reading
-// the actual process environment) is covered by tests/cli.rs via a
-// subprocess with the variable set on the Command builder — see
-// parse_max_depth_env_value's doc for why that logic is split out and
-// tested here in isolation instead of by mutating this test binary's own
-// process environment.
-
 #[test]
 fn parse_max_depth_env_value_falls_back_to_default_when_unset() {
     assert_eq!(
@@ -345,10 +323,6 @@ fn parse_max_depth_env_value_falls_back_to_default_when_unparseable() {
 
 #[test]
 fn every_engine_error_maps_to_a_documented_exit_code() {
-    // `DateTimeOutOfRange` cannot arise from JSON input (see
-    // `exit_code_for`'s doc), so this is the only place its mapping is
-    // exercised — and the `match` is what makes a future variant fail to
-    // compile until it is mapped too.
     assert_eq!(
         super::run::exit_code_for(&onix_core::Error::MaxDepthExceeded {
             path: "root".to_string(),

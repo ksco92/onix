@@ -1,14 +1,4 @@
-//! End-to-end tests for the `onix` binary, driving it as a real subprocess
-//! via [`std::process::Command`] (no `assert_cmd` dependency — the
-//! assertions this crate needs are a handful of exit-code/stdout/stderr
-//! checks, well within what the standard library's `Command`/`Output`
-//! already provide).
-//!
-//! These complement `src/tests.rs`'s unit tests (which exercise `run()`
-//! directly against in-memory buffers): this file is the only place the
-//! *actual compiled binary* — argument parsing from real `env::args()`,
-//! real process exit codes, real stdout/stderr file descriptors — is
-//! verified end-to-end.
+//! End-to-end tests driving the compiled `onix` binary as a subprocess.
 
 use std::process::{Command, Output};
 
@@ -21,11 +11,7 @@ fn run_onix(args: &[&str]) -> Output {
     run_onix_with_env(args, &[])
 }
 
-/// Like [`run_onix`], but additionally sets each `(key, value)` pair in
-/// `env` on the spawned process — the one builder both env-setting and
-/// non-env-setting tests below share, so a test that needs
-/// `ONIX_MAX_DEPTH` isn't hand-rolling its own `Command` and quietly
-/// drifting from `run_onix`'s own construction.
+/// Like [`run_onix`], with extra environment variables.
 fn run_onix_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_onix"))
         .args(args)
@@ -133,12 +119,7 @@ fn json_nested_128_levels_exits_two_with_recursion_limit() {
 
 #[test]
 fn default_max_depth_is_used_when_no_flag_or_env_is_set() {
-    // End-to-end companion to the same-named-in-spirit unit test in
-    // src/tests.rs (run_diff_uses_real_default_max_depth_when_no_flag_or_env_is_set),
-    // through the real compiled binary and its real process environment
-    // rather than an in-memory run() call. Explicitly removes ONIX_MAX_DEPTH
-    // (rather than relying on run_onix's ambient-environment inheritance)
-    // so this can't flake if some wrapping shell happens to export it.
+    // Removes ONIX_MAX_DEPTH so an exporting shell cannot change the default.
     let a = write_temp_file("default_depth_a.json", r#"{"a": {"b": 1}}"#);
     let b = write_temp_file("default_depth_b.json", r#"{"a": {"b": 2}}"#);
 

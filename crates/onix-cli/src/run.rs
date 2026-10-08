@@ -1,7 +1,6 @@
 //! Runs the parsed `diff` subcommand end to end: reads both input files,
 //! calls into `onix_core`, and writes the report (plus, with `--timing`, a
-//! parse/diff timing line) to the caller-supplied `stdout`/`stderr` — see
-//! [`run`]'s own doc for the full output and exit-code contract.
+//! parse/diff timing line) to the caller-supplied `stdout`/`stderr`.
 
 use std::io::Write;
 use std::time::Instant;
@@ -19,8 +18,8 @@ pub(crate) const EXIT_IO_OR_PARSE_ERROR: u8 = 2;
 pub(crate) const EXIT_MAX_DEPTH_EXCEEDED: u8 = 3;
 
 /// Reads `path` and parses it as JSON, returning both the raw text (kept for
-/// `--timing`'s re-parse — see [`run`]'s doc) and the parsed value, or a
-/// human-readable error message on either failure.
+/// `--timing`'s re-parse) and the parsed value, or a human-readable error
+/// message on either failure.
 pub(crate) fn read_json_file(path: &str) -> Result<(String, Value), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
     let value =
@@ -44,40 +43,19 @@ fn read_or_bail(path: &str, stderr: &mut dyn Write) -> Result<(String, Value), u
 ///
 /// - **stdout** carries only the diff report, as a single line of compact
 ///   JSON from [`onix_core::Report::to_json_value`] (an empty report prints
-///   `{}`). Compact rather than pretty-printed: this output is meant for
-///   machine consumption (golden-file comparison, the benchmark harness),
-///   where a single deterministic line is easier to diff byte-for-byte than
-///   a pretty-printed, indentation-sensitive one.
-/// - **stderr** carries usage/error text, and — only when `--timing` is
-///   passed — exactly one line of JSON shaped `{"parse_ns": N, "diff_ns":
-///   N}` measuring, respectively, only the two [`serde_json::from_str`]
-///   calls and only the [`onix_core::diff_with_options`] call. Without
-///   `--timing`, stderr carries nothing on a successful run.
+///   `{}`).
+/// - **stderr** carries usage/error text, and — only with `--timing` — one
+///   line `{"parse_ns": N, "diff_ns": N}` timing the two
+///   [`serde_json::from_str`] calls and the [`onix_core::diff_with_options`]
+///   call.
 ///
 /// # Exit codes
 ///
-/// - `0`: the diff was computed successfully. This holds whether or not the
-///   report is empty — presence/absence of differences is carried in the
-///   stdout JSON itself, not the exit code, so a benchmark or CI harness
-///   scripting against the exit code alone cannot use it as a "differences
-///   found" signal.
-/// - `1`: a usage error (missing/unknown subcommand, missing/extra
-///   positional arguments, an unknown flag, or a non-numeric `--max-depth`).
-///   `stderr` gets the specific error plus [`USAGE`].
-/// - `2`: an I/O error (e.g. a missing input file) or a JSON-parse error on
-///   either input.
-/// - `3`: [`onix_core::Error::MaxDepthExceeded`] — `stderr` gets the error's
-///   `Display` text.
-///
-/// # Stack safety on adversarially deep input
-///
-/// `--max-depth`/`ONIX_MAX_DEPTH` can be set arbitrarily high with no upper
-/// bound enforced here, but that is safe: `serde_json`'s own parser enforces
-/// a default recursion limit of 127 nested arrays or objects (this crate does
-/// not enable its `unbounded_depth` feature), so any input `read_json_file`
-/// can successfully parse is already at most 127 levels deep — far under
-/// [`onix_core::DEFAULT_MAX_DEPTH`] — regardless of how high the configured
-/// bound is.
+/// - `0`: the diff was computed, whether or not the report is empty.
+/// - `1`: a usage error; `stderr` gets the error plus [`USAGE`].
+/// - `2`: an I/O error or a JSON-parse error on either input.
+/// - `3`: [`onix_core::Error::MaxDepthExceeded`]; `stderr` gets its `Display`
+///   text.
 #[allow(
     clippy::missing_panics_doc,
     reason = "see the serde_json::to_string comment below"
@@ -112,8 +90,6 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
     let diff_ns = diff_start.elapsed().as_nanos();
 
     if parsed.timing {
-        // Re-parses the in-memory text read_or_bail already read, not a
-        // second disk read.
         let parse_start = Instant::now();
         let _: Result<Value, _> = serde_json::from_str(&a_text);
         let _: Result<Value, _> = serde_json::from_str(&b_text);
@@ -126,8 +102,7 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
     match result {
         Ok(report) => {
             let value = report.to_json_value();
-            // Built from finite-number inputs and our own path strings, so it
-            // can never contain NaN/Infinity, the only way this can fail.
+            // Finite numbers and our own path strings: no NaN/Infinity.
             let serialized = serde_json::to_string(&value)
                 .expect("a Report's JSON value is always serializable");
             let _ = writeln!(stdout, "{serialized}");
@@ -139,9 +114,8 @@ pub(crate) fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Writ
         }
     }
 }
-/// The exit code one engine error maps to. `DateTimeOutOfRange` cannot arise
-/// here (JSON has no datetime literal) but is matched exhaustively so a
-/// future variant is noticed here rather than silently mapped.
+
+/// The exit code one engine error maps to.
 pub(crate) fn exit_code_for(error: &onix_core::Error) -> u8 {
     match error {
         onix_core::Error::MaxDepthExceeded { .. } => EXIT_MAX_DEPTH_EXCEEDED,

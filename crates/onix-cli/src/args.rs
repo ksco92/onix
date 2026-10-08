@@ -1,7 +1,5 @@
 //! Argument parsing for the `onix diff` subcommand: [`DiffArgs`] and how to
-//! get one from `std::env::args()` (or an `ONIX_MAX_DEPTH` fallback), with
-//! no I/O or `onix_core` calls of its own — see `super::run` for what
-//! happens with a parsed [`DiffArgs`].
+//! get one from `std::env::args()` (or an `ONIX_MAX_DEPTH` fallback).
 
 /// Usage text printed (to stderr) on any argument-parsing error.
 pub(crate) const USAGE: &str =
@@ -22,12 +20,8 @@ pub(crate) struct DiffArgs {
     pub(crate) timing: bool,
 }
 
-/// Parses the arguments to the `diff` subcommand (everything after the
-/// `diff` token itself is not included here; see [`parse_args`]).
-///
-/// `max_depth` is `None` when `--max-depth` was not passed, so the caller
-/// can fall back to [`resolve_default_max_depth`] — keeping "was it passed
-/// explicitly" and "what's the effective default" as separate concerns.
+/// Parses the arguments after the `diff` token; `max_depth` is `None` when
+/// `--max-depth` was not passed.
 pub(crate) fn parse_diff_args(args: &[String]) -> Result<DiffArgs, String> {
     let mut positionals: Vec<&str> = Vec::new();
     let mut max_depth: Option<usize> = None;
@@ -80,17 +74,8 @@ pub(crate) fn parse_args(args: &[String]) -> Result<DiffArgs, String> {
     }
 }
 
-/// The pure parsing logic behind [`resolve_default_max_depth`]: `None` (the
-/// environment variable was unset) or an unparseable value both fall back to
-/// [`onix_core::DEFAULT_MAX_DEPTH`]; a parseable value is used as-is.
-///
-/// Split out from [`resolve_default_max_depth`] purely so this logic is
-/// unit-testable without mutating real process environment state — `std::env
-/// ::set_var`/`remove_var` are `unsafe` as of Rust 2024 (soundness hazard in
-/// multi-threaded processes), and this workspace forbids `unsafe` outright.
-/// The real end-to-end "`ONIX_MAX_DEPTH` is respected" behavior is covered by
-/// `tests/cli.rs`, which sets the variable safely on a spawned subprocess via
-/// [`std::process::Command::env`].
+/// Parses an `ONIX_MAX_DEPTH` value; unset or unparseable falls back to
+/// `DEFAULT_MAX_DEPTH`.
 pub(crate) fn parse_max_depth_env_value(value: Option<&str>) -> usize {
     value
         .and_then(|v| v.parse::<usize>().ok())
@@ -100,10 +85,6 @@ pub(crate) fn parse_max_depth_env_value(value: Option<&str>) -> usize {
 /// Resolves the effective `--max-depth`: the flag value if passed, else
 /// `ONIX_MAX_DEPTH` from the environment if set and parseable as a `usize`,
 /// else [`onix_core::DEFAULT_MAX_DEPTH`] (see [`parse_max_depth_env_value`]).
-///
-/// This ambient-environment default is a deliberate CLI-only convenience —
-/// `onix-core` itself stays a pure function with no environment
-/// dependence; only the binary reads `ONIX_MAX_DEPTH`.
 pub(crate) fn resolve_default_max_depth() -> usize {
     parse_max_depth_env_value(std::env::var(MAX_DEPTH_ENV_VAR).ok().as_deref())
 }
