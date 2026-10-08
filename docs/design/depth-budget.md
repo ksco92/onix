@@ -47,8 +47,10 @@ bytes/level, as the range across macOS and Linux:
 
 `pairing` is the worst case (an `ignore_order` list nested at every
 level beside two shared strings). `guard.rs` (in `onix-py`) sizes its
-worker stack from the debug `pairing` figure, and the same example
-fails CI when any shape exceeds that constant.
+worker stack from the debug `pairing` figure, at 8,192 bytes/level
+times a margin of 2 (16,384, 2.4 times 6,721) over 20,000 levels,
+327,680,000 bytes reserved, and the same example fails CI when any
+shape exceeds 8,192.
 
 Every site that clones a whole value into a `Report` calls
 `check_value_depth`/`check_map_depth` first, so no value over the
@@ -67,8 +69,7 @@ stack overflow.
 In release, the worst figure (`pairing`, 2,582) needs about 1,325,000
 bytes, 63% of an ordinary 2 MiB thread. In debug, plain lists (4,000)
 need about 2,052,000 bytes, a 2.2% margin under 2 MiB, and `pairing`
-(6,721) needs about 3,448,000, so a 4 MiB thread. The release `pairing`
-figure is 0.38 times its debug figure.
+(6,721) needs about 3,448,000, so a 4 MiB thread.
 
 Per-function frame size is part of this bound — see `array_diff`'s
 Stack-footprint note for why its scalar-branch locals are kept out of
