@@ -26,6 +26,6 @@ objects — record-shaped data commonly repeats a handful of keys
 thousands of times — costs one shared `Arc<str>` allocation rather
 than one per occurrence. Each side of a diff gets its own `Builder`,
 so interning is per-side, never shared across `t1`/`t2`. A key
-holding a lone surrogate code point is never interned — see
-`onix_core::value::Key`'s own doc for why that shape isn't worth
-sharing.
+holding a lone surrogate code point is never interned: that shape
+is not the record-shaped repeat interning pays for, so it takes its
+own small allocation.
