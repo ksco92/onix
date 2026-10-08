@@ -1,4 +1,4 @@
-"""Conversion tests: every documented MVP-unsupported-input path, plus subclass acceptance.
+"""Conversion tests: accepted types, subclasses, custom objects, and every refused-input path.
 
 Covers `deepdiff_rs.DeepDiff`'s Python-object-to-`Value` conversion (see
 `crates/onix-py/src/convert.rs`'s module doc for the authoritative
@@ -112,13 +112,7 @@ def test_big_int_in_set_matches_real_deepdiff() -> None:
     )
 
 
-# A big int's exact value is read from PyLong through `int`'s own *unbound*
-# `bit_length`/`to_bytes` (see `exact_big_int` in crates/onix-py/src/convert.rs),
-# so an `int` subclass cannot make onix compare a value other than the one it
-# actually holds — no matter which method it overrides (`__str__`, `__index__`,
-# `bit_length`, or `to_bytes` itself), because onix never calls the instance's
-# own method. Each subclass below overrides a different one to a wrong answer
-# and the true value must still survive.
+# Exact big-int reads bypass subclass overrides; see `exact_big_int` in crates/onix-py/src/convert.rs.
 
 
 class _LyingStr(int):
@@ -157,11 +151,6 @@ class _LyingToBytes(int):
 def test_big_int_subclass_overriding_a_read_method_compares_by_true_value(cls: type) -> None:
     """
     A subclass overriding any method the read might use cannot change the compared value.
-
-    onix reads through ``int``'s own unbound ``bit_length``/``to_bytes``, so an
-    override of ``__str__``, ``bit_length``, or ``to_bytes`` (and the non-numeric
-    ``Money`` ``__str__``, which a decimal read would fail to parse) is bypassed
-    and the true value survives.
 
     :param cls: The lying ``int`` subclass under test.
     """
@@ -212,7 +201,7 @@ def test_ten_thousand_digit_int_round_trips_through_to_dict() -> None:
 
 
 def test_nan_float_is_accepted() -> None:
-    """A NaN float converts without error (see test_non_finite.py)."""
+    """A NaN float converts without error."""
     diff = DeepDiff(math.nan, 0.0)
     assert math.isnan(diff.to_dict()["values_changed"]["root"]["old_value"])
 
@@ -720,7 +709,7 @@ def test_lone_surrogate_high_and_low_surrogate_values() -> None:
 
 
 def test_non_bmp_character_is_accepted() -> None:
-    """A genuine non-BMP character converts fine; only an unpaired surrogate needed this feature."""
+    """A genuine non-BMP character converts fine."""
     diff = DeepDiff("😀", "😁")
     assert diff.to_dict()["values_changed"]["root"] == {"new_value": "😁", "old_value": "😀"}
 
@@ -804,7 +793,7 @@ def test_types_deepdiff_routes_elsewhere_raise_rather_than_reporting_empty(value
 
 
 def test_bytes_does_not_silently_compare_equal() -> None:
-    """The headline defect: two different bytes must not report {} (a false negative)."""
+    """Two different bytes must not report {} (a false negative)."""
     with pytest.raises(TypeError):
         DeepDiff(b"hello", b"world")
 
@@ -986,9 +975,6 @@ def test_property_and_class_attribute_object_matches_deepdiff() -> None:
         def doubled(self) -> int:
             return self.x * 10
 
-    # x changes; the property (equal-shaped) and class attribute do not, so only
-    # `root.x` and the property's derived `root.doubled` (which tracks x) appear
-    # -- both engines agree.
     onix, real = _canonical(WithComputed(1), WithComputed(2))
     assert onix == real
 

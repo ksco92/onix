@@ -21,11 +21,7 @@ from oracle_duckdb import run as oracle_run
 
 
 def _wide_fixture_writable() -> bool:
-    """Whether this pyarrow can write the wide fixture's `decimal32` column to
-    parquet. The oldest supported interpreters resolve an older pyarrow that has
-    the type but no Parquet writer for it, so the wide-fixture test skips there;
-    the narrow fixture and the in-crate Rust tests cover the streaming cell path
-    on every interpreter."""
+    """Whether this pyarrow can write the wide fixture's `decimal32` column to parquet."""
     import io
 
     try:
@@ -493,8 +489,6 @@ def test_oracle_parity_on_the_fixture_pair(n_rows: int, tmp_path: Path) -> None:
     assert summary["rows_removed"] == oracle["rows_removed"]
     assert summary["duplicate_keys"] == oracle["duplicate_keys"]
     assert summary["null_keys"] == oracle["null_keys"]
-    # Every modified fixture row changes exactly one cell, so changed rows equal
-    # the oracle's changed-cell count.
     assert summary["rows_changed"] == oracle["cells_changed"]
 
     oracle_added = _ids(pq.read_table(tmp_path / "oracle" / "rows_added.parquet"))
@@ -502,9 +496,6 @@ def test_oracle_parity_on_the_fixture_pair(n_rows: int, tmp_path: Path) -> None:
     assert _ids(_table(diff.rows_added())) == oracle_added
     assert _ids(_table(diff.rows_removed())) == oracle_removed
 
-    # Every changed cell (key, column, rendered old/new, change label) matches
-    # the oracle's, so the per-cell diff agrees on the decimal and string
-    # renderings on real data.
     assert summary["cells_changed"] == oracle["cells_changed"]
     onix_cells = _cells(_table(diff.cells_changed()))
     oracle_cells = _cells(pq.read_table(tmp_path / "oracle" / "cells_changed.parquet"))
@@ -574,13 +565,7 @@ def test_wide_fixture_thread_count_does_not_change_the_result(tmp_path: Path) ->
         ), f"batches at threads={threads}"
 
 
-# Digest pinning cells_changed's record order (and every member's row count)
-# against 0.10.0. Produced from origin/main at 8ab614d (pre-#87) with the
-# identical function on the same generate(60000, 20260906) narrow shape at
-# threads=18: sha256 over each member's name and row count, then repr() of every
-# cells_changed cell in output order. cells_changed carries the key plus rendered
-# strings only, so its repr() is stable across pyarrow versions (unlike
-# rows_added/removed's raw decimal/timestamp), and the test runs on both legs.
+# sha256 of the four members' row counts and `cells_changed`'s reprs, as 0.10.0 produced it.
 _GOLDEN_0_10_0_60K = "a6b8ecab672e1eb4ea5c7381e7923a2173b0a7cbb88d06b286f6918e0858726d"
 
 
@@ -600,7 +585,7 @@ def _member_value_digest(diff: object) -> str:
 def test_cells_changed_order_matches_the_0_10_0_golden(tmp_path: Path) -> None:
     """The streaming cell pass reproduces 0.10.0's output byte-for-byte: the
     four members' record order and content on a fixed seeded 60,000-row shape
-    match a digest captured from origin/main at 8ab614d (see above)."""
+    match the 0.10.0 digest."""
     fixture_dir = tmp_path / "fixture"
     generate(60_000, 20260906, fixture_dir)
     left = pq.read_table(fixture_dir / "a.parquet")
@@ -687,9 +672,6 @@ def test_threads_over_the_ceiling_raises_without_spawning() -> None:
     start = time_module.perf_counter()
     with pytest.raises(ValueError, match="threads must not exceed 1024"):
         diff_tables(left, left, key=["id"], threads=2**31)
-    # Returns well under a second: the ceiling is checked before spooling or
-    # spawning. (Rust std worker threads are invisible to threading.active_count,
-    # so the fast return, not a thread count, is the observable evidence.)
     assert time_module.perf_counter() - start < 1.0, "must fail fast, before spawning workers"
 
 
