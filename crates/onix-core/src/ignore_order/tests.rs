@@ -7,8 +7,6 @@ use crate::test_support::{
 use crate::value::{ObjectKey, SetItems, Value as CValue};
 use serde_json::json;
 
-// Thin wrappers routing each `serde_json`-literal-based test through the real
-// compact-typed engine via the shared `crate::test_support` converters.
 fn diff_with_options(
     a: &serde_json::Value,
     b: &serde_json::Value,
@@ -84,12 +82,7 @@ fn ignore_order_diff(a: &serde_json::Value, b: &serde_json::Value) -> serde_json
     .to_json_value()
 }
 
-// --- end-to-end, against real deepdiff==9.1.0's confirmed output -----
-//
-// Every expected value below was independently confirmed against a real
-// deepdiff==9.1.0 run during this module's research/build (direct
-// `DeepDiff(...)` probes against the library itself) — not hand-derived
-// from the algorithm this module itself implements.
+// --- end-to-end -----
 
 #[test]
 fn pure_shuffle_is_empty() {
@@ -117,12 +110,9 @@ fn nested_list_reorder_inside_a_shuffled_outer_list_is_empty() {
 
 #[test]
 fn gate_below_threshold_engages_real_pairing() {
-    // n=100, 1 value replaced by a far-away one: mirrors the shape of
-    // probe9_m6_shape_100.py (this crate's own perf fixture generator),
-    // just with a single mutation instead of 5 — the ratio (2/201) is
-    // well under the 0.7 gate either way, so real distance-based
-    // pairing engages and the single genuinely-differing pair is
-    // reported as one values_changed (not a raw add + a raw remove).
+    // n=100, one value replaced by a far-away one; ratio 2/201 is under the 0.7
+    // threshold, so distance-based pairing engages and the single differing pair
+    // is reported as one values_changed (not a raw add + a raw remove).
     let a: Vec<i64> = (0..100).collect();
     let mut b = a.clone();
     b.reverse();
@@ -137,9 +127,7 @@ fn gate_below_threshold_engages_real_pairing() {
 #[test]
 fn gate_above_threshold_falls_back_to_raw_add_remove_plus_merge() {
     // a has 3 raw items but only 2 DISTINCT hashes; b has 2. Ratio uses
-    // DISTINCT hash counts (2+2)/(2+2+1) = 0.8 > 0.7, disabling pairing
-    // entirely — confirmed against real deepdiff (traced with the
-    // pairing function monkeypatched to prove it's never called).
+    // DISTINCT hash counts (2+2)/(2+2+1) = 0.8 > 0.7, disabling pairing entirely.
     assert_eq!(
         ignore_order_diff(&json!([1, 1, 2]), &json!([3, 4])),
         json!({
@@ -164,9 +152,8 @@ fn one_sided_lists_are_all_added_or_all_removed() {
 
 #[test]
 fn nested_dict_pairing_with_index_drift_retags_a_nested_finding() {
-    // Confirmed against real deepdiff: a nested field two levels inside
-    // a hash-paired dict still carries new_path with the outer index
-    // swapped and the suffix path unchanged.
+    // A nested field two levels inside a hash-paired dict carries new_path with
+    // the outer index swapped and the suffix path unchanged.
     let t1 = json!([{"id": 1, "meta": {"x": 1}}, "anchorA", "anchorB", "anchorC"]);
     let t2 = json!(["anchorA", "anchorB", "anchorC", {"id": 1, "meta": {"x": 2}}]);
     assert_eq!(
@@ -181,8 +168,7 @@ fn nested_dict_pairing_with_index_drift_retags_a_nested_finding() {
 
 #[test]
 fn dictionary_item_added_nested_in_a_paired_container_has_no_new_path() {
-    // Confirmed against real deepdiff: added/removed categories never
-    // carry a second path field, even under index drift.
+    // Added/removed categories never carry a second path field, even under index drift.
     let t1 = json!([{"id": 1, "meta": {"x": 1}}, "anchorA", "anchorB", "anchorC"]);
     let t2 = json!(["anchorA", "anchorB", "anchorC", {"id": 1, "meta": {"x": 1}, "extra": 9}]);
     assert_eq!(
@@ -193,10 +179,9 @@ fn dictionary_item_added_nested_in_a_paired_container_has_no_new_path() {
 
 #[test]
 fn type_change_under_ignore_order_pairing() {
-    // Confirmed against real deepdiff: [1, "2", 3.0] vs [3.0, 2, "1"] —
-    // the numeric pair 1<->2 gets paired (values_changed); "2"/"1" and
-    // any cross-type candidates (structural distance 0.5 >= 0.3 cutoff)
-    // are left as separate add/remove.
+    // [1, "2", 3.0] vs [3.0, 2, "1"]: the numeric pair 1<->2 gets paired
+    // (values_changed); "2"/"1" and any cross-type candidates (structural
+    // distance 0.5 >= 0.3 cutoff) are left as separate add/remove.
     let result = ignore_order_diff(&json!([1, "2", 3.0]), &json!([3.0, 2, "1"]));
     let changed = &result["values_changed"];
     assert_eq!(changed["root[0]"]["old_value"], json!(1));
@@ -205,11 +190,9 @@ fn type_change_under_ignore_order_pairing() {
 
 #[test]
 fn int_vs_float_single_element_pairs_and_type_changes() {
-    // Unlike the ORDERED LCS path's [1] vs [1.0] (Python == matching,
-    // reports nothing at all), ignore_order hashes 1 and 1.0 as
-    // DIFFERENT keys (type-tagged) — so this is a real hash-different
-    // pair, and the recursive diff between them reports a genuine
-    // type_changes.
+    // Unlike the ordered LCS path's [1] vs [1.0] (Python == matching, reports
+    // nothing), ignore_order hashes 1 and 1.0 as different keys (type-tagged), so
+    // the recursive diff between them reports a type_changes.
     assert_eq!(
         ignore_order_diff(&json!([1]), &json!([1.0])),
         json!({"type_changes": {"root[0]": {
@@ -253,11 +236,9 @@ fn max_depth_exceeded_on_an_over_budget_item_is_a_clean_error() {
 #[test]
 fn max_depth_boundary_is_exact_for_an_item_on_the_a_side() {
     // max_depth=2, list itself at depth 0, so its items are checked at
-    // depth+1=1: budget = 2-1 = 1. {"a":{"b":1}} has nesting exactly 2
-    // (> the budget of 1), so this must fail. A `depth+1` -> `depth`
-    // mutant computes depth=0 -> budget=2, under which nesting-2
-    // wrongly fits (`deeper_than(_, 2)` is false) — this is the "a"-side
-    // pre-pass loop specifically (deep item in `a`, shallow in `b`).
+    // depth+1=1: budget = 2-1 = 1. {"a":{"b":1}} has nesting 2 (> the budget of
+    // 1), so this must fail: the "a"-side pre-pass loop (deep item in `a`,
+    // shallow in `b`).
     let err = diff_with_options(
         &json!([{"a": {"b": 1}}]),
         &json!([0]),
@@ -290,10 +271,6 @@ fn get_pairs_gate_ratio_uses_the_sum_of_added_and_removed_not_their_product() {
     // 4 fully-disjoint removed items, 1 fully-disjoint added item:
     // sum=5, denominator=4+1+1=6, ratio=5/6=0.833 > 0.7 -> get_pairs
     // FALSE (raw add/remove, then the path-collision merge at root[0]).
-    // A `+` -> `*` mutant computes product=4, ratio=4/6=0.667 <= 0.7 ->
-    // WOULD wrongly engage real distance-based pairing instead,
-    // changing the result entirely (a numeric pairing recursion instead
-    // of the merge-produced values_changed below).
     assert_eq!(
         ignore_order_diff(&json!([1, 2, 3, 4]), &json!([100])),
         json!({
@@ -305,14 +282,9 @@ fn get_pairs_gate_ratio_uses_the_sum_of_added_and_removed_not_their_product() {
 
 #[test]
 fn paired_recursion_depth_boundary_is_exact() {
-    // A single unambiguous pair ({"a":{"b":1}} <-> {"a":{"b":9}}, both
-    // at their own list index — anchors keep the gate/pairing trivial)
-    // whose difference sits exactly 2 dict levels down, with
-    // max_depth=2: correctness coverage for the paired-recursion depth
-    // boundary in the common case. This does NOT kill the sibling
-    // `depth + 1` -> `depth * 1` mutant at the paired `diff_at` call —
-    // see that call site's own doc for why it's accepted as
-    // structurally unreachable instead.
+    // A single unambiguous pair ({"a":{"b":1}} <-> {"a":{"b":9}}, both at their
+    // own list index) whose difference sits 2 dict levels down, with
+    // max_depth=2.
     let anchors: Vec<serde_json::Value> = (0..10).map(|i| json!(format!("anchor{i}"))).collect();
     let mut a = anchors.clone();
     a.push(json!({"a": {"b": 1}}));
@@ -333,8 +305,7 @@ fn paired_recursion_depth_boundary_is_exact() {
 
 #[test]
 fn item_key_handles_a_u64_beyond_i64_range() {
-    // Confirmed against real deepdiff: large ints round-trip through
-    // hashing/matching fine (Python ints are bignums).
+    // Large ints round-trip through hashing/matching (Python ints are bignums).
     let a = json!([1, 18_446_744_073_709_551_615u64]);
     let b = json!([18_446_744_073_709_551_615u64, 1]);
     assert_eq!(ignore_order_diff(&a, &b), json!({}));
@@ -376,12 +347,10 @@ fn item_key_distinguishes_arbitrary_precision_integers() {
 
 #[test]
 fn numeric_pairing_at_two_distances_reuses_the_used_check_across_buckets() {
-    // "5" (added) has candidates at two distinct distances: "4"
-    // (closer) and "100" (farther, still under the 0.3 cutoff). It
-    // pairs with the closer one first; when its farther-distance
-    // bucket entry is later popped, `used` already contains it — the
-    // exact branch this test targets. "100" is left as a genuine
-    // unpaired removal.
+    // "5" (added) has candidates at two distinct distances: "4" (closer) and
+    // "100" (farther, still under the 0.3 cutoff). It pairs with the closer one
+    // first; when its farther-distance bucket entry is later popped, `used`
+    // already contains it. "100" is left as an unpaired removal.
     let anchors: Vec<serde_json::Value> = (0..10).map(|i| json!(format!("anchor{i}"))).collect();
     let mut a = anchors.clone();
     a.push(json!(4));
@@ -454,10 +423,6 @@ fn structural_pairing_of_records_with_null_bool_and_nested_list_fields() {
     b.push(json!({"id": 1, "meta": null, "flag": false, "extra": 5, "tags": [1, 2, 3]}));
 
     let result = ignore_order_diff(&json!(a), &json!(b));
-    // A single candidate on each side always pairs (no competition),
-    // regardless of the exact distance value computed along the way —
-    // this test's point is that the computation itself runs cleanly
-    // end to end, not a specific distance number.
     assert!(result.get("values_changed").is_some());
 }
 
@@ -484,11 +449,6 @@ use super::fxhash::{FX_SEED, FxHasher};
 use super::pairing::CUTOFF_DISTANCE_FOR_PAIRS;
 
 // --- Distance -----------------------------------------------------
-//
-// `BTreeMap<Distance, _>` only ever calls `Ord::cmp` internally, never
-// `PartialOrd::partial_cmp` — exercised directly here so the manual
-// impls (required because `f64` has no total `Ord`) are actually
-// tested, not just organically covered by map operations elsewhere.
 
 #[test]
 fn distance_partial_cmp_and_eq_and_hash_are_consistent() {
@@ -512,10 +472,6 @@ fn distance_partial_cmp_and_eq_and_hash_are_consistent() {
     };
     assert_eq!(hash_of(a), hash_of(b));
 
-    // Both kill a `PartialEq::eq -> true` mutant (a real hash function
-    // will not collide two very different f64 bit patterns) and a
-    // `Hash::hash -> ()` mutant (a no-op hash collapses every value to
-    // the same output).
     assert_ne!(a, c);
     assert_ne!(hash_of(a), hash_of(c));
 }
@@ -571,12 +527,7 @@ fn fx_hasher_output_depends_on_its_input() {
         h.finish()
     };
     assert_ne!(hash_u128(1), hash_u128(2));
-    // The high 64 bits must actually be mixed in — not just discarded
-    // (a `>>` -> `<<` mutant makes `(i << 64) as u64` always `0`
-    // regardless of `i`'s real high bits, so both of these degenerate
-    // to hashing the same (low=0, high-as-mutated=0) pair as
-    // `hash_u128(0)` under that mutant, even though they're genuinely
-    // different real inputs).
+    // The high 64 bits must be mixed in, not discarded.
     assert_ne!(hash_u128(1 << 64), hash_u128(0));
 
     let hash_bytes = |s: &str| {
@@ -592,12 +543,9 @@ fn fx_hasher_output_depends_on_its_input() {
 
 #[test]
 fn fx_hasher_mixing_step_is_xor_not_or() {
-    // `1_u64.rotate_left(5) == 32`, and the word chosen below is also
-    // `32` — identical operands make XOR/OR/AND maximally distinct
-    // (`32^32=0`, `32|32=32`, `32&32=32`), so this genuinely
-    // distinguishes all three, not just XOR-vs-one-of-them. Computed
-    // directly against the documented formula
-    // `(hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED)`.
+    // `1_u64.rotate_left(5) == 32`, and the word chosen below is also `32`:
+    // `32^32=0`, `32|32=32`, `32&32=32`. Computed directly against the
+    // documented formula `(hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED)`.
     assert_eq!(1_u64.rotate_left(5), 32);
     let mut h = FxHasher { hash: 1 };
     h.add_to_hash(32);
@@ -634,8 +582,7 @@ fn count_array_diff_leaves_sums_every_report_category_via_the_ordered_path() {
     // index 1's dict diff = values_changed(1) + removed "y"(1) + added "z"(1) = 3;
     // index 2 values_changed = item_length("added_str") = 1;
     // a's surplus tail (index 3) iterable_item_removed = item_length("tail_removed") = 1.
-    // Total = 2 + 3 + 1 + 1 = 7 (pins an exact value, not just >0, so a
-    // `replace body with 1` mutant is caught).
+    // Total = 2 + 3 + 1 + 1 = 7.
     assert_eq!(count_array_diff_leaves(&a, &b, 0, &opts), 7);
 }
 
@@ -668,12 +615,9 @@ fn type_change_leaf_length_omits_new_value_when_the_coercion_reproduces_it() {
     assert_eq!(type_change_leaf_length(&json!(1.9), &json!(1)), 1);
     // int(1.5) == 1 != 2 -> NOT omitted.
     assert_eq!(type_change_leaf_length(&json!(1.5), &json!(2)), 2);
-    // bool(5) == True -> omitted (this is the rule the OLD special-cased
-    // implementation coincidentally got right, but only for THIS
-    // direction).
+    // bool(5) == True -> omitted.
     assert_eq!(type_change_leaf_length(&json!(5), &json!(true)), 1);
-    // bool(0) == False -> omitted (the OLD special case got this
-    // WRONG: it only ever matched `new_value == true`).
+    // bool(0) == False -> omitted.
     assert_eq!(type_change_leaf_length(&json!(0), &json!(false)), 1);
     // int(True) == 1 -> omitted.
     assert_eq!(type_change_leaf_length(&json!(true), &json!(1)), 1);
@@ -698,8 +642,7 @@ fn type_change_leaf_length_omits_new_value_when_the_coercion_reproduces_it() {
         type_change_leaf_length(&serde_json::Value::Null, &json!("None")),
         1
     );
-    // dict(5) has no known coercion (deliberately unimplemented) ->
-    // always included.
+    // dict(5) has no known coercion -> always included.
     assert_eq!(type_change_leaf_length(&json!(5), &json!({"a": 1})), 1 + 1);
     // bool([]) == False / bool([1]) == True -> both omitted (container
     // truthiness, matching Python's own `bool()` semantics).
@@ -723,44 +666,27 @@ fn type_change_leaf_length_omits_new_value_when_the_coercion_reproduces_it() {
     // A float grossly out of i64 range never coerces to int -> always
     // included.
     assert_eq!(type_change_leaf_length(&json!(1e300), &json!(5)), 2);
-    // Same, but pinned against `i64::MAX`/`i64::MIN` specifically: a
-    // range-check that degraded to `||` (rather than `&&`) would let
-    // Rust's saturating `as i64` cast smuggle a grossly out-of-range
-    // float through as exactly `i64::MAX`/`i64::MIN`, coincidentally
-    // matching these `new_value`s and wrongly omitting them.
+    // Same, pinned against `i64::MAX`/`i64::MIN` specifically.
     assert_eq!(type_change_leaf_length(&json!(1e300), &json!(i64::MAX)), 2);
     assert_eq!(type_change_leaf_length(&json!(-1e300), &json!(i64::MIN)), 2);
-    // int(5) == 5.0 -> omitted: pins `coerce_to_f64`'s `Number` branch
-    // against a non-zero value (the `0`/`0.0` cases above can't
-    // distinguish real coercion from a stub that always returns 0.0).
+    // int(5) == 5.0 -> omitted (a non-zero value, unlike the `0`/`0.0` cases above).
     assert_eq!(type_change_leaf_length(&json!(5), &json!(5.0)), 1);
-    // bool("") == False / bool("x") == True -> both omitted (string
-    // truthiness, matching Python's own `bool()` semantics) — pins
-    // `is_truthy`'s `String` arm in both directions (a `!` flip there
-    // would give the wrong answer for exactly one of these).
+    // bool("") == False / bool("x") == True -> both omitted (string truthiness).
     assert_eq!(type_change_leaf_length(&json!(""), &json!(false)), 1);
     assert_eq!(type_change_leaf_length(&json!("x"), &json!(true)), 1);
     // bool("x") == True != False -> NOT omitted.
     assert_eq!(type_change_leaf_length(&json!("x"), &json!(false)), 2);
-    // str(5.5) == "5.5" -> omitted: the rendered float already contains
-    // a `.`, so no trailing `.0` must be appended (pins the `!` in
-    // `coerce_to_python_str`'s no-append guard — a flipped guard would
-    // wrongly render "5.5.0").
+    // str(5.5) == "5.5" -> omitted: the rendered float already contains a `.`,
+    // so no trailing `.0` is appended.
     assert_eq!(type_change_leaf_length(&json!(5.5), &json!("5.5")), 1);
-    // str(5.5) == "5.5" != "5.5.0" -> NOT omitted (also guards against
-    // the inverse mistake of never appending, since the literal
-    // "5.5.0" already differs from the rendered "5.5").
+    // str(5.5) == "5.5" != "5.5.0" -> NOT omitted.
     assert_eq!(type_change_leaf_length(&json!(5.5), &json!("5.5.0")), 2);
 }
 
 #[test]
-fn ignore_order_pairing_rejects_a_false_negative_from_the_old_special_case() {
-    // A minimal repro: a structural pair whose distance
-    // depends on the general coercion rule (float(0) == 0.0), not just
-    // the old `new_value == true` special case. Real deepdiff: distance
-    // 0.25 < 0.3 (pairs, recursing to a nested type_changes); the old
-    // inline reimplementation in Report::distance_leaf_length computed
-    // 0.333 (>= 0.3, rejected), producing raw add/remove instead.
+fn ignore_order_pairing_applies_the_general_coercion_rule_to_a_nested_type_change() {
+    // A structural pair whose distance depends on the general coercion rule
+    // (float(0) == 0.0). Distance 0.25 < 0.3: pairs, recursing to a nested type_changes.
     let a = json!([[["", ""], []], {}]);
     let b = json!([[1, [], true, {"c": true}], {}]);
     assert_eq!(
@@ -779,11 +705,9 @@ fn ignore_order_pairing_rejects_a_false_negative_from_the_old_special_case() {
 }
 
 #[test]
-fn ignore_order_pairing_generalizes_past_the_true_literal_special_case() {
-    // The sibling repro: [[0]] vs [[0.0]] recurses to a nested
-    // type_changes (float(0) == 0.0, new_value omitted) in real
-    // deepdiff. The old `new_value == true`-only special case couldn't
-    // have handled this at all (new_value here is `0.0`, never `true`).
+fn ignore_order_pairing_omits_new_value_when_float_of_old_equals_new() {
+    // `[[0]]` vs `[[0.0]]` recurses to a nested type_changes
+    // (float(0) == 0.0, new_value omitted).
     let a = json!([[0]]);
     let b = json!([[0.0]]);
     assert_eq!(
@@ -798,33 +722,8 @@ fn ignore_order_pairing_generalizes_past_the_true_literal_special_case() {
 
 #[test]
 fn ignore_order_pairing_is_not_corrupted_by_a_nested_low_overlap_dict_pair() {
-    // Minimized repro (2x3 distance matrix: removed = {1,
-    // [{aa,bb,cc}]}, added = {0.0, 2, [{}]}): `count_array_diff_leaves`'s
-    // trial sub-diff for the `[{aa,bb,cc}]` vs `[{}]` candidate pair
-    // used to recurse into a nested dict-vs-dict comparison through the
-    // *real* `crate::diff::object_diff` (no `threshold_to_diff_deeper`
-    // awareness), inflating that candidate's measured distance past
-    // `CUTOFF_DISTANCE_FOR_PAIRS` (real deepdiff: 0.1364, well under the
-    // cutoff; the old inflated count: 0.3182, over it) and corrupting
-    // the *pairing decision itself* — not just the reported shape. The
-    // old, broken pairing wrongly matched `[{aa,bb,cc}]` (root[2])
-    // straight to the scalar `0.0` (a `type_changes`: list -> float)
-    // and left `[{}]` as a genuinely unpaired `iterable_item_added`,
-    // producing a completely different report shape from real
-    // `DeepDiff`'s.
-    //
-    // `count_array_diff_leaves`'s trial sub-diff now measures this nested
-    // dict-vs-dict candidate through `crate::diff::object_diff`'s own
-    // unconditional `threshold_to_diff_deeper` collapse, fixing the
-    // pairing: this now matches real `DeepDiff`'s pairing decision exactly
-    // (`1` <-> `2`, `[{aa,bb,cc}]` <-> `[{}]`, `0.0` unpaired-added) — and,
-    // since the collapse is no longer trial-only, the nested `root[2][0]`
-    // subtree's own reported shape now matches real `DeepDiff` exactly
-    // too (a single collapsed `values_changed` with `new_path`, not
-    // granular `dictionary_item_removed`s). See the sibling golden case
-    // `ignore_order_nested_low_overlap_dict_pairing` for the
-    // real-`DeepDiff`-generated `expected.json` this now matches
-    // byte-for-byte.
+    // A nested low-overlap dict pair collapses inside the trial sub-diff, so its
+    // distance (0.136) stays under the cutoff and `1`<->`2`, `[{aa,bb,cc}]`<->`[{}]` pair.
     let a = json!(["y", 1, [{"aa": 1, "bb": 2, "cc": 3}]]);
     let b = json!(["y", 0.0, 2, [{}]]);
     assert_eq!(
@@ -881,9 +780,7 @@ fn count_diff_leaves_string_equal_is_zero_unequal_is_one() {
 fn count_diff_leaves_array_dispatches_to_count_array_diff_leaves() {
     let opts = DiffOptions::default();
     // Ordered path (default opts): index-aligned, one values_changed
-    // (new_value=3, item_length=1) — distinct from what the deleted
-    // Array match arm's fallback (`type_change_leaf_length`, which
-    // would count the WHOLE new array) would give (3).
+    // (new_value=3, item_length=1).
     assert_eq!(
         count_diff_leaves(&json!([1, 2]), &json!([1, 3]), 0, &opts),
         1
@@ -896,20 +793,15 @@ fn count_object_diff_leaves_below_threshold_collapses_to_a_wholesale_new_value()
     let a = json!({"a": 1, "c": 2}).as_object().unwrap().clone();
     let b = json!({"b": 1, "d": 2}).as_object().unwrap().clone();
     // union={a,b,c,d}=4, intersect={}=0, ratio=0 < 0.33 -> collapses to
-    // item_length_of_map(b) = item_length(1) + item_length(2) = 2 —
-    // deliberately not 1, so a `replace body with 1` mutant is caught
-    // too.
+    // item_length_of_map(b) = item_length(1) + item_length(2) = 2.
     assert_eq!(count_object_diff_leaves(&a, &b, 0, &opts), 2);
 }
 
 #[test]
 fn count_object_diff_leaves_ratio_uses_division_not_multiplication() {
     let opts = DiffOptions::default();
-    // intersect=1 ("shared"), union=4 -> ratio 1/4=0.25 < 0.33
-    // (collapses, real): item_length_of_map(b) = item_length(9) +
-    // item_length(3) + item_length(4) = 3. A `/` -> `*` mutant computes
-    // 1*4=4 (not < 0.33, no collapse), recursing instead: differing
-    // "shared" (1) + removed "x" (1) + added "y" (1) + added "z" (1) = 4.
+    // intersect=1 ("shared"), union=4 -> ratio 1/4=0.25 < 0.33 (collapses):
+    // item_length_of_map(b) = item_length(9) + item_length(3) + item_length(4) = 3.
     let a = json!({"shared": 1, "x": 2}).as_object().unwrap().clone();
     let b = json!({"shared": 9, "y": 3, "z": 4})
         .as_object()
@@ -924,12 +816,9 @@ fn count_object_diff_leaves_ratio_uses_division_not_multiplication() {
     reason = "asserting the runtime division is bit-identical to the compile-time literal is the test's own point"
 )]
 fn count_object_diff_leaves_ratio_at_exactly_the_threshold_does_not_collapse() {
-    // A ⊇ B: 100 keys in `a` (33 shared with `b`, 67 exclusive to `a`),
-    // 33 keys in `b` (all shared). union = 100, intersect = 33, ratio =
-    // 33.0/100.0 — bit-identical to the `0.33` literal (both round the
-    // same exact decimal value to the nearest f64). `< 0.33` is false at
-    // an exact match (no collapse); a `<` -> `<=` mutant would wrongly
-    // collapse instead.
+    // A ⊇ B: 100 keys in `a` (33 shared with `b`, 67 exclusive to `a`), 33 keys
+    // in `b` (all shared). union = 100, intersect = 33, ratio = 33.0/100.0,
+    // bit-identical to the `0.33` literal, so `< 0.33` is false (no collapse).
     let mut a = serde_json::Map::new();
     let mut b = serde_json::Map::new();
     for i in 0..33 {
@@ -1016,9 +905,8 @@ fn count_object_diff_leaves_shared_key_recursion_depth_boundary_is_exact() {
 #[test]
 fn count_object_diff_leaves_at_or_above_threshold_recurses_normally() {
     let opts = DiffOptions::default();
-    // Full key overlap (ratio 1.0, well above 0.33): must recurse
-    // key-by-key, not collapse — also kills an `&&` -> `||` mutant
-    // (union_len=2 > 1 alone would wrongly satisfy `||`).
+    // Full key overlap (ratio 1.0, well above 0.33): must recurse key-by-key,
+    // not collapse.
     let a = json!({"a": 1, "b": 2}).as_object().unwrap().clone();
     let b = json!({"a": 1, "b": 3}).as_object().unwrap().clone();
     // Shared "a" equal (0) + shared "b" differs (1) = 1, not
@@ -1029,9 +917,8 @@ fn count_object_diff_leaves_at_or_above_threshold_recurses_normally() {
 #[test]
 fn count_object_diff_leaves_union_len_one_never_collapses() {
     let opts = DiffOptions::default();
-    // union_len == 1 (the `> 1` boundary): must never collapse
-    // regardless of the (zero) intersection — kills a `> 1` -> `>= 1`
-    // mutant.
+    // union_len == 1 (the `> 1` boundary): must never collapse regardless of
+    // the (zero) intersection.
     let a = json!({"a": 1}).as_object().unwrap().clone();
     let b = serde_json::Map::new();
     // Removed-only "a": item_length(1) = 1, not item_length_of_map({}) = 0.
@@ -1041,14 +928,10 @@ fn count_object_diff_leaves_union_len_one_never_collapses() {
 #[test]
 fn count_object_diff_leaves_accumulates_distinct_contributions_by_addition() {
     let opts = DiffOptions::default();
-    // Three keys each contributing a DIFFERENT, non-0/1 leaf count so a
-    // `+=` -> `*=` mutant (which would multiply instead of sum, and
-    // start from a multiplicative identity of 1 rather than 0) changes
-    // the total: shared "a" differs by a nested list (item_length([1,2])
-    // = 2), removed-only "b" is a 3-element list (item_length = 3),
-    // added-only "c" is a 4-element list (item_length = 4). Sum = 9;
-    // any `*=` variant gives a different number (e.g. 2*3*4=24, or
-    // 1*2*3*4=24 if the running total also starts at 1).
+    // Three keys each contributing a DIFFERENT, non-0/1 leaf count: shared "a"
+    // differs by a nested list (item_length([1,2]) = 2), removed-only "b" is a
+    // 3-element list (item_length = 3), added-only "c" is a 4-element list
+    // (item_length = 4). Sum = 9.
     let a = json!({"a": [9, 9], "b": [1, 2, 3]})
         .as_object()
         .unwrap()
@@ -1191,8 +1074,7 @@ fn int_float_bool_never_share_a_key_even_at_equal_value() {
 #[test]
 fn signed_zero_floats_share_a_key_but_stay_distinct_from_the_integer_zero() {
     // Signed zeros share a key; an integral float stays distinct from the
-    // integer of the same value. See `super::hash::item_key`'s float branch
-    // for the deepdiff-9.1.0 provenance behind both.
+    // integer of the same value.
     assert_eq!(item_key(&json!(0.0)), item_key(&json!(-0.0)));
     assert_ne!(item_key(&json!(2.0)), item_key(&json!(2)));
     assert_ne!(item_key(&json!(0.0)), item_key(&json!(0)));
@@ -1200,27 +1082,18 @@ fn signed_zero_floats_share_a_key_but_stay_distinct_from_the_integer_zero() {
 
 #[test]
 fn signed_zero_floats_share_a_set_member_digest_too() {
-    // The same normalization, but through `set_member_digest`'s own
-    // `number_key` (its scalar content path): confirmed against
-    // `deepdiff==9.1.0`, `DeepDiff({0.0}, {-0.0})` is `{}` -- two
-    // otherwise-unrelated sets, each holding one signed zero, are the same
-    // set. A `+0.0` normalization mutated away (e.g. `f + 0.0` -> `f - 0.0`,
-    // the identity on every float) would keep the two bit patterns distinct
-    // here.
+    // The same normalization, through `set_member_digest`'s own `number_key`:
+    // two otherwise-unrelated sets, each holding one signed zero, are the same set.
     let memo = IgnoreOrderMemo::new();
     let key = |value: &CValue| super::set_member_digest(value, &memo);
     assert_eq!(key(&cv(&json!(0.0))), key(&cv(&json!(-0.0))));
     assert_ne!(key(&cv(&json!(2.0))), key(&cv(&json!(2))));
-    // A `f + 0.0` -> `f * 0.0` mutant would collapse every float to `0.0`'s
-    // bit pattern regardless of its own value; two distinct nonzero floats
-    // must keep distinct keys.
+    // Two distinct nonzero floats must keep distinct keys.
     assert_ne!(key(&cv(&json!(1.5))), key(&cv(&json!(2.5))));
 }
 
 #[test]
 fn signed_zero_floats_dedup_to_one_removal_under_ignore_order() {
-    // Full-diff regression for the signed-zero item_key normalization (see
-    // `super::hash::item_key`'s float branch for the deepdiff-9.1.0 provenance).
     assert_eq!(
         ignore_order_diff(&json!([0.0, -0.0]), &json!([])),
         json!({"iterable_item_removed": {"root[0]": 0.0}})
@@ -1310,13 +1183,13 @@ fn numeric_distance_opposite_sign_zero_sum_is_always_rejected() {
     reason = "exact output of our own deterministic arithmetic against literal expected constants"
 )]
 fn numeric_distance_bool_vs_number_is_always_at_the_cutoff() {
-    // Confirmed against real deepdiff==9.1.0: get_numeric_types_distance(0, True) == 0.3.
+    // get_numeric_types_distance(0, True) == 0.3.
     assert_eq!(numeric_distance(0.0, 1.0, 0.3), 0.3);
 }
 
 #[test]
 fn numeric_distance_matches_the_probed_n_equals_100_shape() {
-    // probe9_m6_shape_100.py's worked pair: 251650 -> 2870137.
+    // A worked pair: 251650 -> 2870137.
     let d = numeric_distance(251_650.0, 2_870_137.0, 0.3);
     assert!(
         d < 0.3,
@@ -1331,9 +1204,7 @@ fn rough_distance_structural_formula_is_diff_length_over_summed_rough_lengths() 
     let opts = DiffOptions::default();
     // removed=[1,2] (rough_length=3), added=[1,2,3] (rough_length=4):
     // diff_length=1 (one iterable_item_added, item_length(3)=1).
-    // distance = 1 / (3 + 4) = 1/7, distinct from 1/(3*4) = 1/12 (an
-    // `rough_len = a + b` -> `a * b` mutant) and from other simple
-    // arithmetic mistakes.
+    // distance = 1 / (3 + 4) = 1/7.
     let removed = json!([1, 2]);
     let added = json!([1, 2, 3]);
     let d = super::distance::rough_distance(
@@ -1656,24 +1527,8 @@ fn a_distance_cached_at_a_shallow_occurrence_answers_a_deeper_one_whose_trial_wo
     );
 }
 
-/// Pins the exact scale `distance_family` measures a `datetime` pair by:
-/// its instant in *seconds* (microseconds divided by `1_000_000`), the same
-/// value `DeepDiff`'s own `_get_datetime_distance` reads from
-/// `datetime.timestamp()`. Compares `rough_distance`'s actual output
-/// against the identical formula computed independently from `instant()`
-/// here, bypassing `distance_family` entirely.
-///
-/// Catches a `/` mutated to `%` (a non-linear rescale, changing which
-/// candidates fall within the pairing cutoff). It does **not** catch a `/`
-/// mutated to `*`: `numeric_distance`'s own formula, `cutoff * (n1 - n2) /
-/// (n1 + n2)`, is a ratio that is invariant *in the reals* under scaling
-/// both operands by the same nonzero constant, and `timestamp` here is used
-/// nowhere else — but that is an argument about real-number algebra, not
-/// `f64`: exact-integer `/` and `*` are not bit-exact inverses in floating
-/// point in general, so this is an empirical finding (no reachable input
-/// has been observed to distinguish `/ 1_000_000.0` from `* 1_000_000.0`
-/// here, i.e. the two agree up to `f64` rounding for every case this suite
-/// exercises), not an algebraic proof of equivalence.
+/// Pins the datetime pair's scale: instants in seconds, as `_get_datetime_distance`
+/// reads `timestamp()`.
 #[test]
 #[allow(
     clippy::cast_precision_loss,
@@ -1718,13 +1573,12 @@ fn rough_length_matches_deephash_counts_for_scalars_and_containers() {
 
 #[test]
 fn item_length_of_null_is_zero() {
-    // Confirmed against real deepdiff: _get_item_length(None) == 0.
+    // _get_item_length(None) == 0.
     assert_eq!(item_length(&serde_json::Value::Null), 0);
 }
 
 #[test]
 fn item_length_excludes_special_dict_keys() {
-    // Confirmed against real deepdiff:
     // _get_item_length({"old_value": 5, "x": 3}) == 1.
     assert_eq!(item_length(&json!({"old_value": 5, "x": 3})), 1);
 }
@@ -1785,9 +1639,7 @@ proptest! {
 
     /// The distance memo must change no decision: an `ignore_order` diff run
     /// with the memo enabled produces a byte-identical report to one run with
-    /// it disabled, over generated nested shapes. This is the empirical
-    /// counterpart to the purity argument in `docs/design/ignore-order.md`'s
-    /// "Distance memo" section.
+    /// it disabled, over generated nested shapes.
     #[test]
     fn memoized_and_unmemoized_reports_are_byte_identical(
         a in arb_nested(),
@@ -1809,23 +1661,8 @@ proptest! {
     }
 }
 
-/// A memoized deep-nested `ignore_order` diff must recompute each level's
-/// pairing distance exactly once — replaces a wall-clock guard that was
-/// flaky under parallel CI (issue #33). Measured directly instead, with no
-/// clock in the loop:
-///
-/// [`super::pairing::compute_pairs`] recomputes a container pair's distance
-/// only on an [`IgnoreOrderMemo`] cache miss (see [`IgnoreOrderMemo::put`]'s
-/// field doc), so [`IgnoreOrderMemo::put_count`] — every recomputation, not
-/// just the distinct entries a repeated `put` leaves behind — is a direct,
-/// deterministic stand-in for the "re-diffs each level twice, compounding
-/// `~2x` per level" cost the timing bound used to catch. A single-element
-/// nested list of depth `d` has exactly `d - 1` container-pair candidates
-/// (the outermost wrapper is never itself paired against anything), so a
-/// working memo leaves `put_count() == depth - 1`; confirmed by temporarily
-/// forcing [`IgnoreOrderMemo::get`] to always return `None` and re-running
-/// this test, which then reported `2^(depth - 1) - 1` puts (8,191 at depth
-/// 14 alone, where the working memo leaves 13) instead of failing on a clock.
+/// A memoized deep-nested `ignore_order` diff recomputes each level's pairing
+/// distance once: a depth-`d` single-element chain records `d - 1` memo puts.
 #[test]
 fn deep_nested_ignore_order_memoizes_distance_computations_linearly() {
     let opts = DiffOptions {
@@ -1852,8 +1689,6 @@ fn deep_nested_ignore_order_memoizes_distance_computations_linearly() {
         memo.put_count()
     };
 
-    // Depth 25 previously hung for tens of seconds unmemoized; both depths
-    // are kept so a regression shows up well before it would need to.
     for depth in [20usize, 25] {
         let puts = recomputations_at(depth);
         assert_eq!(
@@ -1869,9 +1704,8 @@ fn deep_nested_ignore_order_memoizes_distance_computations_linearly() {
 
 // --- tuples under ignore_order -------------------------------------------
 //
-// Every expected value below was confirmed against a real
-// `deepdiff==9.1.0` probe. Tuples cannot be written as JSON literals, so
-// these build compact values directly and route through one local helper.
+// Tuples cannot be written as JSON literals, so these build compact values
+// directly and route through one local helper.
 
 /// `ignore_order_diff` for values that are already compact (a tuple has no
 /// `serde_json` literal form).
@@ -1971,8 +1805,7 @@ fn a_tuple_and_a_list_whose_items_differ_fall_back_to_raw_add_remove() {
 // `DeepHash` keys its cache by the object itself and shares one cache across
 // both hashtables of a run, so a hashable tuple inherits the digest of an
 // earlier Python-equal one (see `docs/design/ignore-order.md`'s "Distance
-// memo" section). Every expected value below was confirmed against a
-// real `deepdiff==9.1.0` probe.
+// memo" section).
 
 #[test]
 fn a_hashable_tuple_inherits_the_digest_of_an_earlier_python_equal_one() {
@@ -2029,12 +1862,8 @@ fn colliding_tuples_in_one_list_collapse_to_a_single_distinct_item() {
 fn a_tuple_digest_cache_hit_reads_its_own_index_not_the_first_ones() {
     // Three hashable tuples share one run's cache: `(9,)` gets index 0
     // (fresh), `(1,)` gets index 1 (fresh), and `(1.0,)` -- Python-equal to
-    // `(1,)` -- is a cache HIT reading `node_digests[id.index()]`. A
-    // `NodeId::index` mutant that always returns `0` would make every
-    // cache-hit read index 0's digest (`(9,)`'s) instead of its own tuple's
-    // -- invisible for a repeat of the FIRST tuple ever hashed (index 0
-    // already equals 0), so this needs a repeat of the SECOND one, on
-    // both sides of the diff (the shared memo spans the whole run).
+    // `(1,)` -- is a cache HIT reading `node_digests[id.index()]`, on both sides
+    // of the diff (the shared memo spans the whole run).
     let a = carr(vec![
         ctup(&[json!(9)]),
         ctup(&[json!(1)]),
@@ -2088,8 +1917,7 @@ fn the_collision_is_positional_not_the_order_insensitive_content_digest() {
 fn which_member_of_an_equality_class_is_hashed_first_is_observable() {
     // The content digest deduplicates, so `(1, 1)` and `(1,)` share one. The
     // float tuple is not Python-equal to `(1, 1)`, so when it is hashed first
-    // it fixes the class digest as the float one and the two no longer match
-    // — real DeepDiff behaves exactly this way round.
+    // it fixes the class digest as the float one and the two no longer match.
     assert_eq!(
         ignore_order_diff_compact(
             &carr(vec![ctup(&[json!(1)])]),
@@ -2441,10 +2269,7 @@ fn a_date_and_a_datetime_pair_by_ordinal_distance_in_either_direction() {
 fn a_calendar_value_is_truthy_when_a_type_change_coerces_it_to_bool() {
     // `_from_tree_type_changes` omits `new_value` when `new_type(old_value)`
     // reproduces it, and `bool(datetime(...))`/`bool(date(...))` is always
-    // True — confirmed against real `deepdiff==9.1.0`:
-    // `DeepDiff(datetime(2024, 1, 1), True, view="_delta")` has no
-    // `new_value` (length 1), while the same pair against `False` does
-    // (length 2).
+    // True: the pair against `True` has leaf length 1, against `False` length 2.
     let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
 
     assert_eq!(leaf(&cdt(2024, 1, 1, None), &cv(&json!(true))), 1);
@@ -2455,9 +2280,8 @@ fn a_calendar_value_is_truthy_when_a_type_change_coerces_it_to_bool() {
 
 #[test]
 fn a_time_is_truthy_and_a_timedelta_is_truthy_only_when_non_zero() {
-    // `bool(time(...))` is always True (confirmed against real Python — the
-    // historical "midnight is falsy" quirk was removed). `bool(timedelta(...))`
-    // is False only for the exact-zero duration.
+    // `bool(time(...))` is always True. `bool(timedelta(...))` is False only for
+    // the zero duration.
     let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
 
     assert_eq!(leaf(&ctime(0, 0, 0, 0, None), &cv(&json!(true))), 1);
@@ -2513,10 +2337,8 @@ fn a_calendar_value_and_a_number_share_no_distance_family_and_never_pair() {
 #[test]
 fn a_calendar_value_against_its_own_python_str_is_reproduced_by_coercion() {
     // `str(datetime)` uses a space separator, not a `T`, so only the
-    // space-separated string is reproducible — confirmed against real
-    // `deepdiff==9.1.0` with `view="_delta"`, whose `_get_item_length` is
-    // `1` for the first two pairs (no `new_value` key) and `2` for the
-    // third.
+    // space-separated string is reproducible: `_get_item_length` is `1` for the
+    // first two pairs (no `new_value` key) and `2` for the third.
     let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
 
     assert_eq!(
@@ -2702,11 +2524,8 @@ fn sets_holding_the_same_items_hash_match() {
 }
 
 /// Neither set kind consults the run's digest cache: a `set` is unhashable
-/// in Python, and a `frozenset` is deliberately kept out of it, so both keep
-/// their own content key. Real `DeepDiff` lets a frozenset inherit an
-/// earlier Python-equal one's digest, which makes its answer depend on
-/// hashing order; `onix` is deterministic instead (see
-/// `tests/golden/README.md`'s "Set iteration order" section).
+/// in Python, and a `frozenset` is kept out of it, so both keep their own
+/// content key.
 #[test]
 fn neither_set_kind_inherits_another_items_digest() {
     let frozen = compact_ignore_order_diff(
@@ -2753,8 +2572,8 @@ fn a_frozenset_hashes_by_membership_and_apart_from_a_tuple() {
 }
 
 /// `_get_item_length` of a set diff's delta view is the number of added
-/// plus removed *items*, each measured by `item_length` — verified against
-/// real `deepdiff==9.1.0` (`{1, 2}` vs `{1, 2, 3, 4, 5}` measures 3).
+/// plus removed *items*, each measured by `item_length` (`{1, 2}` vs
+/// `{1, 2, 3, 4, 5}` measures 3).
 #[test]
 fn count_diff_leaves_of_two_sets_counts_added_and_removed_items() {
     let memo = IgnoreOrderMemo::new();
@@ -2773,8 +2592,7 @@ fn count_diff_leaves_of_two_sets_counts_added_and_removed_items() {
     assert_eq!(count(&cset(&[json!(1)]), &cset(&[json!(1)])), 0);
 }
 
-/// `_prep_iterable` counts a set exactly like a list — verified with real
-/// `DeepHash` (`{1, 2}` and `[1, 2]` both count 3).
+/// `_prep_iterable` counts a set like a list (`{1, 2}` and `[1, 2]` both count 3).
 #[test]
 fn rough_length_of_a_set_matches_a_list_of_the_same_items() {
     assert_eq!(
@@ -2825,10 +2643,9 @@ fn a_set_type_change_omits_its_new_value_when_the_constructor_reproduces_it() {
     assert_eq!(leaves(&cset(&items), &cfrozen(&[json!(1), json!(3)])), 3);
 
     // A proper subset must not be "reproduced" either: `unordered_python_eq`
-    // requires membership BOTH ways, not either way. `{1}` (new) has every
-    // member in `{1, 2}` (old), but not the reverse, so the constructor does
-    // not reproduce `old` as `new` -- an `&&` -> `||` mutant would accept
-    // this one-directional match and wrongly cost it `1`.
+    // requires membership BOTH ways. `{1}` (new) has every member in `{1, 2}`
+    // (old), but not the reverse, so the constructor does not reproduce `old`
+    // as `new`.
     assert_eq!(leaves(&cset(&items), &cfrozen(&[json!(1)])), 2);
 }
 
@@ -2852,10 +2669,7 @@ fn a_set_coerces_to_its_own_truthiness() {
 /// `((1, 2, 3),)` vs `[[1, 2]]`: the outer tuple-vs-list pair is length-1 on
 /// both sides, so `sequences_python_eq`'s own top-level length check passes
 /// through to a per-element `python_eq` -- which is where the mismatched
-/// INNER lengths (3 vs 2) must be caught. An `&&` -> `||` mutant in
-/// `python_eq`'s array/tuple arm would let the two shorter, pairwise-equal
-/// elements ([1, 2] against the first two of [1, 2, 3]) pass regardless of
-/// the length check, wrongly reproducing `new_value`.
+/// INNER lengths (3 vs 2) must be caught.
 #[test]
 fn python_eq_rejects_mismatched_nested_sequence_lengths() {
     let leaves = super::distance::type_change_leaf_length;
@@ -2865,9 +2679,7 @@ fn python_eq_rejects_mismatched_nested_sequence_lengths() {
         1 + 2,
         "not reproduced: the mismatched inner lengths must cost new_value's own length"
     );
-    // The control: equal-length, equal-content inner sequences ARE
-    // reproduced, so the assertion above is testing the length check, not
-    // an unrelated content mismatch.
+    // The control: equal-length, equal-content inner sequences are reproduced.
     assert_eq!(
         leaves(&ctup(&[json!([1, 2, 3])]), &cv(&json!([[1, 2, 3]]))),
         1
@@ -2939,7 +2751,7 @@ fn unhashable_set_members_of_different_kinds_stay_distinct() {
         key(&listed(cfrozen(&[json!(1)])))
     );
 
-    // The pair the missing kind tag made invisible, end to end.
+    // End to end: a list and a set holding the same values stay distinct.
     let with_set = CValue::Set(SetItems::new(vec![listed(cset(&[json!(1)]))]));
     let with_list = CValue::Set(SetItems::new(vec![listed(cv(&json!([1])))]));
     assert_eq!(
@@ -2953,12 +2765,9 @@ fn unhashable_set_members_of_different_kinds_stay_distinct() {
     );
 }
 
-/// The per-node cache decision has to hold whether a naive/aware (or int/float)
-/// difference sits at the member's own root or nested below it. A member's
-/// digest is built through the shared cache at every node, so both families
-/// collapse. Pins the root-level rows (a control the below-root rows are read
-/// against) and the below-root rows in one place; every pairing but the
-/// bare-number sibling is `{}` in real `deepdiff==9.1.0`.
+/// The per-node cache decision holds whether a naive/aware (or int/float)
+/// difference sits at the member's own root or nested below it: a member's
+/// digest is built through the shared cache at every node.
 #[test]
 fn a_set_member_collapses_a_calendar_difference_at_the_root_and_below_it() {
     let n = || cdt(2024, 1, 1, None);
@@ -3014,7 +2823,7 @@ fn a_set_member_collapses_a_calendar_difference_at_the_root_and_below_it() {
 /// while it is hashed nor while two members are compared — a naive structural
 /// digest with a derived comparison would overflow this small stack. The two
 /// members share one deep chain and differ only naive/aware at the outer tuple,
-/// so they match: the walk runs and the comparison genuinely fires (the two
+/// so they match: the walk runs and the comparison fires (the two
 /// sets are unequal as wholes, so no fast path short-circuits).
 #[test]
 fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
@@ -3046,29 +2855,12 @@ fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
         .expect("set-member hashing and comparison complete on a small stack");
 }
 
-/// Interning `K` set/list members must never collapse onto one hash bucket —
-/// replaces a wall-clock `K -> 2K` diff-time ratio that was flaky under
-/// parallel CI (issue #33). Measured directly instead, with no diff and no
-/// clock in the loop:
+/// Interning `K` set/list members must never collapse onto one hash bucket.
 ///
-/// [`super::hash::item_key`]'s `Float` arm hashes through
-/// [`crate::lcs::mix_float_bits`] before the bits ever reach one of this
-/// module's `FxHash` tables (e.g. [`super::hash::HashedList`], the table an
-/// `ignore_order` list's items are matched through) — an integral or
-/// half-integer float's raw bit pattern shares dozens of trailing zero bits
-/// over the range this test uses, and `hashbrown` picks a table's bucket
-/// from a hash's *low* bits (see `mix_float_bits`'s own doc), so an unmixed
-/// run of them would all name the same bucket and degrade every lookup to a
-/// linear scan. This hashes real [`super::hash::ItemKey`]s through the real
-/// [`FxHasher`] `HashedList` itself uses and checks the low 32 bits (a proxy
-/// wide enough that no realistic table capacity at these sizes reads outside
-/// it) of `K`, and separately `2K`, keys: with the mixing intact they land in
-/// (almost) pairwise-distinct buckets, so the distinct count grows linearly
-/// with `K`; reverting or breaking the mix collapses the whole run onto a
-/// handful of buckets regardless of `K`, which the linearity assertion below
-/// catches immediately (confirmed by temporarily reverting `hash.rs`'s
-/// `Float` arm to hash the raw bits and re-running this test, which then
-/// fails on both the distinctness and the growth checks).
+/// Integral and half-integer floats land in pairwise-distinct low-32-bit
+/// buckets that grow linearly with `K`: [`super::hash::item_key`]'s `Float` arm
+/// hashes through [`crate::lcs::mix_float_bits`] before the bits reach
+/// [`FxHasher`], and `hashbrown` picks a bucket from a hash's *low* bits.
 #[test]
 fn float_hash_buckets_stay_distinct_and_grow_linearly_with_member_count() {
     use std::collections::HashSet;
@@ -3131,17 +2923,14 @@ fn float_hash_buckets_stay_distinct_and_grow_linearly_with_member_count() {
     }
 }
 
-// --- distance-memo repetition-collision regression (issue #31) ---
+// --- distance-memo repetition collision ---
 
 /// Two sibling subtrees whose list elements share an `ItemKey` (order- and
 /// repetition-insensitive) but differ in element repetition have different
 /// distances, so the distance memo must not hand one's cached answer to the
 /// other. `[3, 4]` and `[3]*8 + [4]*8` both key as the set `{3, 4}`; paired
 /// against `[9, 8]`, the short list is close enough to pair (a whole-element
-/// `values_changed`) while the long list is not (it recurses). Keying the memo
-/// by `ItemKey` conflated them; keying by the exact structural `DistKey` does
-/// not. Verified by the memo being decision-neutral (enabled == disabled) and
-/// by the two sibling keys never contaminating each other.
+/// `values_changed`) while the long list is not (it recurses).
 #[test]
 fn memo_does_not_conflate_lists_sharing_itemkey_but_differing_repetition() {
     let short = json!([3, 4]);
@@ -3170,8 +2959,7 @@ fn memo_does_not_conflate_lists_sharing_itemkey_but_differing_repetition() {
         );
 
         // No cross-key contamination: the whole diff must equal the two
-        // sibling subtrees diffed in isolation and merged. If the memo leaked
-        // one sibling's distance into the other, this would differ.
+        // sibling subtrees diffed in isolation and merged.
         let mut isolated = crate::diff::diff_with_options(
             &cv(&json!({"p": [p_a]})),
             &cv(&json!({"p": [other]})),
@@ -3195,8 +2983,7 @@ fn memo_does_not_conflate_lists_sharing_itemkey_but_differing_repetition() {
 
 /// A list of 1..12 elements drawn from a tiny scalar alphabet, so distinct
 /// lists frequently share an `ItemKey` (the deduplicated set of members) while
-/// differing in element repetition — exactly the shape that made the distance
-/// memo unsound when keyed by `ItemKey`.
+/// differing in element repetition.
 fn arb_repeating_list() -> impl Strategy<Value = serde_json::Value> {
     prop::collection::vec(
         prop_oneof![Just(json!(0)), Just(json!(1)), Just(json!(2))],
@@ -3210,9 +2997,8 @@ fn arb_repeating_list() -> impl Strategy<Value = serde_json::Value> {
 /// gives *every* sibling the same "other" list. So each sibling pairs its inner
 /// list against one shared other list, and two siblings whose lists share a
 /// member set (frequent over a 3-symbol alphabet) present the same `(removed,
-/// added)` `ItemKey` pair with genuinely different distances — the exact
-/// collision the memo must not act on. The list lengths make those distances
-/// straddle the 0.3 cutoff.
+/// added)` `ItemKey` pair with different distances. The list lengths make
+/// those distances straddle the 0.3 cutoff.
 fn arb_repeating_siblings_pair() -> impl Strategy<Value = (serde_json::Value, serde_json::Value)> {
     let siblings = (
         arb_repeating_list(),
@@ -3241,12 +3027,10 @@ fn arb_repeating_siblings_pair() -> impl Strategy<Value = (serde_json::Value, se
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(800))]
 
-    /// Targeted at the repetition-collision regression (issue #31): over dicts
-    /// of single-element lists wrapping repetition-varying lists — the shape
-    /// where sibling candidates
-    /// share an `ItemKey` but not a distance, and where those distances
-    /// straddle the 0.3 pairing cutoff — the distance memo must still change no
-    /// decision. Fails on the pre-fix `ItemKey`-keyed cache.
+    /// Over dicts of single-element lists wrapping repetition-varying lists — the shape
+    /// where sibling candidates share an `ItemKey` but not a distance, and
+    /// where those distances straddle the 0.3 pairing cutoff — the distance memo
+    /// must still change no decision.
     #[test]
     fn memo_neutral_on_repetition_varying_siblings(
         (a, b) in arb_repeating_siblings_pair(),
@@ -3267,13 +3051,11 @@ proptest! {
     }
 }
 
-/// The distance memo's two caching conditions are load-bearing, so pin each:
-/// a scalar-only `ignore_order` diff must cache nothing (scalar distances never
-/// recurse, so `is_container` gates them out), and a `disabled()` memo must
-/// cache nothing regardless of shape (so the with/without differential tests
-/// genuinely exercise the uncached path). Both also guard the caching gate
-/// against being widened to "always cache", which would make the memo do
-/// redundant work.
+/// The distance memo's two caching conditions are each pinned: a scalar-only
+/// `ignore_order` diff caches nothing (scalar distances never recurse, so
+/// `is_container` gates them out), and a `disabled()` memo caches nothing
+/// regardless of shape (so the with/without differential tests exercise the
+/// uncached path).
 #[test]
 fn distance_memo_only_caches_container_pairs_when_enabled() {
     let opts = DiffOptions {
@@ -3318,15 +3100,15 @@ fn distance_memo_only_caches_container_pairs_when_enabled() {
     );
 }
 
-// --- DistKey hashing stack safety (issue #31) -------------------------
+// --- DistKey hashing stack safety ---
 
 /// [`DistKey`]'s `Hash` walks the value with an explicit stack, never native
 /// recursion, so hashing a distance-cache key can never overflow the native
 /// stack however deep the value — the same posture the engine's `Value`
 /// `Drop`/`PartialEq` hold. Isolated from the key's own value clone (which,
 /// like the report's clones, recurses): the chain is built iteratively and
-/// wrapped without copying, so the only thing exercised on the deliberately
-/// tiny 256 KiB stack is the hash. A recursive hasher overflows here.
+/// wrapped without copying, so the only thing exercised on the tiny 256 KiB
+/// stack is the hash.
 #[test]
 fn dist_key_hashing_does_not_overflow_the_native_stack() {
     let handle = std::thread::Builder::new()
@@ -3412,9 +3194,8 @@ fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
         // Signed zero: Value equality treats +0.0 == -0.0.
         (float(0.0), float(-0.0)),
         // A set built directly from both signed zeros dedups to the same
-        // single-member set regardless of which sign came first (SetItems::new
-        // now folds the two into one canonical slot, matching a real Python
-        // set, which can never hold both).
+        // single-member set regardless of which sign came first (`SetItems::new`
+        // folds the two into one canonical slot, matching a real Python set).
         (
             CValue::Set(SetItems::new(vec![float(0.0), float(-0.0)])),
             CValue::Set(SetItems::new(vec![float(-0.0)])),
@@ -3431,8 +3212,7 @@ fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
         // A set of tuples, members reordered: exercises the nested walk.
         (nested_set([1, 2, 3]), nested_set([3, 2, 1])),
         // A naive datetime (read as UTC) and an aware one at the same instant:
-        // Value equality compares datetimes by instant, so these are equal and
-        // must hash equal — they would not if the hash mixed in the offset.
+        // Value equality compares datetimes by instant.
         (cdt(2024, 6, 1, None), cdt(2024, 6, 1, Some(0))),
         // Two aware datetimes at the same instant but different wall clock and
         // offset: 12:00+00:00 == 13:00+01:00.
@@ -3451,17 +3231,12 @@ fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
     }
 }
 
-/// `NaN` cannot appear among the pairs above — no two `NaN`s are ever
-/// `Value`-equal (`NaN != NaN`, matching Python), so there is no equal-values
-/// case to add. What NEEDS pinning instead is the deliberately *coarser*
+/// `NaN` cannot appear among the pairs above: no two `NaN`s are ever
+/// `Value`-equal (`NaN != NaN`, matching Python). Pinned instead is the coarser
 /// hash: `DistKey`'s `Hash` collapses every `NaN` bit pattern onto one bucket
-/// (`crate::ignore_order::hash::number_key`, matching `DeepHash`'s own
-/// `NaN`-insensitive digest — see that function's own doc), so two
-/// genuinely distinct, never-`Value`-equal `NaN`s hash *equal* here — the
-/// opposite direction from the property above, and safe only because a hash
-/// collision is not itself a lookup match: `DistKey`'s `Eq` is `Value`'s
-/// real equality, and it must still tell the two apart, or the memo would
-/// silently hand one `NaN`'s cached distance to the other.
+/// (`crate::ignore_order::hash::number_key`), so two distinct, never-`Value`-equal
+/// `NaN`s hash equal here, while `DistKey`'s `Eq` is `Value`'s real equality and
+/// still tells them apart.
 #[test]
 fn dist_key_hash_collision_on_distinct_nans_never_becomes_equality() {
     let nan_a = CValue::Number(crate::value::Number::from_f64(f64::NAN));
@@ -3521,17 +3296,7 @@ fn arb_cleaf() -> impl Strategy<Value = CValue> {
             prop_oneof![Just(datetime.clone()), Just(csub_datetime(&datetime))]
         });
     let arb_date = (2000i32..2025, 1u8..=12, 1u8..=28).prop_map(|(y, m, d)| cdate(y, m, d));
-    // `NaN` is excluded, not `any::<f64>()`'s non-finite values generally:
-    // `Infinity`/`-Infinity` are ordinary equal-to-themselves floats and
-    // `structural_twin` leaves them untouched (only a signed zero gets
-    // perturbed), so they exercise this property harmlessly. A `NaN` cannot:
-    // `Value::eq` never calls two `NaN`s equal (matching Python's
-    // `nan != nan`), so `prop_assert_eq!(&value, &twin)` below would fail on
-    // any tree containing one, structural twin or not — this proptest is
-    // about the hash/equality *agreement*, which a `NaN` leaf has no
-    // meaningful instance of (see
-    // `dist_key_hash_collision_on_distinct_nans_never_becomes_equality` for
-    // the coverage a `NaN` does need).
+    // NaN is excluded: it is never `Value`-equal to its twin.
     let arb_float = prop_oneof![
         Just(0.0f64),
         Just(-0.0f64),
@@ -3555,39 +3320,9 @@ fn arb_cleaf() -> impl Strategy<Value = CValue> {
     ]
 }
 
-/// Rebuilds `value` into a twin that is equal by [`Value`]'s rules but differs
-/// **structurally**, so the hash-agreement property has real power. The
-/// load-bearing arms are the two places `Value` equality is coarser than
-/// structure:
-///
-/// - a **datetime** is re-expressed at the same instant with different fields —
-///   a naive value (read as UTC) becomes aware `+00:00`, and an aware value's
-///   wall clock and offset shift together by one hour (e.g. `12:00+00:00` ->
-///   `13:00+01:00`), which `Value::eq` compares equal by instant;
-/// - a **signed zero** flips sign (`+0.0` <-> `-0.0`), which `Value::eq`
-///   compares equal though the bit patterns differ.
-///
-/// Set/frozenset members and dict entries are also reversed before rebuilding
-/// (they re-canonicalize to the same stored order, so this is only a
-/// construction-path check, not where the power comes from). Recurses over
-/// proptest-bounded depth (safe).
-///
-/// The datetime perturbation is suppressed once the walk is **below a set or
-/// frozenset** (`in_set`, sticky through nested arrays, tuples and dicts). A
-/// set's canonical storage order is *finer* than value equality for a
-/// naive/aware pair (`canonical_cmp` orders a `datetime` by instant then by
-/// whether it is aware, so the two never compare equal there, while
-/// `Value::eq` compares only the instant), so shifting a datetime's offset
-/// below a set would reorder the enclosing set and make the twin genuinely
-/// unequal — a false failure. Above any set the datetime perturbation runs
-/// and gives the property its power there; the reversal still runs
-/// everywhere.
-///
-/// The signed-zero perturbation has no such restriction: `canonical_cmp`'s
-/// number case (`number_cmp`) folds `-0.0` into `+0.0` before ordering, the
-/// same equivalence `Value::eq` already uses, so flipping a zero's sign
-/// anywhere — including a bare set member — never changes `SetItems`'
-/// canonical order or membership, and the twin stays genuinely equal.
+/// Rebuilds `value` into a twin that is `Value`-equal but structurally
+/// different: datetimes re-expressed at the same instant (not below a set),
+/// signed zeros flipped, set/dict entries reversed.
 fn structural_twin(value: &CValue, in_set: bool) -> CValue {
     match value {
         CValue::Array(items) => carr(
@@ -3619,10 +3354,7 @@ fn structural_twin(value: &CValue, in_set: bool) -> CValue {
             CValue::FrozenSet(SetItems::new(members))
         }
         CValue::Object(map) => {
-            // Keys are carried over unchanged (not "twinned") — exactly
-            // what the pre-`ObjectKey` version of this function did too,
-            // since every key was a `str` reproduced verbatim by
-            // `key.to_string()`; only child values get reconstructed.
+            // Keys are carried over unchanged (not "twinned"); only child values get reconstructed.
             let mut entries: Vec<(ObjectKey, CValue)> = map
                 .iter()
                 .map(|(key, child)| (key.clone(), structural_twin(child, in_set)))
@@ -3687,9 +3419,7 @@ proptest! {
     /// is `Value`-equal but structurally different: an equal-instant datetime
     /// at a different offset and a sign-flipped zero (the two places `Value`
     /// equality is coarser than structure), plus reversed set/dict order.
-    /// Guards the `DistKey` `Hash`/`Eq` agreement the memo's soundness depends
-    /// on — a hash that mixed in the UTC offset or the raw signed-zero bits
-    /// would fail here.
+    /// Guards the `DistKey` `Hash`/`Eq` agreement the memo's soundness depends on.
     #[test]
     fn dist_key_hash_equal_for_equal_values(value in arb_cvalue()) {
         let twin = structural_twin(&value, false);
@@ -3808,7 +3538,7 @@ fn item_length_of_a_custom_object_is_its_attribute_count_not_its_values() {
     // attribute *names* (one each), never recursing into the values, unlike a
     // `dict` (the `Mapping` branch). This object has two attributes whose
     // values sum to four leaves as a dict would count them, so the two rules
-    // give different answers and this pins the object rule.
+    // give different answers.
     let object = ccustom("A", json!({"x": [1, 2, 3], "y": 5}).as_object().unwrap());
     assert_eq!(super::distance::item_length(&object), 2);
 
@@ -4289,7 +4019,7 @@ fn an_object_reports_the_address_it_was_converted_from() {
     );
 }
 
-// --- default-path hash flooding (issue #136) ---
+// --- default-path hash flooding ---
 
 /// `n` distinct 16-byte UTF-8 keys that drive `FxHasher` to one final state once `prefix` (the
 /// words hashed before the key's bytes) is written: an 8-byte ASCII word, then a second word
@@ -4419,7 +4149,7 @@ fn colliding_tuple_keys_in_a_set_member_cost_what_distinct_keys_cost_with_defaul
 }
 
 #[test]
-#[ignore = "measurement: cargo test --release -p onix-core --lib default_path_key_curves -- --ignored --nocapture (about 5 s in release; about 4 minutes with FxHash-keyed default-path tables)"]
+#[ignore = "measurement: cargo test --release -p onix-core --lib default_path_key_curves -- --ignored --nocapture (about 5 s in release)"]
 fn default_path_key_curves() {
     for n in [5_000, 10_000, 20_000, 40_000, 80_000] {
         let seconds = |build, prefix: &[u64]| {
