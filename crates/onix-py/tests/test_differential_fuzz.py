@@ -5,9 +5,9 @@ conversion layer. Fifteen batches of seeded cases run twice (ordered and
 `ignore_order=True`), comparing `to_json()` (parsed) and `to_dict()`; the
 custom-object batch compares `to_json()` alone and the enum and class-attribute
 batches the report structure alone, since DeepDiff renders a whole object from
-other views. The big-integer batch draws its big ints as bare scalars
-only, never inside a tuple/set, so it stays on the arbitrary-precision property
-under test rather than surfacing the pre-existing container-hashing divergence a
+other views. The big-integer batch draws its big ints as bare scalars only,
+never inside a tuple/set, so it stays on the arbitrary-precision property under
+test rather than surfacing the pre-existing container-hashing divergence a
 biased alphabet inside a hashable container would otherwise trigger.
 """
 
@@ -414,12 +414,12 @@ def _diverges(a: JsonValue, b: JsonValue, ignore_order: bool) -> tuple[JsonValue
     # a `date` that DeepDiff's stock `to_json()` refuses to serialize; it is a
     # no-op for every other value. See `scripts/golden_tags.py`. A report
     # that carries a raw `frozenset` value, or a *nested* dict value keyed by
-    # a `datetime`/`date`/`tuple` (a dict key any deeper than
-    # the top-level path segment has no json.dumps rule at all, unlike
-    # `int`/`bool`/`float`/`None`, which DeepDiff's own `to_json()` already
-    # stringifies), makes `to_json()` raise `TypeError` outright; both are
-    # real DeepDiff crashes, so the comparison falls back to `to_dict()`
-    # alone rather than treating a crash as a divergence to report.
+    # a `datetime`/`date`/`tuple` (a dict key any deeper than the top-level
+    # path segment has no json.dumps rule at all, unlike `int`/`bool`/`float`/
+    # `None`, which DeepDiff's own `to_json()` already stringifies), makes
+    # `to_json()` raise `TypeError` outright; both are real DeepDiff crashes,
+    # so the comparison falls back to `to_dict()` alone rather than treating a
+    # crash as a divergence to report.
     try:
         expected_json = json.loads(real.to_json(default_mapping=JSON_DEFAULT_MAPPING))
         real_to_json_crashed = False
@@ -1301,9 +1301,9 @@ def test_differential_fuzz_with_surrogate_strings_matches_real_deepdiff() -> Non
     )
 
 
-# The custom-object batches draw attribute values from bare
-# scalars, nested objects, lists and dicts, never a tuple or set, to stay off
-# the container-hashing divergence.
+# The custom-object batches draw attribute values from bare scalars, nested
+# objects, lists and dicts, never a tuple or set, to stay off the
+# container-hashing divergence.
 OBJECT_SEED_BASE: Final[int] = 12_000_000
 ENUM_OBJECT_SEED_BASE: Final[int] = 13_000_000
 CLASS_ATTRIBUTE_SEED_BASE: Final[int] = 14_000_000

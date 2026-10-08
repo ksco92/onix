@@ -13,8 +13,8 @@ import sys
 import textwrap
 from pathlib import Path
 
-# Bound comfortably above the compact build's measured overhead, so allocator/platform
-# noise can't flake it.
+# Bound comfortably above the compact build's measured overhead, so
+# allocator/platform noise can't flake it.
 _OVERHEAD_BOUND_MB = 90.0
 _RECORD_COUNT = 10_000
 
