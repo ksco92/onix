@@ -800,42 +800,13 @@ is. `deep_narrow_d120` uses depth 120, which both tools handle.
 def render_deferred_work_note() -> str:
     """:return: The closing list of what this benchmark does not measure."""
 
-    return """## Deferred work (documented, not silently dropped)
+    return """## Not measured
 
-**Fixture matrix scaled down from the original full table** (this benchmark
-was explicitly scoped to build "a scalable, representative subset", not the
-full matrix, but here is every cut, not just the headline one):
-
-- **`flat_list_5m`** (the originally envisioned 5-million-item list,
-  "throughput, memory"): **not built at all**. Only `flat_list_100k` is in this run's
-  matrix; a multi-million-item list fixture is a candidate follow-up if
-  finer-grained throughput data at that scale is ever needed.
-- **`api_payloads`** capped at 50,000 records rather than the originally
-  suggested ~50-200MB (see the actual measured size in the Fixture matrix
-  table above); see `perf/generate_fixtures.py`'s `API_PAYLOAD_RECORD_COUNT`
-  comment: at 100k records deepdiff's diff-only call already took ~3
-  minutes, which made the full deterministic harness (every fixture run
-  multiple times) impractical to run in one sitting; 50k records already
-  makes deepdiff take ~90 seconds per diff, "meaningfully long" per the
-  brief's own bar.
-- **`deep_narrow_dN`** at depth 120, not the originally-envisioned 20k
-  (nor even the ~500 fallback); see the "Finding: onix's practical
-  depth ceiling is lower than expected" section above for why.
-
-Also deferred, unrelated to matrix scale:
-
-- **Rust-side counting allocator** (marked nice-to-have, not required):
-  not implemented here. onix's allocation profile is inferred
-  only indirectly, via peak RSS and the (already dramatic) CPU-time gap.
-  Left for follow-up if the allocation-churn detail is ever
-  decision-relevant.
-- **Criterion micro-benches**: not implemented here.
-  `run_bench.sh`'s cross-language sweep was the priority; a
-  per-fixture-shape Criterion suite inside `onix-core` is a natural
-  follow-up once the cross-language number exists to compare against.
-- **Energy sampling**: see the Energy section above. CPU-seconds is the
-  documented fallback proxy; a real Joules/diff number needs a manual
-  `sudo` run by the repository owner (exact command provided there).
+- No multi-million-item list fixture; `flat_list_100k` is the largest list.
+- `api_payloads` is capped at 50,000 records, about 90 s per deepdiff diff.
+- No Rust allocation counter: onix memory is reported as peak RSS only.
+- No Criterion micro-benchmark suite.
+- No energy figure: it needs a manual `sudo` run (see Energy above).
 """
 
 
