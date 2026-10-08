@@ -301,7 +301,7 @@ cargo install cargo-mutants --locked
 make mutants
 ```
 
-`perf/MUTANTS.md` holds the standing result, the equivalent-mutant list and the
+`perf/MUTANTS.md` holds the mutant enumeration, the equivalent-mutant list and the
 reproduce command; re-run `make mutants` after touching that logic.
 
 ## Wheels and publishing
