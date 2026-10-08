@@ -103,6 +103,7 @@ pub(crate) fn ignore_order_array_diff(
 
     let pairs = if get_pairs {
         compute_pairs(&hashes_added, &hashes_removed, &t1, &t2, depth, opts, memo)
+            .map_err(|error| error.under(path))?
     } else {
         HashMap::default()
     };

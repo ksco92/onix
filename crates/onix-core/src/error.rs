@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::path::{PathSegment, render_path};
+
 /// Errors that can occur while diffing two values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -39,6 +41,21 @@ pub enum Error {
         /// could not be normalized.
         path: String,
     },
+}
+
+impl Error {
+    /// This error with its path, rendered relative to a sub-diff's root,
+    /// re-rooted under `prefix`.
+    pub(crate) fn under(mut self, prefix: &[PathSegment]) -> Self {
+        let (Error::MaxDepthExceeded { path, .. } | Error::DateTimeOutOfRange { path }) = &mut self;
+        let rerooted = format!(
+            "{}{}",
+            render_path(prefix),
+            path.strip_prefix("root").unwrap_or(path)
+        );
+        *path = rerooted;
+        self
+    }
 }
 
 impl fmt::Display for Error {

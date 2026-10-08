@@ -50,10 +50,7 @@ impl Default for DiffOptions {
 ///
 /// # Errors
 ///
-/// Returns [`Error::MaxDepthExceeded`] if comparing `a`/`b` would need to
-/// recurse past [`DEFAULT_MAX_DEPTH`], or if a finding's value, combined
-/// with its path depth, nests past that same budget — see
-/// `docs/design/depth-budget.md`.
+/// Same as [`diff_with_max_depth`] at [`DEFAULT_MAX_DEPTH`].
 ///
 /// # Examples
 ///
@@ -83,8 +80,8 @@ pub fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
 ///
 /// # Errors
 ///
-/// Same as [`diff_with_max_depth`]: [`Error::MaxDepthExceeded`] if
-/// `opts.max_depth` would be exceeded.
+/// Same as [`diff_with_max_depth`] at `opts.max_depth`; under `ignore_order`,
+/// ranking a candidate pair compares datetimes too.
 ///
 /// # Examples
 ///
@@ -191,7 +188,8 @@ pub(crate) fn diff_with_options_memo(
 /// # Errors
 ///
 /// Returns [`Error::MaxDepthExceeded`] if either the traversal or the
-/// combined path-depth-plus-value-depth budget is exceeded.
+/// combined path-depth-plus-value-depth budget is exceeded, and
+/// [`Error::DateTimeOutOfRange`] if two datetimes it compares have no UTC form.
 ///
 /// # Examples
 ///

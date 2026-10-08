@@ -8,6 +8,8 @@
 use crate::value::{Number, Object, ObjectKey, ObjectKind, Value};
 
 use crate::diff::DiffOptions;
+use crate::error::Error;
+use crate::path::{entry_path_segment, object_key_path_segment};
 
 use super::IgnoreOrderMemo;
 
@@ -308,15 +310,18 @@ pub(crate) fn is_length_excluded_key(key: &str) -> bool {
 /// (the array branch still asks the real engine, guaranteeing the same
 /// number `DeepDiff` would compute); this hybrid trades away the Report-free
 /// property only for the substantially rarer, non-benchmarked case.
+///
+/// `depth` is the depth the pair's real diff runs at; an error comes from a
+/// nested array's trial, its path relative to the pair.
 pub(crate) fn count_diff_leaves(
     a: &Value,
     b: &Value,
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> usize {
+) -> Result<usize, Error> {
     if IgnoreOrderMemo::skips(a, b) {
-        return 0;
+        return Ok(0);
     }
     let resolved_a = memo.resolve(a, b, true);
     let resolved_b = memo.resolve(b, resolved_a.as_deref().unwrap_or(a), true);
@@ -325,7 +330,7 @@ pub(crate) fn count_diff_leaves(
         let b = resolved_b.as_deref().unwrap_or(b);
         return count_diff_leaves(a, b, depth, opts, memo);
     }
-    match (a, b) {
+    Ok(match (a, b) {
         (Value::Null, Value::Null) => 0,
         (Value::Bool(x), Value::Bool(y)) => usize::from(x != y),
         (Value::Str(x), Value::Str(y)) => usize::from(x != y),
@@ -350,7 +355,7 @@ pub(crate) fn count_diff_leaves(
             }
         }
         (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
-            count_array_diff_leaves(x, y, depth, opts, memo)
+            count_array_diff_leaves(x, y, depth, opts, memo)?
         }
         (Value::Set(x), Value::Set(y)) | (Value::FrozenSet(x), Value::FrozenSet(y)) => {
             count_set_diff_leaves(x, y, memo)
@@ -362,10 +367,10 @@ pub(crate) fn count_diff_leaves(
         // the whole-value change `DeepDiff` would report, not a spurious
         // near-zero attribute diff.
         (Value::Object(x), Value::Object(y)) if x.same_class(y) => {
-            count_object_diff_leaves(x, y, depth, opts, memo)
+            count_object_diff_leaves(x, y, depth, opts, memo)?
         }
         _ => type_change_leaf_length(a, b),
-    }
+    })
 }
 
 /// [`count_diff_leaves`]'s type-mismatch contribution: `DeepDiff`'s own
@@ -924,15 +929,15 @@ pub(crate) fn count_object_diff_leaves(
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> usize {
+) -> Result<usize, Error> {
     if is_below_threshold_to_diff_deeper(a, b) {
         // The collapse is one wholesale `values_changed` whose new value is
         // the whole object `b` (see [`item_length`]).
-        return if b.is_custom_object() {
+        return Ok(if b.is_custom_object() {
             b.lengths().dict_len
         } else {
             item_length_of_map(b)
-        };
+        });
     }
 
     // Dispatched to a separate function, kept off this frame for the
@@ -946,7 +951,8 @@ pub(crate) fn count_object_diff_leaves(
     for (key, old_value) in a {
         total += match b.get(key) {
             None => item_length(old_value),
-            Some(new_value) => count_diff_leaves(old_value, new_value, depth + 1, opts, memo),
+            Some(new_value) => count_diff_leaves(old_value, new_value, depth + 1, opts, memo)
+                .map_err(|error| error.under(&[entry_path_segment(a.kind(), key)]))?,
         };
     }
     for (key, new_value) in b {
@@ -955,7 +961,7 @@ pub(crate) fn count_object_diff_leaves(
         }
     }
 
-    total
+    Ok(total)
 }
 
 /// [`count_object_diff_leaves`]'s walk for the (rare) case where `a` or `b`
@@ -969,12 +975,13 @@ fn count_object_diff_leaves_mixed(
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> usize {
+) -> Result<usize, Error> {
     let matched = match_dict_keys(a, b);
     let mut total = 0;
 
-    for (_, old_value, new_value) in &matched.shared {
-        total += count_diff_leaves(old_value, new_value, depth + 1, opts, memo);
+    for (key, old_value, new_value) in &matched.shared {
+        total += count_diff_leaves(old_value, new_value, depth + 1, opts, memo)
+            .map_err(|error| error.under(&[object_key_path_segment(key)]))?;
     }
     for (_, old_value) in &matched.only_a {
         total += item_length(old_value);
@@ -983,7 +990,7 @@ fn count_object_diff_leaves_mixed(
         total += item_length(new_value);
     }
 
-    total
+    Ok(total)
 }
 
 /// [`count_diff_leaves`]'s set case: `DeepDiff`'s delta view of a set diff
@@ -1004,37 +1011,21 @@ fn count_set_diff_leaves(a: &[Value], b: &[Value], memo: &IgnoreOrderMemo) -> us
 
 /// [`count_diff_leaves`]'s array case — see that function's doc for why
 /// this is the one sub-case still routed through a genuine (but small,
-/// single-pair) [`crate::diff::diff_at`] trial diff rather than a count-only mirror.
-/// `depth` here is the array's *own* depth (matching
-/// [`crate::diff::array_diff`]'s own convention), and the trial gets a
-/// bound of the *remaining* `max_depth` budget — see [`rough_distance`]'s
-/// doc for why a reduced (not fresh) budget is required for safety. Any
-/// dict-vs-dict pair this trial recurses into (directly, or arbitrarily
-/// deep through a nested `ignore_order_array_diff` re-entry building one of
-/// its own accepted pairs) is measured by the real
-/// `crate::diff::object_diff`, which applies `threshold_to_diff_deeper`
-/// unconditionally — see [`THRESHOLD_TO_DIFF_DEEPER`]'s doc — so no
-/// special-casing is needed here.
+/// single-pair) [`crate::diff::array_diff`] trial diff rather than a count-only
+/// mirror. The trial runs at the array's own `depth` under the caller's
+/// `max_depth`, the budget its real diff would get.
 pub(crate) fn count_array_diff_leaves(
     a: &[Value],
     b: &[Value],
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> usize {
-    let probe_opts = DiffOptions {
-        max_depth: opts.max_depth.saturating_sub(depth),
-        ignore_order: opts.ignore_order,
-    };
-    let mut probe_path = Vec::new();
-    let Ok(mut sub_report) = crate::diff::array_diff(&mut probe_path, a, b, 0, &probe_opts, memo)
-    else {
-        return 0;
-    };
+) -> Result<usize, Error> {
+    let mut sub_report = crate::diff::array_diff(&mut Vec::new(), a, b, depth, opts, memo)?;
     // The mutual add/remove merge runs before `diff_length` is measured; it
     // is a no-op when `array_diff` took the positional path.
     sub_report.merge_mutual_add_removes();
-    sub_report.distance_leaf_length()
+    Ok(sub_report.distance_leaf_length())
 }
 
 /// `DeepDiff`'s `_get_rough_distance` (distance.py): the
@@ -1047,35 +1038,14 @@ pub(crate) fn count_array_diff_leaves(
 /// [`Report`](crate::report::Report), unlike `DeepDiff`'s own brand-new nested `DeepDiff` object
 /// built purely to measure this).
 ///
-/// `depth` is the depth of the *list* doing the pairing (so `removed`/
-/// `added` themselves sit at `depth + 1`) — used only to give the trial a
-/// bound of the **remaining** `max_depth` budget, not a fresh one: granting
-/// every one of the (potentially many) candidate-pair trials its own full
-/// `max_depth` would let native stack usage compound with the depth already
-/// reached by the outer traversal — the same combined-budget rule
-/// `docs/design/depth-budget.md` states for the rest of this crate.
+/// `depth` is the depth of the *list* doing the pairing, which is also the
+/// depth a paired item's own diff runs at, so the trial gets that diff's
+/// budget (`docs/design/depth-budget.md`).
 ///
-/// **The one place this can still fail is [`count_array_diff_leaves`]'s own
-/// nested trial diff, and it is believed unreachable today, kept anyway as
-/// defense-in-depth.** [`ignore_order_array_diff`](super::ignore_order_array_diff)'s own up-front
-/// [`crate::diff::check_value_depth`] pass already validates `removed`/`added`
-/// individually against this exact same reduced budget
-/// (`max_depth` minus the items' own depth) before pairing ever runs; a
-/// short inductive argument (every subtree's remaining-budget-at-its-relative-depth
-/// transfers exactly from a depth-checked root to a trial restarted at
-/// depth `0` with that same budget as its own `max_depth`) shows the trial
-/// can never need more depth than that. Unlike `insert_lcs_pair_finding`'s
-/// equivalent "structurally unreachable" guard (a *static type fact* — a
-/// JSON scalar's nesting is always `0`, true forever), the invariant here
-/// is a *cross-function arithmetic* one, spread across several functions —
-/// exactly the kind of subtle, easy-to-silently-break invariant that
-/// depth-guard correctness depends on. Treating an
-/// over-budget nested array trial as a **rejected** candidate (`0` leaves
-/// counted, only reachable this way when `removed`/`added` are themselves
-/// arrays needing more depth than available) rather than propagating an
-/// error means a future edit that weakens either budget calculation
-/// degrades to a more conservative pairing decision, never a crash on
-/// untrusted input.
+/// # Errors
+///
+/// Propagates [`count_diff_leaves`]'s error: a failed trial is never a
+/// distance.
 pub(crate) fn rough_distance(
     removed: &Value,
     added: &Value,
@@ -1083,14 +1053,14 @@ pub(crate) fn rough_distance(
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> f64 {
+) -> Result<f64, Error> {
     if let Some(distance) = family_distance(removed, added, cutoff) {
-        return distance;
+        return Ok(distance);
     }
 
-    let diff_length = count_diff_leaves(removed, added, depth + 1, opts, memo);
+    let diff_length = count_diff_leaves(removed, added, depth, opts, memo)?;
     if diff_length == 0 {
-        return 0.0;
+        return Ok(0.0);
     }
     let rough_len = rough_length(removed) + rough_length(added);
     #[allow(
@@ -1099,7 +1069,7 @@ pub(crate) fn rough_distance(
                   far under f64's exact-integer range"
     )]
     {
-        diff_length as f64 / rough_len as f64
+        Ok(diff_length as f64 / rough_len as f64)
     }
 }
 

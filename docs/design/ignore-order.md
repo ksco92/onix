@@ -21,7 +21,10 @@ preserving that side's first-occurrence order. Pairing is gated:
 distinct hashes, not raw list length; over the gate, pairing is skipped
 for raw per-hash add/remove. When engaged, matching is greedy and not
 globally optimal: it resolves candidates in ranked distance order
-without backtracking.
+without backtracking. A candidate whose distance trial fails (it
+compares a datetime with no UTC form, or meets a resolved value over
+the depth budget) fails the diff with that error, at the removed
+item's path; it is never ranked.
 
 ## Distance
 
@@ -38,11 +41,10 @@ keyed by each side's exact structural identity, bounding a subtree
 pair's own trial diff to one computation regardless of how many
 candidates embed it.
 
-Caching changes no decision: on this path `rough_distance` depends
-only on the two values' content (the structural trial's own depth
-bound is unreachable here, since every paired item is depth-checked
-before ranking begins), so a cache keyed by exact structural
-identity returns exactly what a fresh computation would.
+Caching changes no distance: a successful `rough_distance` depends
+only on the two values' content, so a cache keyed by exact structural
+identity returns exactly what a fresh computation would; a failed
+trial raises and caches nothing.
 
 Two further tables share the memo's lifetime and key the same way
 `DeepHash` keys its own run-scoped cache:
@@ -83,5 +85,5 @@ and memory, with one entry per distinct container pair.
 Item hashing and the distance fallback recurse natively, unlike the
 rest of this crate's traversal; every item is validated against the
 shared depth budget before hashing. The distance fallback's
-nested-array trial restarts at depth 0 with the remaining budget as
-its own `max_depth` (see `rough_distance`'s doc).
+nested-array trial runs at the depth and under the `max_depth` the
+pair's own diff gets (see `rough_distance`'s doc).

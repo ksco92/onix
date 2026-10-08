@@ -35,6 +35,7 @@ fn count_diff_leaves(
     opts: &DiffOptions,
 ) -> usize {
     super::distance::count_diff_leaves(&cv(a), &cv(b), depth, opts, &super::IgnoreOrderMemo::new())
+        .unwrap()
 }
 fn count_object_diff_leaves(
     a: &serde_json::Map<String, serde_json::Value>,
@@ -49,6 +50,7 @@ fn count_object_diff_leaves(
         opts,
         &super::IgnoreOrderMemo::new(),
     )
+    .unwrap()
 }
 fn count_array_diff_leaves(
     a: &[serde_json::Value],
@@ -63,6 +65,7 @@ fn count_array_diff_leaves(
         opts,
         &super::IgnoreOrderMemo::new(),
     )
+    .unwrap()
 }
 fn item_key(value: &serde_json::Value) -> super::hash::ItemKey {
     super::hash::item_key(&cv(value), &IgnoreOrderMemo::new())
@@ -977,25 +980,34 @@ fn mixed_key_union_sums_shared_and_one_sided_keys() {
     assert!(!super::is_below_threshold_to_diff_deeper(&a, &b));
 }
 
+fn max_depth_exceeded(path: &str, max_depth: usize) -> crate::error::Error {
+    crate::error::Error::MaxDepthExceeded {
+        path: path.to_string(),
+        max_depth,
+    }
+}
+
 #[test]
 fn count_object_diff_leaves_shared_key_recursion_depth_boundary_is_exact() {
-    // Shared key "x" holds arrays whose one element (a dict) needs 3
-    // levels of recursion (array-element -> dict "a" -> dict "b") to
-    // reach the actual leaf difference. With max_depth=3 and this call
-    // itself at depth=0, the recursive `count_diff_leaves(..., depth +
-    // 1, ...)` call for "x" must use depth=1, so
-    // `count_array_diff_leaves`'s own fresh-restart budget
-    // (`max_depth.saturating_sub(depth)`) is `3 - 1 = 2` — one short of
-    // the 3 needed, so the trial is rejected (0). A `+` -> `*` mutant
-    // computes depth=0 instead, handing the trial the full budget of 3
-    // (exactly enough to succeed), giving a nonzero total instead.
-    let opts = DiffOptions {
-        max_depth: 3,
-        ignore_order: false,
-    };
+    // "x"'s trial reaches the leaf at depth 4: key, array item, "a", "b".
     let a = json!({"x": [{"a": {"b": 1}}]}).as_object().unwrap().clone();
     let b = json!({"x": [{"a": {"b": 9}}]}).as_object().unwrap().clone();
-    assert_eq!(count_object_diff_leaves(&a, &b, 0, &opts), 0);
+    let count = |max_depth| {
+        super::distance::count_object_diff_leaves(
+            &cobj(&a),
+            &cobj(&b),
+            0,
+            &DiffOptions {
+                max_depth,
+                ignore_order: false,
+            },
+            &IgnoreOrderMemo::new(),
+        )
+    };
+    assert_eq!(
+        (count(3), count(4)),
+        (Err(max_depth_exceeded("root['x'][0]['a']['b']", 3)), Ok(1))
+    );
 }
 
 #[test]
@@ -1077,26 +1089,27 @@ fn count_object_diff_leaves_mixed_sums_shared_added_and_removed_non_str_keys() {
             0,
             &DiffOptions::default(),
             &super::IgnoreOrderMemo::new(),
-        ),
+        )
+        .unwrap(),
         2 + 3 + 4
     );
 }
 
-/// `count_object_diff_leaves_mixed`'s shared-key recursion steps `depth` by
-/// exactly one, matching the trial sub-diff's own remaining-budget bound.
 #[test]
 fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact() {
     let key = || ObjectKey::Other(Box::new(cv(&json!(5))));
     let a = crate::value::Object::from_pairs(vec![(key(), cv(&json!([{"a": {"b": 1}}])))]);
     let b = crate::value::Object::from_pairs(vec![(key(), cv(&json!([{"a": {"b": 9}}])))]);
-    let opts = DiffOptions {
-        max_depth: 3,
-        ignore_order: false,
+    let count = |max_depth| {
+        let opts = DiffOptions {
+            max_depth,
+            ignore_order: false,
+        };
+        super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &IgnoreOrderMemo::new())
     };
-
     assert_eq!(
-        super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &super::IgnoreOrderMemo::new()),
-        0
+        (count(3), count(4)),
+        (Err(max_depth_exceeded("root[5][0]['a']['b']", 3)), Ok(1))
     );
 }
 
@@ -1324,42 +1337,117 @@ fn rough_distance_structural_formula_is_diff_length_over_summed_rough_lengths() 
         0,
         &opts,
         &super::IgnoreOrderMemo::new(),
-    );
+    )
+    .unwrap();
     assert!((d - 1.0 / 7.0).abs() < 1e-12, "expected 1/7, got {d}");
 }
 
 #[test]
-#[allow(
-    clippy::float_cmp,
-    reason = "the exact-zero early return (diff_length == 0) is deterministic, not an arithmetic result"
-)]
 fn rough_distance_depth_boundary_is_exact() {
-    // removed/added are single-element arrays whose element (a dict)
-    // needs 3 levels of recursion (array-element -> dict "a" -> dict
-    // "b") to reach the actual leaf difference. With max_depth=3 and
-    // the pairing list itself at depth=0, `rough_distance`'s own
-    // `count_diff_leaves(..., depth + 1, ...)` call must use depth=1,
-    // so `count_array_diff_leaves`'s fresh-restart budget
-    // (`max_depth.saturating_sub(depth)`) is `3 - 1 = 2` — one short of
-    // the 3 needed, so `diff_length` is 0 and this returns exactly
-    // `0.0`. A `+` -> `*` mutant computes depth=0 instead, handing the
-    // trial the full budget of 3 (exactly enough to succeed), giving a
-    // nonzero distance instead.
-    let opts = DiffOptions {
-        max_depth: 3,
-        ignore_order: false,
+    // The trial runs at the pairing list's own depth, 0, and reaches the
+    // leaf at depth 3: array item, "a", "b".
+    let distance = |max_depth| {
+        super::distance::rough_distance(
+            &cv(&json!([{"a": {"b": 1}}])),
+            &cv(&json!([{"a": {"b": 9}}])),
+            CUTOFF_DISTANCE_FOR_PAIRS,
+            0,
+            &DiffOptions {
+                max_depth,
+                ignore_order: false,
+            },
+            &IgnoreOrderMemo::new(),
+        )
     };
-    let removed = json!([{"a": {"b": 1}}]);
-    let added = json!([{"a": {"b": 9}}]);
-    let d = super::distance::rough_distance(
-        &cv(&removed),
-        &cv(&added),
+    assert_eq!(
+        (distance(2), distance(3)),
+        (
+            Err(max_depth_exceeded("root[0]['a']['b']", 2)),
+            Ok(1.0 / 12.0)
+        )
+    );
+}
+
+/// A datetime whose UTC form leaves year 9999, and an in-range neighbour
+/// the nested pairing pairs it with.
+fn unnormalizable_and_near() -> (CValue, CValue) {
+    (
+        cdt_at(9999, 12, 31, 23, 0, 0, 0, Some(-3600)),
+        cdt_at(9999, 12, 31, 23, 59, 0, 0, None),
+    )
+}
+
+fn ignore_order_opts(max_depth: usize) -> DiffOptions {
+    DiffOptions {
+        ignore_order: true,
+        max_depth,
+    }
+}
+
+#[test]
+fn rough_distance_of_a_pair_whose_trial_compares_an_unnormalizable_datetime_is_its_error() {
+    let (extreme, near) = unnormalizable_and_near();
+    let record = |datetime| cdict_holding(carr(vec![datetime, cv(&json!("x")), cv(&json!("y"))]));
+    let distance = super::distance::rough_distance(
+        &record(extreme),
+        &record(near),
         CUTOFF_DISTANCE_FOR_PAIRS,
         0,
-        &opts,
-        &super::IgnoreOrderMemo::new(),
+        &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH),
+        &IgnoreOrderMemo::new(),
     );
-    assert_eq!(d, 0.0);
+    assert_eq!(
+        distance,
+        Err(crate::error::Error::DateTimeOutOfRange {
+            path: "root['k'][0]".to_string()
+        })
+    );
+}
+
+/// `a` holds a zero-distance candidate for `b`'s one added item ahead of a
+/// second candidate `failing`, which the pairing would leave unpaired.
+fn lists_with_a_failing_candidate(
+    zero_distance: CValue,
+    failing: CValue,
+    added: CValue,
+) -> (CValue, CValue) {
+    let shared = || vec![cv(&json!("s1")), cv(&json!("s2"))];
+    (
+        carr([vec![zero_distance, failing], shared()].concat()),
+        carr([vec![added], shared()].concat()),
+    )
+}
+
+#[test]
+fn a_candidate_whose_trial_compares_an_unnormalizable_datetime_fails_the_diff_at_its_path() {
+    let (extreme, near) = unnormalizable_and_near();
+    let list = |items: Vec<CValue>| carr([items, vec![cv(&json!("x")), cv(&json!("y"))]].concat());
+    let (a, b) = lists_with_a_failing_candidate(
+        list(vec![near.clone(), CValue::Null]),
+        list(vec![extreme]),
+        list(vec![near]),
+    );
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH)),
+        Err(crate::error::Error::DateTimeOutOfRange {
+            path: "root[1][0]".to_string()
+        })
+    );
+}
+
+#[test]
+fn a_candidate_whose_trial_meets_a_resolved_value_over_the_depth_budget_fails_the_diff() {
+    let (a, b) = lists_with_a_failing_candidate(
+        cdict_holding(cv(&json!([[2], null]))),
+        cdict_holding(copaque("1")),
+        cdict_holding(cv(&json!([[2]]))),
+    );
+    let too_deep = cv(&json!([[[[1]]]]));
+    let mut resolver = |_: &str| Some(crate::diff::Resolution::Borrowed(&too_deep));
+    assert_eq!(
+        crate::diff::diff_with_resolver(&a, &b, &ignore_order_opts(4), &mut resolver),
+        Err(max_depth_exceeded("root[1]['k'][0]", 4))
+    );
 }
 
 /// Pins the exact scale `distance_family` measures a `datetime` pair by:
@@ -1403,7 +1491,8 @@ fn rough_distance_datetime_pair_measures_seconds_not_microseconds() {
         0,
         &DiffOptions::default(),
         &super::IgnoreOrderMemo::new(),
-    );
+    )
+    .unwrap();
     assert!(
         (d - expected).abs() < 1e-12,
         "expected {expected} (seconds-scale), got {d}"
@@ -2027,7 +2116,8 @@ fn calendar_values_count_as_one_structural_node() {
 fn a_datetime_leaf_counts_as_changed_only_when_the_instants_differ() {
     let opts = DiffOptions::default();
     let memo = IgnoreOrderMemo::new();
-    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
 
     assert_eq!(
         count(
@@ -2045,7 +2135,8 @@ fn a_datetime_leaf_counts_as_changed_only_when_the_instants_differ() {
 fn a_time_leaf_counts_as_changed_only_by_plain_time_equality() {
     let opts = DiffOptions::default();
     let memo = IgnoreOrderMemo::new();
-    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
 
     // Two aware values at the same offset-adjusted instant: equal.
     assert_eq!(
@@ -2097,7 +2188,8 @@ fn dist_key_hashes_time_and_timedelta_leaves_consistently_with_equality() {
 fn a_timedelta_leaf_counts_as_changed_only_when_the_exact_value_differs() {
     let opts = DiffOptions::default();
     let memo = IgnoreOrderMemo::new();
-    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
 
     assert_eq!(count(&ctimedelta(0, 1, 0), &ctimedelta(0, 1, 0)), 0);
     assert_eq!(count(&ctimedelta(0, 1, 0), &ctimedelta(0, 2, 0)), 1);
@@ -2461,7 +2553,8 @@ fn a_frozenset_hashes_by_membership_and_apart_from_a_tuple() {
 fn count_diff_leaves_of_two_sets_counts_added_and_removed_items() {
     let memo = IgnoreOrderMemo::new();
     let opts = DiffOptions::default();
-    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
 
     assert_eq!(
         count(
@@ -3459,7 +3552,7 @@ fn a_collapsed_custom_object_pair_counts_the_new_objects_dict_len() {
     };
     let opts = DiffOptions::default();
     assert_eq!(
-        super::distance::count_object_diff_leaves(a, b, 0, &opts, &IgnoreOrderMemo::new()),
+        super::distance::count_object_diff_leaves(a, b, 0, &opts, &IgnoreOrderMemo::new()).unwrap(),
         5
     );
 }
@@ -3651,7 +3744,8 @@ fn a_cycle_token_reports_nothing_on_the_first_side_and_is_compared_on_the_second
 fn a_first_side_cycle_token_or_one_python_object_counts_no_distance() {
     let memo = IgnoreOrderMemo::new();
     let opts = DiffOptions::default();
-    let leaves = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+    let leaves =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
     assert_eq!(
         (
             leaves(&ccycle(), &cv(&json!([1, 2]))),
@@ -3709,7 +3803,8 @@ fn a_resolved_token_counts_the_distance_of_its_value() {
     let memo = IgnoreOrderMemo::with_resolver(&mut resolver);
     let opts = DiffOptions::default();
     assert_eq!(
-        super::distance::count_diff_leaves(&copaque("1"), &cv(&json!([1, 3])), 0, &opts, &memo),
+        super::distance::count_diff_leaves(&copaque("1"), &cv(&json!([1, 3])), 0, &opts, &memo)
+            .unwrap(),
         1
     );
 }
