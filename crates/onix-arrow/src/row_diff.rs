@@ -4303,11 +4303,7 @@ mod tests {
 
     #[test]
     fn materialize_reads_each_side_through_its_own_column_order() {
-        // left is [id, v]; right is [v, id] — the key and value columns sit at
-        // different positions on each side. Materializing the right side through
-        // the left's column indices would hash the wrong column as the key and
-        // misclassify every row (all removed, all added), so the added/removed
-        // sets pin that each side uses its own `SideColumns`.
+        // left is [id, v]; right is [v, id].
         let left_sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let right_sch = schema(vec![Field::new("v", DataType::Int64, false), id_field()]);
         let left = reader(
@@ -5835,8 +5831,7 @@ mod tests {
     #[test]
     fn hash_of_large_integral_floats_stays_distinct() {
         // Two distinct integral floats past 2^53 keep their bit patterns (they do
-        // not fold to an integer): folding them would saturate both to the same
-        // i128 and collide.
+        // not fold to an integer).
         let hasher = super::RowHasher::new().unwrap();
         let f1: ArrayRef = Arc::new(Float64Array::from(vec![1e300]));
         let f2: ArrayRef = Arc::new(Float64Array::from(vec![2e300]));
@@ -5936,7 +5931,7 @@ mod tests {
     #[test]
     fn dictionary_non_key_value_change_is_detected() {
         // A dictionary-encoded non-key column is hashable, so a changed value is
-        // a row change (if it were treated as unhashable it would be skipped).
+        // a row change.
         let dict_type = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
         let sch = schema(vec![id_field(), Field::new("s", dict_type, false)]);
         let left_s: arrow_array::DictionaryArray<arrow_array::types::Int32Type> =
@@ -6539,9 +6534,8 @@ mod tests {
     fn streaming_matches_sequential_with_asymmetric_column_layout() {
         // The right side carries an extra non-common column before the common
         // ones, so a common column's index differs between the two sides. The
-        // streaming path must project each side by its own resolved columns;
-        // using the left side's indices on the right would compare the wrong
-        // column. Compared against the sequential path, which resolves per side.
+        // streaming path must project each side by its own resolved columns.
+        // Compared against the sequential path, which resolves per side.
         let left_sch = schema(vec![
             id_field(),
             Field::new("a", DataType::Int64, false),
@@ -6625,9 +6619,7 @@ mod tests {
 
     #[test]
     fn streaming_cell_pass_yields_the_expected_cells() {
-        // A direct content check (not only parallel==sequential): every row
-        // changed on a two-batch input, verified against the exact expected
-        // cell rows in output order.
+        // Every row changed on a two-batch input.
         force_parallel_path();
         let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let left = chunked_reader(&sch, &[(Some(2), 20), (Some(10), 100), (Some(1), 10)], 2);
@@ -7355,8 +7347,7 @@ mod tests {
     #[test]
     fn ordered_driver_consumer_panic_unwinds_without_hanging() {
         // A panic in `visit` (the consumer) must unwind rather than deadlock the
-        // scope join. Many batches so the channels fill and workers/reader would
-        // block if the consumer stopped draining without releasing them.
+        // scope join. Many batches so the channels fill.
         let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let rows: Vec<(Option<i64>, i64)> = (0..400).map(|i| (Some(i), i)).collect();
         let input = chunked_reader(&sch, &rows, 32);
