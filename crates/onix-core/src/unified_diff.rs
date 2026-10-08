@@ -2,52 +2,26 @@
 // `difflib` standard-library module (`unified_diff` and
 // `_format_range_unified`), used under the PSF License Agreement version 2.
 // See THIRD-PARTY-NOTICES.md at the repository root.
-//! The `diff` field `DeepDiff` attaches to a `values_changed` entry, at
-//! `verbose_level=2`, when a `str`→`str` change involves a newline — a
-//! faithful port of `DeepDiff._diff_str`'s convenience diff
-//! (`deepdiff/diff.py`), which is a `difflib.unified_diff` of the two values
-//! rendered with `lineterm=''`.
-//!
-//! The line-level matching reuses `crate::lcs` (a
-//! [`difflib.SequenceMatcher`](crate::lcs) port); this module adds only what
-//! sits *above* the matcher: splitting a
-//! string into lines the way Python's `str.splitlines()` does, grouping the
-//! opcodes into unified-diff hunks (`crate::lcs::grouped_opcodes`), and
-//! formatting the header/range/body lines exactly as `CPython`'s
-//! `difflib.unified_diff` and `_format_range_unified` do.
+//! The `diff` field `DeepDiff` adds to a `str`→`str` `values_changed` at `verbose_level=2`: a
+//! `difflib.unified_diff` with `lineterm=''` over the `str.splitlines()` lines of both values,
+//! matched by [`crate::lcs`].
 //!
 //! # Trigger
 //!
-//! `DeepDiff` adds the field only when a literal `'\n'` occurs in *either*
-//! value (`'\n' in t1 or '\n' in t2`), then splits *both* with
-//! `splitlines()` — so a `str` joined only by `\r` (no `\n`) gets no field,
-//! but once a `\n` triggers it, `splitlines()`'s full set of Unicode line
-//! boundaries (`\r`, `\r\n`, `\x0b`, `\x0c`, `\x1c`–`\x1e`, `\x85`,
-//! `\u{2028}`, `\u{2029}`) all split. Both facts verified against real
-//! `deepdiff==9.1.0`. If the two line lists turn out identical (e.g. the
-//! values differ only by a trailing newline, which `splitlines()` drops),
-//! `unified_diff` yields nothing and no field is added — also verified.
+//! The field is added only when a literal `'\n'` occurs in either value; both are then split on
+//! every `splitlines()` boundary (`\r`, `\r\n`, `\x0b`, `\x0c`, `\x1c`–`\x1e`, `\x85`, `\u{2028}`,
+//! `\u{2029}`), so a `\r`-only string gets no field. Identical line lists (values differing only by
+//! a trailing newline) yield an empty diff and no field.
 
 use crate::lcs::{Tag, grouped_opcodes};
 use crate::value::Value;
 
-/// The number of context lines `difflib.unified_diff` keeps around each
-/// change by default (`n=3`), which `DeepDiff` does not override.
+/// `difflib.unified_diff`'s default context (`n=3`), which `DeepDiff` keeps.
 const CONTEXT_LINES: usize = 3;
 
-/// Returns the `diff` field for a `values_changed` entry whose two values
-/// are `a` and `b`, or `None` when `DeepDiff` would attach no field.
-///
-/// `None` unless both values are strings (`DeepDiff._diff_str` only runs for
-/// a `str`→`str` change), a literal newline occurs in one of them, and the
-/// resulting unified diff is non-empty — see the module doc.
-///
-/// Also `None` when either side holds a lone surrogate code point (a
-/// `Str::Wtf8`): line-splitting needs real `&str` text, and this field is
-/// an ergonomic convenience `DeepDiff` itself only adds when both sides are
-/// already known to differ — an accepted, narrow, documented gap (the
-/// `values_changed` entry itself still reports correctly; it just carries
-/// no `diff` field for this specific, rare combination).
+/// The `diff` field for a `values_changed` between `a` and `b`, or `None` when `DeepDiff` attaches
+/// none (see the module doc). Also `None` when either side holds a lone surrogate (`Str::Wtf8`),
+/// which line-splitting cannot read; the `values_changed` entry itself is unaffected.
 pub(crate) fn str_diff_field(a: &Value, b: &Value) -> Option<String> {
     match (a, b) {
         (Value::Str(t1), Value::Str(t2)) => match (t1.as_utf8(), t2.as_utf8()) {
@@ -58,8 +32,7 @@ pub(crate) fn str_diff_field(a: &Value, b: &Value) -> Option<String> {
     }
 }
 
-/// The `diff` string for two changed string values, or `None` when no field
-/// is warranted (no `\n` in either, or an empty unified diff).
+/// The `diff` string for two changed strings, or `None` when no field is warranted.
 fn str_diff(t1: &str, t2: &str) -> Option<String> {
     if !t1.contains('\n') && !t2.contains('\n') {
         return None;
@@ -81,12 +54,9 @@ fn str_diff(t1: &str, t2: &str) -> Option<String> {
         return None;
     }
 
-    // `lineterm=''` and empty from-/to-file names, so the two header lines
-    // are exactly `"--- "` and `"+++ "` (trailing space, no newline).
+    // `lineterm=''` and empty file names: the headers are `"--- "` and `"+++ "`.
     let mut out: Vec<String> = vec!["--- ".to_string(), "+++ ".to_string()];
     for group in &groups {
-        // `grouped_opcodes` guarantees every group is non-empty (see its
-        // doc), so this cannot panic.
         let (first, last) = group
             .first()
             .zip(group.last())
@@ -128,10 +98,8 @@ fn str_diff(t1: &str, t2: &str) -> Option<String> {
     Some(out.join("\n"))
 }
 
-/// Formats a hunk range the way `CPython`'s `difflib._format_range_unified`
-/// does: `start`/`stop` are half-open 0-based indices, the output is 1-based
-/// `ed`-style (`"{beginning}"` for a single line, `"{beginning},{length}"`
-/// otherwise, and an empty range begins at the line just before it).
+/// `difflib._format_range_unified`: `start`/`stop` are half-open 0-based, the output 1-based; an
+/// empty range begins at the line just before it.
 fn format_range_unified(start: usize, stop: usize) -> String {
     let beginning = start + 1;
     let length = stop - start;
@@ -139,7 +107,6 @@ fn format_range_unified(start: usize, stop: usize) -> String {
         return beginning.to_string();
     }
     if length == 0 {
-        // An empty range begins at the line just before the range.
         return format!("{},{length}", beginning - 1);
     }
     format!("{beginning},{length}")
@@ -162,10 +129,8 @@ fn is_line_boundary(c: char) -> bool {
     )
 }
 
-/// Splits `s` into lines exactly as Python's `str.splitlines()` (without
-/// keepends): breaks on every boundary [`is_line_boundary`] recognizes,
-/// treats `\r\n` as a single boundary, and never emits a trailing empty
-/// line for a string that ends on a boundary.
+/// Python's `str.splitlines()` without keepends: `\r\n` is one boundary and a trailing boundary
+/// adds no empty line.
 fn splitlines(s: &str) -> Vec<&str> {
     let mut lines = Vec::new();
     let mut start = 0usize;

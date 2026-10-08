@@ -53,8 +53,8 @@ is what was verified independently of any single run's labels.
    cannot change any output, so no test can kill it. Confined to these spots:
    - `onix-core/src/lcs.rs`'s `find_longest_match` / `get_matching_blocks`:
      these either force a non-terminating loop (reported as a timeout) or
-     produce a wrong-but-terminating result the surrounding comments prove is
-     equivalent or non-actionable.
+     touch only the backward extension step, whose size increment the
+     forward step re-covers, or a guard on an empty window or zero-size block.
    - `onix-core/src/diff/array.rs`'s `lcs_or_positional_array_diff` `> 1`
      threshold: replacing `> 1` with `>= 1` is output-neutral (at exactly one
      LCS finding the positional report holds the same finding or at least two,
