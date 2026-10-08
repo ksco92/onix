@@ -4,10 +4,7 @@
 //! polars, `DuckDB`), imports it with no Python round trip, and diffs
 //! schema and keyed rows with [`onix_arrow`]. `pyarrow` is optional: only
 //! [`ArrowTable::to_pyarrow`] needs it, raising `ImportError` naming the
-//! extra when absent. Every result exports `__arrow_c_stream__`: polars
-//! reads it needing no pyarrow; pandas' `from_dataframe` imports pyarrow
-//! internally and falls back to the deprecated `__dataframe__` protocol
-//! (unimplemented here), so pandas needs pyarrow either way.
+//! extra when absent. Every result exports `__arrow_c_stream__`.
 
 use std::fs::File;
 use std::num::NonZeroUsize;
@@ -45,7 +42,6 @@ impl TableInput for SpooledInput {
     }
 
     fn open(&self) -> Result<Box<dyn RecordBatchReader + Send>, TableDiffError> {
-        // Re-read the anonymous spool file from the start.
         Ok(Box::new(spool::reopen(&self.file)?))
     }
 }
@@ -74,7 +70,7 @@ fn spool_input(obj: &Bound<'_, PyAny>) -> PyResult<SpooledInput> {
 /// Diffs two Arrow tables.
 ///
 /// `left` and `right` are any objects implementing the Arrow `PyCapsule`
-/// interface (see the module docs). `key` is the list of primary-key column
+/// interface. `key` is the list of primary-key column
 /// names; it is required and must be non-empty, and every key column must
 /// exist on both sides. `threads` sets the number of worker threads the row
 /// diff uses; `None` (the default) uses the machine's available parallelism,
@@ -95,21 +91,14 @@ pub(crate) fn diff_tables(
 ) -> PyResult<TableDiff> {
     let key = extract_key(key)?;
     let threads = resolve_threads(threads)?;
-    // Import, diff, and drop all run on the stack-sized worker (re-acquiring the
-    // GIL there) because the recursive Arrow FFI import and the imported types'
-    // recursive drop are native-stack sinks on deep nesting, and — unlike the
-    // JSON path, which measures depth cheaply first and only spawns the worker
-    // past a threshold — depth here can only be measured after the import that
-    // is itself at risk, so the worker is unconditional. Its fixed per-call
-    // cost (tens of microseconds) is negligible for a whole-table diff.
-    // `onix_arrow::MAX_NESTING_DEPTH` then bounds the comparison; see its doc.
+    // Import, diff and drop run on the stack-sized worker: the recursive Arrow FFI import and
+    // drop are native-stack sinks and depth is unknowable before importing, so the worker is
+    // unconditional. `onix_arrow::MAX_NESTING_DEPTH` then bounds the comparison.
     let left = left.clone().unbind();
     let right = right.clone().unbind();
 
     crate::guard::run_on_worker(py, move || {
         Python::attach(|py| {
-            // Each input is imported and fully spooled before the next, so two
-            // one-shot Python streams are never open at the same time.
             let left_input = spool_input(left.bind(py))?;
             let right_input = spool_input(right.bind(py))?;
             let mut options = TableDiffOptions::new(key);
@@ -138,8 +127,6 @@ fn resolve_threads(threads: Option<i64>) -> PyResult<Option<NonZeroUsize>> {
             "threads must be a positive integer (or None for the default), got {n}"
         ))),
         Some(n) => {
-            // `n >= 1` here; anything over the ceiling (or too large for usize)
-            // is refused before any thread is spawned or memory allocated.
             let over_ceiling =
                 || PyValueError::new_err(format!("threads must not exceed {MAX_THREADS}, got {n}"));
             let count = usize::try_from(n).map_err(|_| over_ceiling())?;
@@ -186,8 +173,7 @@ fn import_reader(obj: &Bound<'_, PyAny>) -> PyResult<ImportedReader> {
     Ok(RecordBatchIterator::new(reader, schema))
 }
 
-/// Maps an [`onix_arrow`] error to the Python exception a caller sees. A
-/// wildcard arm is required because [`TableDiffError`] is `#[non_exhaustive]`.
+/// Maps an [`onix_arrow`] error to the Python exception a caller sees.
 fn map_table_error(error: &TableDiffError) -> PyErr {
     let message = error.to_string();
     match error {
@@ -201,19 +187,12 @@ fn map_table_error(error: &TableDiffError) -> PyErr {
 #[pyclass(module = "deepdiff_rs", name = "TableDiff", frozen)]
 pub(crate) struct TableDiff {
     core: CoreTableDiff,
-    /// The Arrow record batch for `schema_arrow`, built once here because it
-    /// costs real work; the schema list and summary are derived from `core`
-    /// on demand instead, since they are cheap. `to_json()` is also built on
-    /// demand, from `core`, because — unlike this batch — it can fail once a
-    /// diff has more row-level content than its documented cap (see its own
-    /// doc), and building it eagerly here would make constructing a
-    /// `TableDiff` fail for a caller who never calls `to_json()` at all.
+    /// The `schema_arrow` batch, built once.
     schema_batch: RecordBatch,
 }
 
 impl TableDiff {
-    /// Builds the Python result from a finished core diff, taking it by value so
-    /// the (potentially large) changed-key set is moved, not cloned.
+    /// Builds the Python result from a finished core diff.
     fn from_core(core: CoreTableDiff) -> PyResult<Self> {
         let schema_batch = core
             .schema_record_batch()
@@ -242,9 +221,7 @@ impl TableDiff {
     }
 
     /// The schema diff as an Arrow-exportable table: it implements
-    /// `__arrow_c_stream__` (polars needs no pyarrow to consume it; pandas
-    /// needs pyarrow installed, for its own reasons — see this module's doc)
-    /// and offers `ArrowTable.to_pyarrow`.
+    /// `__arrow_c_stream__` and offers `ArrowTable.to_pyarrow`.
     #[getter]
     fn schema_arrow(&self) -> ArrowTable {
         ArrowTable::new(self.schema_batch.clone())
@@ -346,9 +323,8 @@ fn schema_change_dict<'py>(py: Python<'py>, change: &SchemaChange) -> PyResult<B
 
 /// An Arrow record batch exposed to Python through the Arrow `PyCapsule`
 /// interface. Every table-shaped result of a diff is one of these, so
-/// pyarrow, polars, and (with pyarrow installed) pandas can all consume it —
-/// see this module's doc for why pandas' own consuming code needs pyarrow
-/// even though this side of the exchange needs no third-party package.
+/// pyarrow, polars, and pandas can all consume it. polars needs no pyarrow;
+/// pandas needs pyarrow installed, for its own reasons.
 /// `ArrowTable.to_pyarrow` is a convenience for when pyarrow is present.
 #[pyclass(module = "deepdiff_rs", name = "ArrowTable", frozen)]
 pub(crate) struct ArrowTable {
@@ -406,19 +382,13 @@ impl ArrowTable {
     /// This table as a `pyarrow.Table`.
     ///
     /// Requires pyarrow (`pip install deepdiff-rs[arrow]`); raises
-    /// `ImportError` naming that extra if pyarrow is not installed. Consuming
-    /// the table with polars needs no pyarrow at all — use
-    /// `__arrow_c_stream__` (which polars calls for you) instead; pandas'
-    /// own consumption of that same protocol needs pyarrow regardless (see
-    /// this module's doc), so this method is the simpler path for pandas.
+    /// `ImportError` naming that extra if pyarrow is not installed.
     fn to_pyarrow<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let pyarrow = match py.import("pyarrow") {
             Ok(module) => module,
-            // Only a genuinely-absent pyarrow becomes the install-the-extra
-            // hint; any other import failure (a broken or partial pyarrow) is
-            // propagated with its own message, kept as the cause so the real
-            // error is not hidden.
+            // Only a ModuleNotFoundError gets the install hint; any other import failure
+            // propagates with its own message.
             Err(error) if error.is_instance_of::<PyModuleNotFoundError>(py) => {
                 let hint = PyImportError::new_err(
                     "pyarrow is required for to_pyarrow(); install it with \

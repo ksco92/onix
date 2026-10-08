@@ -47,8 +47,6 @@ const MAX_INLINE_DEPTH: usize = 32;
 
 /// Resolves the two Python-supplied diff parameters into a [`DiffOptions`],
 /// applying the default `max_depth` and enforcing [`MAX_DEPTH_CEILING`].
-/// Shared by both entry points so the defaulting and the ceiling check live
-/// in exactly one place.
 ///
 /// # Errors
 ///
@@ -111,8 +109,7 @@ pub(crate) fn diff_to_value<'r>(
 /// # Errors
 ///
 /// `RuntimeError` if the worker thread cannot be run (see
-/// [`run_on_worker`]) — serialization itself cannot fail (see
-/// [`to_json_string`]'s doc).
+/// [`run_on_worker`]).
 pub(crate) fn serialize_value(
     py: Python<'_>,
     value: &Value,
