@@ -161,36 +161,26 @@ cached, so it overstates bare interpreter startup.
 two-tool comparison like every other fixture (see the Headline table
 above for its row: 176.60x diff-only, this run).
 This was DeepDiff's own documented headline slowness (its `O(changed²)`
-candidate-pairing built from real Python objects) and the motivating
-reason for `onix-core`'s ignore_order support. Three design choices explain the size of the
-gap:
+candidate-pairing built from real Python objects). Three design choices
+explain the size of the gap:
 
 - **The numeric fast path never builds a `Report`.** For a flat list of
   ints like this fixture, every pairing candidate's distance is computed
-  by [`crate::ignore_order::numeric_distance`] alone (closed-form
-  arithmetic), never touching the structural fallback that would
-  otherwise pay for `PathSegment` allocations, `Value` clones, and
-  `BTreeMap` inserts per candidate: replicating DeepDiff's own
-  per-candidate object-construction cost in Rust would have defeated the
-  point of this port.
+  by `numeric_distance` (`crates/onix-core/src/ignore_order/distance.rs`)
+  alone (closed-form arithmetic), never touching the structural fallback
+  that would otherwise pay for `PathSegment` allocations, `Value` clones,
+  and `BTreeMap` inserts per candidate.
 - **Every item is hashed exactly once per list** (`HashedList::build`),
   not recomputed per candidate comparison: the
   `O(hashes_added × hashes_removed)` candidate loop only ever does `O(1)`
   hash-map lookups against already-computed keys.
-- **A from-scratch, dependency-free `FxHasher`** (this crate's own quality
-  bar has no new-dependency budget) replaces the standard library's
-  default `SipHash` for this module's `HashMap`/`HashSet`s. `SipHash`'s
-  DoS-resistance is a real per-call cost: switching the input-keyed maps to
-  it slowed this shape's diff by a measurable margin, so `FxHash` is kept
-  and the residual hash-flooding exposure on attacker-controlled keys is
-  documented as an accepted trade-off (see
-  `crates/onix-core/src/ignore_order/fxhash.rs`'s `FxHasher` doc).
+- **A from-scratch `FxHasher`** replaces the default `SipHash` for this
+  module's maps; the hashing posture is documented in
+  `crates/onix-core/src/ignore_order/fxhash.rs`.
 
 The cost is dominated by `O(change_n²)` (the candidate-pairing loop), not
-`O(n²)`, matching real `DeepDiff`'s own documented cost anatomy (see
-`docs/design/ignore-order.md` for the scaling-signature analysis; not
-re-run here, since it validates the algorithm's asymptotic behavior, not
-this fixture's specific numbers).
+`O(n²)`, matching real `DeepDiff`'s own documented cost anatomy. Pairing
+is `O(N²)` in unpaired elements (`docs/design/ignore-order.md`).
 
 ## Energy (best-effort: fell back to the documented proxy)
 
