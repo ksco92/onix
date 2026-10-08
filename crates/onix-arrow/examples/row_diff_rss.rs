@@ -18,6 +18,9 @@
 //! /usr/bin/time -l target/release/examples/row_diff_rss 200000 wide 1024
 //! # wide rows, few changed cells: id + 8 512-byte columns, only one differing
 //! ROW_DIFF_THREADS=18 /usr/bin/time -l target/release/examples/row_diff_rss 150000 manycols 8 512
+//! # one Int64 column differing on every row beside equal 1 KB Utf8View, BinaryView
+//! # and Utf8 columns
+//! /usr/bin/time -l target/release/examples/row_diff_rss 500000 int64diff 1024
 //! # two 1 KB `Utf8View` columns: every row removed, every row added, every
 //! # 10,000th row removed; the right repeating left keys, repeating keys the
 //! # left lacks, and repeating one key the left lacks once per 10,000 rows
@@ -40,13 +43,14 @@
 //! ```
 //!
 //! Each side is generated on the fly, batch by batch, and nothing is retained
-//! between batches, so the process's peak RSS is the diff's own state, not the
-//! table data. The shapes run are `linear`, `nochange`, `allchange`, `wide`,
-//! `widesame`, `manycols`, `dup`, and the remaining shapes in the
-//! commands above, each defined by its `Case` variant in
-//! `examples/shared/gen_shapes.rs`. The peak RSS of `linear` over `nochange` is
-//! the cell pass's cost; `wide` scales with changed cells times cell width, and
-//! `dup` with distinct duplicated keys times the key width.
+//! between batches (except `int64diff`'s shared equal columns, about 0.3 GB at
+//! 500k rows, which its figures include), so the process's peak RSS is the
+//! diff's own state, not the table data. The shapes run are `linear`,
+//! `nochange`, `allchange`, `wide`, `widesame`, `manycols`, `int64diff`, `dup`,
+//! and the remaining shapes in the commands above, each defined by its `Case`
+//! variant in `examples/shared/gen_shapes.rs`. The peak RSS of `linear` over
+//! `nochange` is the cell pass's cost; `wide` scales with changed cells times
+//! cell width, and `dup` with distinct duplicated keys times the key width.
 
 use onix_arrow::{TableDiffOptions, diff_tables};
 
@@ -78,10 +82,13 @@ fn main() {
         .and_then(|a| a.parse().ok())
         .unwrap_or(1_000_000);
     let mode = args.get(2).map_or("", String::as_str);
-    let width: usize = args
-        .get(3)
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(if mode == "wide" { 1024 } else { 16 });
+    let width: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(
+        if matches!(mode, "wide" | "int64diff") {
+            1024
+        } else {
+            16
+        },
+    );
 
     let (case, label) = match mode {
         "" | "linear" => (Case::Linear, String::new()),
@@ -100,6 +107,10 @@ fn main() {
                 format!(" (manycols, ncols={ncols}, width={width})"),
             )
         }
+        "int64diff" => (
+            Case::Int64Diff(width),
+            format!(" (int64diff, width={width})"),
+        ),
         "dup" => (Case::Dup(width), format!(" (dup, key_width={width})")),
         "viewremoved" | "viewadded" | "viewaddedbyvalue" | "viewaddedrepeat" | "viewsparse"
         | "duprightonce" | "duprightabsent" | "repeatabsent" | "chain" => {
@@ -120,7 +131,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown mode {other:?}; expected linear (the default), nochange, allchange, wide, widesame, manycols, dup, viewremoved, viewadded, viewaddedbyvalue, viewaddedrepeat, viewsparse, duprightonce, duprightabsent, repeatabsent or chain"
+                "unknown mode {other:?}; expected linear (the default), nochange, allchange, wide, widesame, manycols, int64diff, dup, viewremoved, viewadded, viewaddedbyvalue, viewaddedrepeat, viewsparse, duprightonce, duprightabsent, repeatabsent or chain"
             );
             std::process::exit(2);
         }

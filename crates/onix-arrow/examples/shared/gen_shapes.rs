@@ -1,17 +1,19 @@
 //! Shared streaming table generator and cases for the row-diff examples
 //! (`row_diff_rss` and `row_diff_profile`), included with `#[path]` by both.
 //! Each shape's data is a deterministic function of the row index, so nothing
-//! is retained between batches and two runs at the same size produce
-//! byte-identical data.
+//! is retained between batches (except `int64diff`'s equal columns, shared by
+//! both sides) and two runs at the same size produce byte-identical data.
 
 // Each example includes this module and uses a subset of the shapes, so a shape
 // unused by one example is not dead across the pair.
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use arrow_array::{
-    ArrayRef, Int64Array, RecordBatch, RecordBatchReader, StringArray, StringViewArray,
+    ArrayRef, BinaryViewArray, Int64Array, RecordBatch, RecordBatchReader, StringArray,
+    StringViewArray,
 };
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use onix_arrow::{TableDiffError, TableInput};
@@ -52,6 +54,10 @@ pub enum Shape {
         width: usize,
         first_fill: u8,
     },
+    /// `(id, value, view, bin, text)`: `value` is the row index plus `delta`;
+    /// the `Utf8View`, `BinaryView` and `Utf8` columns hold a `width`-byte cell
+    /// equal on both sides.
+    Int64Diff { width: usize, delta: i64 },
     /// `(id, v0, v1)`, two `width`-byte `Utf8View` columns starting with `fill`;
     /// `keys` maps row `i` to its id, or omits it.
     View {
@@ -126,6 +132,9 @@ pub enum Case {
     ManyCols { ncols: usize, width: usize },
     /// Every `key_width`-byte string key appearing twice on each side.
     Dup(usize),
+    /// Every row changed in one `Int64` column (`+1` on the right) beside three
+    /// equal `width`-byte `Utf8View`, `BinaryView` and `Utf8` columns.
+    Int64Diff(usize),
     /// Two `width`-byte view columns; every left row removed (right empty).
     ViewRemoved(usize),
     /// [`Case::ViewRemoved`] mirrored: every right row added (left empty).
@@ -275,6 +284,17 @@ impl Case {
                     "id",
                 )
             }
+            Case::Int64Diff(width) => {
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new("id", DataType::Int64, false),
+                    Field::new("value", DataType::Int64, false),
+                    Field::new("view", DataType::Utf8View, false),
+                    Field::new("bin", DataType::BinaryView, false),
+                    Field::new("text", DataType::Utf8, false),
+                ]));
+                let shape = |delta| Shape::Int64Diff { width, delta };
+                (schema, shape(0), shape(1), "id")
+            }
             Case::ViewRemoved(_)
             | Case::ViewAdded(_)
             | Case::ViewAddedByValue(_)
@@ -296,7 +316,29 @@ impl Case {
     }
 }
 
-/// A table generated on demand, retaining nothing between batches.
+/// The `Utf8View`, `BinaryView` and `Utf8` columns of a [`Shape::Int64Diff`]
+/// batch of `len` rows, built once per `(width, len)` and shared across sides
+/// and across batches of the same length.
+fn equal_columns(width: usize, len: i64) -> Vec<ArrayRef> {
+    type Key = (usize, i64);
+    static CACHE: Mutex<BTreeMap<Key, Vec<ArrayRef>>> = Mutex::new(BTreeMap::new());
+    CACHE
+        .lock()
+        .unwrap()
+        .entry((width, len))
+        .or_insert_with(|| {
+            let cell = "a".repeat(width);
+            let rows = 0..len;
+            let view: StringViewArray = rows.clone().map(|_| Some(cell.as_str())).collect();
+            let bin: BinaryViewArray = rows.clone().map(|_| Some(cell.as_bytes())).collect();
+            let text: StringArray = rows.map(|_| Some(cell.as_str())).collect();
+            vec![Arc::new(view), Arc::new(bin), Arc::new(text)]
+        })
+        .clone()
+}
+
+/// A table generated on demand, retaining nothing between batches except
+/// [`equal_columns`].
 pub struct Generated {
     pub schema: SchemaRef,
     pub rows: i64,
@@ -383,6 +425,13 @@ impl Iterator for GenReader {
                         (self.next..end).map(|_| Some(cell.as_str())).collect();
                     columns.push(Arc::new(values));
                 }
+                columns
+            }
+            Shape::Int64Diff { width, delta } => {
+                let ids: Int64Array = (self.next..end).map(Some).collect();
+                let values: Int64Array = (self.next..end).map(|i| Some(i + delta)).collect();
+                let mut columns: Vec<ArrayRef> = vec![Arc::new(ids), Arc::new(values)];
+                columns.extend(equal_columns(width, end - self.next));
                 columns
             }
             Shape::View { width, fill, keys } => {
