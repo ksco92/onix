@@ -1,7 +1,8 @@
 # Mutation testing results
 
-Summary of a full `cargo-mutants` run over `onix-core`, `onix-cli`, and
-`onix-arrow`. Line coverage proves every line ran; mutation testing proves a
+The `cargo-mutants` enumeration for `onix-core`, `onix-cli` and `onix-arrow`,
+the kinds of mutant that survive and why none is a test gap, and how to
+reproduce it. Line coverage proves every line ran; mutation testing proves a
 test would fail if that line's logic were wrong.
 
 ## Tooling and reproduce
@@ -83,9 +84,10 @@ is what was verified independently of any single run's labels.
      result.
 
 2. **`Default`-substitution mutants that cannot compile.** cargo-mutants tries
-   replacing a function body with `Default::default()` (and similar). Most
-   fail because the return type has no `Default` impl, so the mutant does not
-   compile; none can be exercised by a test. The list:
+   replacing a function body with `Default::default()` (and similar). They
+   fail because the return type has no `Default` impl (or, for
+   `compute_pairs`, no matching constructor), so no test can exercise them.
+   The list:
    - `onix-cli/src/args.rs`: `parse_diff_args`, `parse_args`.
    - `onix-core/src/ignore_order/distance.rs`: `Distance`'s `partial_cmp` and
      `cmp` (`std::cmp::Ordering` has no `Default`).
@@ -102,9 +104,7 @@ is what was verified independently of any single run's labels.
      inherent `::new()` (that associated fn exists only for the
      `RandomState`-backed `std` `HashMap`), not a `Default` issue.
 
-Every other viable mutant is caught. `onix-cli`'s only non-caught mutants are
-the two uncompilable `Default`-substitutions above; every viable `onix-cli`
-mutant is caught. The `ItemKey::hash` no-op mutant is caught by
+The `ItemKey::hash` no-op mutant is caught by
 `float_hash_buckets_stay_distinct_and_grow_linearly_with_member_count`.
 
 Future work that touches this logic should re-run `make mutants` and confirm
