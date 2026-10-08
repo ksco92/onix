@@ -299,17 +299,19 @@ runs per build for `wide` 200k at 18 threads, 5 for `wide` 1M, 3 otherwise):
 
 Measured on `deepdiff-rs` 0.13.0 and 0.14.0, 2026-09-24, 2, 18 and 64 threads.
 
-A shape with no committed generator (issue #219): 500k changed rows/side where only an `Int64`
-column differs and three equal 1 KB columns (`Utf8View`, `BinaryView`, `Utf8`) are compared, each
-cell the median with the run range in brackets (8 runs per build at 2 threads, 3 at 18 and 64):
+`int64diff` 500k x 3 x 1 KB (`Utf8View`, `BinaryView`, `Utf8` equal; `Int64` differing on every row),
+each cell the median with the run range in brackets (8 runs at 2 threads, 3 at 18 and 64), run as
+`ROW_DIFF_THREADS=<n> /usr/bin/time -l target/release/examples/row_diff_rss 500000 int64diff 1024`
+in a fresh process per run, on a machine with no other benchmark job running (macOS background
+services only):
 
-| threads | 0.13.1 | 0.14.0 |
-| --- | --- | --- |
-| 2 | 5.644 GB [5.007-6.338] | 5.949 GB [5.549-6.814] |
-| 18 | 2.671 GB [2.605-2.910] | 2.473 GB [2.458-2.927] |
-| 64 | 2.032 GB [2.019-2.067] | 2.025 GB [2.009-2.057] |
+| threads | 0.17.0 |
+| --- | --- |
+| 2 | 7.672 GB [6.754-9.098] |
+| 18 | 4.209 GB [4.064-4.476] |
+| 64 | 3.578 GB [3.497-3.687] |
 
-Measured on `deepdiff-rs` 0.13.1 and 0.14.0, 2026-09-24, 2, 18 and 64 threads.
+Measured on `deepdiff-rs` 0.17.0, 2026-10-08, 2, 18 and 64 threads.
 
 ### Cell-pass memory
 
