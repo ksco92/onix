@@ -29,10 +29,7 @@ item's path; it is never ranked.
 ## Distance
 
 Distance ranks candidate pairs; it is a structural/numeric measure
-between two values, never an equality check. A container candidate
-pair's distance is memoized by structural identity, so a distinct
-container pair costs one trial regardless of how many candidates
-embed it.
+between two values, never an equality check.
 
 ## Distance memo
 
@@ -54,17 +51,16 @@ Two further tables share the memo's lifetime and key the same way
   diff, so the first Python-equal tuple hashed in the run fixes the
   digest every later Python-equal one inherits. An unhashable tuple
   (holding a list or dict) keeps its own type-strict digest instead.
-  The table is a `BTreeMap`: a set member's tuple dict keys reach it
-  on the default path.
 - **Set-member digests** — each member reduces to a Python-equality id
   (first-Python-equal-wins, so `1` and `1.0` inside an otherwise-equal
   container collapse) and a content id (collapsing naive/aware
   datetimes and every `NaN` at a leaf). A parent names a nested member
   by its equality id, keeping a naive/aware difference visible;
-  comparison and rendering use the content id. Both interning tables
-  are `BTreeMap`s, not `FxHash`: they are keyed by attacker-controlled
-  member content and reached on the default (`ignore_order=false`)
-  path too, so their key types carry no `Hash` derive.
+  comparison and rendering use the content id.
+
+The set-member and tuple tables are `BTreeMap`s with no `Hash` derive,
+as they are reached on the default (`ignore_order=false`) path; see
+the `IgnoreOrderMemo` struct doc and `fxhash.rs`'s table list.
 
 ## Walk
 

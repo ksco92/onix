@@ -27,9 +27,10 @@ partition to anonymous temporary IPC files (`RightFuse`); the left is
 then re-read and materialized in the same pass (`reread_left`), and
 the cell pass compares and renders one partition at a time across the
 workers (`diff_cells_streaming`), finding each column's changed cells
-in one mask (`changed_mask`) that equals the per-cell decision. Every partitioning is by key hash
-and every reduction is order-independent or restored to batch order,
-so parallel output is byte-identical to the single-threaded path.
+in one mask (`changed_mask`) that equals the per-cell decision. Every
+partitioning is by key hash and every reduction is order-independent or
+restored to batch order, so parallel output is byte-identical to the
+single-threaded path.
 
 ## Hashing
 
@@ -48,10 +49,11 @@ Cell hashing matches `onix-core`'s scalar comparison except for NaN,
 which folds to one canonical form because the renderer cannot tell NaN
 payloads apart (ordered comparison keeps every NaN distinct,
 `ignore_order` matches all, set dedup folds bit-identical ones; golden
-README, "Non-finite floats"): integers and integral floats within `±2⁵³`
-fold to one integer form, other floats hash by bit pattern, decimals by
-exact value minus trailing zeros, timestamps/times/durations normalize to
-nanoseconds, and a null equals only another null (`IS DISTINCT FROM`).
+README, "Non-finite floats"): integers and integral floats within
+`±2⁵³` fold to one integer form, other floats hash by bit pattern,
+decimals by exact value minus trailing zeros, timestamps/times/durations
+normalize to nanoseconds, and a null equals only another null (`IS
+DISTINCT FROM`).
 
 ## Per-cell changes
 
