@@ -35,8 +35,7 @@ FIXTURE_DESCRIPTIONS: Final[dict[str, str]] = {
     "ignore_order_10k": "list, shuffled + 5% mutated, diffed with `--ignore-order` — the ignore_order headline comparison",
 }
 
-# AWS EC2 r7i.large on-demand, us-east-1, assumed by the "$ per 1M diffs"
-# derived column; see `INSTANCE_PRICE_DATE` for when this was priced.
+# Instance assumed by the "$ per 1M diffs" column, priced on `INSTANCE_PRICE_DATE`.
 INSTANCE_LABEL: Final[str] = "AWS EC2 r7i.large (2 vCPU, 16 GiB, us-east-1, on-demand)"
 INSTANCE_PRICE_PER_HOUR_USD: Final[float] = 0.132
 INSTANCE_PRICE_DATE: Final[str] = "2026-08-31"
@@ -218,10 +217,7 @@ class ToolMetrics:
 
 
 class DiffOnlySamples:
-    """
-    Self-instrumented diff-only timing samples for one tool on one fixture,
-    from N repeated runs (counts per `run_bench.sh`'s `tier_for`).
-    """
+    """Self-instrumented diff-only timing samples for one tool on one fixture (run counts per `run_bench.sh`'s `tier_for`)."""
 
     def __init__(self: Self, samples_ns: list[float]) -> None:
         """
@@ -258,8 +254,7 @@ class DiffOnlySamples:
 
 def load_sample_document(path: Path) -> dict[str, list[float]]:
     """
-    Load a `diffonly_*.json` file (written by `run_bench.sh`'s N-sample
-    loop): every `..._samples` key mapped to its list of floats.
+    Load a `diffonly_*.json` file: every `..._samples` key mapped to its list of floats.
 
     :param path: The raw-results file to read.
     :return: `{key: samples}` for every array-valued key in the document.
