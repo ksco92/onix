@@ -79,17 +79,7 @@ It's also an all-numeric flat list, so it never reaches the one case
 (`path_rendering_collision`, an adversarial-key path collision);
 no special-casing was needed here.
 
-`api_payloads` wraps each scalar in its `tags` and `metadata.flags` lists
-in a single-key dict. An earlier concern was a divergence on the default
-*ordered* path: real DeepDiff 9.1.0 applies an LCS-style "cheapest edit"
-match for lists of *hashable* scalars, which onix's then-simpler
-index-aligned list algorithm did not mirror, so two same-length
-low-cardinality scalar lists sharing values at different offsets could
-diverge. That gap is closed: `crates/onix-core/src/lcs.rs` now dispatches
-scalar-only lists to the same LCS/`difflib` matching DeepDiff uses, and
-differential testing confirms both tools agree without the wrapping. It is
-retained only so the generated fixture byte-matches the shape these
-published measurements used.
+`api_payloads` wraps each scalar in its `tags`/`metadata.flags` lists in a one-key dict; see `build_api_payloads`.
 
 ## Finding: onix's practical depth ceiling is lower than expected
 
