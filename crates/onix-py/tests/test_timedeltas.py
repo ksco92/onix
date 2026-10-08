@@ -1,6 +1,6 @@
 """`datetime.timedelta` behavior of the `deepdiff_rs.DeepDiff` class, against real DeepDiff.
 
-Two things this file pins that the golden corpus cannot:
+Two things this file covers that the golden corpus cannot:
 
 - the `timedelta` **superset**. Real DeepDiff's `to_json()` has no serializer for
   `datetime.timedelta` and raises `TypeError` on a report holding one, so a

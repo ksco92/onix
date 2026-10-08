@@ -5,9 +5,9 @@ conversion layer. Fifteen batches of seeded cases run twice (ordered and
 `ignore_order=True`), comparing `to_json()` (parsed) and `to_dict()`; the
 custom-object batch compares `to_json()` alone and the enum and class-attribute
 batches the report structure alone, since DeepDiff renders a whole object from
-other views. The big-integer batch (issue #65) draws its big ints as bare scalars
-only, never inside a tuple/set, so it stays on the arbitrary-precision property
-under test rather than surfacing the pre-existing container-hashing divergence a
+other views. The big-integer batch draws its big ints as bare scalars only,
+never inside a tuple/set, so it stays on the arbitrary-precision property under
+test rather than surfacing the pre-existing container-hashing divergence a
 biased alphabet inside a hashable container would otherwise trigger.
 """
 
@@ -69,7 +69,6 @@ CALENDAR_SEED_BASE: Final[int] = 2_000_000
 CLUSTERED_SEED_BASE: Final[int] = 3_000_000
 STRINGIFIED_SEED_BASE: Final[int] = 4_000_000
 
-# COMBINED_SEED_COUNT satisfies issue #21's >=500-case requirement.
 COMBINED_SEED_BASE: Final[int] = 6_000_000
 COMBINED_SEED_COUNT: Final[int] = 500
 
@@ -202,7 +201,7 @@ def _gen_calendar(rng: random.Random) -> JsonValue:
 
 
 def _gen_non_str_dict_key(rng: random.Random) -> JsonValue:
-    """Pick a random non-`str` dict key: a scalar, `datetime`/`date`, or a `tuple` (issue #62)."""
+    """Pick a random non-`str` dict key: a scalar, `datetime`/`date`, or a `tuple`."""
     kind = rng.random()
 
     if kind < 0.2:
@@ -415,12 +414,12 @@ def _diverges(a: JsonValue, b: JsonValue, ignore_order: bool) -> tuple[JsonValue
     # a `date` that DeepDiff's stock `to_json()` refuses to serialize; it is a
     # no-op for every other value. See `scripts/golden_tags.py`. A report
     # that carries a raw `frozenset` value, or a *nested* dict value keyed by
-    # a `datetime`/`date`/`tuple` (issue #62 -- a dict key any deeper than
-    # the top-level path segment has no json.dumps rule at all, unlike
-    # `int`/`bool`/`float`/`None`, which DeepDiff's own `to_json()` already
-    # stringifies), makes `to_json()` raise `TypeError` outright; both are
-    # real DeepDiff crashes, so the comparison falls back to `to_dict()`
-    # alone rather than treating a crash as a divergence to report.
+    # a `datetime`/`date`/`tuple` (a dict key any deeper than the top-level
+    # path segment has no json.dumps rule at all, unlike `int`/`bool`/`float`/
+    # `None`, which DeepDiff's own `to_json()` already stringifies), makes
+    # `to_json()` raise `TypeError` outright; both are real DeepDiff crashes,
+    # so the comparison falls back to `to_dict()` alone rather than treating a
+    # crash as a divergence to report.
     try:
         expected_json = json.loads(real.to_json(default_mapping=JSON_DEFAULT_MAPPING))
         real_to_json_crashed = False
@@ -491,7 +490,7 @@ def test_differential_fuzz_with_tuples_matches_real_deepdiff() -> None:
 
 
 def test_differential_fuzz_with_big_integers_matches_real_deepdiff() -> None:
-    """Runs a SEED_COUNT-case batch whose leaves include arbitrary-precision ints (issue #65)."""
+    """Runs a SEED_COUNT-case batch whose leaves include arbitrary-precision ints."""
     seeds = range(BIG_INT_SEED_BASE, BIG_INT_SEED_BASE + SEED_COUNT)
     mismatches = _run_batch(seeds, case_fn=lambda seed: _generate_case(seed, scalars=BIG_INT_SCALARS))
 
@@ -953,7 +952,7 @@ def _gen_combined_hashable(rng: random.Random, depth: int) -> object:
 
 
 def _gen_combined_value(rng: random.Random, depth: int) -> object:
-    """Generate a value drawing from the full supported alphabet in one generator run (issue #21)."""
+    """Generate a value drawing from the full supported alphabet in one generator run."""
     if depth <= 0:
         return _gen_calendar(rng)
 
@@ -1015,7 +1014,7 @@ def _mutate_combined_value(rng: random.Random, value: object) -> object:
 
 
 def _generate_combined_case(seed: int) -> tuple[object, object]:
-    """Generate one seeded `(a, b)` pair drawing from the full supported alphabet (issue #21)."""
+    """Generate one seeded `(a, b)` pair drawing from the full supported alphabet."""
     rng = random.Random(seed)
     a = _gen_combined_value(rng, 3)
     b = _mutate_combined_value(rng, a)
@@ -1028,7 +1027,7 @@ def _generate_combined_case(seed: int) -> tuple[object, object]:
 def test_differential_fuzz_with_the_combined_alphabet_matches_real_deepdiff(
     utc_timezone: None,
 ) -> None:
-    """Run a seventh, >=500-case batch drawing the full alphabet in one generator (issue #21)."""
+    """Run a seventh, >=500-case batch drawing the full alphabet in one generator."""
     mismatches = []
 
     for seed in range(COMBINED_SEED_BASE, COMBINED_SEED_BASE + COMBINED_SEED_COUNT):
@@ -1100,7 +1099,7 @@ def _mutate_multiline_value(rng: random.Random, value: JsonValue) -> JsonValue:
 
 
 def test_differential_fuzz_with_multiline_strings_matches_real_deepdiff() -> None:
-    """Run an eighth SEED_COUNT-case batch whose leaves are often multi-line strings (issue #28)."""
+    """Run an eighth SEED_COUNT-case batch whose leaves are often multi-line strings."""
     mismatches = []
 
     for seed in range(MULTILINE_SEED_BASE, MULTILINE_SEED_BASE + SEED_COUNT):
@@ -1122,7 +1121,7 @@ def test_differential_fuzz_with_multiline_strings_matches_real_deepdiff() -> Non
 
 
 def test_differential_fuzz_with_non_str_dict_keys_matches_real_deepdiff() -> None:
-    """Run a ninth SEED_COUNT-case batch whose dicts may carry non-`str` keys (issue #62)."""
+    """Run a ninth SEED_COUNT-case batch whose dicts may carry non-`str` keys."""
     seeds = range(DICT_KEY_SEED_BASE, DICT_KEY_SEED_BASE + SEED_COUNT)
     mismatches = _run_batch(seeds, tuples=True, calendar=True, dict_keys=True)
 
@@ -1148,7 +1147,7 @@ class _DateSub(datetime.date):
 
 
 def _gen_subclass_key(rng: random.Random) -> object:
-    """Pick a random subclass dict key: `namedtuple`, `tuple`, `datetime`, or `date` (issue #64 follow-up)."""
+    """Pick a random subclass dict key: `namedtuple`, `tuple`, `datetime`, or `date`."""
     kind = rng.random()
 
     if kind < 0.25:
@@ -1200,7 +1199,7 @@ def _generate_subclass_key_case(seed: int) -> tuple[dict[object, JsonValue], dic
 
 
 def test_differential_fuzz_with_subclass_dict_keys_matches_real_deepdiff() -> None:
-    """Run a tenth batch whose dicts carry a subclass key against its base-type twin (issue #64's dict-key follow-up)."""
+    """Run a tenth batch whose dicts carry a subclass key against its base-type twin."""
     seeds = range(SUBCLASS_KEY_SEED_BASE, SUBCLASS_KEY_SEED_BASE + SUBCLASS_KEY_SEED_COUNT)
     mismatches = _run_batch(seeds, case_fn=_generate_subclass_key_case)
 
@@ -1263,7 +1262,7 @@ def _mutate_surrogate_value(rng: random.Random, value: JsonValue) -> JsonValue:
 
 
 def _mutate_surrogate_keys(rng: random.Random, value: JsonValue) -> JsonValue:
-    """Additionally replace some dict keys with a surrogate-bearing string (issue #59)."""
+    """Additionally replace some dict keys with a surrogate-bearing string."""
     if isinstance(value, dict):
         retagged: dict[str, JsonValue] = {}
 
@@ -1280,7 +1279,7 @@ def _mutate_surrogate_keys(rng: random.Random, value: JsonValue) -> JsonValue:
 
 
 def test_differential_fuzz_with_surrogate_strings_matches_real_deepdiff() -> None:
-    """Run an eleventh SEED_COUNT-case batch whose leaves and dict keys often hold a lone surrogate code point (issue #59)."""
+    """Run an eleventh SEED_COUNT-case batch whose leaves and keys often hold a lone surrogate."""
     mismatches = []
 
     for seed in range(SURROGATE_SEED_BASE, SURROGATE_SEED_BASE + SEED_COUNT):
@@ -1302,9 +1301,9 @@ def test_differential_fuzz_with_surrogate_strings_matches_real_deepdiff() -> Non
     )
 
 
-# The custom-object batches (issue #66) draw attribute values from bare
-# scalars, nested objects, lists and dicts, never a tuple or set, to stay off
-# the container-hashing divergence.
+# The custom-object batches draw attribute values from bare scalars, nested
+# objects, lists and dicts, never a tuple or set, to stay off the
+# container-hashing divergence.
 OBJECT_SEED_BASE: Final[int] = 12_000_000
 ENUM_OBJECT_SEED_BASE: Final[int] = 13_000_000
 CLASS_ATTRIBUTE_SEED_BASE: Final[int] = 14_000_000
@@ -1407,7 +1406,7 @@ def _object_diverges(a: object, b: object, ignore_order: bool) -> tuple[object, 
 
 
 def test_differential_fuzz_with_custom_objects_matches_real_deepdiff() -> None:
-    """Runs a SEED_COUNT-case batch of custom-object graphs, ordered and ignore_order=True (issue #66)."""
+    """Runs a SEED_COUNT-case batch of custom-object graphs, ordered and ignore_order=True."""
     seeds = range(OBJECT_SEED_BASE, OBJECT_SEED_BASE + SEED_COUNT)
     mismatches = _run_batch(seeds, case_fn=_generate_object_case, diverge_fn=_object_diverges)
 

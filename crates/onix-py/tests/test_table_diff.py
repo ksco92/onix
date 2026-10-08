@@ -796,7 +796,7 @@ def test_row_member_exports_to_pandas_via_the_interchange_protocol() -> None:
 
 
 def test_row_member_exports_to_pandas_raises_without_pyarrow() -> None:
-    """pandas' interchange path raises when pyarrow is genuinely unimportable, the regression test for that fact."""
+    """pandas' interchange path raises when pyarrow is genuinely unimportable."""
     result = _run_isolated(
         _BLOCK_PYARROW_IMPORT
         + textwrap.dedent(
@@ -887,7 +887,7 @@ def test_to_pyarrow_propagates_a_broken_pyarrow() -> None:
 # Arrow type nesting is attacker-controlled. Importing, comparing, and dropping
 # a deeply nested type all recurse on the native stack and would SIGSEGV the
 # interpreter; diff_tables must instead raise MaxDepthError. Each subprocess case
-# turns a regression into a non-zero exit, and the first is the control proving
+# turns a native crash into a non-zero exit, and the first is the control proving
 # that mechanism catches a native crash.
 
 

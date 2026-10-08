@@ -1,6 +1,6 @@
 """Datetime and date behavior of the `deepdiff_rs.DeepDiff` class, against real DeepDiff.
 
-Two things this file pins that the golden corpus cannot:
+Two things this file covers that the golden corpus cannot:
 
 - the `date` **superset**. Real DeepDiff's `to_json()` has no serializer for
   `datetime.date` and raises `TypeError` on a report holding one, so a date case's
