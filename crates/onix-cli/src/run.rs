@@ -53,9 +53,9 @@ fn read_or_bail(path: &str, stderr: &mut dyn Write) -> Result<(String, Value), u
 ///
 /// - `0`: the diff was computed, whether or not the report is empty.
 /// - `1`: a usage error; `stderr` gets the error plus [`USAGE`].
-/// - `2`: an I/O error or a JSON-parse error on either input.
-/// - `3`: [`onix_core::Error::MaxDepthExceeded`]; `stderr` gets its `Display`
-///   text.
+/// - `2`: an I/O error, a JSON-parse error on either input, or an input value
+///   the engine cannot compare.
+/// - `3`: [`onix_core::Error::MaxDepthExceeded`]; `stderr` gets its message.
 #[allow(
     clippy::missing_panics_doc,
     reason = "see the serde_json::to_string comment below"

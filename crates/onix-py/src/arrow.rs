@@ -29,8 +29,7 @@ type ImportedReader = RecordBatchIterator<Box<dyn RecordBatchReader + Send>>;
 /// One diff input, spooled to an anonymous [`onix_arrow::spool`] IPC file so the
 /// core's multi-pass row diff can re-read it (that module owns the temp-file
 /// posture). Each input is imported and fully drained before the next, so two
-/// one-shot Python streams (a pair of `DuckDB` relations sharing one connection,
-/// say) are never open at once.
+/// one-shot Python streams are never open at once.
 struct SpooledInput {
     file: File,
     schema: SchemaRef,
@@ -76,10 +75,10 @@ fn spool_input(obj: &Bound<'_, PyAny>) -> PyResult<SpooledInput> {
 /// default) uses the machine's available parallelism, `1` runs
 /// single-threaded, and a value below 1 or above 1024 (`MAX_THREADS` in the
 /// `onix-arrow` crate of the onix repository) is a `ValueError`. The diff runs
-/// single-threaded (ignoring `threads`) only when
-/// both sides stay under 50,000 rows and under 64 MB of decoded data; either
-/// bound reached first uses the requested threads. The output is identical at
-/// any thread count. The result is a `TableDiff`.
+/// single-threaded (ignoring `threads`) only when both sides stay under 50,000
+/// rows and under 64 MB of decoded data; either bound reached first uses the
+/// requested threads. The output is identical at any thread count. The result
+/// is a `TableDiff`.
 #[pyfunction]
 #[pyo3(signature = (left, right, *, key, threads=None))]
 pub(crate) fn diff_tables(
@@ -91,9 +90,10 @@ pub(crate) fn diff_tables(
 ) -> PyResult<TableDiff> {
     let key = extract_key(key)?;
     let threads = resolve_threads(threads)?;
-    // Import, diff and drop run on the stack-sized worker: the recursive Arrow FFI import and
-    // drop are native-stack sinks and depth is unknowable before importing, so the worker is
-    // unconditional. `onix_arrow::MAX_NESTING_DEPTH` then bounds the comparison.
+    // Import, diff and drop run on the stack-sized worker: the recursive Arrow
+    // FFI import and drop are native-stack sinks and depth is unknowable before
+    // importing, so the worker is unconditional.
+    // `onix_arrow::MAX_NESTING_DEPTH` then bounds the comparison.
     let left = left.clone().unbind();
     let right = right.clone().unbind();
 
@@ -323,9 +323,9 @@ fn schema_change_dict<'py>(py: Python<'py>, change: &SchemaChange) -> PyResult<B
 
 /// An Arrow record batch exposed to Python through the Arrow `PyCapsule`
 /// interface. Every table-shaped result of a diff is one of these, so
-/// pyarrow, polars, and pandas can all consume it. polars needs no pyarrow;
-/// pandas needs pyarrow installed, for its own reasons.
-/// `ArrowTable.to_pyarrow` is a convenience for when pyarrow is present.
+/// pyarrow, polars, and pandas can all consume it. pandas needs pyarrow
+/// installed. `ArrowTable.to_pyarrow` is a convenience for when pyarrow is
+/// present.
 #[pyclass(module = "deepdiff_rs", name = "ArrowTable", frozen)]
 pub(crate) struct ArrowTable {
     batch: RecordBatch,
@@ -342,7 +342,7 @@ impl ArrowTable {
 impl ArrowTable {
     /// Exports this table as an Arrow C stream (one record batch) in a
     /// `PyCapsule`, the standard zero-copy hand-off pyarrow, polars, and
-    /// (given pyarrow) pandas all understand.
+    /// pandas all understand.
     #[pyo3(signature = (requested_schema=None))]
     fn __arrow_c_stream__<'py>(
         &self,
@@ -387,8 +387,8 @@ impl ArrowTable {
         let py = slf.py();
         let pyarrow = match py.import("pyarrow") {
             Ok(module) => module,
-            // Only a ModuleNotFoundError gets the install hint; any other import failure
-            // propagates with its own message.
+            // Only a ModuleNotFoundError gets the install hint; any other
+            // import failure propagates with its own message.
             Err(error) if error.is_instance_of::<PyModuleNotFoundError>(py) => {
                 let hint = PyImportError::new_err(
                     "pyarrow is required for to_pyarrow(); install it with \
