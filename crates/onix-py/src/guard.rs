@@ -31,14 +31,12 @@ const PER_LEVEL_STACK_BYTES: usize = 8_192;
 const STACK_SAFETY_MARGIN: usize = 2;
 
 /// Smallest worker stack: the 512 KiB [`MAX_INLINE_DEPTH`] is sized for. The
-/// fixed handoff cost above the first engine level is under 8 KiB, the
-/// `base` that `stack_frame_cost -- --handoff` reports in
-/// `crates/onix-core/examples/stack_frame_cost.rs`.
+/// handoff cost is below what `stack_frame_cost -- --handoff` resolves (see
+/// `crates/onix-core/examples/stack_frame_cost.rs`).
 const WORKER_STACK_FLOOR_BYTES: usize = 524_288;
 
 /// The worker thread's stack size for a diff bounded by `max_depth`: reserved
-/// virtual address space, committed lazily. 8 MiB at the default depth,
-/// 312.5 MiB at [`MAX_DEPTH_CEILING`].
+/// virtual address space, committed lazily.
 const fn worker_stack_bytes(max_depth: usize) -> usize {
     let sized = max_depth * PER_LEVEL_STACK_BYTES * STACK_SAFETY_MARGIN;
     if sized > WORKER_STACK_FLOOR_BYTES {
@@ -118,8 +116,9 @@ pub(crate) fn diff_to_value<'r>(
 
 /// Serializes `value` to a JSON string, on the sized worker thread when
 /// `deep` is set (rendering is natively recursive too), inline otherwise.
-/// `max_depth` bounds the value's nesting. `deep` and `may_have_wtf8` are the caller's own precomputed verdicts (see
-/// [`is_deep`]) so this never re-walks `value` to answer either question.
+/// `max_depth` bounds the value's nesting. `deep` and `may_have_wtf8` are the
+/// caller's own precomputed verdicts (see [`is_deep`]) so this never re-walks
+/// `value` to answer either question.
 ///
 /// # Errors
 ///
@@ -263,8 +262,8 @@ fn write_json_seq<'a>(items: impl Iterator<Item = &'a Value>, out: &mut String) 
 }
 
 /// Runs `f` on a dedicated worker thread with a [`worker_stack_bytes`]
-/// stack for `max_depth`, GIL released. `f` may borrow non-`'static` data because the worker is joined before this
-/// function returns.
+/// stack for `max_depth`, GIL released. `f` may borrow non-`'static` data
+/// because the worker is joined before this function returns.
 ///
 /// # Errors
 ///

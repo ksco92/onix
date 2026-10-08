@@ -22,13 +22,12 @@
 //!
 //! With `--max-bytes-per-level`, the run exits 1 when any shape exceeds `N`.
 //!
-//! `-- --handoff` instead measures the fixed cost above the first engine
-//! level: the smallest thread stack, to 1 KiB, on which an unequal `list` diff,
-//! its `Report::to_value` and the report's JSON rendering succeed, at depths
-//! 100 and 300. The line's `base` is the intercept of those two points, the
-//! frames every `onix-py` worker pays at any `max_depth` (the sizing floor in
-//! `crates/onix-py/src/guard.rs`); a value within a few KiB of zero means the
-//! fixed cost is below the 1 KiB search step and the fit's noise.
+//! `-- --handoff` instead reports the smallest thread stack, to 1 KiB, on
+//! which an unequal `list` diff, its `Report::to_value` and the report's JSON
+//! rendering succeed at depths 100 and 300, and `base`, the intercept of those
+//! two points. The intercept is noise-limited (release: -15,285), so the
+//! handoff cost is below what the search resolves; it sizes the floor in
+//! `crates/onix-py/src/guard.rs`.
 //!
 //! The worst case (largest bytes/level) is `pairing`, an `ignore_order` list
 //! nested at every level beside two shared strings, in a debug build.
@@ -73,12 +72,13 @@ fn build(shape: &str, depth: usize, leaf: i64) -> Value {
 
 /// One probe: build two unequal `depth`-deep values, diff them, and exit
 /// with a distinct status. Runs on a thread with `probe_stack_bytes` of
-/// stack; if the recursion overflows, the process dies with a signal
-/// instead of exiting cleanly, which is exactly the signal the parent reads.
-fn run_probe(shape: &str, depth: usize) -> ! {
+/// stack, or `stack` bytes when given, which also renders the report to JSON
+/// (the `--handoff` body); if the recursion overflows, the process dies with a
+/// signal instead of exiting cleanly, which is exactly the signal the parent reads.
+fn run_probe(shape: &str, depth: usize, stack: Option<usize>) -> ! {
     let shape = shape.to_owned();
     let handle = std::thread::Builder::new()
-        .stack_size(probe_stack_bytes(&shape))
+        .stack_size(stack.unwrap_or_else(|| probe_stack_bytes(&shape)))
         .spawn(move || {
             let a = build(&shape, depth, 1);
             let b = build(&shape, depth, 2);
@@ -95,29 +95,14 @@ fn run_probe(shape: &str, depth: usize) -> ! {
             };
             let report = diff_with_options(&a, &b, &opts).expect("depth budget covers the input");
             assert!(!report.is_empty(), "unequal inputs must produce a finding");
+            if stack.is_some() {
+                serde_json::to_string(&report.to_value().to_serde_json())
+                    .expect("report serializes");
+            }
         })
         .expect("probe thread spawns");
     let survived = handle.join().is_ok();
     std::process::exit(i32::from(!survived));
-}
-
-/// One handoff probe: the minimal worker body (diff, `to_value`, JSON text)
-/// on a thread with `stack` bytes, over a `depth`-deep `list`.
-fn run_handoff_probe(stack: usize, depth: usize) -> ! {
-    let handle = std::thread::Builder::new()
-        .stack_size(stack)
-        .spawn(move || {
-            let a = onix_core::Value::from(build("list", depth, 1));
-            let b = onix_core::Value::from(build("list", depth, 2));
-            let opts = DiffOptions {
-                max_depth: depth + 1,
-                ignore_order: false,
-            };
-            let report = diff_with_options(&a, &b, &opts).expect("depth budget covers the input");
-            serde_json::to_string(&report.to_value().to_serde_json()).expect("report serializes");
-        })
-        .expect("probe thread spawns");
-    std::process::exit(i32::from(handle.join().is_err()));
 }
 
 /// Binary-searches the smallest stack, in 1 KiB steps, on which the handoff
@@ -125,7 +110,7 @@ fn run_handoff_probe(stack: usize, depth: usize) -> ! {
 fn min_handoff_stack(exe: &str, depth: usize) -> usize {
     let survives = |stack: usize| {
         Command::new(exe)
-            .args(["--probe-handoff", &stack.to_string(), &depth.to_string()])
+            .args(["--probe", "list", &depth.to_string(), &stack.to_string()])
             .status()
             .expect("child probe runs")
             .success()
@@ -144,16 +129,14 @@ fn min_handoff_stack(exe: &str, depth: usize) -> usize {
 
 /// The fixed handoff cost: the intercept of the minimum stack at two depths,
 /// which a thread's platform minimum stack would otherwise hide.
-fn measure_handoff(exe: &str) -> isize {
+fn measure_handoff(exe: &str) {
     let (near, far) = (100_usize, 300_usize);
     let (s_near, s_far) = (min_handoff_stack(exe, near), min_handoff_stack(exe, far));
     let per_level = (s_far - s_near) / (far - near);
-    let base = isize::try_from(s_near).expect("stack fits isize")
-        - isize::try_from(near * per_level).expect("stack fits isize");
     println!(
-        "handoff: min_ok_stack@{near}={s_near} @{far}={s_far} bytes_per_level={per_level} base={base}"
+        "handoff: min_ok_stack@{near}={s_near} @{far}={s_far} bytes_per_level={per_level} base={}",
+        s_near.cast_signed() - (near * per_level).cast_signed()
     );
-    base
 }
 
 /// Returns whether a probe at `depth` for `shape` survived (exited cleanly).
@@ -195,13 +178,7 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--probe") {
         let shape = args.get(2).map_or("list", String::as_str);
         let depth = args.get(3).and_then(|d| d.parse().ok()).unwrap_or(0);
-        run_probe(shape, depth);
-    }
-
-    if args.get(1).map(String::as_str) == Some("--probe-handoff") {
-        let stack = args.get(2).and_then(|d| d.parse().ok()).unwrap_or(0);
-        let depth = args.get(3).and_then(|d| d.parse().ok()).unwrap_or(0);
-        run_handoff_probe(stack, depth);
+        run_probe(shape, depth, args.get(4).and_then(|n| n.parse().ok()));
     }
 
     let exe = std::env::current_exe()
