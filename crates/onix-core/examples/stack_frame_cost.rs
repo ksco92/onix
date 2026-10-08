@@ -19,18 +19,30 @@
 //! cargo run --quiet --release -p onix-core --example stack_frame_cost  # release
 //! ```
 //!
-//! The worst case (largest bytes/level) is nested lists in a debug build,
-//! which is what the bindings size their margins against.
+//! The worst case (largest bytes/level) is `pairing`, an `ignore_order` list
+//! nested at every level beside two shared strings, in a debug build.
 
 use std::process::Command;
 
-use onix_core::diff::diff_with_max_depth;
+use onix_core::diff::{DiffOptions, diff_with_options};
 use serde_json::{Map, Value};
 
 /// The fixed stack each probe thread is given while searching. Large enough
 /// that the deepest non-overflowing input is in the thousands, so the
 /// division has several significant figures.
 const PROBE_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// The `pairing` shape's probe stack: its run time grows with the cube of
+/// the depth, so it searches a stack that overflows in the hundreds.
+const PAIRING_PROBE_STACK_BYTES: usize = 1024 * 1024;
+
+fn probe_stack_bytes(shape: &str) -> usize {
+    if shape == "pairing" {
+        PAIRING_PROBE_STACK_BYTES
+    } else {
+        PROBE_STACK_BYTES
+    }
+}
 
 fn build(shape: &str, depth: usize, leaf: i64) -> Value {
     let mut value = Value::from(leaf);
@@ -39,6 +51,8 @@ fn build(shape: &str, depth: usize, leaf: i64) -> Value {
             let mut map = Map::new();
             map.insert("k".to_owned(), value);
             value = Value::Object(map);
+        } else if shape == "pairing" {
+            value = Value::Array(vec![value, "s1".into(), "s2".into()]);
         } else {
             value = Value::Array(vec![value]);
         }
@@ -47,13 +61,13 @@ fn build(shape: &str, depth: usize, leaf: i64) -> Value {
 }
 
 /// One probe: build two unequal `depth`-deep values, diff them, and exit
-/// with a distinct status. Runs on a thread with `PROBE_STACK_BYTES` of
+/// with a distinct status. Runs on a thread with `probe_stack_bytes` of
 /// stack; if the recursion overflows, the process dies with a signal
 /// instead of exiting cleanly, which is exactly the signal the parent reads.
 fn run_probe(shape: &str, depth: usize) -> ! {
     let shape = shape.to_owned();
     let handle = std::thread::Builder::new()
-        .stack_size(PROBE_STACK_BYTES)
+        .stack_size(probe_stack_bytes(&shape))
         .spawn(move || {
             let a = build(&shape, depth, 1);
             let b = build(&shape, depth, 2);
@@ -64,8 +78,11 @@ fn run_probe(shape: &str, depth: usize) -> ! {
             // alongside the diff it measures).
             let a = onix_core::Value::from(a);
             let b = onix_core::Value::from(b);
-            let report =
-                diff_with_max_depth(&a, &b, depth + 1).expect("depth budget covers the input");
+            let opts = DiffOptions {
+                max_depth: depth + 1,
+                ignore_order: shape == "pairing",
+            };
+            let report = diff_with_options(&a, &b, &opts).expect("depth budget covers the input");
             assert!(!report.is_empty(), "unequal inputs must produce a finding");
         })
         .expect("probe thread spawns");
@@ -83,7 +100,7 @@ fn probe_survives(exe: &str, shape: &str, depth: usize) -> bool {
 }
 
 /// Binary-searches the deepest input `shape` that does not overflow
-/// `PROBE_STACK_BYTES`, and reports the implied per-level cost.
+/// `probe_stack_bytes`, and reports the implied per-level cost.
 fn measure(exe: &str, shape: &str) {
     let mut low = 10_usize;
     let mut high = 100_000_usize;
@@ -99,8 +116,11 @@ fn measure(exe: &str, shape: &str) {
             high = mid;
         }
     }
-    let bytes_per_level = PROBE_STACK_BYTES / low;
-    println!("{shape:>4}: max_ok_depth={low:>6}  bytes_per_level={bytes_per_level}");
+    let stack = probe_stack_bytes(shape);
+    let bytes_per_level = stack / low;
+    println!(
+        "{shape:>7}: stack={stack:>8}  max_ok_depth={low:>6}  bytes_per_level={bytes_per_level}"
+    );
 }
 
 fn main() {
@@ -115,7 +135,8 @@ fn main() {
         .expect("current exe path")
         .to_string_lossy()
         .into_owned();
-    println!("onix_core diff recursion stack cost (probe stack {PROBE_STACK_BYTES} bytes)");
+    println!("onix_core diff recursion stack cost");
     measure(&exe, "list");
     measure(&exe, "dict");
+    measure(&exe, "pairing");
 }

@@ -102,7 +102,10 @@ pub(crate) fn ignore_order_array_diff(
     };
 
     let pairs = if get_pairs {
-        compute_pairs(&hashes_added, &hashes_removed, &t1, &t2, depth, opts, memo)
+        match compute_pairs(&hashes_added, &hashes_removed, &t1, &t2, depth, opts, memo) {
+            Ok(pairs) => pairs,
+            Err(error) => return Err(*error.under(path)),
+        }
     } else {
         HashMap::default()
     };

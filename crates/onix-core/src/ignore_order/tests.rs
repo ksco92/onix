@@ -35,6 +35,7 @@ fn count_diff_leaves(
     opts: &DiffOptions,
 ) -> usize {
     super::distance::count_diff_leaves(&cv(a), &cv(b), depth, opts, &super::IgnoreOrderMemo::new())
+        .unwrap()
 }
 fn count_object_diff_leaves(
     a: &serde_json::Map<String, serde_json::Value>,
@@ -49,6 +50,7 @@ fn count_object_diff_leaves(
         opts,
         &super::IgnoreOrderMemo::new(),
     )
+    .unwrap()
 }
 fn count_array_diff_leaves(
     a: &[serde_json::Value],
@@ -63,6 +65,7 @@ fn count_array_diff_leaves(
         opts,
         &super::IgnoreOrderMemo::new(),
     )
+    .unwrap()
 }
 fn item_key(value: &serde_json::Value) -> super::hash::ItemKey {
     super::hash::item_key(&cv(value), &IgnoreOrderMemo::new())
@@ -977,25 +980,37 @@ fn mixed_key_union_sums_shared_and_one_sided_keys() {
     assert!(!super::is_below_threshold_to_diff_deeper(&a, &b));
 }
 
+fn max_depth_exceeded(path: &str, max_depth: usize) -> crate::error::Error {
+    crate::error::Error::MaxDepthExceeded {
+        path: path.to_string(),
+        max_depth,
+    }
+}
+
 #[test]
 fn count_object_diff_leaves_shared_key_recursion_depth_boundary_is_exact() {
-    // Shared key "x" holds arrays whose one element (a dict) needs 3
-    // levels of recursion (array-element -> dict "a" -> dict "b") to
-    // reach the actual leaf difference. With max_depth=3 and this call
-    // itself at depth=0, the recursive `count_diff_leaves(..., depth +
-    // 1, ...)` call for "x" must use depth=1, so
-    // `count_array_diff_leaves`'s own fresh-restart budget
-    // (`max_depth.saturating_sub(depth)`) is `3 - 1 = 2` — one short of
-    // the 3 needed, so the trial is rejected (0). A `+` -> `*` mutant
-    // computes depth=0 instead, handing the trial the full budget of 3
-    // (exactly enough to succeed), giving a nonzero total instead.
-    let opts = DiffOptions {
-        max_depth: 3,
-        ignore_order: false,
-    };
+    // "x"'s trial reaches the leaf at depth 4: key, array item, "a", "b".
     let a = json!({"x": [{"a": {"b": 1}}]}).as_object().unwrap().clone();
     let b = json!({"x": [{"a": {"b": 9}}]}).as_object().unwrap().clone();
-    assert_eq!(count_object_diff_leaves(&a, &b, 0, &opts), 0);
+    let count = |max_depth| {
+        super::distance::count_object_diff_leaves(
+            &cobj(&a),
+            &cobj(&b),
+            0,
+            &DiffOptions {
+                max_depth,
+                ignore_order: false,
+            },
+            &IgnoreOrderMemo::new(),
+        )
+    };
+    assert_eq!(
+        (count(3), count(4)),
+        (
+            Err(Box::new(max_depth_exceeded("root['x'][0]['a']['b']", 3))),
+            Ok(1)
+        )
+    );
 }
 
 #[test]
@@ -1077,26 +1092,30 @@ fn count_object_diff_leaves_mixed_sums_shared_added_and_removed_non_str_keys() {
             0,
             &DiffOptions::default(),
             &super::IgnoreOrderMemo::new(),
-        ),
+        )
+        .unwrap(),
         2 + 3 + 4
     );
 }
 
-/// `count_object_diff_leaves_mixed`'s shared-key recursion steps `depth` by
-/// exactly one, matching the trial sub-diff's own remaining-budget bound.
 #[test]
 fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact() {
     let key = || ObjectKey::Other(Box::new(cv(&json!(5))));
     let a = crate::value::Object::from_pairs(vec![(key(), cv(&json!([{"a": {"b": 1}}])))]);
     let b = crate::value::Object::from_pairs(vec![(key(), cv(&json!([{"a": {"b": 9}}])))]);
-    let opts = DiffOptions {
-        max_depth: 3,
-        ignore_order: false,
+    let count = |max_depth| {
+        let opts = DiffOptions {
+            max_depth,
+            ignore_order: false,
+        };
+        super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &IgnoreOrderMemo::new())
     };
-
     assert_eq!(
-        super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &super::IgnoreOrderMemo::new()),
-        0
+        (count(3), count(4)),
+        (
+            Err(Box::new(max_depth_exceeded("root[5][0]['a']['b']", 3))),
+            Ok(1)
+        )
     );
 }
 
@@ -1324,42 +1343,317 @@ fn rough_distance_structural_formula_is_diff_length_over_summed_rough_lengths() 
         0,
         &opts,
         &super::IgnoreOrderMemo::new(),
-    );
+    )
+    .unwrap();
     assert!((d - 1.0 / 7.0).abs() < 1e-12, "expected 1/7, got {d}");
 }
 
 #[test]
-#[allow(
-    clippy::float_cmp,
-    reason = "the exact-zero early return (diff_length == 0) is deterministic, not an arithmetic result"
-)]
 fn rough_distance_depth_boundary_is_exact() {
-    // removed/added are single-element arrays whose element (a dict)
-    // needs 3 levels of recursion (array-element -> dict "a" -> dict
-    // "b") to reach the actual leaf difference. With max_depth=3 and
-    // the pairing list itself at depth=0, `rough_distance`'s own
-    // `count_diff_leaves(..., depth + 1, ...)` call must use depth=1,
-    // so `count_array_diff_leaves`'s fresh-restart budget
-    // (`max_depth.saturating_sub(depth)`) is `3 - 1 = 2` — one short of
-    // the 3 needed, so `diff_length` is 0 and this returns exactly
-    // `0.0`. A `+` -> `*` mutant computes depth=0 instead, handing the
-    // trial the full budget of 3 (exactly enough to succeed), giving a
-    // nonzero distance instead.
-    let opts = DiffOptions {
-        max_depth: 3,
-        ignore_order: false,
+    // The trial runs at the pairing list's own depth, 0, and reaches the
+    // leaf at depth 3: array item, "a", "b".
+    let distance = |max_depth| {
+        super::distance::rough_distance(
+            &cv(&json!([{"a": {"b": 1}}])),
+            &cv(&json!([{"a": {"b": 9}}])),
+            CUTOFF_DISTANCE_FOR_PAIRS,
+            0,
+            &DiffOptions {
+                max_depth,
+                ignore_order: false,
+            },
+            &IgnoreOrderMemo::new(),
+        )
     };
-    let removed = json!([{"a": {"b": 1}}]);
-    let added = json!([{"a": {"b": 9}}]);
-    let d = super::distance::rough_distance(
-        &cv(&removed),
-        &cv(&added),
+    assert_eq!(
+        (distance(2), distance(3)),
+        (
+            Err(Box::new(max_depth_exceeded("root[0]['a']['b']", 2))),
+            Ok(1.0 / 12.0)
+        )
+    );
+}
+
+/// A datetime whose UTC form leaves year 9999, and an in-range neighbour
+/// the nested pairing pairs it with.
+fn unnormalizable_and_near() -> (CValue, CValue) {
+    (
+        cdt_at(9999, 12, 31, 23, 0, 0, 0, Some(-3600)),
+        cdt_at(9999, 12, 31, 23, 59, 0, 0, None),
+    )
+}
+
+fn ignore_order_opts(max_depth: usize) -> DiffOptions {
+    DiffOptions {
+        ignore_order: true,
+        max_depth,
+    }
+}
+
+#[test]
+fn rough_distance_of_a_pair_whose_trial_compares_an_unnormalizable_datetime_is_its_error() {
+    let (extreme, near) = unnormalizable_and_near();
+    let record = |datetime| cdict_holding(carr(vec![datetime, cv(&json!("x")), cv(&json!("y"))]));
+    let distance = super::distance::rough_distance(
+        &record(extreme),
+        &record(near),
         CUTOFF_DISTANCE_FOR_PAIRS,
         0,
-        &opts,
-        &super::IgnoreOrderMemo::new(),
+        &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH),
+        &IgnoreOrderMemo::new(),
     );
-    assert_eq!(d, 0.0);
+    assert_eq!(
+        distance,
+        Err(Box::new(crate::error::Error::DateTimeOutOfRange {
+            path: "root['k'][0]".to_string()
+        }))
+    );
+}
+
+/// `a` holds a zero-distance candidate for `b`'s one added item ahead of a
+/// second candidate `failing`, which the pairing would leave unpaired.
+fn lists_with_a_failing_candidate(
+    zero_distance: CValue,
+    failing: CValue,
+    added: CValue,
+) -> (CValue, CValue) {
+    let shared = || vec![cv(&json!("s1")), cv(&json!("s2"))];
+    (
+        carr([vec![zero_distance, failing], shared()].concat()),
+        carr([vec![added], shared()].concat()),
+    )
+}
+
+#[test]
+fn a_dict_candidate_holding_an_unnormalizable_datetime_fails_the_diff_at_its_path() {
+    let (extreme, near) = unnormalizable_and_near();
+    let (a, b) = lists_with_a_failing_candidate(
+        crate::value::Builder::new().object(vec![("k", near.clone()), ("n", CValue::Null)]),
+        cdict_holding(extreme),
+        cdict_holding(near),
+    );
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH)),
+        Err(crate::error::Error::DateTimeOutOfRange {
+            path: "root[1]['k']".to_string()
+        })
+    );
+}
+
+fn sub() -> std::sync::Arc<str> {
+    std::sync::Arc::from("Sub")
+}
+
+fn csub_datetime(value: &CValue) -> CValue {
+    let CValue::DateTime(datetime) = value else {
+        panic!("csub_datetime wraps a datetime")
+    };
+    CValue::DateTime(crate::value::Typed::with_class_name(
+        datetime.value(),
+        Some(sub()),
+    ))
+}
+
+fn mirror_and_report(a: &CValue, b: &CValue) -> [Result<usize, Box<crate::error::Error>>; 2] {
+    let opts = ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH);
+    [
+        super::distance::count_diff_leaves(a, b, 0, &opts, &IgnoreOrderMemo::new()),
+        crate::diff::diff_with_options(a, b, &opts)
+            .map(|report| report.distance_leaf_length())
+            .map_err(Box::new),
+    ]
+}
+
+#[test]
+fn an_unnormalizable_datetime_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let (extreme, near) = unnormalizable_and_near();
+    assert_eq!(
+        mirror_and_report(&csub_datetime(&extreme), &near),
+        [Ok(2), Ok(2)]
+    );
+    let (a, b) = lists_with_a_failing_candidate(
+        crate::value::Builder::new().object(vec![("k", near.clone()), ("n", CValue::Null)]),
+        cdict_holding(csub_datetime(&extreme)),
+        cdict_holding(near),
+    );
+    assert!(
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH))
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_same_instant_datetime_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let (_, near) = unnormalizable_and_near();
+    assert_eq!(
+        mirror_and_report(&csub_datetime(&near), &near),
+        [Ok(2), Ok(2)]
+    );
+}
+
+#[test]
+fn a_date_time_or_timedelta_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let date = cdate(2024, 1, 1);
+    let time = ctime(10, 0, 0, 0, None);
+    let delta = ctimedelta(1, 0, 0);
+    let (CValue::Date(d), CValue::Time(t), CValue::TimeDelta(td)) = (&date, &time, &delta) else {
+        panic!("the builders return their own variants")
+    };
+    for (subclass, base) in [
+        (
+            CValue::Date(crate::value::Typed::with_class_name(d.value(), Some(sub()))),
+            &date,
+        ),
+        (
+            CValue::Time(crate::value::Typed::with_class_name(t.value(), Some(sub()))),
+            &time,
+        ),
+        (
+            CValue::TimeDelta(crate::value::Typed::with_class_name(
+                td.value(),
+                Some(sub()),
+            )),
+            &delta,
+        ),
+    ] {
+        assert_eq!(mirror_and_report(&subclass, base), [Ok(2), Ok(2)]);
+    }
+}
+
+/// `[datetime, "x"]` as a list or a tuple, of the subclass `Sub` or not.
+fn sequence_holding(datetime: &CValue, tuple: bool, class: Option<std::sync::Arc<str>>) -> CValue {
+    let items = crate::value::Typed::with_class_name(
+        vec![datetime.clone(), cv(&json!("x"))].into_boxed_slice(),
+        class,
+    );
+    if tuple {
+        CValue::Tuple(items)
+    } else {
+        CValue::Array(items)
+    }
+}
+
+/// Asserts the mirror and the report agree on a `Sub` sequence holding an
+/// unnormalizable datetime against a plain one, bare and as the losing
+/// candidate of a list, where the diff reports it removed.
+fn assert_sequence_of_another_class_is_a_type_change(tuple: bool) {
+    let (extreme, near) = unnormalizable_and_near();
+    let base = sequence_holding(&near, tuple, None);
+    assert_eq!(
+        mirror_and_report(&sequence_holding(&extreme, tuple, Some(sub())), &base),
+        [Ok(3), Ok(3)]
+    );
+    let (a, b) = lists_with_a_failing_candidate(
+        crate::value::Builder::new().object(vec![("k", base.clone()), ("n", CValue::Null)]),
+        cdict_holding(sequence_holding(&extreme, tuple, Some(sub()))),
+        cdict_holding(base),
+    );
+    let report =
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH))
+            .map(|report| report.to_json_value());
+    assert_eq!(
+        report.map(|json| json["iterable_item_removed"]
+            .as_object()
+            .map(|removed| { removed.keys().cloned().collect::<Vec<_>>() })),
+        Ok(Some(vec!["root[1]".to_string()]))
+    );
+}
+
+#[test]
+fn a_list_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    assert_sequence_of_another_class_is_a_type_change(false);
+}
+
+#[test]
+fn a_tuple_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    assert_sequence_of_another_class_is_a_type_change(true);
+}
+
+#[test]
+fn a_set_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let members = || crate::value::SetItems::new(vec![cv(&json!(1)), cv(&json!(2))]);
+    assert_eq!(
+        mirror_and_report(
+            &CValue::Set(members().with_type_name(Some(sub()))),
+            &CValue::Set(members())
+        ),
+        [Ok(1), Ok(1)]
+    );
+}
+
+#[test]
+fn a_dict_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let entries = || cobj(json!({"a": 1, "b": 2}).as_object().unwrap());
+    let subclass = entries().with_dict_class(Some((sub(), std::sync::Arc::from("1"))));
+    assert_eq!(
+        mirror_and_report(&CValue::Object(subclass), &CValue::Object(entries())),
+        [Ok(3), Ok(3)]
+    );
+}
+
+#[test]
+fn a_candidate_whose_trial_compares_an_unnormalizable_datetime_fails_the_diff_at_its_path() {
+    let (extreme, near) = unnormalizable_and_near();
+    let list = |items: Vec<CValue>| carr([items, vec![cv(&json!("x")), cv(&json!("y"))]].concat());
+    let (a, b) = lists_with_a_failing_candidate(
+        list(vec![near.clone(), CValue::Null]),
+        list(vec![extreme]),
+        list(vec![near]),
+    );
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH)),
+        Err(crate::error::Error::DateTimeOutOfRange {
+            path: "root[1][0]".to_string()
+        })
+    );
+}
+
+#[test]
+fn a_candidate_whose_trial_meets_a_resolved_value_over_the_depth_budget_fails_the_diff() {
+    let (a, b) = lists_with_a_failing_candidate(
+        cdict_holding(cv(&json!([[2], null]))),
+        cdict_holding(copaque("1")),
+        cdict_holding(cv(&json!([[2]]))),
+    );
+    let too_deep = cv(&json!([[[[1]]]]));
+    let mut resolver = |_: &str| Some(crate::diff::Resolution::Borrowed(&too_deep));
+    assert_eq!(
+        crate::diff::diff_with_resolver(&a, &b, &ignore_order_opts(4), &mut resolver),
+        Err(max_depth_exceeded("root[1]['k'][0]", 4))
+    );
+}
+
+#[test]
+fn a_distance_cached_at_a_shallow_occurrence_answers_a_deeper_one_whose_trial_would_fail() {
+    let (a, b) = lists_with_a_failing_candidate(
+        cdict_holding(cv(&json!([[2], null]))),
+        cdict_holding(copaque("1")),
+        cdict_holding(cv(&json!([[2]]))),
+    );
+    let too_deep = cv(&json!([[[[1]]]]));
+    let document = |list: &CValue, shallow_key: &str, deep_key: &str| {
+        let mut builder = crate::value::Builder::new();
+        let inner = builder.object(vec![("f", list.clone())]);
+        let deep = builder.object(vec![("e", inner)]);
+        builder.object(vec![(shallow_key, list.clone()), (deep_key, deep)])
+    };
+    let run = |shallow_key, deep_key| {
+        let mut resolver = |_: &str| Some(crate::diff::Resolution::Borrowed(&too_deep));
+        crate::diff::diff_with_resolver(
+            &document(&a, shallow_key, deep_key),
+            &document(&b, shallow_key, deep_key),
+            &ignore_order_opts(7),
+            &mut resolver,
+        )
+        .map(|report| report.is_empty())
+    };
+    assert_eq!(
+        [run("a", "z"), run("z", "a")],
+        [
+            Ok(false),
+            Err(max_depth_exceeded("root['a']['e']['f'][1]['k'][0]", 7))
+        ]
+    );
 }
 
 /// Pins the exact scale `distance_family` measures a `datetime` pair by:
@@ -1403,7 +1697,8 @@ fn rough_distance_datetime_pair_measures_seconds_not_microseconds() {
         0,
         &DiffOptions::default(),
         &super::IgnoreOrderMemo::new(),
-    );
+    )
+    .unwrap();
     assert!(
         (d - expected).abs() < 1e-12,
         "expected {expected} (seconds-scale), got {d}"
@@ -2027,7 +2322,8 @@ fn calendar_values_count_as_one_structural_node() {
 fn a_datetime_leaf_counts_as_changed_only_when_the_instants_differ() {
     let opts = DiffOptions::default();
     let memo = IgnoreOrderMemo::new();
-    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
 
     assert_eq!(
         count(
@@ -2045,7 +2341,8 @@ fn a_datetime_leaf_counts_as_changed_only_when_the_instants_differ() {
 fn a_time_leaf_counts_as_changed_only_by_plain_time_equality() {
     let opts = DiffOptions::default();
     let memo = IgnoreOrderMemo::new();
-    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
 
     // Two aware values at the same offset-adjusted instant: equal.
     assert_eq!(
@@ -2097,7 +2394,8 @@ fn dist_key_hashes_time_and_timedelta_leaves_consistently_with_equality() {
 fn a_timedelta_leaf_counts_as_changed_only_when_the_exact_value_differs() {
     let opts = DiffOptions::default();
     let memo = IgnoreOrderMemo::new();
-    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
 
     assert_eq!(count(&ctimedelta(0, 1, 0), &ctimedelta(0, 1, 0)), 0);
     assert_eq!(count(&ctimedelta(0, 1, 0), &ctimedelta(0, 2, 0)), 1);
@@ -2461,7 +2759,8 @@ fn a_frozenset_hashes_by_membership_and_apart_from_a_tuple() {
 fn count_diff_leaves_of_two_sets_counts_added_and_removed_items() {
     let memo = IgnoreOrderMemo::new();
     let opts = DiffOptions::default();
-    let count = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
 
     assert_eq!(
         count(
@@ -3188,6 +3487,21 @@ fn dist_key_hash_collision_on_distinct_nans_never_becomes_equality() {
 /// actually generated: tuples, sets, frozensets, datetimes (naive and aware),
 /// dates, and floats (signed zero and integral values among them).
 fn arb_cvalue() -> impl Strategy<Value = CValue> {
+    arb_cleaf().prop_recursive(5, 40, 4, |inner| {
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..4).prop_map(carr),
+            prop::collection::vec(inner.clone(), 0..4).prop_map(ctuple),
+            prop::collection::vec(inner.clone(), 0..4).prop_map(|v| CValue::Set(SetItems::new(v))),
+            prop::collection::vec(inner.clone(), 0..4)
+                .prop_map(|v| CValue::FrozenSet(SetItems::new(v))),
+            prop::collection::vec(("[a-c]", inner), 0..3)
+                .prop_map(|entries| crate::value::Builder::new().object(entries)),
+        ]
+    })
+}
+
+/// [`arb_cvalue`]'s scalar leaves.
+fn arb_cleaf() -> impl Strategy<Value = CValue> {
     let arb_datetime = (
         2000i32..2025,
         1u8..=12,
@@ -3202,7 +3516,10 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
             Just(Some(-3600))
         ],
     )
-        .prop_map(|(y, mo, d, h, mi, s, off)| cdt_at(y, mo, d, h, mi, s, 0, off));
+        .prop_map(|(y, mo, d, h, mi, s, off)| cdt_at(y, mo, d, h, mi, s, 0, off))
+        .prop_flat_map(|datetime| {
+            prop_oneof![Just(datetime.clone()), Just(csub_datetime(&datetime))]
+        });
     let arb_date = (2000i32..2025, 1u8..=12, 1u8..=28).prop_map(|(y, m, d)| cdate(y, m, d));
     // `NaN` is excluded, not `any::<f64>()`'s non-finite values generally:
     // `Infinity`/`-Infinity` are ordinary equal-to-themselves floats and
@@ -3227,7 +3544,7 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
     .prop_filter_map("not NaN", |f| {
         (!f.is_nan()).then(|| CValue::Number(crate::value::Number::from_f64(f)))
     });
-    let leaf = prop_oneof![
+    prop_oneof![
         Just(CValue::Null),
         any::<bool>().prop_map(CValue::Bool),
         any::<i64>().prop_map(|i| CValue::Number(crate::value::Number::from_i64(i))),
@@ -3235,18 +3552,7 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
         "[a-z]{0,3}".prop_map(|s| CValue::Str(s.into())),
         arb_datetime,
         arb_date,
-    ];
-    leaf.prop_recursive(5, 40, 4, |inner| {
-        prop_oneof![
-            prop::collection::vec(inner.clone(), 0..4).prop_map(carr),
-            prop::collection::vec(inner.clone(), 0..4).prop_map(ctuple),
-            prop::collection::vec(inner.clone(), 0..4).prop_map(|v| CValue::Set(SetItems::new(v))),
-            prop::collection::vec(inner.clone(), 0..4)
-                .prop_map(|v| CValue::FrozenSet(SetItems::new(v))),
-            prop::collection::vec(("[a-c]", inner), 0..3)
-                .prop_map(|entries| crate::value::Builder::new().object(entries)),
-        ]
-    })
+    ]
 }
 
 /// Rebuilds `value` into a twin that is equal by [`Value`]'s rules but differs
@@ -3324,9 +3630,10 @@ fn structural_twin(value: &CValue, in_set: bool) -> CValue {
             entries.reverse();
             crate::value::Builder::new().object_with_keys(entries)
         }
-        CValue::DateTime(dt) if !in_set => {
+        CValue::DateTime(typed) if !in_set => {
+            let dt = typed.value();
             let date = dt.date();
-            match dt.utc_offset_seconds() {
+            let twin = match dt.utc_offset_seconds() {
                 None => cdt_at(
                     date.year(),
                     date.month(),
@@ -3354,7 +3661,14 @@ fn structural_twin(value: &CValue, in_set: bool) -> CValue {
                         Some(offset),
                     )
                 }
-            }
+            };
+            let CValue::DateTime(rewritten) = &twin else {
+                unreachable!("cdt_at builds a datetime")
+            };
+            CValue::DateTime(crate::value::Typed::with_class_name(
+                rewritten.value(),
+                typed.class_name().map(std::sync::Arc::from),
+            ))
         }
         CValue::Number(n) if n.is_f64() => {
             let f = n.as_f64().expect("is_f64 guarantees as_f64");
@@ -3387,6 +3701,104 @@ proptest! {
         let s2 = CValue::Set(SetItems::new(vec![cv(&json!("z")), value, CValue::Null]));
         prop_assert_eq!(&s1, &s2);
         prop_assert_eq!(dist_hash(&s1), dist_hash(&s2));
+    }
+}
+
+/// One leaf's change in [`perturb`].
+#[derive(Clone, Debug)]
+enum Edit {
+    Keep,
+    /// A same-type change: a string's first letter, a number plus one, a
+    /// flipped bool, else [`structural_twin`]'s equal-valued rewrite.
+    Tweak,
+    Replace(CValue),
+}
+
+fn tweak(leaf: &CValue) -> CValue {
+    use crate::value::Number;
+    match leaf {
+        CValue::Str(text) => {
+            let mut bytes = text.as_bytes().to_vec();
+            match bytes.first_mut() {
+                Some(first) => *first = b'a' + (first.wrapping_sub(b'a') + 1) % 26,
+                None => bytes.push(b'a'),
+            }
+            CValue::Str(String::from_utf8_lossy(&bytes).into_owned().into())
+        }
+        CValue::Number(n) => CValue::Number(match n.as_i64() {
+            Some(i) if !n.is_f64() => Number::from_i64(i.wrapping_add(1)),
+            _ => Number::from_f64(n.as_f64().map_or(0.0, |f| f + 1.0)),
+        }),
+        CValue::Bool(b) => CValue::Bool(!b),
+        other => structural_twin(other, false),
+    }
+}
+
+/// `value` with its leaves changed in walk order by `edits`.
+fn perturb(value: &CValue, edits: &mut impl Iterator<Item = Edit>) -> CValue {
+    let mut all = |items: &[CValue]| items.iter().map(|item| perturb(item, edits)).collect();
+    match value {
+        CValue::Array(items) => carr(all(items)),
+        CValue::Tuple(items) => ctuple(all(items)),
+        CValue::Set(items) => CValue::Set(SetItems::new(all(items))),
+        CValue::FrozenSet(items) => CValue::FrozenSet(SetItems::new(all(items))),
+        CValue::Object(map) => crate::value::Builder::new().object_with_keys(
+            map.iter()
+                .map(|(key, child)| (key.clone(), perturb(child, edits)))
+                .collect(),
+        ),
+        leaf => match edits.next() {
+            Some(Edit::Tweak) => tweak(leaf),
+            Some(Edit::Replace(new)) => new,
+            Some(Edit::Keep) | None => leaf.clone(),
+        },
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    /// `count_diff_leaves` counts what the `Report` of the same diff measures,
+    /// for an independent pair, a value against an edited copy, and each
+    /// under a shared sibling in a list and in a dict.
+    #[test]
+    fn count_diff_leaves_matches_the_report_of_the_same_diff(
+        a in arb_cvalue(),
+        b in arb_cvalue(),
+        edits in prop::collection::vec(
+            prop_oneof![
+                Just(Edit::Keep),
+                Just(Edit::Tweak),
+                arb_cleaf().prop_map(Edit::Replace),
+            ],
+            1..6,
+        ),
+        sibling in arb_cvalue(),
+        ignore_order in any::<bool>(),
+    ) {
+        let opts = DiffOptions {
+            ignore_order,
+            ..DiffOptions::default()
+        };
+        let edited = perturb(&a, &mut edits.into_iter().cycle());
+        let in_list = |value: &CValue| carr(vec![value.clone(), sibling.clone()]);
+        let in_dict = |value: &CValue| {
+            crate::value::Builder::new().object(vec![("k", value.clone()), ("s", sibling.clone())])
+        };
+        for (old, new) in [(&a, &b), (&a, &edited)] {
+            for (old, new) in [
+                (old.clone(), new.clone()),
+                (in_list(old), in_list(new)),
+                (in_dict(old), in_dict(new)),
+            ] {
+                let mirror =
+                    super::distance::count_diff_leaves(&old, &new, 0, &opts, &IgnoreOrderMemo::new());
+                let report = crate::diff::diff_with_options(&old, &new, &opts)
+                    .map(|report| report.distance_leaf_length())
+                    .map_err(Box::new);
+                prop_assert_eq!(mirror, report);
+            }
+        }
     }
 }
 
@@ -3459,7 +3871,7 @@ fn a_collapsed_custom_object_pair_counts_the_new_objects_dict_len() {
     };
     let opts = DiffOptions::default();
     assert_eq!(
-        super::distance::count_object_diff_leaves(a, b, 0, &opts, &IgnoreOrderMemo::new()),
+        super::distance::count_object_diff_leaves(a, b, 0, &opts, &IgnoreOrderMemo::new()).unwrap(),
         5
     );
 }
@@ -3651,7 +4063,8 @@ fn a_cycle_token_reports_nothing_on_the_first_side_and_is_compared_on_the_second
 fn a_first_side_cycle_token_or_one_python_object_counts_no_distance() {
     let memo = IgnoreOrderMemo::new();
     let opts = DiffOptions::default();
-    let leaves = |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo);
+    let leaves =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
     assert_eq!(
         (
             leaves(&ccycle(), &cv(&json!([1, 2]))),
@@ -3709,7 +4122,8 @@ fn a_resolved_token_counts_the_distance_of_its_value() {
     let memo = IgnoreOrderMemo::with_resolver(&mut resolver);
     let opts = DiffOptions::default();
     assert_eq!(
-        super::distance::count_diff_leaves(&copaque("1"), &cv(&json!([1, 3])), 0, &opts, &memo),
+        super::distance::count_diff_leaves(&copaque("1"), &cv(&json!([1, 3])), 0, &opts, &memo)
+            .unwrap(),
         1
     );
 }
