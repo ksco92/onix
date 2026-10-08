@@ -21,9 +21,10 @@ use crate::errors::map_diff_error;
 /// rather than risking a native stack overflow the interpreter cannot catch.
 pub(crate) const MAX_DEPTH_CEILING: usize = 20_000;
 
-/// Worst-case native stack, in bytes, one level of the recursive diff engine
-/// costs, measured by `crates/onix-core/examples/stack_frame_cost.rs` and
-/// rounded up from its debug-build worst case (~3.5 KiB/level).
+/// Native stack per level of the recursive diff engine, rounded up from the
+/// debug `list` shape (about 4,000 bytes) of
+/// `crates/onix-core/examples/stack_frame_cost.rs`;
+/// [`STACK_SAFETY_MARGIN`] covers its worst shape, `pairing` (about 6,700).
 const PER_LEVEL_STACK_BYTES: usize = 4_096;
 
 /// Extra multiplier over the bare `ceiling * per-level` figure, so the worker
