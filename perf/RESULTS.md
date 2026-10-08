@@ -222,7 +222,7 @@ gap, not a production cost estimate.
 
 ## GO / NO-GO evaluation
 
-This harness's success thresholds: **≥5x faster (diff-only) OR ≥5x less peak memory on the majority of fixtures, and strictly better on `api_payloads`; no fixture where onix is slower** (any regression is a bug to explain, not a caveat to publish).
+This harness's success thresholds: **≥5x faster (diff-only) OR ≥5x less peak memory on the majority of fixtures, and strictly better on `api_payloads`; no fixture where onix is slower**.
 
 | Fixture | Meets ≥5x threshold | Diff-only speedup | Memory ratio |
 |---|---|---|---|
@@ -244,7 +244,7 @@ This harness's success thresholds: **≥5x faster (diff-only) OR ≥5x less peak
 
 ### Verdict: **GO**
 
-This is an **upper bound**, not the product validation: onix here diffs data the CLI stream-parses straight from JSON text into the compact `onix_core::Value`, with no intermediate `serde_json` tree and no FFI or Python-object conversion cost on this path's ledger. The decision-relevant validation is the product surface (real diffing through the Python bindings on live Python objects), where per-node FFI or up-front conversion costs will land on onix's side of the ledger. A clean GO here justifies *continuing* toward that validation, not a claim that the product is proven.
+CLI figures exclude Python-object conversion, which `crates/onix-py/benchmarks/bench_bindings.py` measures (see the README's Performance section).
 
 ## Deferred work (documented, not silently dropped)
 
