@@ -12,20 +12,16 @@ check`, since it shells out to a debug build and to real `deepdiff`.
 `object_diff` applies DeepDiff's `threshold_to_diff_deeper=0.33` dict
 collapse unconditionally (root and nested, ordered and under
 ignore_order), so `is_known_threshold_divergence` below is expected to
-report zero hits — it stays in place as a classifier rather than being
-removed, so a future regression here would surface as a named bucket
-instead of an unexplained mismatch.
+report zero hits.
 
 Usage::
 
     uv run scripts/differential_fuzz.py [seed] [count] [--bias-nested-low-overlap-dicts|--bias-repeated-scalars]
 
-The optional third argument switches to a generator biased toward nested
-single-dict-in-a-list elements with low key overlap between `a`/`b` --
-this shape exercises `ignore_order`'s own pairing decisions when a
-candidate pair's distance depends on a nested dict-vs-dict comparison; the
-plain generator above essentially never happens to hit this shape on its
-own.
+The optional third argument selects a biased generator:
+
+- `--bias-nested-low-overlap-dicts`: single-dict-in-a-list elements with low key overlap.
+- `--bias-repeated-scalars`: dicts of lists drawn from a tiny scalar alphabet.
 """
 
 import json
@@ -94,13 +90,8 @@ DICT_KEY_POOL: Final[list[str]] = [*DICT_KEYS, "e", "f", "g", "h"]
 
 def gen_list_with_nested_low_overlap_dicts(rng: random.Random, depth: int) -> list[JsonValue]:
     """
-    Like `gen_list`, but with an elevated chance that an element is a
-    single-item list wrapping a multi-key dict -- the exact shape
-    (`count_array_diff_leaves`'s trial sub-diff recursing into a nested
-    dict-vs-dict pair) whose distance the disclosed
-    `threshold_to_diff_deeper` reported-shape gap used to corrupt when
-    computed via the real, non-threshold-aware `object_diff` -- see
-    `crate::ignore_order::THRESHOLD_TO_DIFF_DEEPER`'s doc.
+    Like `gen_list`, but biased toward a one-element list wrapping a multi-key dict
+    (a nested dict-vs-dict pairing candidate).
 
     :param rng: Seeded RNG.
     :param depth: Remaining nesting budget for the non-biased elements.
@@ -156,8 +147,7 @@ REPEAT_ALPHABET: Final[list[JsonValue]] = [0, 1, 2, 3]
 def gen_repeating_inner(rng: random.Random) -> list[JsonValue]:
     """A list of 1..14 scalars drawn from a tiny alphabet, so distinct lists
     frequently share DeepHash's order- and repetition-insensitive item key
-    (the set of members) while differing in element repetition -- the shape
-    that made onix's distance memo unsound when keyed by that item key."""
+    (the set of members) while differing in element repetition."""
     length = rng.randint(1, 14)
     return [rng.choice(REPEAT_ALPHABET) for _ in range(length)]
 
@@ -170,8 +160,7 @@ def gen_repeating_sibling_dict(rng: random.Random) -> dict[str, JsonValue]:
     inner lists. Diffing two such dicts runs one array_diff per shared key
     against a common run memo, so sibling keys whose inner lists share an item
     key (the deduplicated member set) but not a distance make the same
-    (removed, added) item-key pair recur with different true distances -- the
-    exact structure that made the ItemKey-keyed memo unsound (issue #31)."""
+    (removed, added) item-key pair recur with different true distances."""
     keys = rng.sample(REPEAT_SIBLING_KEYS, rng.randint(2, len(REPEAT_SIBLING_KEYS)))
     return {k: [gen_repeating_inner(rng)] for k in keys}
 
@@ -193,8 +182,7 @@ def mutate_toward_repeated_scalars(rng: random.Random, a: list[JsonValue]) -> li
     """Shuffle and, for each repeating-sibling dict, give *every* one of its
     keys the same shared "other" wrapped inner list. That is what makes the
     sibling keys' (removed, added) item-key pairs collide in the run memo while
-    their distances differ -- the pre-fix cache handed one sibling's distance to
-    the next. A fresh shared other per dict keeps distances straddling the 0.3
+    their distances differ. A fresh shared other per dict keeps distances straddling the 0.3
     pairing cutoff."""
     b = list(a)
     rng.shuffle(b)

@@ -55,9 +55,8 @@ PLUS_THIRTY_THIRTY: Final[timezone] = timezone(timedelta(seconds=1830))
 
 GOLDEN_ROOT = Path(__file__).resolve().parent.parent / "tests" / "golden"
 
-# Each case is a small, hand-designed (t1, t2) pair. Keep cases SMALL and
-# focused on one behavior each — this is the correctness corpus, not a
-# performance fixture (see perf/ for those).
+# Each case is a small, hand-designed (t1, t2) pair focused on one behavior; this is the
+# correctness corpus, not a performance fixture (see perf/).
 CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
     # Scalars: values_changed vs type_changes; int/float/bool are distinct Python types.
     "values_changed_scalar": ({"a": 1}, {"a": 2}),
@@ -539,7 +538,7 @@ CASES: dict[str, tuple[TaggedValue, TaggedValue]] = {
     ),
     # DeepHash decides cache-versus-content at every node: a member can miss the cache at
     # its outer tuple (a naive/aware sibling blocks it) yet its inner container still hits
-    # the cache once the datetimes normalize to one instant. Each of these five is `{}`.
+    # the cache once the datetimes normalize to one instant.
     "set_tuple_datetime_and_nested_tuple_share_inner_cache": (
         {(datetime(2024, 1, 1), (1,))},
         {(datetime(2024, 1, 1, tzinfo=UTC), (1.0,))},
@@ -708,8 +707,8 @@ def _generate_fuzz_cases() -> dict[str, tuple[TaggedValue, TaggedValue]]:
     return cases
 
 
-# Seeded-random time/timedelta cases: a small alphabet biased toward the trickiest
-# comparison/hashing shapes, bare scalars only per the differential-fuzz-alphabet convention.
+# Seeded-random time/timedelta cases over a small alphabet of tricky shapes; bare scalars only
+# (a tuple/frozenset member would surface the pinned container-hashing divergence instead).
 _TIME_FUZZ_SEED = 0xDA7E_71ED
 _TIME_FUZZ_CASE_COUNT = 15
 _TIME_FUZZ_ALPHABET: Final[list[TaggedValue]] = [
@@ -1344,8 +1343,6 @@ def main() -> None:
         else:
             raise AssertionError(f"{name}: expected DeepDiff to raise {exception_name}, but it returned")
 
-        # DeepDiff has no diff to record; `expected.json` carries the exception it
-        # raises and onix's own expected report.
         write_json(
             case_dir / "expected.json",
             {"deepdiff_raises": exception_name, "onix": onix_report},
