@@ -233,16 +233,11 @@ columns, 18 threads, load average 19 to 10.
 
 ## Memory
 
-### Fused reads (issue #90)
+### Peak RSS by shape
 
-0.13.0 keeps the 32-byte hashes of the left side only: the right side's hash pass tallies each row
-against the left key it matches (an 8-byte count per left row), and keeps a 32-byte map entry per
-distinct right key absent from the left. A selection kept for `rows_added`, `rows_removed` or the
-right's candidates copies a buffer it shares with a much larger allocation when it keeps at most
-half its batch; the duplicate-key report always does, and a candidate's key columns follow its
-full-width rows. Peak resident
-set of one fresh process per run, measured 2026-09-24 alongside 0.11.2's build (the same example
-shapes on both); a cell with several runs is their median:
+Measured on `deepdiff-rs` 0.11.2 and 0.13.0, 2026-09-24, the thread counts in the table. Peak
+resident set of one fresh process per run, `row_diff_rss`, the same example shapes on both builds; a
+cell with several runs is their median:
 
 | Shape (`row_diff_rss`, rows/side) | threads | 0.11.2 | 0.13.0 | runs |
 | --- | --- | --- | --- | --- |
@@ -297,15 +292,7 @@ those rows out.
 A spooled partial selection (`halfall`: a left of 980,000 keys; a right of 2,000 batches, each with
 510 keys the left lacks, 490 unchanged left keys and one repeat of the previous batch's first new
 key; columns `id` Int64, `w` 1 KB `Utf8`, `v` 64 B `Utf8View`) measures 4420 → 4684 MB at 2 threads
-and 4298 → 4483 MB at 64 (0.11.2 → 0.13.0, median of 3). The added rows are materialized one
-candidate at a time and each candidate is freed once its selection is taken; holding every candidate
-until the concatenation measured 5522 and 5403 MB. What remains is the map entry per key the left
-lacks.
-
-`chain` wall time at 18 threads (`row_diff_rss`, median of 3), 0.11.2 → 0.13.0: 2-row batches at
-100k / 200k / 400k rows 0.73 / 1.46 / 2.94 s → 0.65 / 1.22 / 2.55 s; 16-row batches at 1M / 2M / 4M
-rows 1.79 / 3.61 / 7.31 s → 1.50 / 3.15 / 6.19 s. Each compaction visits only candidates still
-holding full-width rows.
+and 4298 → 4483 MB at 64 (0.11.2 → 0.13.0, median of 3).
 
 Four terms remain above 0.11.2, all right-side keys on the parallel path:
 
@@ -327,12 +314,6 @@ written to the output as they are (Arrow IPC writes a view array's data buffers 
 batch with a kept row still keeps its whole view data resident: `viewsparse` removes 100 rows spread
 over all 16 batches and holds about the whole side's 2.0 GB of view data on both versions, at 1 and
 at 18 threads.
-
-The single-threaded `wide` 1M peak is 2.3% higher (8.10 against 7.91 GB, in every run). That path
-still reads each side three times with the same filtering, and building its changed-key set at
-0.11.2's point instead measured 8.30 GB, so the figure follows allocation order rather than an added
-resident term. The size-gate peek shapes of the section below measure within 3 MB of 0.11.2 except
-the whole side in one batch at 18 threads, which falls from 1580 to 1190 MB.
 
 The real fixtures, one diff per fresh process of the file-mode harness (no parquet reader, so no
 input tables resident), at 2 / 18 / 64 threads: `narrow full` 3.25 / 2.76 / 2.83 GB (0.11.2: 4.13 /
@@ -371,28 +352,11 @@ threads 2.671 GB [2.605-2.910] against 2.473 GB [2.458-2.927], and at 64 threads
 [2.019-2.067] against 2.025 GB [2.009-2.057] (3 runs each), where partitions are smaller than the
 spread. Measured 2026-09-24T15:31Z to 15:34Z, load average 4 to 7.
 
-### Earlier releases
+### Cell-pass memory
 
-`row_diff_rss` (the example, `ROW_DIFF_THREADS` sets the worker count) peak resident set, the row
-diff's own state (no parquet), at 18 threads versus single-threaded, on the parallel row diff of
-issue #81:
+Measured on `deepdiff-rs` 0.11.1, 2026-09-06, 18 threads (2, 18 and 64 in the last table).
 
-| Rows/side | threads=1 | threads=18 | delta |
-| --- | --- | --- | --- |
-| 8,000,000 | 629 MB | 857 MB | +228 MB |
-| 37,000,000 | 2866 MB | 3551 MB | +685 MB |
-
-The delta grows with the row count at roughly 10-15 bytes per row per side — about half of one extra
-copy of the 32-byte-per-row hash vectors, i.e. the reallocation slack of the shared per-partition
-buffers, bounded by one full copy — plus the in-flight batches (worker count times batch size, tens
-of MB). The 32-byte-per-row hash vectors dominate either path and their growable-`Vec` slack makes
-the single-threaded peak itself vary run-to-run by a comparable amount (2.9-4.2 GB at 37M).
-
-### Cell-pass memory (streaming, issue #87)
-
-The pre-#87 cell pass (0.11.0, carrying 0.10.0's behaviour unchanged) held both sides' full changed rows and rendered on one thread; 0.11.1 spills each side's
-changed value rows -- every common value column of every changed row, changed or not -- by key-hash
-partition and holds one partition plus the reordered output resident. Its peak has two terms: the
+The cell pass's peak has two terms: the
 spilled changed value rows (the changed-row count times the total width of the common value columns,
 both sides -- resident where written temp pages count against the process, e.g. macOS `ru_maxrss` or
 a RAM-backed `tmpfs`) and about twice the `cells_changed` output (its one out-of-place reorder) plus
@@ -402,11 +366,11 @@ when rows are wide and few cells change. It is not bounded by the changed *cell*
 `row_diff_rss`'s `wide` shape (an `id` and one `value_width`-byte string differing on every row --
 output-dominated) at 18 threads:
 
-| Rows/side x cell | 0.11.0 (sequential) | 0.11.1 (streaming) |
-| --- | --- | --- |
-| 100,000 x 1 KB | 1.18 GB | 0.92 GB |
-| 200,000 x 1 KB | 2.34 GB | 1.31 GB |
-| 1,000,000 x 1 KB | 11.6 GB (est.) | 4.81 GB |
+| Rows/side x cell | 0.11.1 |
+| --- | --- |
+| 100,000 x 1 KB | 0.92 GB |
+| 200,000 x 1 KB | 1.31 GB |
+| 1,000,000 x 1 KB | 4.81 GB |
 
 At 1M x 1 KB the output's Arrow size is about 2.09 GB, so twice it plus the 64 MB hash vectors is
 about 4.24 GB; the measured 4.81 GB is 1.13x that (the reorder is out-of-place, plus the changed-key
@@ -450,13 +414,14 @@ sequential, and the byte check runs between whole batches, so the peek holds at 
 producer batch per side. This is the peak RSS of a 49,999-row/side pair of 8 KB `string` cells,
 identical on both sides (zero changes, so only the peek and hash vectors are resident), generated at
 three batch sizes (`ROW_DIFF_BATCH`); the default is the example's 65,536, at which the whole side is
-one batch and the peek necessarily holds it. Medians of 3 runs, 2026-09-24:
+one batch and the peek necessarily holds it. Measured on `deepdiff-rs` 0.13.0, 2026-09-24, 1 and 18
+threads, medians of 3 runs:
 
-| Rows per batch | threads=1 (0.11.2) | threads=18 (0.11.2) | threads=1 (0.13.0) | threads=18 (0.13.0) |
-| --- | --- | --- | --- | --- |
-| 100 | 12 MB | 68 MB | 12 MB | 65 MB |
-| 1,000 | 524 MB | 559 MB | 524 MB | 558 MB |
-| 65,536 (default, whole side in one batch) | 1578 MB | 1580 MB | 1578 MB | 1190 MB |
+| Rows per batch | threads=1 | threads=18 |
+| --- | --- | --- |
+| 100 | 12 MB | 65 MB |
+| 1,000 | 524 MB | 558 MB |
+| 65,536 (default, whole side in one batch) | 1578 MB | 1190 MB |
 
 So a caller that streams small batches keeps the peek tiny; a caller that hands the whole side over
 as one giant batch makes the peek hold that batch. Bound the producer's batch size for untrusted
