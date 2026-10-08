@@ -4303,11 +4303,7 @@ mod tests {
 
     #[test]
     fn materialize_reads_each_side_through_its_own_column_order() {
-        // left is [id, v]; right is [v, id] — the key and value columns sit at
-        // different positions on each side. Materializing the right side through
-        // the left's column indices would hash the wrong column as the key and
-        // misclassify every row (all removed, all added), so the added/removed
-        // sets pin that each side uses its own `SideColumns`.
+        // left is [id, v]; right is [v, id].
         let left_sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let right_sch = schema(vec![Field::new("v", DataType::Int64, false), id_field()]);
         let left = reader(
@@ -4739,8 +4735,6 @@ mod tests {
 
     #[test]
     fn render_duration_produces_iso_seconds() {
-        // Exact renderings pin the second/nanosecond split and the sign, which a
-        // distinctness-only check leaves free.
         use super::render_duration;
         assert_eq!(render_duration(3600, TimeUnit::Second), "PT3600S");
         assert_eq!(render_duration(1, TimeUnit::Millisecond), "PT0.001S");
@@ -5493,9 +5487,7 @@ mod tests {
 
     #[test]
     fn hash_cell_refuses_an_unsupported_scalar_type() {
-        // The up-front column check normally refuses these first; this pins the
-        // belt-and-braces refusal in `hash_cell` itself for a type it cannot
-        // hash (a run-end-encoded cell reached directly).
+        // A run-end-encoded cell reached directly.
         use arrow_array::RunArray;
         let run_ends = Int32Array::from(vec![1]);
         let values = Int64Array::from(vec![10]);
@@ -5839,8 +5831,7 @@ mod tests {
     #[test]
     fn hash_of_large_integral_floats_stays_distinct() {
         // Two distinct integral floats past 2^53 keep their bit patterns (they do
-        // not fold to an integer): folding them would saturate both to the same
-        // i128 and collide.
+        // not fold to an integer).
         let hasher = super::RowHasher::new().unwrap();
         let f1: ArrayRef = Arc::new(Float64Array::from(vec![1e300]));
         let f2: ArrayRef = Arc::new(Float64Array::from(vec![2e300]));
@@ -5851,8 +5842,7 @@ mod tests {
     fn hash_uses_both_128_bit_halves() {
         // SipHash-1-3's 128-bit output must populate both halves: across a run of
         // inputs, at least one has a non-zero top half and at least one has the
-        // two halves unequal. A hash that collapsed to 64 bits (top half always
-        // zero, or the halves mirrored) would fail this.
+        // two halves unequal.
         let keyed = super::RowHasher::new().unwrap();
         let outputs: Vec<u128> = (0..16)
             .map(|v| cell_hash(&keyed, Arc::new(Int64Array::from(vec![v])) as ArrayRef))
@@ -5941,7 +5931,7 @@ mod tests {
     #[test]
     fn dictionary_non_key_value_change_is_detected() {
         // A dictionary-encoded non-key column is hashable, so a changed value is
-        // a row change (if it were treated as unhashable it would be skipped).
+        // a row change.
         let dict_type = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
         let sch = schema(vec![id_field(), Field::new("s", dict_type, false)]);
         let left_s: arrow_array::DictionaryArray<arrow_array::types::Int32Type> =
@@ -6544,9 +6534,8 @@ mod tests {
     fn streaming_matches_sequential_with_asymmetric_column_layout() {
         // The right side carries an extra non-common column before the common
         // ones, so a common column's index differs between the two sides. The
-        // streaming path must project each side by its own resolved columns;
-        // using the left side's indices on the right would compare the wrong
-        // column. Compared against the sequential path, which resolves per side.
+        // streaming path must project each side by its own resolved columns.
+        // Compared against the sequential path, which resolves per side.
         let left_sch = schema(vec![
             id_field(),
             Field::new("a", DataType::Int64, false),
@@ -6630,9 +6619,7 @@ mod tests {
 
     #[test]
     fn streaming_cell_pass_yields_the_expected_cells() {
-        // A direct content check (not only parallel==sequential): every row
-        // changed on a two-batch input, verified against the exact expected
-        // cell rows in output order.
+        // Every row changed on a two-batch input.
         force_parallel_path();
         let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let left = chunked_reader(&sch, &[(Some(2), 20), (Some(10), 100), (Some(1), 10)], 2);
@@ -6790,11 +6777,7 @@ mod tests {
     #[test]
     fn spill_field_type_targets_large_offsets_for_views_and_dictionaries() {
         use super::spill_field_type;
-        // Byte-view columns spill as the *large* (i64-offset) non-view type: their
-        // `take` keeps the whole variadic buffer, which can exceed the 2 GiB an
-        // i32-offset `Utf8`/`Binary` caps at, so casting to `Utf8`/`Binary` would
-        // panic inside arrow. Dictionaries decode to their value type, composed
-        // recursively so a dictionary of a view also lands on the large type.
+        // Rationale: `spill_field_type`'s doc.
         assert_eq!(spill_field_type(&DataType::Utf8View), DataType::LargeUtf8);
         assert_eq!(
             spill_field_type(&DataType::BinaryView),
@@ -6884,11 +6867,7 @@ mod tests {
     #[ignore = "allocates ~2.3 GiB of view data; run manually with --ignored"]
     fn view_column_over_i32_offset_limit_streams_without_panic() {
         // A single input batch whose byte-view column carries more than
-        // `i32::MAX` bytes: `take` retains the whole variadic buffer, so the
-        // spill cast sees all of it at once. Casting to `Utf8`/`Binary`
-        // (i32 offsets) would panic here; the spill targets `LargeUtf8`/
-        // `LargeBinary` (i64 offsets), so the diff streams without panic.
-        // Ignored by default: it needs several GiB of resident memory.
+        // `i32::MAX` bytes.
         force_parallel_path();
         let base = "x".repeat(450 * 1024 * 1024);
         let rows = 5usize; // 5 x 450 MiB > i32::MAX total view bytes
@@ -7145,9 +7124,7 @@ mod tests {
     #[test]
     fn hash_side_parallel_worker_panic_takes_precedence_over_a_read_error() {
         // A prefix batch makes a worker panic (out-of-range value column) and the
-        // next read yields an error. `hash_side_parallel` must still join every
-        // worker, so the panic surfaces as WorkerPanicked instead of resuming
-        // (aborting) — the read-error path must not return before join_results.
+        // next read yields an error.
         let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let good = RecordBatch::try_new(
             sch.clone(),
@@ -7368,8 +7345,7 @@ mod tests {
     #[test]
     fn ordered_driver_consumer_panic_unwinds_without_hanging() {
         // A panic in `visit` (the consumer) must unwind rather than deadlock the
-        // scope join. Many batches so the channels fill and workers/reader would
-        // block if the consumer stopped draining without releasing them.
+        // scope join. Many batches so the channels fill.
         let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let rows: Vec<(Option<i64>, i64)> = (0..400).map(|i| (Some(i), i)).collect();
         let input = chunked_reader(&sch, &rows, 32);
