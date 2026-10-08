@@ -4,12 +4,9 @@
 # ///
 """Read `perf/bench_raw/*.json` (written by `run_bench.sh`) and emit `perf/RESULTS.md`.
 
-This is the only place derived metrics (speedup ratios, memory ratios,
-MB/CPU-second, $/1M diffs) get computed — `run_bench.sh` only captures raw
-tool output, never does arithmetic on it, so every number in `RESULTS.md`
-traces back to one specific raw JSON file this script read. Run via
-`uv run perf/summarize_results.py` (only ever invoked by `run_bench.sh`
-itself, as its final step).
+This is the only place derived metrics (ratios, MB/CPU-second, $/1M diffs)
+are computed; `run_bench.sh` only captures raw tool output and runs this
+script as its final step.
 """
 
 import json
@@ -25,7 +22,6 @@ RAW_DIR: Final[Path] = ROOT / "perf" / "bench_raw"
 FIXTURES_DIR: Final[Path] = ROOT / "perf" / "fixtures"
 RESULTS_PATH: Final[Path] = ROOT / "perf" / "RESULTS.md"
 
-# Human-facing description per fixture, for the matrix table below.
 FIXTURE_DESCRIPTIONS: Final[dict[str, str]] = {
     "flat_dict_10k": "1-level dict, 10k keys — dict key-set ops",
     "flat_dict_100k": "1-level dict, 100k keys — dict at moderate scale",
@@ -66,10 +62,7 @@ def load_json(path: Path) -> JsonValue:
 
 def as_object(value: JsonValue) -> dict[str, JsonValue]:
     """
-    Narrow a `JsonValue` known, by construction, to be a JSON object — every
-    raw-results file this script reads is written by `run_bench.sh`'s own
-    JSON producers, so a non-dict here is a harness bug, not recoverable
-    runtime input.
+    Narrow a `JsonValue` known, by construction, to be a JSON object.
 
     :param value: The value; must be a `dict`.
     :return: The same value, typed as `dict[str, JsonValue]`.
@@ -117,10 +110,7 @@ def find_manifest_entry(manifest: list[JsonValue], name: str) -> dict[str, JsonV
 
 def fixture_names(manifest: list[JsonValue]) -> list[str]:
     """
-    Every fixture name, in manifest order — derived from the manifest
-    itself (not a second hardcoded list) so this and `run_bench.sh`'s own
-    fixture list can never drift out of sync. Every fixture in the matrix
-    is a real two-tool comparison, `ignore_order_10k` included.
+    Every fixture name, in manifest order.
 
     :param manifest: The parsed manifest's `fixtures` list.
     :return: Every fixture name.
@@ -161,8 +151,7 @@ def fmt_seconds(seconds: float) -> str:
 
 def fmt_bytes(num_bytes: float) -> str:
     """
-    Format a byte count as MB (1 MB = 1_000_000 bytes, matching the
-    fixture-generator's own MB reporting).
+    Format a byte count as MB (1 MB = 1_000_000 bytes).
 
     :param num_bytes: Size in bytes.
     :return: A human-readable string.
@@ -231,10 +220,7 @@ class ToolMetrics:
 class DiffOnlySamples:
     """
     Self-instrumented diff-only timing samples for one tool on one fixture,
-    from N repeated runs (tier-appropriate warmup/run counts — see
-    `run_bench.sh`'s `tier_for`). Median is the headline number; min/max is
-    the reported spread. This harness always reports medians and a spread
-    across repeated runs, never a single unreplicated sample.
+    from N repeated runs (counts per `run_bench.sh`'s `tier_for`).
     """
 
     def __init__(self: Self, samples_ns: list[float]) -> None:
@@ -317,9 +303,7 @@ class FixtureRow:
     @property
     def diff_only_speedup(self: Self) -> float:
         """
-        :return: `deepdiff diff-only MEDIAN time / onix diff-only MEDIAN
-            time` (the headline metric), each a median
-            over N tier-appropriate runs, never a single sample.
+        :return: `deepdiff diff-only median time / onix diff-only median time` (the headline metric).
         """
 
         return self.deepdiff_diff_only.median_ns / self.onix_diff_only.median_ns
@@ -339,9 +323,7 @@ class FixtureRow:
     @property
     def meets_threshold(self: Self) -> bool:
         """
-        :return: Whether this fixture clears this harness's own success threshold
-            (≥5x faster diff-only OR ≥5x less peak RSS), used by the
-            go/no-go section.
+        :return: Whether this fixture is ≥5x faster diff-only or uses ≥5x less peak RSS.
         """
 
         return self.diff_only_speedup >= 5.0 or self.memory_ratio >= 5.0
@@ -381,8 +363,7 @@ class Report:
 
 def render_environment_header(env: JsonValue) -> str:
     """
-    Render the environment front-matter block (recording hardware +
-    versions in perf/RESULTS.md front matter).
+    Render the environment block (hardware and tool versions).
 
     :param env: The parsed `env.json`.
     :return: A markdown section.
@@ -562,7 +543,7 @@ def render_headline_table(report: Report) -> str:
 def render_wall_clock_table(report: Report) -> str:
     """
     :param report: The loaded benchmark report.
-    :return: End-to-end wall-clock table (item 1: includes process startup).
+    :return: End-to-end wall-clock table (includes process startup).
     """
     lines = [
         "## End-to-end wall clock",
@@ -650,11 +631,7 @@ smaller gap.
 def render_ignore_order_design_notes(report: Report) -> str:
     """
     :param report: The loaded benchmark report.
-    :return: Design-rationale notes for `ignore_order_10k`, the ignore_order headline
-        comparison — the live measured numbers already appear in the
-        Headline/wall-clock/CPU tables above via the normal per-fixture
-        row; this section explains *why* the number looks the way it
-        does, without re-deriving or hand-carrying any figure.
+    :return: Design-rationale notes for `ignore_order_10k`, the ignore_order headline comparison.
     """
     row = report.row("ignore_order_10k")
 
@@ -780,7 +757,7 @@ gap, not a production cost estimate.
 def render_go_no_go(report: Report) -> str:
     """
     :param report: The loaded benchmark report.
-    :return: The GO/NO-GO evaluation section against this harness's own thresholds.
+    :return: The GO/NO-GO evaluation section.
     """
     api_row = report.row("api_payloads")
     non_identical_rows = [r for r in report.rows if r.name not in {"identical_1m", "startup_trivial"}]
@@ -893,7 +870,7 @@ ceiling of each rather than forcing an arbitrary large target like 20k.
 
 
 def render_deferred_work_note() -> str:
-    """:return: The closing note on what this benchmark deliberately deferred, incl. the full scope-cut disclosure."""
+    """:return: The closing list of what this benchmark does not measure."""
 
     return """## Deferred work (documented, not silently dropped)
 
