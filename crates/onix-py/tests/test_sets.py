@@ -386,7 +386,7 @@ def test_a_frozenset_never_inherits_another_ones_digest() -> None:
 def test_a_frozenset_bool_vs_float_member_hits_the_same_shared_cache_rule() -> None:
     """A frozenset of `False` and one of `0.0` stay distinct.
 
-    
+
     See tests/golden/README.md, "Set iteration order: where onix differs",
     "Which member of an equality class wins".
     """
