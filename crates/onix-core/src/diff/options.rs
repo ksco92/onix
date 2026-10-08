@@ -11,29 +11,19 @@ use crate::report::Report;
 
 use super::{diff_at, values_equal};
 
-/// Default maximum recursion depth for [`diff()`].
-///
-/// See `docs/design/depth-budget.md` for the depth-counting convention
-/// and the exact guarantee this bound gives unequal nested structures.
+/// Default recursion-depth bound for [`diff()`]; it caps unequal nesting.
+/// See `docs/design/depth-budget.md`, "Depth and value budget".
 pub const DEFAULT_MAX_DEPTH: usize = 512;
-/// The options a [`diff_with_options`] call runs with.
-///
-/// [`diff()`] and [`diff_with_max_depth()`] are unchanged, thinner
-/// convenience wrappers that build one of these and delegate — see their own
-/// docs. `Default` matches [`diff()`]'s own behavior: [`DEFAULT_MAX_DEPTH`],
-/// ordered (non-`ignore_order`) comparison.
+/// The options a [`diff_with_options`] call runs with; `Default` matches
+/// [`diff()`]: [`DEFAULT_MAX_DEPTH`], ordered comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiffOptions {
-    /// The recursion-depth bound (unchanged by `ignore_order`) — see
-    /// `docs/design/depth-budget.md` for the exact contract.
+    /// The recursion-depth bound, independent of `ignore_order`; see
+    /// `docs/design/depth-budget.md`.
     pub max_depth: usize,
-    /// Mirrors `DeepDiff(..., ignore_order=True)`: every list/tuple
-    /// encountered anywhere in the tree, at any depth, is compared as a
-    /// multiset-ish match (hash-based pairing) instead of the ordered
-    /// index-aligned/LCS comparison — see `docs/design/ignore-order.md`
-    /// for the full spec this implements.
-    /// Dicts are unaffected (always key-compared); this only changes how
-    /// *list-typed* values compare, recursively.
+    /// Mirrors `DeepDiff(..., ignore_order=True)`: lists and tuples at any
+    /// depth pair by hash instead of by index; dicts are unaffected. See
+    /// `docs/design/ignore-order.md`.
     pub ignore_order: bool,
 }
 
@@ -45,8 +35,8 @@ impl Default for DiffOptions {
         }
     }
 }
-/// Diffs two JSON-shaped values and returns a DeepDiff-compatible
-/// [`Report`], using [`DEFAULT_MAX_DEPTH`] as the recursion-depth bound.
+/// Diffs two JSON-shaped values into a [`Report`], bounding recursion at
+/// [`DEFAULT_MAX_DEPTH`].
 ///
 /// # Errors
 ///
@@ -69,14 +59,8 @@ impl Default for DiffOptions {
 pub fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
     diff_with_max_depth(a, b, DEFAULT_MAX_DEPTH)
 }
-/// Diffs two JSON-shaped values with a caller-chosen [`DiffOptions`] —
-/// the general entry point [`diff()`] and [`diff_with_max_depth()`]
-/// delegate to, unchanged themselves (both still run with
-/// `ignore_order: false`).
-///
-/// See `docs/design/depth-budget.md` for the recursion-depth contract
-/// (unaffected by `ignore_order`), and `crate::ignore_order`'s module
-/// doc when `opts.ignore_order` is `true`.
+/// Diffs two JSON-shaped values with a caller-chosen [`DiffOptions`]; see
+/// `crate::ignore_order` when `opts.ignore_order` is `true`.
 ///
 /// # Errors
 ///
@@ -99,15 +83,12 @@ pub fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
 /// assert!(report.is_empty());
 /// ```
 pub fn diff_with_options(a: &Value, b: &Value, opts: &DiffOptions) -> Result<Report, Error> {
-    // The memo is created here, per diff invocation, and dropped when this
-    // returns — no cross-call state. An ordered diff consults it only through
-    // set comparison (set-member and tuple digests); `ignore_order` also
-    // caches container-pair distances in it.
+    // A fresh memo per call: no state survives across diffs.
     diff_with_options_memo(a, b, opts, &crate::ignore_order::IgnoreOrderMemo::new())
 }
 
-/// A value the diff compares in place of a token: shared with the caller, or
-/// borrowed from a value that outlives the diff.
+/// A value compared in place of a token: shared, or borrowed from a value
+/// that outlives the diff.
 #[derive(Clone)]
 pub enum Resolution<'r> {
     /// A value the caller converted for the token.
@@ -153,15 +134,8 @@ pub fn diff_with_resolver<'r>(
     )
 }
 
-/// The shared body of [`diff_with_options`], taking an explicit
-/// [`crate::ignore_order::IgnoreOrderMemo`] so the decision-equivalence
-/// differential test can run the exact same code path with the cache
-/// disabled. Production always calls it via [`diff_with_options`] with a live
-/// memo.
-///
-/// # Errors
-///
-/// Same as [`diff_with_options`].
+/// The body of [`diff_with_options`], taking an explicit
+/// [`crate::ignore_order::IgnoreOrderMemo`].
 pub(crate) fn diff_with_options_memo(
     a: &Value,
     b: &Value,
@@ -177,24 +151,20 @@ pub(crate) fn diff_with_options_memo(
         report
     })
 }
-/// Diffs two JSON-shaped values like [`diff()`], but with a caller-chosen
-/// recursion-depth bound instead of [`DEFAULT_MAX_DEPTH`], replacing an
-/// uncatchable stack overflow on adversarially deep input with a
-/// recoverable error. See `docs/design/depth-budget.md` for the
-/// depth-counting convention and the shared path-plus-value budget
-/// this enforces.
+/// Diffs like [`diff()`] with a caller-chosen recursion-depth bound; path
+/// depth plus finding-value depth share it. See `docs/design/depth-budget.md`,
+/// "Depth and value budget".
 ///
 /// # Errors
 ///
-/// Returns [`Error::MaxDepthExceeded`] if either the traversal or the
-/// combined path-depth-plus-value-depth budget is exceeded, and
-/// [`Error::DateTimeOutOfRange`] if two datetimes it compares have no UTC form.
+/// [`Error::MaxDepthExceeded`] when the bound is exceeded;
+/// [`Error::DateTimeOutOfRange`] for compared datetimes with no UTC form.
 ///
 /// # Examples
 ///
 /// ```
 /// use onix_core::Value;
-/// use onix_core::diff::{DEFAULT_MAX_DEPTH, diff_with_max_depth};
+/// use onix_core::diff::diff_with_max_depth;
 /// use serde_json::json;
 ///
 /// // A tiny bound is enough for a shallow diff.
@@ -206,7 +176,6 @@ pub(crate) fn diff_with_options_memo(
 /// let deep = Value::from(json!({"a": {"b": {"c": {"d": {"e": 1}}}}}));
 /// let report = diff_with_max_depth(&deep, &deep, 1).unwrap();
 /// assert!(report.is_empty());
-/// # let _ = DEFAULT_MAX_DEPTH;
 /// ```
 pub fn diff_with_max_depth(a: &Value, b: &Value, max_depth: usize) -> Result<Report, Error> {
     diff_with_options(
