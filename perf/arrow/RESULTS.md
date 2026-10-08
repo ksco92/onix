@@ -208,8 +208,9 @@ Measured on `deepdiff-rs` 0.14.0, 2026-09-24, 18 threads.
 
 ### Peak RSS by shape
 
-Peak resident set of one fresh process per run (`row_diff_rss`; shapes are defined in that example's
-module doc); a cell with several runs is their median:
+Peak resident set of one fresh process per run (`row_diff_rss`; shapes are defined by the `Case`
+variants in `crates/onix-arrow/examples/shared/gen_shapes.rs`); a cell with several runs is their
+median:
 
 | Shape (`row_diff_rss`, rows/side) | threads | peak RSS | runs |
 | --- | --- | --- | --- |
@@ -218,7 +219,6 @@ module doc); a cell with several runs is their median:
 | `linear` 37M | 18 | 2.49 GB | 4 |
 | `wide` 100k x 1 KB | 18 | 480 MB | 5 |
 | `wide` 200k x 1 KB | 18 | 962 MB | 3 |
-| `wide` 1M x 1 KB | 18 | 4.62 GB | 3 |
 | `wide` 1M x 1 KB | 1 | 8.10 GB | 3 |
 | `wide` 200k x 1 KB | 2 / 64 | 1454 / 1254 MB | 3 |
 | `manycols` 150k x 8 x 512 B | 18 | 1555 MB | 5 |
@@ -297,24 +297,26 @@ runs per build for `wide` 200k at 18 threads, 5 for `wide` 1M, 3 otherwise):
 | `manycols` 150k x 8 x 512 B | 64 | 2077 MB [1938-2092] | 2069 MB [2035-2072] |
 | `allchange` 1M | 18 | 350 MB [333-385] | 354 MB [344-361] |
 
-Measured on `deepdiff-rs` 0.13.0, 0.13.1 and 0.14.0, 2026-09-24, 2, 18 and 64 threads.
-The 0.13.0 column is kept because README Known limitations cites this difference.
+Measured on `deepdiff-rs` 0.13.0 and 0.14.0, 2026-09-24, 2, 18 and 64 threads.
 
-Every row's two ranges overlap. A shape with 500k changed rows/side where only an `Int64` column
-differs and three equal 1 KB columns (`Utf8View`, `BinaryView`, `Utf8`) are compared measures, at 2
-threads, 5.644 GB [5.007-6.338] on 0.13.1 against 5.949 GB [5.549-6.814] on 0.14.0 (medians of 8
-runs each), about +0.3 GB; at 18 threads 2.671 GB [2.605-2.910] against 2.473 GB [2.458-2.927], and
-at 64 threads 2.032 GB [2.019-2.067] against 2.025 GB [2.009-2.057] (3 runs each).
+A shape with 500k changed rows/side where only an `Int64` column differs and three equal 1 KB
+columns (`Utf8View`, `BinaryView`, `Utf8`) are compared, each cell the median with the run range in
+brackets (8 runs per build at 2 threads, 3 at 18 and 64):
+
+| threads | 0.13.1 | 0.14.0 |
+| --- | --- | --- |
+| 2 | 5.644 GB [5.007-6.338] | 5.949 GB [5.549-6.814] |
+| 18 | 2.671 GB [2.605-2.910] | 2.473 GB [2.458-2.927] |
+| 64 | 2.032 GB [2.019-2.067] | 2.025 GB [2.009-2.057] |
+
+Measured on `deepdiff-rs` 0.13.1 and 0.14.0, 2026-09-24, 2, 18 and 64 threads.
 
 ### Cell-pass memory
 
 The peak has a spill term and an output term; the mechanism is in `docs/design/row-diff.md` and
-`reorder_into`'s doc in `crates/onix-arrow/src/row_diff.rs`. The output term dominates when many
-cells change; the spill term dominates when rows are wide and few cells change, and neither is
-bounded by the changed *cell* count alone.
+`reorder_into`'s doc in `crates/onix-arrow/src/row_diff.rs`.
 
-`row_diff_rss`'s `wide` shape (an `id` and one `value_width`-byte string differing on every row --
-output-dominated) at 18 threads:
+`row_diff_rss`'s `wide` shape (output-dominated) at 18 threads:
 
 | Rows/side x cell | Peak RSS |
 | --- | --- |
@@ -326,9 +328,7 @@ Measured on `deepdiff-rs` 0.11.1, 2026-09-06, 18 threads.
 
 The single-threaded path measures 8.30 GB at the same shape.
 
-`row_diff_rss`'s `manycols` shape (an `id` and `ncols` `width`-byte columns of which only one
-differs -- spill-dominated: every row changed but one cell each, so the output is small while the
-spill holds all `ncols` columns) at 18 threads, 150,000 rows/side, 512 B columns:
+`row_diff_rss`'s `manycols` shape (spill-dominated) at 18 threads, 150,000 rows/side, 512 B columns:
 
 | Value columns | cells_changed | output | Peak RSS |
 | --- | --- | --- | --- |
@@ -396,34 +396,26 @@ isolated subprocess runs per cell.
 
 Measured on `deepdiff-rs` 0.11.1, 2026-09-06, 18 threads (default).
 
-At 1M rows, phase (b) -- the actual ceiling, a rendered and ordered per-cell table -- costs no more
-than phase (a)'s counts-only join: rendering and ordering only touch the changed rows (20,000 of 1M
-narrow, 229,077 of 1M wide), and the two phases land within noise of each other. `diff_tables` is
-2.3-3.5x phase (b)'s wall time here (narrow: 354 ms vs. 155 ms; wide: 1.592 s vs. 461 ms).
-`bench_tables.py`'s correctness precheck
-(`rows_added`/`rows_removed`/`cells_changed`/`duplicate_keys` against `generate_fixtures.py`'s
-manifest) passes for `polars_spike.py`'s counts on both fixtures, matching `_polars_counts`'s
-existing baseline exactly (narrow: 10,000/10,000/20,000/0; wide: 10,000/10,000/229,077/0).
+At 1M rows, phase (b), a rendered and ordered per-cell table, costs no more than phase (a)'s
+counts-only join, since both touch only the changed rows (20,000 of 1M narrow, 229,077 of 1M wide).
+`diff_tables` is 2.3-3.5x phase (b)'s wall time here (narrow: 354 ms vs. 155 ms; wide: 1.592 s vs.
+461 ms).
 
 ## Disk usage
 
 Both fixture pairs (narrow and wide) at both sizes, all resident at once, from the narrow and wide
 fixture tables above: narrow 1M (269.4 MB) + narrow full (9,970.9 MB) + wide 1M (593.3 MB) + wide
 full (10,011.4 MB) — about 20.8 GB, plus `bench_raw/`'s per-run JSON files. Nothing under
-`perf/arrow/fixtures/` or `perf/arrow/bench_raw/` is committed. The full-size `wide` run's peak
-resident memory for `onix` alone is about 28.8 GB at the default 18 threads (see Results (wide)).
+`perf/arrow/fixtures/` or `perf/arrow/bench_raw/` is committed.
 
 `onix` also uses temporary disk (anonymous `tempfile`s, unlinked at creation; on Linux typically a
 RAM-backed `tmpfs`): the two input spools plus both sides' changed value rows spilled by key-hash
 partition, all resident until the cell pass ends. With every file resident at once that is about
 23.8 GB for the full `wide` pair (12.26 GB of input spool, the inputs' uncompressed Arrow IPC size,
 plus 11.51 GB of spill at 2, 18 and 64 threads alike) and 11.9 GB for the full `narrow` pair (11.66
-GB plus 0.23 GB). The spill is `changed rows x total value-column width` (plus, on the parallel
-path, the first right row of each key the left holds once that a later right batch repeats),
-independent of the thread/partition count. `spill_field_type`'s doc in
-`crates/onix-arrow/src/row_diff.rs` states which column types are rewritten before the spill and
-why. Bound the changed fraction and the total value-column width for untrusted input. A full temp
-filesystem raises `ValueError` naming `TMPDIR`.
+GB plus 0.23 GB). `spill_field_type`'s doc in `crates/onix-arrow/src/row_diff.rs` states which
+column types are rewritten before the spill and why. A full temp filesystem raises `ValueError`
+naming `TMPDIR`.
 
 Measured on `deepdiff-rs` 0.13.0, 2026-09-24, 2, 18 and 64 threads.
 
@@ -431,7 +423,8 @@ Spill of a 40,000-row all-distinct dictionary string column at 2 / 18 / 64 parti
 204.6 MB undecoded, 3.19 / 3.20 / 3.22 MB decoded. A `Utf8View` column spills 3.36 / 3.36 / 3.38 MB
 (cast to `LargeUtf8`), as does a dictionary whose value type is itself a `Utf8View` (3.36 / 3.36 /
 3.38 MB). `LargeUtf8`, `LargeBinary`, and `FixedSizeBinary` spill as themselves (3.35 MB at 2 vs 64
-for `LargeUtf8`). Spilled undecoded, the full-size `wide` pair's whole-process peak RSS at 64
-threads is about 97 GB, against 31.4 GB decoded (Peak RSS by shape).
+for `LargeUtf8`). Spilled undecoded (`deepdiff-rs` 0.11.1), the full-size `wide` pair's
+whole-process peak RSS at 64 threads is about 97 GB, against 31.4 GB decoded on 0.13.0 (Peak RSS by
+shape).
 
 Measured on `deepdiff-rs` 0.11.1, 2026-09-06, 2, 18 and 64 partitions.
