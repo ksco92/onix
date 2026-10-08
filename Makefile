@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test test-all-features coverage docs deny machete mutants bench python-test
+.PHONY: check stack-check fmt clippy test test-all-features coverage docs deny machete mutants bench python-test
 
 # Everything must be green; CI runs this target.
 check: fmt clippy test test-all-features coverage docs deny machete
@@ -37,6 +37,10 @@ mutants:
 	@command -v cargo-mutants >/dev/null 2>&1 || { echo "cargo-mutants not installed: cargo install cargo-mutants --locked"; exit 1; }
 	cargo mutants --package onix-core --package onix-cli --package onix-arrow
 
+# Fails when a shape's debug stack cost exceeds PER_LEVEL_STACK_BYTES in crates/onix-py/src/guard.rs.
+stack-check:
+	cargo run --quiet -p onix-core --example stack_frame_cost -- --max-bytes-per-level 8192
+
 # Regenerates perf/RESULTS.md from a real run against pinned deepdiff.
 # Slow (tens of minutes on the full fixture matrix, including two
 # multi-second-per-diff "very heavy" fixtures) — see perf/run_bench.sh and
@@ -46,7 +50,7 @@ bench:
 	perf/run_bench.sh
 
 # The pytest suite for crates/onix-py. Not part of `check`: it needs a Python venv (uv)
-# and a release build of the extension module, which the Rust-only gate does not set up.
+# and a release build of the extension module, which the Rust-only check does not set up.
 python-test:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not installed: see https://docs.astral.sh/uv/"; exit 1; }
 	@command -v maturin >/dev/null 2>&1 || { echo "maturin not installed: uv tool install maturin"; exit 1; }

@@ -17,7 +17,10 @@
 //! ```sh
 //! cargo run --quiet -p onix-core --example stack_frame_cost            # debug
 //! cargo run --quiet --release -p onix-core --example stack_frame_cost  # release
+//! cargo run --quiet -p onix-core --example stack_frame_cost -- --max-bytes-per-level N
 //! ```
+//!
+//! With `--max-bytes-per-level`, the run exits 1 when any shape exceeds `N`.
 //!
 //! The worst case (largest bytes/level) is `pairing`, an `ignore_order` list
 //! nested at every level beside two shared strings, in a debug build.
@@ -100,8 +103,8 @@ fn probe_survives(exe: &str, shape: &str, depth: usize) -> bool {
 }
 
 /// Binary-searches the deepest input `shape` that does not overflow
-/// `probe_stack_bytes`, and reports the implied per-level cost.
-fn measure(exe: &str, shape: &str) {
+/// `probe_stack_bytes`, prints and returns the implied per-level cost.
+fn measure(exe: &str, shape: &str) -> usize {
     let mut low = 10_usize;
     let mut high = 100_000_usize;
     while probe_survives(exe, shape, high) {
@@ -121,6 +124,7 @@ fn measure(exe: &str, shape: &str) {
     println!(
         "{shape:>7}: stack={stack:>8}  max_ok_depth={low:>6}  bytes_per_level={bytes_per_level}"
     );
+    bytes_per_level
 }
 
 fn main() {
@@ -136,7 +140,21 @@ fn main() {
         .to_string_lossy()
         .into_owned();
     println!("onix_core diff recursion stack cost");
-    measure(&exe, "list");
-    measure(&exe, "dict");
-    measure(&exe, "pairing");
+    let max = args
+        .iter()
+        .position(|a| a == "--max-bytes-per-level")
+        .map(|i| {
+            args.get(i + 1)
+                .and_then(|n| n.parse::<usize>().ok())
+                .expect("--max-bytes-per-level takes a number")
+        });
+    for shape in ["list", "dict", "pairing"] {
+        let bytes_per_level = measure(&exe, shape);
+        if let Some(max) = max.filter(|&max| bytes_per_level > max) {
+            eprintln!(
+                "{shape}: bytes_per_level={bytes_per_level} exceeds --max-bytes-per-level={max}"
+            );
+            std::process::exit(1);
+        }
+    }
 }
