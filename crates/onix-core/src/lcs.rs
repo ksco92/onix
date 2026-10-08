@@ -194,11 +194,9 @@ impl std::hash::Hash for ScalarKey {
 /// copies move together.
 const MAX_EXACT_F64_INT: f64 = 9_007_199_254_740_992.0;
 
-/// Returns `true` if every element of `items` is a JSON scalar (null, bool,
-/// number, or string) or a calendar value (datetime, date) —
-/// `DeepDiff`'s `_all_values_basic_hashable` check, whose `helper.basic_types`
-/// tuple lists `datetime.datetime` and `datetime.date` alongside the numeric
-/// and string types.
+/// Returns `true` if every element of `items` is a JSON scalar or a calendar
+/// value — `DeepDiff`'s `_all_values_basic_hashable` check over
+/// `helper.basic_types`.
 ///
 /// A dict, list or tuple anywhere in `items` returns `false`. An empty slice
 /// returns `true` (vacuously — matches `DeepDiff`, whose equivalent check is
