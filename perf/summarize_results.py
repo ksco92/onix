@@ -667,7 +667,7 @@ same machine:
 {energy["manual_sudo_command"]}
 ```
 
-while looping a fixture diff (see `run_bench.sh`'s Step 6 for the exact
+while looping a fixture diff (see `run_bench.sh`'s Step 7 for the exact
 loop it would otherwise run) and dividing the reported package energy by
 the iteration count.
 """
