@@ -439,15 +439,12 @@ duplicate/null-key-aware, rendered, ordered `cells_changed` table -- where its
 rendering diverges from onix's is documented in
 [`perf/arrow/polars_spike.py`](perf/arrow/polars_spike.py)'s module docstring.
 
-Environment: same machine and versions as [Environment](#environment) above (Apple M5 Max, 18
-cores, 137438.95 MB RAM, polars 1.44.1, deepdiff-rs 0.11.1, the streaming cell pass of issue #87),
-measured 2026-09-06, median of 11 isolated subprocess runs per cell (same convention as the rest of
-this file). Each sweep was `ps`-checked clear of other `cargo`/`maturin`/`pytest` activity
-immediately before starting, on a shared machine running other, unrelated background jobs at a load
-average around 9-10 (of 18 cores) throughout (`uptime` checked before and after each sweep), so the
-`diff_tables` column here reads a little higher than the dedicated, otherwise-idle sweeps elsewhere
-in this file (354 ms vs. 336.84 ms narrow 1M in [Results](#results); 1.592 s vs. 1.376 s wide 1M in
-[Wide fixture pair](#wide-fixture-pair-84)) -- the three phases in one row are still directly
+Measured on `deepdiff-rs` 0.11.1, 2026-09-06, 18 threads (default): same machine and versions as
+[Environment](#environment) above (Apple M5 Max, 18 cores, 137438.95 MB RAM, polars 1.44.1), median
+of 11 isolated subprocess runs per cell (same convention as the rest of this file). Each sweep was
+`ps`-checked clear of other `cargo`/`maturin`/`pytest` activity immediately before starting, on a
+shared machine running other, unrelated background jobs at a load average around 9-10 (of 18 cores)
+throughout (`uptime` checked before and after each sweep); the three phases in one row are directly
 comparable, since all three ran under the same contention.
 
 | Fixture | Phase | Wall clock (median) | CPU seconds (median) | Peak RSS (median) |
@@ -464,13 +461,8 @@ than phase (a)'s counts-only join: rendering and ordering only touch the changed
 narrow, 229,077 of 1M wide), while `.ne_missing()` itself already scans every compared column in
 full for either phase, so that scan is the dominant cost and the two phases land within noise of
 each other. `diff_tables` is 2.3-3.5x phase (b)'s wall time here (narrow: 354 ms vs. 155 ms; wide:
-1.592 s vs. 461 ms), now that issue #87's streaming, parallel cell pass has closed most of the gap
-the pre-#87 cell pass left ([Results (wide)](#results-wide)'s own, otherwise-idle 0.11.0 figure was
-11.8x here at the wide size: 5.460 s against this section's 461 ms phase-(b) figure) --
-`diff_tables` 0.11.1 re-read and re-hashed the whole table three times over (0.13.0 reads the right
-once and the left twice), against polars' single in-memory pass. The full ~5 GB wide pair (16.875M
-rows) was not measured here (see [Wide fixture pair](#wide-fixture-pair-84) for `diff_tables`'s own
-cost at that size, about 24 s on 0.11.1, down from about 150 s pre-#87). `bench_tables.py`'s
+1.592 s vs. 461 ms). The full ~5 GB wide pair (16.875M rows) was not measured here (see
+[Results (wide)](#results-wide) for `diff_tables`'s own cost at that size). `bench_tables.py`'s
 correctness precheck (`rows_added`/`rows_removed`/`cells_changed`/`duplicate_keys` against
 `generate_fixtures.py`'s manifest) passes for `polars_spike.py`'s counts on both fixtures, matching
 `_polars_counts`'s existing baseline exactly (narrow: 10,000/10,000/20,000/0; wide:
@@ -478,40 +470,37 @@ correctness precheck (`rows_added`/`rows_removed`/`cells_changed`/`duplicate_key
 
 ## Disk usage
 
-Both fixture pairs (narrow and wide) at both sizes, all resident at once, from the two "Fixture
-pair" tables above: narrow 1M (269.4 MB) + narrow full (9,970.9 MB) + wide 1M (593.3 MB) + wide
+Both fixture pairs (narrow and wide) at both sizes, all resident at once, from the narrow and wide
+fixture tables above: narrow 1M (269.4 MB) + narrow full (9,970.9 MB) + wide 1M (593.3 MB) + wide
 full (10,011.4 MB) — about 20.8 GB, plus `bench_raw/`'s per-run JSON files (under 1 MB total,
 measured at 192 KB for the wide runs alone). Nothing under `perf/arrow/fixtures/` or
-`perf/arrow/bench_raw/` is committed. On 0.13.0 the full-size `wide` run's peak resident memory for
-`onix` alone is about 28.8 GB at the default 18 threads (33.1 GB on 0.11.2, about 67 GB on the pre-#87
-cell pass; see the results tables); size the runner accordingly.
+`perf/arrow/bench_raw/` is committed. The full-size `wide` run's peak resident memory for `onix`
+alone is about 28.8 GB at the default 18 threads (see the results tables); size the runner
+accordingly.
+
+Measured on `deepdiff-rs` 0.13.0, 2026-09-24, 2, 18 and 64 threads.
 
 `onix` also uses temporary disk (an anonymous `tempfile`, unlinked at creation, so nothing is left
 on disk on abnormal exit; on Linux this is typically a RAM-backed `tmpfs`): the two input spools
 (both inputs' decoded Arrow IPC, resident for the whole diff so a side can be re-read) plus both
-sides' changed value rows spilled by key-hash partition (on 0.13.0 the right's while it is hashed
-and the left's while it is re-read, both resident until the cell pass ends). With every file
-resident at once that is about 23.8 GB for the full `wide` pair (12.26 GB of input spool, the
-inputs' uncompressed Arrow IPC size, plus 11.51 GB of spill at 2, 18 and 64 threads alike) and 11.9
-GB for the full `narrow` pair (11.66 GB plus 0.23 GB). The partition spill is compact: the two Arrow
-types whose `take` retains data beyond the selected rows are decoded first -- byte-view columns
-(`Utf8View`/`BinaryView`, whose `take` keeps the source's whole variadic buffers) are cast to their
-large i64-offset non-view type (`LargeUtf8`/`LargeBinary`, not the i32-offset `Utf8`/`Binary`, whose
-~2 GiB offset ceiling a single input batch's retained view buffers can exceed), and dictionaries
-(what polars and DuckDB emit for strings, whose `take` keeps the whole values array) are decoded to
-their value type. Without these a spilled partition would carry the entire side's view data or
-dictionary and the spill would grow with the partition count; measured with a 40,000-row
-all-distinct dictionary string column, the total spill is 6.6 / 57.7 / 204.6 MB at 2 / 18 / 64
-partitions before the decode versus 3.19 / 3.20 / 3.22 MB after. A `Utf8View` column shows the same
-flat shape (3.36 / 3.36 / 3.38 MB at 2 / 18 / 64, casting to `LargeUtf8`), as does a dictionary
-whose value type is itself a `Utf8View` (3.36 / 3.36 / 3.38 MB, the dictionary decode composing with
-the view cast). `LargeUtf8`, `LargeBinary`, and `FixedSizeBinary` already compact on `take` and
-spill as themselves (measured flat, 3.35 MB at 2 vs 64 for `LargeUtf8`). With the decode the spill
-is `changed rows x total value-column width` (plus, on the parallel path, the first right row of
-each key the left holds once that a later right batch repeats), independent of the thread/partition
-count: the full-size `wide` pair's whole-process peak RSS (input tables + partition spill + working
-set) is about 40 GB at 2 threads, 29 GB at 18, and 31 GB at 64 on 0.13.0 (46, 33 and 34 GB on
-0.11.2) -- it falls as more, smaller partitions shrink the resident chunk, and does not blow up with
-the thread count (before the byte-view cast it would reach about 97 GB at 64 threads). Bound the
-changed fraction and the total value-column width for untrusted input. A full temp filesystem raises
-`ValueError` naming `TMPDIR`.
+sides' changed value rows spilled by key-hash partition (both resident until the cell pass ends).
+With every file resident at once that is about 23.8 GB for the full `wide` pair (12.26 GB of input
+spool, the inputs' uncompressed Arrow IPC size, plus 11.51 GB of spill at 2, 18 and 64 threads
+alike) and 11.9 GB for the full `narrow` pair (11.66 GB plus 0.23 GB). The partition spill is
+compact: `spill_field_type`'s doc in `crates/onix-arrow/src/row_diff.rs` states which column types
+are rewritten before the spill and why.
+
+Measured on `deepdiff-rs` 0.11.1, 2026-09-06, 2 / 18 / 64 partitions: with a 40,000-row all-distinct
+dictionary string column, the total spill is 6.6 / 57.7 / 204.6 MB before the decode versus 3.19 /
+3.20 / 3.22 MB after. A `Utf8View` column shows the same flat shape (3.36 / 3.36 / 3.38 MB at 2 / 18
+/ 64, casting to `LargeUtf8`), as does a dictionary whose value type is itself a `Utf8View` (3.36 /
+3.36 / 3.38 MB, the dictionary decode composing with the view cast). `LargeUtf8`, `LargeBinary`, and
+`FixedSizeBinary` already compact on `take` and spill as themselves (measured flat, 3.35 MB at 2 vs
+64 for `LargeUtf8`). With the decode the spill is `changed rows x total value-column width` (plus,
+on the parallel path, the first right row of each key the left holds once that a later right batch
+repeats), independent of the thread/partition count: the full-size `wide` pair's whole-process peak
+RSS (input tables + partition spill + working set) is about 40 GB at 2 threads, 29 GB at 18, and 31
+GB at 64 on 0.13.0 (46, 33 and 34 GB on 0.11.2) -- it falls as more, smaller partitions shrink the
+resident chunk, and does not blow up with the thread count (before the byte-view cast it would reach
+about 97 GB at 64 threads). Bound the changed fraction and the total value-column width for
+untrusted input. A full temp filesystem raises `ValueError` naming `TMPDIR`.
