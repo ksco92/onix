@@ -190,48 +190,32 @@ impl TableDiff {
 
     /// Rows present only on the right (added), in the right table's schema and
     /// excluding duplicate keys.
-    ///
-    /// # Errors
-    ///
-    /// Never fails; the [`Result`] keeps the signature uniform with the other
-    /// row-level members.
-    pub fn rows_added(&self) -> Result<RecordBatch, TableDiffError> {
-        Ok(self.rows.rows_added.clone())
+    #[must_use]
+    pub fn rows_added(&self) -> RecordBatch {
+        self.rows.rows_added.clone()
     }
 
     /// Rows present only on the left (removed), in the left table's schema and
     /// excluding duplicate keys.
-    ///
-    /// # Errors
-    ///
-    /// Never fails; the [`Result`] keeps the signature uniform with the other
-    /// row-level members.
-    pub fn rows_removed(&self) -> Result<RecordBatch, TableDiffError> {
-        Ok(self.rows.rows_removed.clone())
+    #[must_use]
+    pub fn rows_removed(&self) -> RecordBatch {
+        self.rows.rows_removed.clone()
     }
 
     /// Per-cell changes for rows present on both sides with differing non-key
     /// values: the key columns, then `column`, `old_value`, `new_value`, and
     /// `change`. One row per changed cell, ordered by the canonical string
     /// rendering of the key columns, then left-schema column order.
-    ///
-    /// # Errors
-    ///
-    /// Never fails; the [`Result`] keeps the signature uniform with the other
-    /// row-level members.
-    pub fn cells_changed(&self) -> Result<RecordBatch, TableDiffError> {
-        Ok(self.rows.cells_changed.clone())
+    #[must_use]
+    pub fn cells_changed(&self) -> RecordBatch {
+        self.rows.cells_changed.clone()
     }
 
     /// Keys appearing more than once on either side: the key columns, then
     /// `left_count` and `right_count`.
-    ///
-    /// # Errors
-    ///
-    /// Never fails; the [`Result`] keeps the signature uniform with the other
-    /// row-level members.
-    pub fn duplicate_keys(&self) -> Result<RecordBatch, TableDiffError> {
-        Ok(self.rows.duplicate_keys.clone())
+    #[must_use]
+    pub fn duplicate_keys(&self) -> RecordBatch {
+        self.rows.duplicate_keys.clone()
     }
 }
 
@@ -482,9 +466,9 @@ mod tests {
         .unwrap();
         let diff = TableDiff::new(Vec::new(), rows);
 
-        assert_eq!(diff.rows_added().unwrap().num_rows(), 1);
-        assert_eq!(diff.rows_removed().unwrap().num_rows(), 0);
-        assert_eq!(diff.duplicate_keys().unwrap().num_rows(), 0);
+        assert_eq!(diff.rows_added().num_rows(), 1);
+        assert_eq!(diff.rows_removed().num_rows(), 0);
+        assert_eq!(diff.duplicate_keys().num_rows(), 0);
     }
 
     #[test]
@@ -498,6 +482,6 @@ mod tests {
         .unwrap();
         let diff = TableDiff::new(Vec::new(), rows);
 
-        assert_eq!(diff.cells_changed().unwrap().num_rows(), 2);
+        assert_eq!(diff.cells_changed().num_rows(), 2);
     }
 }

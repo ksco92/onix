@@ -289,20 +289,14 @@ impl TableDiff {
 
     /// Rows present only on the right (added), in the right table's schema and
     /// excluding duplicate keys.
-    fn rows_added(&self) -> PyResult<ArrowTable> {
-        self.core
-            .rows_added()
-            .map(ArrowTable::new)
-            .map_err(|e| map_table_error(&e))
+    fn rows_added(&self) -> ArrowTable {
+        ArrowTable::new(self.core.rows_added())
     }
 
     /// Rows present only on the left (removed), in the left table's schema and
     /// excluding duplicate keys.
-    fn rows_removed(&self) -> PyResult<ArrowTable> {
-        self.core
-            .rows_removed()
-            .map(ArrowTable::new)
-            .map_err(|e| map_table_error(&e))
+    fn rows_removed(&self) -> ArrowTable {
+        ArrowTable::new(self.core.rows_removed())
     }
 
     /// Per-cell changes for rows present on both sides with differing non-key
@@ -311,20 +305,14 @@ impl TableDiff {
     /// (`value_changed`, `type_changed`, `became_null`, or `became_non_null`).
     /// One row per changed cell, ordered by the canonical string rendering of
     /// the key columns, then left-schema column order.
-    fn cells_changed(&self) -> PyResult<ArrowTable> {
-        self.core
-            .cells_changed()
-            .map(ArrowTable::new)
-            .map_err(|e| map_table_error(&e))
+    fn cells_changed(&self) -> ArrowTable {
+        ArrowTable::new(self.core.cells_changed())
     }
 
     /// Keys appearing more than once on either side: the key columns, then
     /// `left_count` and `right_count`.
-    fn duplicate_keys(&self) -> PyResult<ArrowTable> {
-        self.core
-            .duplicate_keys()
-            .map(ArrowTable::new)
-            .map_err(|e| map_table_error(&e))
+    fn duplicate_keys(&self) -> ArrowTable {
+        ArrowTable::new(self.core.duplicate_keys())
     }
 
     fn __repr__(&self) -> String {

@@ -57,7 +57,7 @@
 //! // id 1 is only on the left (removed), id 3 only on the right (added).
 //! assert_eq!(diff.summary().rows_removed, 1);
 //! assert_eq!(diff.summary().rows_added, 1);
-//! assert_eq!(diff.rows_added().unwrap().num_rows(), 1);
+//! assert_eq!(diff.rows_added().num_rows(), 1);
 //! ```
 
 mod error;
