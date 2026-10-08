@@ -8,14 +8,9 @@ sizes: the 1M-row fixture and the full ~5 GB fixture (`generate_fixtures.py`'s
 whole-process high-water mark, so only a fresh process can attribute peak RSS
 to one tool's run), reporting wall clock, peak RSS, and CPU seconds (user +
 system). Medians are taken over 11 runs at the 1M size and 5 runs at the full
-size (a single full-size run already takes tens of seconds; more runs would
-not fit a foreground session). Every run's raw metrics, plus the pair's
-SHA-256 checksums, are written to `bench_raw/<size>/<tool>_<run>.json`.
-This script's `Measurement`/`_normalize_maxrss` duplicate rather
-than import their `bench_bindings.py` counterparts: it runs from `perf/arrow`
-with only that directory on `sys.path`, the same cross-directory-import
-constraint `perf/_common.py`'s own docstring documents for this repo's other
-single-file perf scripts.
+size (a full-size run takes tens of seconds). Every run's raw metrics, plus the
+pair's SHA-256 checksums, are written to `bench_raw/<size>/<tool>_<run>.json`.
+It runs from `perf/arrow`, so it cannot import `bench_bindings.py`.
 
 # Correctness before timing
 
@@ -50,10 +45,9 @@ compares only row/cell counts, never schema.
 
 All three tools read the same two parquet files from disk inside the timed
 window (no side gets a warm, pre-loaded table). The DuckDB oracle always
-persists its five result tables to a scratch directory as part of its
-existing, unmodified contract (`oracle_duckdb.run`); the scratch directory's
-creation and deletion are excluded from the timed window (mkdtemp/rmtree are
-not part of "how long the diff took"), but the writes themselves are not.
+persists its five result tables to a scratch directory
+(`oracle_duckdb.run`'s contract); the directory's creation and deletion are
+outside the timed window, the writes inside it.
 Neither the polars script nor `diff_tables` writes its result to disk.
 
 # The `wide` kind (#84)
