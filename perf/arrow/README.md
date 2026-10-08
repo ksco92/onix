@@ -141,4 +141,5 @@ the narrow and wide fixture pairs (`--kind narrow`/`--kind wide`), at 1M rows an
 its own module docstring is the single home for the methodology, correctness check, and fairness
 rules. Results for both kinds, and both fixture pairs' disk usage (about 20.8 GB for all four
 sizes at once), are in [`RESULTS.md`](RESULTS.md). The full-size `wide` run peaks at about 28.8 GB
-of resident memory for `onix` alone at the default 18 threads; size the runner accordingly before starting it.
+of resident memory for `onix` alone at the default 18 threads; size the runner accordingly
+before starting it.
