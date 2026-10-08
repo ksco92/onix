@@ -21,11 +21,11 @@ use crate::errors::map_diff_error;
 /// rather than risking a native stack overflow the interpreter cannot catch.
 pub(crate) const MAX_DEPTH_CEILING: usize = 20_000;
 
-/// Native stack per level of the recursive diff engine, rounded up from the
-/// debug `list` shape (about 4,000 bytes) of
-/// `crates/onix-core/examples/stack_frame_cost.rs`;
-/// [`STACK_SAFETY_MARGIN`] covers its worst shape, `pairing` (about 6,700).
-const PER_LEVEL_STACK_BYTES: usize = 4_096;
+/// Native stack per level of the recursive diff engine: 1.5 times the debug
+/// worst case, the `pairing` shape (6,721 bytes/level on macOS and Linux) of
+/// `crates/onix-core/examples/stack_frame_cost.rs`. The example's CI step
+/// fails when a shape exceeds this value.
+const PER_LEVEL_STACK_BYTES: usize = 10_240;
 
 /// Extra multiplier over the bare `ceiling * per-level` figure, so the worker
 /// stack is comfortably larger than the deepest recursion the ceiling
@@ -33,15 +33,17 @@ const PER_LEVEL_STACK_BYTES: usize = 4_096;
 const STACK_SAFETY_MARGIN: usize = 4;
 
 /// The diff worker thread's stack size: reserved virtual address space,
-/// committed lazily, sized for [`MAX_DEPTH_CEILING`] with a
-/// [`STACK_SAFETY_MARGIN`]-fold margin.
+/// committed lazily. At [`MAX_DEPTH_CEILING`] it is 819,200,000 bytes
+/// (781.25 MiB), 6.1 times the debug `pairing` cost of those levels.
 const WORKER_STACK_BYTES: usize = MAX_DEPTH_CEILING * PER_LEVEL_STACK_BYTES * STACK_SAFETY_MARGIN;
 
 /// Depth up to which the recursive operations (the diff itself, plus
 /// serializing or dropping its result) may run directly on the calling
 /// thread; anything deeper is routed to the sized worker. Sized for thread
-/// stacks of 512 KiB and up, the common server-executor size; a thread
-/// configured near Python's 32 KiB minimum can still overflow on inline work.
+/// stacks of 512 KiB and up, the common server-executor size: 32 levels of
+/// the debug `pairing` cost (6,721 bytes/level, the example above) is
+/// 215,072 bytes. A thread configured near Python's 32 KiB minimum can still
+/// overflow on inline work.
 const MAX_INLINE_DEPTH: usize = 32;
 
 /// Resolves the two Python-supplied diff parameters into a [`DiffOptions`],
