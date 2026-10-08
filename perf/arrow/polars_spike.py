@@ -3,21 +3,6 @@ per-cell `cells_changed` report, not just `bench_tables.py`'s
 `_polars_counts` join-based counts (no per-cell rows, no rendering, no
 order, a duplicate key fanned out rather than reported) (#93).
 
-`prepare` runs the same anti/inner joins as `_polars_counts`, null-safe
-(`nulls_equal=True`, renamed from `join_nulls` in 1.24, onix's own
-null-key rule); a key occurring more than once on either side is found
-first (`group_by(key).len()`), excluded before any join, and reported with
-its per-side counts, matching onix's duplicate-key handling.
-`cells_changed_table` compares every common non-key column (left-schema
-order, `_compare_columns`) with `.ne_missing()` (like SQL's `IS DISTINCT
-FROM`), casts both sides to `Utf8` for the differing rows, and
-concatenates the per-column fragments; `change` is
-`became_null`/`became_non_null` on a null transition, else `type_changed`
-if the column's polars dtype differs between the two sides (a cheap,
-schema-level check) else `value_changed`. The sort key is each key column
-cast to `Utf8` (nulls first, polars' `nulls_last` default) then column
-rank -- onix's record order (`row_diff.rs`'s `diff_cells` doc).
-
 Divergences from onix (the point is the timing ceiling, not byte parity):
 `_render` is polars' own formatter, not onix's Python `repr`/`str`
 rendering (digit count or format can differ; `Binary` hex-encodes and

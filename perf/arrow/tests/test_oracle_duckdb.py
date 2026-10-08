@@ -33,8 +33,6 @@ def test_oracle_counts_match_sidecar(n_rows: int, tmp_path: Path) -> None:
     assert summary["rows_removed"] == manifest["rows_deleted"]
     assert summary["duplicate_keys"] == manifest["duplicate_keys"]
     assert summary["cells_changed"] == manifest["rows_modified_amount"] + manifest["rows_modified_payload"]
-    # `category`'s dictionary retype is invisible to a SQL-only oracle (see the
-    # module docstring); only `ts` and `note` show up in `schema_changes`.
     assert summary["schema_changes"] == len(manifest["schema_changes"]) - 1
 
 

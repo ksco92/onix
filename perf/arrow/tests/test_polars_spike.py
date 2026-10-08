@@ -26,8 +26,7 @@ SEED = 246810
 def test_cells_changed_table_matches_diff_tables_shape(tmp_path: Path) -> None:
     """Same row count and the same set of `(id, column)` pairs as `diff_tables`, at 100k rows.
 
-    Values may differ in rendering: `cells_changed_table`'s docstring documents where its
-    `Utf8`-cast rendering diverges from onix's own Python-rule rendering.
+    Values may differ in rendering; `polars_spike.py`'s module docstring documents where.
     """
     fixture_dir = tmp_path / "fixture"
     generate(100_000, SEED, fixture_dir)

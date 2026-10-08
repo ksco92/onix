@@ -70,8 +70,7 @@ own module docstring. Wider rows mean far fewer of them at the same size:
 | 2,000,000 | 592.8 MB | 593.8 MB | 43.1 s |
 | 16,875,000 (default) | 5,001.5 MB | 5,009.9 MB | 7 min 47 s |
 
-Row density (≈296 bytes/row for `a.parquet`, after adding the
-float16/decimal32/decimal64/view/fixed-size-binary columns) is linear over
+Row density (≈296 bytes/row for `a.parquet`) is linear over
 the same range, so `WIDE_DEFAULT_ROWS` was solved the same way as
 `DEFAULT_ROWS` above.
 

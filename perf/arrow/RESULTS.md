@@ -647,8 +647,8 @@ The [Results](#results) and [Wide fixture pair](#wide-fixture-pair-84) tables ab
 only, no `cells_changed` table, no rendering, no order (see `bench_tables.py`'s module docstring's
 "What the polars baseline does and does not see"). This section measures the ceiling instead: what
 an end-to-end polars-backed pipeline costs once it must also produce that long-format,
-duplicate/null-key-aware, rendered, ordered `cells_changed` table -- the method, and where its
-rendering diverges from onix's, are documented in
+duplicate/null-key-aware, rendered, ordered `cells_changed` table -- where its
+rendering diverges from onix's is documented in
 [`perf/arrow/polars_spike.py`](perf/arrow/polars_spike.py)'s module docstring.
 
 Environment: same machine and versions as [Environment](#environment) above (Apple M5 Max, 18

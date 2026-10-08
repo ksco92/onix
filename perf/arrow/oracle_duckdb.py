@@ -3,10 +3,9 @@
 Computes, using DuckDB SQL only (joins, `GROUP BY`, and set membership --
 no row-by-row Python), what a correct table diff of `a.parquet`/`b.parquet`
 must report: schema differences, rows added, rows removed, changed rows
-(long format: key, column, old_value, new_value, change), and duplicate keys. This
-serves two purposes later in the project: a correctness reference the Rust
-`onix-arrow` crate's own results are checked against (#39, #40), and one of
-two speed baselines a data engineer would otherwise reach for (#43).
+(long format: key, column, old_value, new_value, change), and duplicate keys.
+Used as the correctness reference for onix-arrow and as a speed baseline in
+`bench_tables.py`.
 
 # Value-comparison semantics (for the Rust implementation to match)
 
@@ -15,66 +14,32 @@ two speed baselines a data engineer would otherwise reach for (#43).
   which would silently drop a null-involving row out of a `WHERE` filter
   instead of reporting it as changed. `IS DISTINCT FROM` treats two `NULL`s
   as equal (unchanged) and `NULL` vs. non-`NULL` as different -- the
-  `became_null`/`became_non_null` cases #40 defines. This fixture has no
-  `NULL` non-key cells (every base column is always populated on both
-  sides), so the rule is documented but not exercised by this pair; a
-  future fixture that adds nullable cells should add a duplicate-run
-  determinism check that also probes `IS DISTINCT FROM`'s branches.
-* **Null keys.** Per #39, "null in a key column counts as a distinct key
-  value that equals itself" -- a null-keyed row must still be matched
-  against its counterpart on the other side, not treated as a non-match.
-  Plain equality (`=`, and `USING (...)`'s implicit `=`) breaks this: `NULL
-  = NULL` is `UNKNOWN`, so a join on `=` silently excludes every null-keyed
-  row from a match, reporting it as both added and removed, and reports a
-  null key duplicated on both sides as two separate `duplicate_keys` rows
-  instead of one with combined counts. Every join on the key columns in
-  this module (`_build_key_summary`, `_write_cells_changed`, and `run`'s
-  added/removed queries) therefore uses `_null_safe_join`'s `IS NOT
-  DISTINCT FROM` predicate per key column, not `USING`/`=`. `GROUP BY`
-  needs no such fix: it already groups `NULL`s together per standard SQL
-  grouping semantics, so `key_summary`'s per-side row counts are correct
-  as soon as the join that reunites the two sides' counts is null-safe. A
-  composite key matches null-safely component-by-component, so one `NULL`
-  component doesn't prevent the other components from still requiring an
-  exact match.
-* **Decimals.** `amount` is `DECIMAL(18,4)` on both sides here, so DuckDB
-  compares exact scaled integers with no floating-point rounding --
-  `IS DISTINCT FROM` on two same-scale decimals is exact. A pair whose
-  scale actually changes between sides would need an explicit `CAST` to a
-  common scale before comparing (not exercised by this fixture, since
-  `amount`'s scale never changes in the mutation mix -- see
-  `generate_fixtures.py`'s module docstring).
-* **Timestamps across units.** `a.ts` is `timestamp[us, UTC]`; `b.ts` is
+  `became_null`/`became_non_null` cases #40 defines.
+* **Null keys.** Per #39, a null key equals itself, so a null-keyed row matches
+  its counterpart on the other side. Every key join uses `_null_safe_join`,
+  never `=`/`USING`; a composite key matches per component.
+* **Decimals.** `IS DISTINCT FROM` on DECIMAL is exact (scaled integers, no
+  floating-point rounding). `narrow`'s `amount` is `DECIMAL(18,4)` on both
+  sides; `wide`'s `dec_scale4` is `(18,4)` on `a` and `(18,6)` on `b`, which
+  DuckDB promotes to a common scale implicitly, so the query needs no `CAST`.
+* **Timestamps across units.** `narrow`'s `a.ts` is `timestamp[us, UTC]`; `b.ts` is
   `timestamp[ms, UTC]`. For *value* comparisons, DuckDB's parquet reader
   normalizes both to its own internal microsecond-precision `TIMESTAMP WITH
   TIME ZONE` at read time, so `a.ts IS DISTINCT FROM b.ts` already compares
   by instant with no explicit unit-normalization cast needed in the query
-  text -- confirmed by `tests/test_oracle_duckdb.py`'s same-instant and
-  different-sub-millisecond-instant timestamp tests. That same
-  normalization, however, means the unit change is invisible at the
-  *schema* level through `DESCRIBE`/`pragma_table_info` (both columns
-  report the identical DuckDB type, confirmed empirically); `_schema_diff`
+  text. That same normalization, however, means the unit change is
+  invisible at the *schema* level through `DESCRIBE`/`pragma_table_info`
+  (both columns report the identical DuckDB type); `_schema_diff`
   below reads `parquet_schema()`'s `converted_type` column instead, which
   does still show `TIMESTAMP_MICROS` vs. `TIMESTAMP_MILLIS`, because that
   reports the file's actual stored Parquet annotation rather than DuckDB's
   own normalized SQL type.
-* **Floats.** This fixture has no `FLOAT`/`DOUBLE` column (`amount` is a
-  fixed-point `DECIMAL`), so this oracle carries no opinion on float
-  equality (significant digits, signed zero, NaN); a fixture that adds a
-  float column must state its own comparison rule before this oracle can
-  be trusted for it.
-* **Dictionary encoding is invisible here.** Parquet's own type system has
-  no "dictionary-encoded string" logical type -- it is purely an Arrow-side
-  annotation that `pyarrow` round-trips through a private `ARROW:schema`
-  key in the file's footer metadata, which DuckDB's parquet reader does not
-  decode. `category`'s `string -> dictionary<int32, string>` retype
-  (`generate_fixtures.py`) is therefore **not** one of the schema changes
-  this oracle can detect over SQL: `DESCRIBE`/`pragma_table_info` reports
-  `category` as `VARCHAR` on both sides, both before and after the retype,
-  because that is genuinely what the Parquet file's physical schema says.
-  This is an accepted, structural limitation of a SQL-only, Parquet-reading
-  oracle, not a bug; the dictionary retype is instead verified directly via
-  `pyarrow` in `tests/test_oracle_duckdb.py`.
+* **Floats.** `IS DISTINCT FROM` is never asked to compare a NaN or -0.0
+  against a different value; the `wide` generator's mutation rule in
+  `generate_fixtures.py` guarantees it.
+* **Dictionary encoding is invisible here.** `category`'s retype to
+  `dictionary<int32, string>` is an Arrow-only annotation DuckDB's parquet
+  reader ignores: `DESCRIBE` reports `VARCHAR` on both sides.
 * **Timestamp zone-awareness.** DuckDB normalizes both sides to one instant
   type before comparing, so `wide`'s `ts_cast` zone drop (#84) is invisible
   at the value level here (onix reports `type_changed` instead);
@@ -91,9 +56,7 @@ Usage::
 Writes `<out>/schema_diff.parquet`, `<out>/rows_added.parquet`,
 `<out>/rows_removed.parquet`, `<out>/cells_changed.parquet`, and
 `<out>/duplicate_keys.parquet`, and prints a JSON summary of counts to
-stdout (comparable against `generate_fixtures.py`'s sidecar `manifest.json`,
-which it matches exactly at 1k, 100k, and 1M rows -- see
-`tests/test_oracle_duckdb.py`).
+stdout (comparable against `generate_fixtures.py`'s sidecar `manifest.json`).
 """
 
 from __future__ import annotations
@@ -166,14 +129,7 @@ def _null_safe_join(alias_a: str, alias_b: str, key_columns: list[str]) -> str:
 def _schema_diff(con: duckdb.DuckDBPyConnection, left: Path, right: Path) -> list[tuple[str, str | None, str | None, str]]:
     """
     Compare `left`'s and `right`'s top-level column types via a full outer
-    join on column name, using `parquet_schema()` rather than
-    `DESCRIBE`/`pragma_table_info`: DuckDB normalizes both `timestamp[us]`
-    and `timestamp[ms]` to the same internal `TIMESTAMP WITH TIME ZONE` SQL
-    type (verified empirically -- see the module docstring), which would
-    hide a real unit change from a `DESCRIBE`-based diff. `parquet_schema()`
-    instead reports each file's actual stored Parquet annotation
-    (`converted_type`, e.g. `TIMESTAMP_MICROS` vs. `TIMESTAMP_MILLIS`),
-    which does reflect it.
+    join on column name, using `parquet_schema()` (see the module docstring).
 
     :param con: Connection to run the query on.
     :param left: Path to the base (`a`) parquet file.
