@@ -79,11 +79,11 @@ fn spool_input(obj: &Bound<'_, PyAny>) -> PyResult<SpooledInput> {
 /// exist on both sides. `threads` sets the number of worker threads the row
 /// diff uses; `None` (the default) uses the machine's available parallelism,
 /// `1` runs single-threaded, and a value below 1 or above
-/// [`onix_arrow::MAX_THREADS`] (1024) is a `ValueError`. The diff runs
-/// single-threaded (ignoring `threads`) only when both sides stay under 50,000
-/// rows and under 64 MB of decoded data; either bound reached first uses the
-/// requested threads. The output is identical at any thread count. The result
-/// is a [`TableDiff`].
+/// 1024 (`MAX_THREADS` in the `onix-arrow` crate of the onix repository) is a
+/// `ValueError`. The diff runs single-threaded (ignoring `threads`) only when
+/// both sides stay under 50,000 rows and under 64 MB of decoded data; either
+/// bound reached first uses the requested threads. The output is identical at
+/// any thread count. The result is a `TableDiff`.
 #[pyfunction]
 #[pyo3(signature = (left, right, *, key, threads=None))]
 pub(crate) fn diff_tables(
@@ -196,7 +196,7 @@ fn map_table_error(error: &TableDiffError) -> PyErr {
     }
 }
 
-/// The result of [`diff_tables`]: the schema diff and the row-level members
+/// The result of `diff_tables`: the schema diff and the row-level members
 /// (`rows_added`, `rows_removed`, `cells_changed`, `duplicate_keys`).
 #[pyclass(module = "deepdiff_rs", name = "TableDiff", frozen)]
 pub(crate) struct TableDiff {
@@ -244,7 +244,7 @@ impl TableDiff {
     /// The schema diff as an Arrow-exportable table: it implements
     /// `__arrow_c_stream__` (polars needs no pyarrow to consume it; pandas
     /// needs pyarrow installed, for its own reasons — see this module's doc)
-    /// and offers [`ArrowTable::to_pyarrow`].
+    /// and offers `ArrowTable.to_pyarrow`.
     #[getter]
     fn schema_arrow(&self) -> ArrowTable {
         ArrowTable::new(self.schema_batch.clone())
@@ -349,7 +349,7 @@ fn schema_change_dict<'py>(py: Python<'py>, change: &SchemaChange) -> PyResult<B
 /// pyarrow, polars, and (with pyarrow installed) pandas can all consume it —
 /// see this module's doc for why pandas' own consuming code needs pyarrow
 /// even though this side of the exchange needs no third-party package.
-/// [`ArrowTable::to_pyarrow`] is a convenience for when pyarrow is present.
+/// `ArrowTable.to_pyarrow` is a convenience for when pyarrow is present.
 #[pyclass(module = "deepdiff_rs", name = "ArrowTable", frozen)]
 pub(crate) struct ArrowTable {
     batch: RecordBatch,

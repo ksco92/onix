@@ -13,7 +13,8 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 /// # Errors
 ///
 /// - `ValueError` if `a` or `b` fails to parse as JSON, or if `max_depth`
-///   exceeds `deepdiff_rs.MAX_DEPTH_CEILING` (see [`crate::guard`]).
+///   exceeds `deepdiff_rs.MAX_DEPTH_CEILING` (see `crates/onix-py/src/guard.rs` in the
+///   onix repository).
 /// - `deepdiff_rs.MaxDepthError` if diffing would recurse past `max_depth`.
 #[pyfunction]
 #[pyo3(signature = (a, b, ignore_order=false, max_depth=None))]
