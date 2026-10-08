@@ -9,7 +9,8 @@
 //! the rationale behind the depth/node/case-count bounds and the fixed seed.
 
 use proptest::prelude::*;
-use proptest::test_runner::{Config, RngSeed};
+use proptest::strategy::ValueTree;
+use proptest::test_runner::{Config, RngSeed, TestRunner};
 use serde_json::{Map, Number, Value};
 
 use onix_core::{DiffOptions, diff_with_options};
@@ -69,16 +70,13 @@ fn arb_json_value() -> impl Strategy<Value = Value> {
     )
 }
 
-/// A list of [`arb_json_value`]s, plus a Fisher-Yates-style shuffle
-/// permutation of the same length (proptest's own `Just`-index shuffle
-/// strategy, not a hand-rolled RNG) — used to build `b` as a genuine
-/// reordering of `a`, never a resampled list that merely happens to look
-/// similar.
+/// A list of [`arb_json_value`]s and a uniformly shuffled permutation of its indices.
 fn arb_list_and_permutation() -> impl Strategy<Value = (Vec<Value>, Vec<usize>)> {
     proptest::collection::vec(arb_json_value(), 0..10).prop_flat_map(|list| {
         let len = list.len();
         Just(list).prop_flat_map(move |list| {
-            proptest::sample::subsequence((0..len).collect::<Vec<_>>(), len)
+            Just((0..len).collect::<Vec<_>>())
+                .prop_shuffle()
                 .prop_map(move |perm| (list.clone(), perm))
         })
     })
@@ -96,6 +94,17 @@ fn ignore_order_diff_ok(a: &Value, b: &Value) -> Value {
     )
     .expect("generated values are far under DEFAULT_MAX_DEPTH")
     .to_json_value()
+}
+
+#[test]
+fn permutation_strategy_draws_non_identity_orders() {
+    let mut runner = TestRunner::new(config());
+    let strategy = arb_list_and_permutation();
+    let non_identity = (0..PROPTEST_CASES)
+        .map(|_| strategy.new_tree(&mut runner).unwrap().current().1)
+        .filter(|perm| perm.len() >= 2 && perm.iter().enumerate().any(|(i, &p)| i != p))
+        .count();
+    assert!(non_identity > 0, "every drawn permutation was the identity");
 }
 
 proptest! {

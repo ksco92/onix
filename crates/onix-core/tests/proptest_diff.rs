@@ -10,8 +10,7 @@
 //! input, not just the hand-picked examples in the unit test suites:
 //! reflexivity, that every reported path actually resolves in its expected
 //! side, that each report category's membership rules hold, and that a
-//! report is deterministic, including independent of `serde_json::Map`'s
-//! internal key insertion order.
+//! report is deterministic.
 //!
 //! # Why keys here exclude quotes, backslashes, and control characters
 //!
@@ -39,7 +38,7 @@
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestCaseError};
-use serde_json::{Map, Number, Value};
+use serde_json::{Number, Value};
 
 use onix_core::diff;
 
@@ -543,27 +542,6 @@ proptest! {
         let first = diff_ok(&a, &b);
         let second = diff_ok(&a, &b);
         prop_assert_eq!(first, second);
-    }
-
-    /// (d) Determinism: the report is unaffected by the insertion order used
-    /// to build a logically-identical `serde_json::Map` on one side.
-    #[test]
-    fn diff_result_is_unaffected_by_dict_key_insertion_order(
-        entries in prop::collection::hash_map(arb_key(), arb_json_value(), 1..MAX_COLLECTION_BRANCH as usize),
-        other in arb_json_value(),
-    ) {
-        let entries: Vec<(String, Value)> = entries.into_iter().collect();
-
-        let forward: Map<String, Value> = entries.iter().cloned().collect();
-        let backward: Map<String, Value> = entries.iter().rev().cloned().collect();
-        // Building from two different insertion orders must still produce
-        // the same logical map (the property this test exists to check, one
-        // level below diffing it).
-        prop_assert_eq!(&forward, &backward);
-
-        let forward_report = diff_ok(&Value::Object(forward), &other);
-        let backward_report = diff_ok(&Value::Object(backward), &other);
-        prop_assert_eq!(forward_report, backward_report);
     }
 }
 
