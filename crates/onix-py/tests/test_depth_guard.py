@@ -2,9 +2,7 @@
 
 Every fixture here is built iteratively (a `for` loop wrapping a leaf in a
 new single-item list, never Python-side recursion) so building the fixture
-itself never hits Python's own recursion limit -- the whole point is to
-prove `deepdiff_rs` itself stays safe on deep input, independent of how the
-fixture is constructed.
+itself never hits Python's own recursion limit.
 """
 
 import json
@@ -123,14 +121,8 @@ def test_max_depth_error_is_a_value_error_subclass() -> None:
 
 
 def test_deep_equal_input_also_raises_at_conversion_time() -> None:
-    """
-    Documented limitation: unlike `onix_core`'s own `diff_with_max_depth`
-    (which lets two *equal* inputs of any depth diff cleanly regardless of
-    `max_depth`), the bindings' Python-object-to-`Value` conversion runs
-    before equality can be known and is bounded by the same `max_depth`
-    budget on its own -- so an equal-but-adversarially-deep pair still
-    raises here (see `docs/design/depth-budget.md`'s "Equal inputs of any depth"
-    section).
+    """Equal deep inputs still raise: conversion is bounded by `max_depth` before
+    equality is known (`docs/design/depth-budget.md`, "Equal inputs of any depth").
     """
     value = _nested_list(100_000, leaf=1)
 
@@ -154,7 +146,7 @@ def test_max_depth_boundary_accepts_exactly_and_rejects_one_more() -> None:
 
 
 def test_default_max_depth_matches_onix_core() -> None:
-    """The constructor's default max_depth is onix_core::DEFAULT_MAX_DEPTH (512)."""
+    """The constructor's default max_depth is onix_core::DEFAULT_MAX_DEPTH."""
     a = _nested_list(DEFAULT_MAX_DEPTH, leaf=1)
     b = _nested_list(DEFAULT_MAX_DEPTH, leaf=2)
     diff = DeepDiff(a, b)
@@ -167,9 +159,8 @@ def test_default_max_depth_matches_onix_core() -> None:
         DeepDiff(a_over, b_over)
 
 
-# The sized-worker cases: genuinely-unequal input nested BELOW max_depth (so
-# conversion succeeds and the diff itself runs), which is the exact shape that
-# overflows the native stack and SIGSEGVs the interpreter without the guard.
+# The sized-worker cases: unequal input nested BELOW max_depth (so conversion
+# succeeds and the diff itself runs).
 # Each runs in its own subprocess so a crash is a failed assertion, not a dead
 # suite.
 
@@ -421,9 +412,8 @@ def test_tuple_hashing_cost_stays_linear_in_nesting_depth() -> None:
     Under ``ignore_order`` every tuple node is looked up in (and added to) the
     run's digest cache. Keying each node by its whole subtree, rather than by
     its children's interned ids, made a single shuffle of one deep tuple cost
-    quadratic time and retained heap: at depth 4000 it took 1.7 s and 3.4 GB
-    where the identical list nest takes ~2 ms and ~29 MB. Quadratic growth
-    would show as ~16x here, linear as ~4x.
+    quadratic time and retained heap. Quadratic growth would show as ~16x
+    here, linear as ~4x.
     """
 
     def best_of_three(depth: int) -> float:
@@ -475,13 +465,10 @@ def _nested_frozenset(depth: int, leaf: JsonValue) -> JsonValue:
 def test_a_deep_two_member_set_converts_on_a_small_stack_thread() -> None:
     """A set of two deep members must not overflow the stack while it is being built.
 
-    Conversion runs on the calling thread — `guard.py`'s sized worker takes
+    Conversion runs on the calling thread — `guard.rs`'s sized worker takes
     only the diff and the JSON rendering — so every walk it triggers has to be
     iterative. Building a set orders its members, and that comparison must
-    stay iterative: two members with an equal spine would otherwise descend
-    the whole way and overflow a 512 KiB thread with an uncatchable SIGBUS
-    before any `MaxDepthError` could fire. CPython itself builds the same set on
-    that thread, so this is onix's own limit, not Python's.
+    stay iterative.
     """
     result = _run_isolated(
         f"""
@@ -521,10 +508,7 @@ def test_frozenset_hashing_cost_stays_linear_in_nesting_depth() -> None:
     Two costs meet here, and both have to stay linear. A frozenset is
     hashable, so like a tuple every node is looked up in (and added to) the
     run's digest cache, keyed by its members' interned ids rather than by its
-    whole subtree. And nothing may render a member to order it: an earlier
-    version of this slice sorted a set's members by their rendered text at
-    construction, which made this exact shape quadratic (394 ms at depth
-    4,000 against 1.9 ms for the tuple control, and 6.1 s at depth 16,000).
+    whole subtree. And nothing may render a member to order it.
     Quadratic growth would show as ~16x here, linear as ~4x. See
     `test_tuple_hashing_cost_stays_linear_in_nesting_depth`.
     """
@@ -566,8 +550,7 @@ def test_shallow_diff_per_call_overhead_is_bounded() -> None:
         DeepDiff(a, b)
         samples.append(time.perf_counter() - start)
     median_us = statistics.median(samples) * 1e6
-    # Wide, one-directional bound against a thread-spawn-per-call slowdown
-    # (baseline is ~1-2 us for the inline shallow path).
+    # Wide, one-directional bound against a thread-spawn-per-call slowdown.
     assert median_us < 25.0, f"median {median_us:.2f} us exceeds 25 us"
 
 
@@ -601,7 +584,7 @@ def test_diff_json_moderately_deep_input_raises_max_depth_error() -> None:
 
 def test_diff_json_past_parser_recursion_limit_raises_value_error() -> None:
     """
-    A JSON array nested past `serde_json`'s own ~128-level parser recursion
+    A JSON array nested past `serde_json`'s own 128-level parser recursion
     limit fails to parse at all, raising ValueError -- a different, also
     clean error path from MaxDepthError (which only fires once parsing has
     already succeeded).
