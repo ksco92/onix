@@ -8,10 +8,8 @@ create_exception!(
     deepdiff_rs,
     MaxDepthError,
     PyValueError,
-    "Raised when diffing two values would need to recurse past the configured `max_depth` \
-     (the same guard `onix_core` enforces natively, surfaced here as a catchable Python \
-     exception instead of a native crash). A `ValueError` subclass, so callers that only \
-     catch `ValueError` still catch this."
+    "Raised when diffing two values would need to recurse past the configured `max_depth`. A \
+     `ValueError` subclass, so callers that only catch `ValueError` still catch this."
 );
 
 /// Maps an [`onix_core::Error`] to the [`pyo3::PyErr`] a Python caller sees.

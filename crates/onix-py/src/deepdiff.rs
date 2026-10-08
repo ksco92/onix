@@ -40,13 +40,9 @@ impl DeepDiff {
         max_depth: Option<usize>,
     ) -> PyResult<Self> {
         let opts = resolve_options(max_depth, ignore_order)?;
-        // Conversion stays here (needs the GIL); if `t2` fails, `?` drops a
-        // deep `a`, safe because `Value`'s `Drop` is iterative.
         let mut held = Held::new(opts.max_depth);
         let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth, &mut held)?;
         let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth, &mut held)?;
-        // Shallow inputs diff inline; deeper ones move to the sized worker
-        // thread (GIL released) — see `crate::guard`.
         // A class attribute or cycle token is resolved the first time the
         // diff compares one, then the diff reruns with it available.
         let mut index = None;
@@ -125,13 +121,9 @@ impl DeepDiff {
         )
     }
 
-    /// The report as a native Python `dict`, with Python types (tuples, sets,
-    /// datetimes) intact rather than rendered to JSON; conversion is iterative
-    /// (`value_to_pyobject` in `crates/onix-py/src/convert.rs`), safe at any
-    /// depth. Differences from `DeepDiff`'s `to_dict()` are documented in the
-    /// onix repository's `tests/golden/README.md`: its 'Normalized versus raw
-    /// datetimes' section, 'Fixed-offset `tzinfo` round-trip' point, and its
-    /// '`to_dict()` type names' section.
+    /// The report as a native Python dict, Python types (tuples, sets,
+    /// datetimes) intact. Differences from `DeepDiff`'s `to_dict()`:
+    /// `tests/golden/README.md` in the onix repository.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         value_to_pyobject(py, &self.report_value)
     }
@@ -147,9 +139,6 @@ impl DeepDiff {
     }
 }
 
-/// A [`DeepDiff`] report renders to an empty object via
-/// [`onix_core::Report::to_value`] when there are no findings — see that
-/// function's own doc.
 fn is_empty_report(value: &Value) -> bool {
     matches!(value, Value::Object(map) if map.is_empty())
 }
