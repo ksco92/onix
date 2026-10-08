@@ -1,18 +1,11 @@
-//! Unit tests for [`super::Date`]/[`super::DateTime`]. Every expected
-//! literal here was read off real `CPython` 3.13 (`toordinal()`,
-//! `isoformat()`, `astimezone(timezone.utc)`, `timestamp()`), not derived
-//! from this module's own arithmetic.
+//! Tests for `Date`/`DateTime`; expected literals come from `CPython`, not this module's arithmetic.
 
 use super::{Date, DateTime, Time, TimeDelta, times_equal};
 
-/// A date that is known-valid, for tests whose subject is not the
-/// constructor.
 fn date(year: i32, month: u8, day: u8) -> Date {
     Date::new(year, month, day).expect("test date is a real calendar date")
 }
 
-/// A datetime that is known-valid, for tests whose subject is not the
-/// constructor.
 #[allow(clippy::too_many_arguments, reason = "one argument per datetime field")]
 fn dt(
     year: i32,
@@ -49,11 +42,6 @@ fn date_new_rejects_impossible_calendar_dates() {
 
 #[test]
 fn date_new_accepts_every_months_real_last_day() {
-    // The rejection boundary above (day 31 in a 30-day month, day 29 in a
-    // non-leap February) is satisfied whether `days_in_month` returns its
-    // real value or 0 for that month, so it alone cannot tell a deleted
-    // match arm from a correct one; each month's real last day itself must
-    // be accepted.
     for month in [4, 6, 9, 11] {
         assert!(
             Date::new(2024, month, 30).is_some(),
@@ -66,8 +54,6 @@ fn date_new_accepts_every_months_real_last_day() {
             "month {month}, day 31"
         );
     }
-    // The plain (non-leap-year) `2 => 28` arm, distinct from the
-    // `is_leap_year` guarded one just above it.
     assert!(Date::new(2023, 2, 28).is_some());
 }
 
@@ -102,14 +88,7 @@ fn date_from_ordinal_inverts_ordinal_across_the_python_range() {
 
 #[test]
 fn date_from_ordinal_inverts_every_ordinal_in_the_python_range() {
-    // The four hand-picked ordinals above all land in the first ~100 years
-    // of their 400-year "era" (Hinnant's `civil_from_days` correction
-    // terms), where the era's `/36_524`/`/146_096` century/era corrections
-    // are `0` regardless of whether they are added or subtracted -- mutation
-    // testing found this leaves an `+`/`-` flip on either correction term
-    // invisible. Exhaustive coverage catches it (and anything else) at
-    // every era position, including the one day in 400 years the
-    // `/146_096` term is actually non-zero.
+    // Exhaustive: every era position, including the one day in 400 years the `/146_096` term is non-zero.
     for ordinal in 1_i64..=3_652_059 {
         assert_eq!(
             Date::from_ordinal(ordinal).expect("in range").ordinal(),
@@ -333,14 +312,10 @@ fn datetime_isoformat_matches_python() {
     );
 }
 
-/// A time that is known-valid, for tests whose subject is not the
-/// constructor.
 fn time(hour: u8, minute: u8, second: u8, microsecond: u32, offset: Option<i32>) -> Time {
     Time::new(hour, minute, second, microsecond, offset).expect("test time fields are in range")
 }
 
-/// A timedelta that is known-valid, for tests whose subject is not the
-/// constructor.
 fn td(days: i64, seconds: i64, microseconds: i64) -> TimeDelta {
     TimeDelta::new(days, seconds, microseconds).expect("test timedelta fields are in range")
 }
@@ -432,10 +407,7 @@ fn time_hash_seconds_of_day_drops_microsecond_and_offset() {
     let base = Time::new(10, 30, 5, 123_456, Some(2 * 3600)).expect("in range");
     let no_micros = Time::new(10, 30, 5, 999_999, None).expect("in range");
     assert_eq!(base.hash_seconds_of_day(), no_micros.hash_seconds_of_day());
-    // Hour, minute and second all nonzero and distinct, so a sign or
-    // operator flip anywhere in `(hour*60+minute)*60+second` changes the
-    // result -- unlike a zero second (as this test used to check), which
-    // cannot tell a `+second`/`-second` flip apart.
+    // Distinct non-zero fields so every term of the formula is observable.
     assert_eq!(base.hash_seconds_of_day(), (10 * 60 + 30) * 60 + 5);
 }
 
@@ -452,11 +424,7 @@ fn time_sort_instant_matches_the_quantity_times_equal_compares_within_one_bucket
 
 #[test]
 fn wall_micros_of_day_combines_hour_minute_and_second_correctly() {
-    // Hour, minute and second are all nonzero AND distinct, so a sign or
-    // operator flip among the three terms of `hour*3600 + minute*60 +
-    // second` changes the result -- unlike a value with minute=second=0
-    // (as `time_sort_instant_matches_the_quantity_times_equal_compares_
-    // within_one_bucket` above uses), which cannot tell such a mutant apart.
+    // Distinct non-zero fields so every term of the formula is observable.
     let value = time(1, 2, 3, 0, None);
     assert_eq!(value.sort_instant(), (3600 + 2 * 60 + 3) * 1_000_000);
 }

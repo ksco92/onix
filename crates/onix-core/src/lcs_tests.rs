@@ -2,8 +2,6 @@ use super::Tag;
 use crate::test_support::{cdate, cdt, cdt_at, ctime, ctimedelta, cv, cvec};
 use serde_json::json;
 
-// Thin wrappers routing each `serde_json`-literal-based test through the real
-// compact-typed engine via the shared `crate::test_support` converters.
 fn all_basic_scalars(items: &[serde_json::Value]) -> bool {
     super::all_basic_scalars(&cvec(items))
 }
@@ -14,13 +12,7 @@ fn scalar_key(value: &serde_json::Value) -> super::ScalarKey {
     super::scalar_key(&cv(value))
 }
 
-/// Python-`==` equality for two JSON scalars, per [`super::ScalarKey`]'s
-/// doc. Test-only: the engine compares scalars directly by
-/// [`super::ScalarKey`] (including [`super::find_longest_match`]'s autojunk
-/// extension step) rather than through a standalone predicate — this survives
-/// here purely to assert the hashability/cross-type-equality semantics
-/// directly, and to state the `Replace`-opcode non-matching-pair invariant
-/// precisely in [`replace_opcode_ranges_never_share_a_matching_element`].
+/// Python `==` for two JSON scalars, via `ScalarKey`.
 fn python_scalar_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     scalar_key(a) == scalar_key(b)
 }
@@ -61,7 +53,7 @@ fn a_nested_object_disqualifies() {
     assert!(!all_basic_scalars(&[json!(1), json!({"a": 1})]));
 }
 
-// --- python_scalar_eq (the hashability/cross-type finding) ---------
+// --- python_scalar_eq: Python cross-type equality ---
 
 #[test]
 fn int_and_equal_float_are_python_equal() {
@@ -279,10 +271,7 @@ fn equal_length_replace_is_one_replace_opcode() {
     );
 }
 
-/// A `Replace` opcode's two ranges never share a matching element (see
-/// [`compute_opcodes`]'s doc) — verified directly here by brute force
-/// over every `Replace` opcode `compute_opcodes` produces for a
-/// spread of small random-ish inputs, not just asserted in prose.
+/// A `Replace` opcode's two ranges never share a matching element.
 #[test]
 fn replace_opcode_ranges_never_share_a_matching_element() {
     let cases: &[(&[i64], &[i64])] = &[
@@ -310,16 +299,7 @@ fn replace_opcode_ranges_never_share_a_matching_element() {
     }
 }
 
-/// `get_matching_blocks`' right-recursion bound
-/// (`match_a + match_size < ahi && match_b + match_size < bhi`) needs
-/// its `+`, not a `*`: found by mutation testing, minimized from a
-/// randomized differential-test failure against a mutated build. With
-/// either `+` replaced by `*`,
-/// this pair's second `insert` opcode (`a[3:3]` / `b[6:7]`) is missed
-/// entirely, changing the a-side split point of the trailing `equal`
-/// block and, downstream in `array_diff`, silently dropping the
-/// `iterable_item_added` at `root[6]` for a `values_changed` at
-/// `root[3]` instead — confirmed against real `deepdiff==9.1.0`.
+/// The right-recursion bound finds a second insert past the first equal block.
 #[test]
 fn get_matching_blocks_right_recursion_finds_a_second_insert() {
     let a = vals(&[1, 0, 0, 0]);
@@ -360,18 +340,7 @@ fn get_matching_blocks_right_recursion_finds_a_second_insert() {
     );
 }
 
-/// `get_matching_blocks`' LEFT-recursion bound
-/// (`alo < match_a && blo < match_b`) is fine as-is — each condition
-/// only guards against enqueuing an empty sub-range, and
-/// `find_longest_match` on an empty range provably returns a size-0
-/// match, which is a downstream no-op regardless of the other
-/// operand, so its `&&`/`<` variants are equivalent mutants, not
-/// killable by any test — but the analogous
-/// right-recursion arithmetic (`match_a + match_size`, not
-/// `match_a * match_size`) needs its own dedicated case distinct from
-/// [`get_matching_blocks_right_recursion_finds_a_second_insert`]
-/// (that one only kills the `match_b` addition, not this one) — found
-/// and minimized the same way.
+/// The right-recursion bound finds a trailing insert.
 #[test]
 fn get_matching_blocks_right_recursion_finds_a_trailing_insert() {
     let a = vec![
@@ -421,8 +390,7 @@ fn get_matching_blocks_right_recursion_finds_a_trailing_insert() {
 
 #[test]
 fn one_vs_one_point_zero_is_a_single_equal_opcode() {
-    // The hashability finding: 1 and 1.0 match as 'equal', never a
-    // replace/type-change opcode.
+    // 1 and 1.0 match as 'equal', never a replace/type-change opcode.
     let a = vec![json!(1)];
     let b = vec![json!(1.0)];
     let ops = compute_opcodes(&a, &b);
@@ -431,24 +399,12 @@ fn one_vs_one_point_zero_is_a_single_equal_opcode() {
 }
 
 // --- get_matching_blocks: adjacent-block collapsing -----------------
-//
-// `raw_matches` from the work-stack recursion can land two matches
-// right up against each other (found via *different* stack entries,
-// e.g. one via the top-level scan and another via a right-recursion
-// exploring the remainder) that must collapse into one — the three
-// cases below were each minimized from a randomized differential-test
-// failure against a specific mutated build (the collapse check's
-// `&&`, and each side's `pending_a`/`pending_b` `+`, mutated to `||`/
-// `*` respectively).
+// Adjacent raw matches found via different stack entries collapse into one.
 
 #[test]
 fn adjacent_matches_from_different_stack_entries_collapse_needs_and_not_or() {
     // A single insert followed by a single equal: two raw matches
-    // ((0,0,0) the initial no-match state contributes nothing, and
-    // (0,1,1) the real "s0" match) that must NOT spuriously collapse
-    // with an unrelated leading segment. `&&` mutated to `||` moves
-    // the added item from `root[0]` to `root[1]` — wrong on either
-    // count (a's only element is unambiguously still present).
+    // ((0,0,0) the initial no-match state, and (0,1,1) the real "s0" match).
     let a = vals_str(&["s0"]);
     let b = vals_str(&["s2", "s0"]);
 
@@ -610,11 +566,7 @@ fn time_scalar_keys_follow_pythons_own_equality_not_the_engines() {
     assert_ne!(naive, utc);
 }
 
-/// `HashSet::insert`/`contains` forces both `Hash` and `Eq` to actually run
-/// (unlike a bare `assert_eq!`, which only exercises `PartialEq`) -- the
-/// only way this crate's suite exercises `ScalarKey`'s hand-written `Hash`
-/// impl for its `Time`/`TimeDelta` arms, which back `build_b2j`'s
-/// `HashMap<ScalarKey, _>` for a list-LCS all-scalar match.
+/// `ScalarKey`'s `Hash` agrees with `Eq` for time and timedelta keys.
 #[test]
 fn time_and_timedelta_scalar_keys_hash_consistently_with_their_equality() {
     use std::collections::HashSet;
@@ -630,8 +582,6 @@ fn time_and_timedelta_scalar_keys_hash_consistently_with_their_equality() {
     assert!(!seen.contains(&super::python_scalar_key(&ctimedelta(0, 2, 0)).expect("scalar")));
 }
 
-/// A direct `Hasher` call (not routed through `HashSet`/hashbrown), so this
-/// exercises `ScalarKey::hash`'s `TimeDelta` arm unambiguously.
 #[test]
 fn timedelta_scalar_key_hash_agrees_with_equality_via_a_direct_hasher() {
     use std::hash::{Hash, Hasher};
@@ -650,11 +600,7 @@ fn timedelta_scalar_key_hash_agrees_with_equality_via_a_direct_hasher() {
     assert_ne!(hash_of(&a), hash_of(&c));
 }
 
-/// `mix_float_bits` must spread the low bits of integral and half-integer
-/// floats — whose raw bit patterns share ~50 trailing zeros — so they do not
-/// all fall in one hash bucket (which would make the crate's `FxHash`-backed
-/// interning tables degrade to a linear scan; see the function's own doc).
-/// Deterministic, so this guards the mixing without a timing measurement.
+/// `mix_float_bits` spreads the low byte of integral and half-integer floats.
 #[test]
 fn mix_float_bits_spreads_low_bits_of_integral_and_half_integer_floats() {
     use std::collections::HashSet;
@@ -670,8 +616,7 @@ fn mix_float_bits_spreads_low_bits_of_integral_and_half_integer_floats() {
             })
             .collect();
         // The raw bit patterns share their low byte (all zeros); mixed, 1000
-        // of them must cover most of the 256 possible low bytes. A no-op mix
-        // would leave a single value here.
+        // of them must cover most of the 256 possible low bytes.
         assert!(
             low_bytes.len() > 200,
             "mixed low byte covered only {} of 256 values for +{half}",
@@ -691,8 +636,7 @@ fn mix_float_bits_spreads_low_bits_of_integral_and_half_integer_floats() {
 fn grouped_opcodes_of_empty_inputs_yields_no_groups() {
     // `get_opcodes` is empty for two empty sequences, so the fallback dummy
     // "equal" opcode is inserted and then dropped as a trivial single-equal
-    // group — no group is emitted. (`unified_diff` never reaches this, since
-    // its trigger requires a newline, but the port mirrors difflib exactly.)
+    // group — no group is emitted.
     assert!(grouped_opcodes(&[], &[], 3).is_empty());
 }
 
@@ -719,13 +663,7 @@ fn grouped_opcodes_splits_far_apart_changes_into_separate_groups() {
 }
 
 // --- find_longest_match extension step (autojunk-only) --------------
-//
-// These call `find_longest_match` directly with a `b2j` that deliberately
-// omits a "popular" element (as `build_b2j`'s autojunk purge would), so the
-// DP chain cannot match that element and only the greedy extension step can
-// re-bridge it. The window and match offsets are asymmetric between the two
-// sides so each loop bound (`best_a > alo`, `best_b > blo`, and the two
-// forward `< ahi`/`< bhi` checks) is exercised as the binding constraint.
+// Direct calls with a hand-built `b2j` omitting a purged element; only extension can bridge it.
 
 fn keys(items: &[serde_json::Value]) -> Vec<super::ScalarKey> {
     items.iter().map(scalar_key).collect()
@@ -822,10 +760,7 @@ fn build_b2j_purges_only_above_the_autojunk_threshold() {
 
 /// A big integer collapses onto the same `ScalarKey` as a float exactly equal
 /// to it (Python's `10**20 == 1e20`), and stays distinct from a float it does
-/// not equal — the ordered-list matcher's Python-`==` rule. Floats are built
-/// directly from their exact `f64` bits here, not parsed from text, so this
-/// pins the collapse logic independently of the JSON reader's own float
-/// rounding.
+/// not equal — the ordered-list matcher's Python-`==` rule.
 #[test]
 fn big_integer_scalar_key_collapses_with_its_equal_float_only() {
     use crate::value::{Number, Value};

@@ -2,11 +2,6 @@
 //! object lookup/order semantics, the streaming `Deserialize` visitor, a
 //! `serde_json::Value` round-trip property, and the iterative `Drop` and
 //! `PartialEq` stack-safety guards.
-//!
-//! The memory-footprint smoke check lives in its own integration-test binary
-//! (`tests/memory_footprint.rs`) so its process-global counting allocator is
-//! not shared with — and polluted by — the other unit tests running
-//! concurrently in this binary.
 
 use std::sync::Arc;
 
@@ -26,10 +21,7 @@ use crate::test_support::{
     carr, cdate, cdt, cdt_at, cfrozen, cset, ctime, ctimedelta, ctup, ctuple, cv,
 };
 
-/// The WTF-8 bytes for one lone surrogate code point, matching `CPython`'s own
-/// `str.encode('utf-8', 'surrogatepass')` — see `crates/onix-py/src/convert.rs`'s
-/// `pystring_to_cstr` doc. `0xDC80` throughout these tests (an arbitrary low surrogate);
-/// [`wtf8_surrogate_bytes`] covers both halves and boundary values.
+/// WTF-8 bytes of one lone surrogate (`str.encode('utf-8', 'surrogatepass')`).
 fn wtf8_surrogate_bytes(code_point: u16) -> [u8; 3] {
     [
         0xE0 | ((code_point >> 12) as u8),
@@ -38,18 +30,12 @@ fn wtf8_surrogate_bytes(code_point: u16) -> [u8; 3] {
     ]
 }
 
-/// The convenience alias for `serde`'s in-memory deserializer error type.
 type DeError = serde::de::value::Error;
 
 // --- size ----------------------------------------------------------------
 
 #[test]
 fn value_is_compact() {
-    // Grew from 32 to 40 bytes with subclass-name tracking (`Typed<T>` on
-    // `DateTime`/`Date`/`Time`/`TimeDelta`/`Array`/`Tuple` adds one
-    // `Option<Arc<str>>`, niche-optimized to 16 bytes) — the cost of
-    // carrying a subclass's own class name (e.g. pandas `Timestamp`)
-    // through the value model; see `crate::value::Typed`'s doc.
     let size = std::mem::size_of::<Value>();
     println!("size_of::<Value>() = {size} bytes");
     assert!(size <= 40, "Value must be <= 40 bytes, got {size}");
@@ -239,7 +225,7 @@ fn big_integer_renders_full_digits_but_bridges_to_serde_json_as_f64() {
 
 #[test]
 fn object_lookup_and_sorted_iteration() {
-    // Deliberately unsorted insertion order.
+    // Unsorted insertion order.
     let value = Value::from(serde_json::json!({ "b": 1, "a": 2, "c": 3 }));
     let Value::Object(obj) = &value else {
         panic!("expected object");
@@ -320,8 +306,7 @@ fn object_key_as_str_is_none_for_a_non_str_key() {
 
 #[test]
 fn object_key_ordering_puts_every_str_before_every_other_key() {
-    // See `ObjectKey`'s own `Ord` doc: this is what keeps a `str`-only
-    // object's entry order unchanged from before this variant existed.
+    // `str` keys sort before every other key kind.
     let str_key = ObjectKey::Str(Key::Utf8(Arc::from("z")));
     let other_key = ObjectKey::Other(Box::new(Value::Number(Number::from_i64(-1000))));
     assert!(str_key < other_key);
@@ -381,9 +366,6 @@ fn object_with_non_str_keys_has_non_str_keys_is_true() {
     assert!(!str_only.has_non_str_keys());
 }
 
-/// See `tests/golden/README.md`'s nested-non-`str`-dict-key `to_json()`
-/// bullet in Known `DeepDiff` quirks, where this test is pinned as the
-/// `tuple`-key case.
 #[test]
 fn to_serde_json_stringifies_a_tuple_key_via_python_repr_where_deepdiff_would_crash() {
     let obj = Value::Object(Object::from_pairs(vec![(
@@ -393,8 +375,6 @@ fn to_serde_json_stringifies_a_tuple_key_via_python_repr_where_deepdiff_would_cr
     assert_eq!(obj.to_serde_json(), json!({"(1, 2)": "x"}));
 }
 
-/// [`to_serde_json_stringifies_a_tuple_key_via_python_repr_where_deepdiff_would_crash`]'s
-/// `datetime`-key twin.
 #[test]
 fn to_serde_json_stringifies_a_datetime_key_via_python_repr_where_deepdiff_would_crash() {
     let obj = Value::Object(Object::from_pairs(vec![(
@@ -942,7 +922,7 @@ fn set_items_drop_a_member_equal_to_an_earlier_one() {
 
 /// Deduplication is structural, so every one of these survives: an integral
 /// float stays distinct from the equal-valued integer (`1`/`1.0`), and every
-/// number below is a genuinely different value. Signed zero is the one
+/// number below is a different value. Signed zero is the one
 /// exception — see `set_items_dedup_signed_zero_like_a_real_python_set`.
 #[test]
 fn set_items_keep_members_that_only_look_alike() {
@@ -958,12 +938,7 @@ fn set_items_keep_members_that_only_look_alike() {
     assert_eq!(items.len(), 6);
 }
 
-/// A real Python `set` can never hold both `-0.0` and `0.0` — they compare
-/// and hash equal, so the second `.add()` is a no-op — confirmed against
-/// `deepdiff==9.1.0`: `DeepDiff({0.0, -0.0}, {0.0})` is `{}`. `SetItems::new`
-/// must dedup the pair the same way, keeping the first-inserted
-/// representative (whichever the caller's `items` order put first), exactly
-/// like the existing same-value dedup for any other equal pair.
+/// `-0.0` and `0.0` are one set member; the first inserted is kept.
 #[test]
 fn set_items_dedup_signed_zero_like_a_real_python_set() {
     let items = SetItems::new(vec![
@@ -1010,9 +985,7 @@ fn set_items_dedup_bit_identical_nan_but_keep_differently_signed_nan_apart() {
 }
 
 /// `Value::to_serde_json` cannot hold a non-finite float (`serde_json`'s own
-/// `Number::from_f64` rejects it, matching the JSON spec) — it falls back to
-/// `null`, the same collapse the streaming `Deserialize` path already uses
-/// for one arriving that way (see `non_finite_float_deserializes_to_null_like_serde_json`).
+/// `Number::from_f64` rejects it, matching the JSON spec) — it falls back to `null`.
 #[test]
 fn to_serde_json_renders_a_non_finite_number_as_null() {
     for f in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
@@ -1025,11 +998,7 @@ fn to_serde_json_renders_a_non_finite_number_as_null() {
     assert_eq!(nested.to_serde_json(), serde_json::json!([null]));
 }
 
-/// [`fold_signed_zero`] must leave a `NaN`'s bits alone (see that function's
-/// own doc): IEEE `+ 0.0` is not guaranteed to be the identity on a `NaN`
-/// (it quiets a signaling `NaN` on this crate's targets), which would
-/// otherwise make [`canonical_cmp`]/hashing silently key a `NaN` on a bit
-/// pattern it never actually had.
+/// `fold_signed_zero` leaves every `NaN` bit pattern unchanged.
 #[test]
 fn fold_signed_zero_preserves_every_nan_bit_pattern() {
     use super::fold_signed_zero;
@@ -1220,12 +1189,7 @@ fn set_items_drop_an_equal_container_member() {
     assert_eq!(items.len(), 3);
 }
 
-/// A calendar value's canonical order and top-level set-item rendering are
-/// pinned here: both kinds sort after every other, datetimes by instant and
-/// dates by ordinal, and each renders with Python's own `str()`
-/// ([`crate::path::set_item_repr`]'s rule for a bare set item — `repr()` is
-/// what a container holding one shows instead, pinned by `python_repr`'s own
-/// `calendar_values_render_as_python_repr` test in `path.rs`).
+/// Calendar values sort last (datetimes by instant, dates by ordinal) and render with `str()`.
 #[test]
 fn canonical_order_ranks_calendar_values_last() {
     let items = SetItems::new(vec![
@@ -1328,13 +1292,11 @@ fn str_eq_ord_hash_cross_variant() {
         hasher.finish()
     };
 
-    // Equal content hashes equal...
+    // Equal content hashes equal.
     assert_eq!(
         hash_of(&surrogate),
         hash_of(&Str::Wtf8(Box::from(bytes.as_slice())))
     );
-    // ...and content actually reaches the hasher (a no-op `Hash` impl would
-    // make every value collide, including these two clearly distinct ones).
     assert_ne!(hash_of(&plain), hash_of(&surrogate));
     let other_surrogate = Str::Wtf8(Box::from(wtf8_surrogate_bytes(0xDFFF).as_slice()));
     assert_ne!(hash_of(&surrogate), hash_of(&other_surrogate));
@@ -1383,10 +1345,6 @@ fn key_ord_cross_variant() {
 
 #[test]
 fn key_eq_is_true_for_equal_content_same_and_cross_variant_construction() {
-    // `key_ord_cross_variant` above only ever asserts inequality, which a
-    // `PartialEq` impl unconditionally returning `false` would also satisfy;
-    // this pins the positive case directly, for both variants and for two
-    // separately-allocated `Utf8` keys (not the same `Arc`).
     assert_eq!(Key::Utf8(Arc::from("a")), Key::Utf8(Arc::from("a")));
 
     let bytes = wtf8_surrogate_bytes(0xDC80);
@@ -1411,10 +1369,8 @@ fn key_hash_reaches_content() {
     let bytes = wtf8_surrogate_bytes(0xDC80);
     let wtf8_key = Key::Wtf8(Box::from(bytes.as_slice()));
 
-    // Equal content hashes equal...
+    // Equal content hashes equal.
     assert_eq!(hash_of(&utf8_key), hash_of(&Key::Utf8(Arc::from("a"))));
-    // ...and content actually reaches the hasher (a no-op `Hash` impl would
-    // make every value collide, including these two clearly distinct ones).
     assert_ne!(hash_of(&utf8_key), hash_of(&wtf8_key));
 }
 
@@ -1441,11 +1397,6 @@ fn builder_object_carries_a_wtf8_key_through_without_interning() {
 
 #[test]
 fn builder_intern_key_interns_a_plain_str_but_not_a_wtf8_one() {
-    // `Builder::intern_key` is the public entry point `onix-py`'s
-    // conversion calls directly (for a dict key it has already classified,
-    // see `crates/onix-py/src/convert.rs`); this exercises it the same way
-    // `Builder::object`'s own `Utf8`/`Wtf8` split is exercised above, but
-    // through this standalone wrapper rather than the whole-object path.
     let mut builder = Builder::new();
 
     let first = builder.intern_key(Str::from("shared"));
@@ -1473,10 +1424,7 @@ fn wtf8_chars_decodes_plain_ascii_in_one_call() {
 
 #[test]
 fn wtf8_chars_decodes_a_valid_prefix_before_a_surrogate() {
-    // "ab" (two single-byte chars) followed by one surrogate's 3-byte WTF-8
-    // encoding: exercises both the `Ok(valid)` fast path (no invalid bytes
-    // left) and the `Err(..) if valid_up_to() > 0` partial-prefix path (a
-    // valid run sits before the surrogate).
+    // "ab" followed by one surrogate's 3-byte WTF-8 encoding.
     let mut bytes = b"ab".to_vec();
     bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDC80));
 
@@ -1493,10 +1441,7 @@ fn wtf8_chars_decodes_a_valid_prefix_before_a_surrogate() {
 
 #[test]
 fn wtf8_chars_decodes_a_multibyte_scalar_then_a_surrogate() {
-    // 'é' (2-byte UTF-8) immediately followed by a surrogate: the invalid
-    // byte sits at offset 0 of the *remaining* slice only after 'é' is
-    // consumed, so this also exercises the `valid_up_to() == 0` branch
-    // directly (no valid prefix at all once 'é' has been taken).
+    // 'é' (2-byte UTF-8) immediately followed by a surrogate.
     let mut bytes = "é".as_bytes().to_vec();
     bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDFFF));
 
@@ -1528,30 +1473,14 @@ fn wtf8_chars_empty_bytes_yield_nothing() {
 
 #[test]
 fn utf8_sequence_width_boundary_at_the_ascii_continuation_split() {
-    // Pins the `< 0x80` boundary directly: 0x7F (the last ASCII byte) is
-    // width 1; 0x80 (a continuation byte, never a real lead byte at a
-    // WTF-8 character boundary, but a valid `u8` all the same) must NOT be
-    // read as width 1 too — it matches none of the multi-byte lead-byte
-    // patterns either, so it falls all the way to the 4-byte default,
-    // distinguishing `< 0x80` from a `<= 0x80` that would misroute it to
-    // width 1 instead. This function is never called with 0x80 through the
-    // public `Wtf8Chars` iterator, so only a direct call exercises it.
+    // 0x80 is not a lead byte, so it falls to the 4-byte default.
     assert_eq!(super::utf8_sequence_width(0x7F), 1);
     assert_eq!(super::utf8_sequence_width(0x80), 4);
 }
 
 #[test]
 fn wtf8_chars_decode_validates_at_most_a_constant_number_of_bytes_per_call_and_o_n_total() {
-    // A quadratic decoder validates the whole remaining slice on every
-    // call, so total bytes validated grows with the square of the input;
-    // a linear one validates at most `utf8_sequence_width`'s bound (4)
-    // bytes per call, so the total is bounded by the input length plus a
-    // small constant. Counted directly via `wtf8_decode_stats` rather than
-    // timed, so this cannot flake on a noisy machine. Run for both a
-    // plain-ASCII string and one ending in a lone surrogate, since the two
-    // decode paths (`Ok`/`Err` in `Wtf8Chars::next`) are exercised
-    // independently. See `Wtf8Chars`'s own doc for why the decode must
-    // stay linear.
+    // Counts validated bytes; linear decode validates at most 4 per call.
     fn build(chars: usize, with_surrogate: bool) -> Vec<u8> {
         let mut bytes = "a".repeat(chars).into_bytes();
         if with_surrogate {
@@ -1669,8 +1598,7 @@ fn write_json_str_content_escapes_a_bare_surrogate() {
 
 #[test]
 fn write_json_str_content_escapes_a_surrogate_between_two_plain_runs() {
-    // "a" + surrogate + "b" exercises the run-flush (a non-empty run pushed
-    // before the escape) and the trailing-run flush after the loop.
+    // "a" + surrogate + "b".
     let mut bytes = b"a".to_vec();
     bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDC80));
     bytes.push(b'b');
@@ -1679,9 +1607,7 @@ fn write_json_str_content_escapes_a_surrogate_between_two_plain_runs() {
 
 #[test]
 fn write_json_str_content_escapes_a_surrogate_needing_escaped_neighbors_too() {
-    // The plain run around the surrogate itself needs ordinary JSON
-    // escaping (a literal quote), proving `push_escaped_run` — not a raw
-    // byte copy — renders it.
+    // The plain run around the surrogate contains a literal quote.
     let mut bytes = b"a\"".to_vec();
     bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDC80));
     assert_eq!(write_json_str_content_string(&bytes), r#"a\"\udc80"#);
@@ -1689,19 +1615,14 @@ fn write_json_str_content_escapes_a_surrogate_needing_escaped_neighbors_too() {
 
 #[test]
 fn write_json_str_content_leading_surrogate_with_no_prefix_run() {
-    // A surrogate as the very first code point: `run` is empty when the
-    // `Surrogate` arm fires, exercising the `!run.is_empty()` guard's false
-    // branch.
+    // A surrogate as the very first code point.
     let bytes = wtf8_surrogate_bytes(0xD800);
     assert_eq!(write_json_str_content_string(&bytes), r"\ud800");
 }
 
 #[test]
 fn write_json_str_content_two_adjacent_surrogates_have_no_run_between_them() {
-    // Two surrogates back-to-back: `run` stays empty across the whole
-    // decode, so the `!run.is_empty()` flush never fires between them —
-    // only the trailing flush check after the loop (also a no-op here) is
-    // exercised on the empty-run side.
+    // Two surrogates back-to-back.
     let mut bytes = wtf8_surrogate_bytes(0xD800).to_vec();
     bytes.extend_from_slice(&wtf8_surrogate_bytes(0xDFFF));
     assert_eq!(write_json_str_content_string(&bytes), r"\ud800\udfff");
