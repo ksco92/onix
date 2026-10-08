@@ -4739,8 +4739,6 @@ mod tests {
 
     #[test]
     fn render_duration_produces_iso_seconds() {
-        // Exact renderings pin the second/nanosecond split and the sign, which a
-        // distinctness-only check leaves free.
         use super::render_duration;
         assert_eq!(render_duration(3600, TimeUnit::Second), "PT3600S");
         assert_eq!(render_duration(1, TimeUnit::Millisecond), "PT0.001S");
@@ -5493,9 +5491,7 @@ mod tests {
 
     #[test]
     fn hash_cell_refuses_an_unsupported_scalar_type() {
-        // The up-front column check normally refuses these first; this pins the
-        // belt-and-braces refusal in `hash_cell` itself for a type it cannot
-        // hash (a run-end-encoded cell reached directly).
+        // A run-end-encoded cell reached directly.
         use arrow_array::RunArray;
         let run_ends = Int32Array::from(vec![1]);
         let values = Int64Array::from(vec![10]);
@@ -5851,8 +5847,7 @@ mod tests {
     fn hash_uses_both_128_bit_halves() {
         // SipHash-1-3's 128-bit output must populate both halves: across a run of
         // inputs, at least one has a non-zero top half and at least one has the
-        // two halves unequal. A hash that collapsed to 64 bits (top half always
-        // zero, or the halves mirrored) would fail this.
+        // two halves unequal.
         let keyed = super::RowHasher::new().unwrap();
         let outputs: Vec<u128> = (0..16)
             .map(|v| cell_hash(&keyed, Arc::new(Int64Array::from(vec![v])) as ArrayRef))
@@ -6790,11 +6785,7 @@ mod tests {
     #[test]
     fn spill_field_type_targets_large_offsets_for_views_and_dictionaries() {
         use super::spill_field_type;
-        // Byte-view columns spill as the *large* (i64-offset) non-view type: their
-        // `take` keeps the whole variadic buffer, which can exceed the 2 GiB an
-        // i32-offset `Utf8`/`Binary` caps at, so casting to `Utf8`/`Binary` would
-        // panic inside arrow. Dictionaries decode to their value type, composed
-        // recursively so a dictionary of a view also lands on the large type.
+        // Rationale: `spill_field_type`'s doc.
         assert_eq!(spill_field_type(&DataType::Utf8View), DataType::LargeUtf8);
         assert_eq!(
             spill_field_type(&DataType::BinaryView),
@@ -6884,11 +6875,7 @@ mod tests {
     #[ignore = "allocates ~2.3 GiB of view data; run manually with --ignored"]
     fn view_column_over_i32_offset_limit_streams_without_panic() {
         // A single input batch whose byte-view column carries more than
-        // `i32::MAX` bytes: `take` retains the whole variadic buffer, so the
-        // spill cast sees all of it at once. Casting to `Utf8`/`Binary`
-        // (i32 offsets) would panic here; the spill targets `LargeUtf8`/
-        // `LargeBinary` (i64 offsets), so the diff streams without panic.
-        // Ignored by default: it needs several GiB of resident memory.
+        // `i32::MAX` bytes.
         force_parallel_path();
         let base = "x".repeat(450 * 1024 * 1024);
         let rows = 5usize; // 5 x 450 MiB > i32::MAX total view bytes
