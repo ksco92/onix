@@ -299,9 +299,9 @@ runs per build for `wide` 200k at 18 threads, 5 for `wide` 1M, 3 otherwise):
 
 Measured on `deepdiff-rs` 0.13.0 and 0.14.0, 2026-09-24, 2, 18 and 64 threads.
 
-A shape with 500k changed rows/side where only an `Int64` column differs and three equal 1 KB
-columns (`Utf8View`, `BinaryView`, `Utf8`) are compared, each cell the median with the run range in
-brackets (8 runs per build at 2 threads, 3 at 18 and 64):
+A shape with no committed generator (issue #219): 500k changed rows/side where only an `Int64`
+column differs and three equal 1 KB columns (`Utf8View`, `BinaryView`, `Utf8`) are compared, each
+cell the median with the run range in brackets (8 runs per build at 2 threads, 3 at 18 and 64):
 
 | threads | 0.13.1 | 0.14.0 |
 | --- | --- | --- |
