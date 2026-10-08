@@ -427,7 +427,8 @@ DeepDiff's ladder checks a `pydantic` `BaseModel` just before `Iterable` and
 diffs it with `_diff_obj`, reading its fields and, from the class, its other
 attributes; `DeepHash` and `_get_item_length` instead treat the model as the
 iterable of `(field, value)` pairs it is. onix refuses a model, with the root
-`TypeError` or an identity token below the root, where DeepDiff diffs it.
+`TypeError`, or a path-naming `TypeError` below the root, where DeepDiff diffs
+it.
 
 ### Refused mappings
 
