@@ -460,7 +460,7 @@ enum Strategy<'py> {
 
 /// The attribute strategy for `obj`, or `None` for a type `DeepDiff` routes to
 /// a handler onix lacks; predicates and order follow `diff.py::_diff`'s ladder.
-/// See `tests/golden/README.md`'s "Pydantic models" and "Refused mappings".
+/// See `tests/golden/README.md`'s "Refused mappings".
 fn object_strategy<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Option<Strategy<'py>>> {
     let py = obj.py();
 
@@ -621,13 +621,8 @@ fn failed_object_step<'py>(
     })
 }
 
-/// The attributes `DeepDiff` 9.1.0 diffs for an accepted object, plus the
-/// lengths `onix_core::value::Object::into_class` takes. `_diff_enum` reads an
-/// `Enum` member's `name` and
-/// `value`; `_diff_obj` reads `helper.detailed__dict__` for an object with a
-/// `__dict__`, `_dict_from_slots` for one with `__slots__`, and every
-/// non-callable `getmembers` value otherwise. A name starting with `__` is
-/// dropped, as `_diff_dict` drops it.
+/// The attributes `DeepDiff` 9.1.0 diffs for an accepted object, plus the lengths
+/// `Object::into_class` takes; names starting `__` are dropped.
 fn object_attributes<'py>(
     obj: &Bound<'py, PyAny>,
     strategy: &Strategy<'py>,
@@ -1093,14 +1088,19 @@ fn object_failure(
 /// raises [`MaxDepthError`] past `max_depth` (root at 0; see
 /// `docs/design/depth-budget.md`'s "Equal inputs of any depth").
 ///
+/// Never recurses natively, and every `onix_core` step run while building (set
+/// ordering, `Value`'s `Drop`) is iterative, so native stack and error-path
+/// teardown stay O(1) at any depth (`docs/design/value-model.md`'s "Stack
+/// safety"); only the diff engine needs `crate::guard`'s sized worker.
+///
 /// The second return value is whether the walk built a lone-surrogate `str` or
 /// key (see [`pystring_to_cstr`]). `held` collects the objects the value's
 /// identities name, and must outlive the diff.
 ///
 /// # Errors
 ///
-/// Returns a Python `TypeError` for an unsupported type, `ValueError` for an
-/// unreadable or out-of-range value, or [`MaxDepthError`].
+/// `TypeError` (unsupported type), `ValueError` (unreadable or out-of-range
+/// value), [`MaxDepthError`] past `max_depth`.
 pub(crate) fn to_value(
     obj: &Bound<'_, PyAny>,
     max_depth: usize,
@@ -1475,13 +1475,9 @@ fn int_to_value(i: &Bound<'_, PyInt>, path: &[PathSegment]) -> PyResult<CValue> 
     Ok(CValue::Number(CNumber::from_bigint(big)))
 }
 
-/// Reads a Python `int`'s exact value as a [`BigInt`] through `int`'s own
-/// unbound `bit_length`/`to_bytes`, never the object's own methods.
-///
-/// A subclass can override `__str__`/`__index__`/`to_bytes` to report a value
-/// other than the one in `PyLong`'s storage, which the `i64`/`u64` path and
-/// `DeepDiff` read; the base type's slots bypass every override, and
-/// `CPython`'s `int`->`str` digit cap (`sys.set_int_max_str_digits`).
+/// Reads a Python `int`'s exact value through `int`'s unbound
+/// `bit_length`/`to_bytes`, which bypass subclass overrides and the `int`->`str`
+/// digit cap.
 fn exact_big_int(i: &Bound<'_, PyInt>) -> PyResult<BigInt> {
     let (int_type, kwargs) = int_type_and_signed_kwargs(i.py())?;
     let bit_length: usize = int_type.getattr("bit_length")?.call1((i,))?.extract()?;
@@ -1649,8 +1645,8 @@ fn class_name(obj: &Bound<'_, PyAny>) -> Arc<str> {
 
 /// An [`onix_core::value::Object`]'s class as onix carries it: the `__name__`
 /// `DeepDiff` renders, the identity onix decides `type_changes` by (see
-/// `onix_core::value::Object::same_class`), and the object's
-/// `ignore_order` lengths (see `onix_core::value::Object::into_class`).
+/// `onix_core::value::Object::same_class`), and the object's `ignore_order`
+/// lengths.
 struct PyClass {
     name: Arc<str>,
     identity: Arc<str>,

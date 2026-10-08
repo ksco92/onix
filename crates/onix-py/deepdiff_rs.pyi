@@ -25,7 +25,10 @@ MAX_DEPTH_CEILING: int
 """
 
 class DeepDiff:
-    """A drop-in subset of ``deepdiff.DeepDiff``.
+    """A drop-in subset of ``deepdiff.DeepDiff``, diffing ``t1``/``t2`` at
+    ``verbose_level=2``. ``max_depth`` defaults to 512; deeper input raises
+    ``MaxDepthError``. Supported types and errors:
+    https://github.com/ksco92/onix#known-limitations
 
     Example::
 

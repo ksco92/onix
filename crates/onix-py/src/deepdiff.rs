@@ -14,12 +14,9 @@ use crate::convert::{
 use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, serialize_value};
 
 /// A drop-in subset of `deepdiff.DeepDiff`, diffing `t1`/`t2` at
-/// `verbose_level=2`. `max_depth` defaults to 512, capped at
-/// `MAX_DEPTH_CEILING` (else `ValueError`); past it raises `MaxDepthError`;
-/// deeper-than-inline input diffs on a sized worker thread. Supported types
-/// and raised errors are listed in the "Known limitations" section of the onix
-/// repository's `README.md`; the depth bound and its errors in
-/// `crates/onix-py/src/guard.rs`.
+/// `verbose_level=2`. `max_depth` defaults to 512; deeper input raises
+/// `MaxDepthError`. Supported types and errors:
+/// <https://github.com/ksco92/onix#known-limitations>
 #[pyclass(module = "deepdiff_rs")]
 pub(crate) struct DeepDiff {
     report_value: Value,
