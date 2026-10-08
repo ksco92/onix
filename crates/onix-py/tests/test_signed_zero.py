@@ -1,6 +1,6 @@
-"""Regression + differential coverage for signed-zero hashing under ignore_order.
+"""Directed and differential coverage for signed-zero hashing under ignore_order.
 
-Directed regression cases plus two differential batches, reusing
+Directed cases plus two differential batches, reusing
 ``test_differential_fuzz``'s generators: one over plain lists, one over
 sets/frozensets directly. A real `set`/`frozenset` never holds both `-0.0`
 and `0.0`, so the set batch covers only the single-representative case.

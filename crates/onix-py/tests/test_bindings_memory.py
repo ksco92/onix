@@ -1,4 +1,4 @@
-"""Peak-RSS regression guard for the direct compact-value build.
+"""Peak-RSS guard for the direct compact-value build.
 
 Asserts the incremental process RSS of converting an ``api_payloads``-shaped
 fixture stays under ``_OVERHEAD_BOUND_MB``.
@@ -13,7 +13,8 @@ import sys
 import textwrap
 from pathlib import Path
 
-# Regression bound: comfortably above the compact build's measured overhead, so allocator/platform noise can't flake it.
+# Bound comfortably above the compact build's measured overhead, so allocator/platform
+# noise can't flake it.
 _OVERHEAD_BOUND_MB = 90.0
 _RECORD_COUNT = 10_000
 

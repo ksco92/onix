@@ -190,7 +190,7 @@ def test_two_distinct_bit_identical_nans_in_a_carried_set_dedup_in_onix_not_deep
     assert len(added) == 1
 
 
-# --- regression: JSON rendering of a buried non-finite leaf stays linear ---
+# --- JSON rendering of a buried non-finite leaf stays linear ---
 
 
 def test_deep_report_with_a_buried_non_finite_leaf_renders_to_json_quickly() -> None:

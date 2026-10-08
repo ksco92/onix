@@ -27,7 +27,8 @@ DEFAULT_MAX_DEPTH = 512
 
 def _run_isolated(body: str) -> subprocess.CompletedProcess[str]:
     """
-    Run `body` in an isolated subprocess so a SIGSEGV-class regression is a failed assertion, not a dead test run.
+    Run `body` in an isolated subprocess so a SIGSEGV-class crash is a failed assertion,
+    not a dead test run.
 
     :param body: Python source to run; it should assert its own expectations
         and exit 0 on success.
@@ -123,7 +124,7 @@ def test_max_depth_error_is_a_value_error_subclass() -> None:
 
 def test_deep_equal_input_also_raises_at_conversion_time() -> None:
     """
-    Documented MVP limitation: unlike `onix_core`'s own `diff_with_max_depth`
+    Documented limitation: unlike `onix_core`'s own `diff_with_max_depth`
     (which lets two *equal* inputs of any depth diff cleanly regardless of
     `max_depth`), the bindings' Python-object-to-`Value` conversion runs
     before equality can be known and is bounded by the same `max_depth`
@@ -168,8 +169,8 @@ def test_default_max_depth_matches_onix_core() -> None:
 
 # The sized-worker cases: genuinely-unequal input nested BELOW max_depth (so
 # conversion succeeds and the diff itself runs), which is the exact shape that
-# used to overflow the native stack and SIGSEGV the interpreter. Each runs in
-# its own subprocess so a regression is a failed assertion, not a dead suite.
+# overflows the native stack and SIGSEGVs the interpreter without the guard. Each runs
+# in its own subprocess so a crash is a failed assertion, not a dead suite.
 
 
 def test_deep_unequal_lists_below_max_depth_return_correct_diff() -> None:
@@ -565,7 +566,7 @@ def test_shallow_diff_per_call_overhead_is_bounded() -> None:
         DeepDiff(a, b)
         samples.append(time.perf_counter() - start)
     median_us = statistics.median(samples) * 1e6
-    # Wide, one-directional bound against a thread-spawn-per-call regression
+    # Wide, one-directional bound against a thread-spawn-per-call slowdown
     # (baseline is ~1-2 us for the inline shallow path).
     assert median_us < 25.0, f"median {median_us:.2f} us exceeds 25 us"
 
@@ -626,7 +627,7 @@ class _Node:
 
 def _nested_object(depth: int, leaf: object) -> object:
     """
-    Wrap `leaf` in `depth` nested custom objects, iteratively (issue #66).
+    Wrap `leaf` in `depth` nested custom objects, iteratively.
 
     :param depth: How many object layers to wrap `leaf` in.
     :param leaf: The innermost value.
