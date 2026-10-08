@@ -30,6 +30,6 @@ serde_json = "1"
 # arrow-buffer already resolves in this workspace, so no second copy enters.
 num-bigint = "0.5"
 
-# Off by default so `cargo test` links against libpython; maturin enables it via `pyproject.toml`.
+# Off by default so `cargo test` links libpython; maturin enables it via `pyproject.toml`.
 [features]
 extension-module = ["pyo3/extension-module"]

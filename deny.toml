@@ -12,11 +12,6 @@ allow = [
     "CC0-1.0",
 ]
 
-[bans]
-wildcards = "allow"
-workspace-default-features = "allow"
-external-default-features = "allow"
-
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
