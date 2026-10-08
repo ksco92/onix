@@ -83,9 +83,9 @@ It's also an all-numeric flat list, so it never reaches the one case
 ## Depth ceiling
 
 DeepDiff 9.1.0 raises `RecursionError` near depth 495 at the default
-recursion limit. `onix-cli` parses at most 127 nested arrays or objects (`serde_json`'s
-recursion limit, see `crates/onix-cli/src/run.rs`), whatever `--max-depth`
-is. `deep_narrow_d120` uses depth 120, which both tools handle.
+recursion limit. `onix-cli` parses at most 127 nested arrays or objects
+(`serde_json`'s recursion limit, see `crates/onix-cli/src/run.rs`), whatever
+`--max-depth` is. `deep_narrow_d120` uses depth 120, which both tools handle.
 
 ## Headline: diff-only time + peak RSS
 
