@@ -73,9 +73,9 @@ fn read_or_bail(path: &str, stderr: &mut dyn Write) -> Result<(String, Value), u
 ///
 /// `--max-depth`/`ONIX_MAX_DEPTH` can be set arbitrarily high with no upper
 /// bound enforced here, but that is safe: `serde_json`'s own parser enforces
-/// a default recursion limit of 127 nested arrays or objects (this crate does not
-/// enable its `unbounded_depth` feature), so any input `read_json_file` can
-/// successfully parse is already at most 127 levels deep — far under
+/// a default recursion limit of 127 nested arrays or objects (this crate does
+/// not enable its `unbounded_depth` feature), so any input `read_json_file`
+/// can successfully parse is already at most 127 levels deep — far under
 /// [`onix_core::DEFAULT_MAX_DEPTH`] — regardless of how high the configured
 /// bound is.
 #[allow(
