@@ -77,32 +77,7 @@ the same range, so `WIDE_DEFAULT_ROWS` was solved the same way as
 
 ## Mutation mix
 
-`a.parquet` has five columns: `id` (int64, unique, ascending), `ts`
-(`timestamp[us, UTC]`), `category` (string, 20 distinct values), `amount`
-(`decimal(18,4)`), `payload` (string, 20-200 chars). `b.parquet` applies, in
-one streaming pass from the same seed:
-
-* 2% of surviving rows modified -- half get a new `amount`, half a new
-  `payload` (never both; see `generate_fixtures.py`'s
-  `test_modified_rows_change_exactly_one_of_amount_or_payload`).
-* 1% of rows deleted.
-* 1% new rows appended with fresh, higher ids.
-* `category` re-typed to `dictionary<int32, string>` (values unchanged).
-* `ts` cast from `timestamp[us, UTC]` to `timestamp[ms, UTC]` (lossless: every
-  `ts` lands on a whole second).
-* A new `note` column: `null` for every carried-over row, `"added"` for new rows.
-
-No duplicate `id` appears on either side by construction -- this fixture's
-ids are always unique. Duplicate-key handling (#39) is exercised by that
-slice's own small synthetic/property tests, not by this fixture; the oracle
-below still implements and tests real duplicate-key detection (see
-`tests/test_oracle_duckdb.py`), it's just never triggered by the shared 5%-mutation
-pair.
-
-`wide`'s own column set and mutation mix (documented in
-`generate_fixtures.py`'s module docstring) apply the same kinds of change --
-deletions, additions, per-column modifications, and schema changes -- across
-every scalar Arrow type instead of five columns.
+The mutation mix is documented in `generate_fixtures.py`'s module docstring.
 
 ## Oracle semantics
 
@@ -170,5 +145,4 @@ the narrow and wide fixture pairs (`--kind narrow`/`--kind wide`), at 1M rows an
 its own module docstring is the single home for the methodology, correctness check, and fairness
 rules. Results for both kinds, and both fixture pairs' disk usage (about 20.8 GB for all four
 sizes at once), are in [`RESULTS.md`](RESULTS.md). The full-size `wide` run peaks at about 28.8 GB
-of resident memory for `onix` alone at the default 18 threads (33.1 GB on 0.11.2, about 67 GB
-before the streaming cell pass of issue #87); size the runner accordingly before starting it.
+of resident memory for `onix` alone at the default 18 threads; size the runner accordingly before starting it.
