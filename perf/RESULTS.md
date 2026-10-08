@@ -90,7 +90,7 @@ is. `deep_narrow_d120` uses depth 120, which both tools handle.
 
 ## Headline: diff-only time + peak RSS
 
-Diff-only time excludes process startup and JSON parsing on both sides (self-instrumented: onix via `--timing`'s `diff_ns`, deepdiff via `time.perf_counter_ns()` around only the `DeepDiff(...)` call). **Each cell is the MEDIAN over N tier-appropriate runs (the same warmup/run counts as the run-procedure table above), shown with its observed min-max spread, never a single sample** (this harness's own rule: report medians and σ, never single runs). Peak RSS is the median of hyperfine's per-run `memory_usage_byte` (verified against `/usr/bin/time -l`'s "maximum resident set size", identical value on this machine) over the full process, same runs as the wall-clock sweep.
+Diff-only time excludes process startup and JSON parsing on both sides (self-instrumented: onix via `--timing`'s `diff_ns`, deepdiff via `time.perf_counter_ns()` around only the `DeepDiff(...)` call). Peak RSS is the median of hyperfine's per-run `memory_usage_byte` over the full process, same runs as the wall-clock sweep.
 
 | Fixture | onix diff-only (median, min-max) | deepdiff diff-only (median, min-max) | Speedup | onix peak RSS | deepdiff peak RSS | Memory ratio | ≥5x threshold |
 |---|---|---|---|---|---|---|---|
@@ -124,7 +124,7 @@ Process start to exit, both tools reading the same two JSON files (hyperfine, me
 
 ## CPU time (user+sys) and allocation profile
 
-CPU time is the cloud-cost-relevant number (instances bill CPU-seconds regardless of wall clock) and doubles as the energy proxy documented in the Energy section below. `tracemalloc peak` is deepdiff's traced-allocation peak during the diff call only; onix's equivalent (a counting global allocator behind a bench-only feature) is a **documented TODO**, not implemented (marked nice-to-have, not required; see the Deferred work note at the end of this file).
+CPU time is the cloud-cost-relevant number (instances bill CPU-seconds regardless of wall clock) and doubles as the energy proxy documented in the Energy section below. `tracemalloc peak` is deepdiff's traced-allocation peak during the diff call only. onix has no allocation counter; see Not measured below.
 
 | Fixture | onix CPU (user+sys) | deepdiff CPU (user+sys) | deepdiff tracemalloc peak |
 |---|---|---|---|
