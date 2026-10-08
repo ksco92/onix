@@ -1,9 +1,8 @@
 # Golden corpus
 
 This directory is the compatibility test corpus for `onix`'s claim: proof that
-`onix`'s report is byte-identical (canonical JSON) to real `DeepDiff`'s
-`to_json()` output at `verbose_level=2`, on a hand-designed corpus of small,
-diverse cases.
+`onix`'s report is byte-identical (canonical JSON) to `DeepDiff`'s `to_json()`
+output at `verbose_level=2`, on a hand-designed corpus of small, diverse cases.
 
 ## Layout
 
@@ -13,12 +12,10 @@ Each subdirectory is one case:
 tests/golden/<case_name>/
 ├── a.json         # t1, as fed to both DeepDiff and onix
 ├── b.json         # t2
-├── expected.json  # DeepDiff(t1, t2, verbose_level=2, **kwargs), rendered through
-│                  # golden_tags.canonical_report (which passes the
-│                  # JSON_DEFAULT_MAPPING a `date` case needs, and puts anything
-│                  # set-derived into onix's canonical order) and re-dumped with
-│                  # sort_keys=True — see "JSON supersets" and "Set
-│                  # iteration order" below
+├── expected.json  # DeepDiff(t1, t2, verbose_level=2, **kwargs) rendered
+│                  # through golden_tags.canonical_report (see "JSON
+│                  # supersets"), re-dumped with sort_keys=True
+└── options.json   # {"ignore_order": bool} — which DiffOptions onix diffs
                     # this case with; kwargs above mirrors it (currently the
                     # only option this corpus varies)
 ```
@@ -60,12 +57,10 @@ value. `$timedelta` carries Python's own already-normalized
 `(days, seconds, microseconds)` triple as an object instead of one ISO string,
 because a single flattened microsecond count overflows even a 64-bit integer at
 Python's own extreme `days=999_999_999` (see `onix_core::datetime::TimeDelta`'s
-own doc); a set's members are always *written* in the canonical order documented
-below, which is what makes a fixture holding one byte-identical between runs.
-`$dict` is the one tag whose payload is a list of pairs rather than a list of
-items or a bare string: a plain JSON object can only ever have `str` keys, so a
-`dict` with any other key kind (`int`, `bool`, `float`, `None`, `datetime`,
-`date`, or a `tuple` of those) has no other shape to write it in —
+own doc). `$dict` is the one tag whose payload is a list of pairs rather than a
+list of items or a bare string: a plain JSON object can only ever have `str`
+keys, so a `dict` with any other key kind (`int`, `bool`, `float`, `None`,
+`datetime`, `date`, or a `tuple` of those) has no other shape to write it in —
 `{"$dict": [[1, "x"], [true, "y"]]}` is `{1: "x", True: "y"}`. Each pair's key
 is itself tagged where its type needs it (a `$tuple`/`$datetime`/`$date` key
 encodes like a value of that type would). **Any other object is plain data**,
@@ -80,15 +75,15 @@ it cannot decode yet fails loudly.
 arbitrary-precision integer has a perfectly good JSON number literal, but this
 corpus's Rust reader parses a number back through `serde_json` without its
 `arbitrary_precision` feature, which collapses any integer beyond `i64`/`u64` to
-the nearest `f64` — so an untagged big integer in an input file would decode to
-a float, not the integer the case means. Tagging it as its exact decimal digits
-keeps the input an integer for both readers. An in-range integer stays a plain
-JSON number, unchanged. This is the same representation gap onix's own value
-model closes (`onix_core::value:: Number`'s arbitrary-precision arm); the JSON
-*text* readers (`diff_json`, the CLI) share `serde_json`'s limitation and parse
-such an integer as a float, so two documents whose integers differ only past
-`i64`/`u64` compare equal and diff to `{}` there — stated in the README's Known
-limitations and tracked in issue #92.
+the nearest `f64` — so an untagged big integer in an input file would decode
+to a float, not the integer the case means. Tagging it as its exact decimal
+digits keeps the input an integer for both readers. An in-range integer stays a
+plain JSON number, unchanged. This is the same representation gap onix's own
+value model closes (`onix_core::value::Number`'s arbitrary-precision arm); the
+JSON *text* readers (`diff_json`, the CLI) share `serde_json`'s limitation and
+parse such an integer as a float, so two documents whose integers differ only
+past `i64`/`u64` compare equal and diff to `{}` there — stated in the README's
+Known limitations and tracked in issue #92.
 
 Because a big integer in a **report value** (a `values_changed`/`type_changes`
 `old_value`/`new_value`) has the same `serde_json` gap, the golden test
@@ -97,7 +92,7 @@ resolution before comparing (`collapse_bigint_tags` in
 `crates/onix-core/tests/golden.rs`). The diff *structure* — which category,
 which path, the int-versus-float type split — is still checked exactly; only a
 big integer's rendered *value* is compared at `f64` resolution there. onix's
-exact-digit rendering is pinned directly instead by the crate's own
+exact-digit rendering is checked directly instead by the crate's own
 JSON-writer/`Number` unit tests and the Python bindings' `to_dict()`/`to_json()`
 round-trip tests, which do not go through `serde_json`.
 
@@ -118,7 +113,7 @@ readers:
 **The product never interprets a tag.** `onix_core::Value`'s `Deserialize`,
 `deepdiff_rs.diff_json`, the `DeepDiff` class, and the CLI all read
 `{"$tuple": [1]}` or `{"$datetime": "2024-01-01T00:00:00"}` as the one-key dict
-it literally is; each of those paths has a test pinning that.
+it literally is; each of those paths has a test for that.
 
 ## JSON supersets
 
@@ -128,14 +123,12 @@ raises `TypeError` on any report carrying a bare date. onix renders one as
 `YYYY-MM-DD` — the same bytes `date.isoformat()` gives — a superset of
 DeepDiff's output, not a divergence: passing
 `default_mapping={datetime.date: datetime.date.isoformat}` to DeepDiff's own
-`to_json()` makes it produce byte-identical output, and that is what
-`scripts/golden_tags.py`'s `JSON_DEFAULT_MAPPING` is, shared by the generator
-and by `crates/onix-py/tests/test_golden_parity.py`. So a date-carrying golden
-case still has real DeepDiff output as its spec.
-
-`crates/onix-py/tests/test_datetimes.py` additionally asserts date cases against
-DeepDiff's `to_dict()` — the rendering-free comparison — and pins the fact that
-DeepDiff's stock `to_json()` still raises.
+`to_json()` makes it produce byte-identical output. That mapping is
+`scripts/golden_tags.py`'s `JSON_DEFAULT_MAPPING`, which `canonical_report`
+passes when it renders each `expected.json` (and which
+`crates/onix-py/tests/test_golden_parity.py` shares), and `canonical_report`
+also puts anything set-derived into onix's canonical order. So a date-carrying
+golden case still has DeepDiff output as its spec.
 
 The same gap, for the same reason: `JSON_CONVERTOR` has no entry for
 `datetime.time` or `datetime.timedelta` either, so DeepDiff's stock `to_json()`
@@ -145,23 +138,23 @@ takes) and a `timedelta` as `str(timedelta)`'s — there being no
 `timedelta.isoformat()` to mirror instead, `str()` is the natural, deterministic
 choice. `JSON_DEFAULT_MAPPING` carries both mappings alongside `date`'s.
 
-`crates/onix-py/tests/test_times.py`/`test_timedeltas.py` additionally assert
-cases against DeepDiff's `to_dict()` and pin the fact that DeepDiff's stock
-`to_json()` still raises for both.
-
 **`frozenset` values are a superset, not a difference.** `DeepDiff`'s own
 `to_json()` raises `TypeError` on a report holding a `frozenset` (e.g. the
 `new_value` of a set-vs-frozenset `type_changes`); `onix` serializes it as an
-array. No golden case (the corpus's `expected.json` could not be generated);
-`test_onix_serializes_a_frozenset_where_real_deepdiff_refuses` in `test_sets.py`
-pins it.
+array. There is no golden case: the corpus's `expected.json` cannot be generated
+for it, so `test_onix_serializes_a_frozenset_where_real_deepdiff_refuses` in
+`test_sets.py` asserts the behaviour.
+
+The tests for the calendar types are `crates/onix-py/tests/test_datetimes.py`,
+`test_times.py` and `test_timedeltas.py`; they compare against DeepDiff's
+`to_dict()`.
 
 ## Pinned versions
 
 - **Python:** 3.14 (installed on demand by `uv`, per `scripts/gen_goldens.py`'s
   inline script metadata) — pinned exactly, not just a floor: a case holding a
-  `str` nested inside a tuple/frozenset set item is rendered by real DeepDiff's
-  own `repr()`, which escapes against *this interpreter's* Unicode table, so
+  `str` nested inside a tuple/frozenset set item is rendered by DeepDiff's own
+  `repr()`, which escapes against *this interpreter's* Unicode table, so
   generating on any other version could bake a stale classification into the
   committed spec (see the Unicode entry below; `main()` asserts the running
   interpreter's `unicodedata.unidata_version` before writing anything).
@@ -171,8 +164,8 @@ pins it.
 - **Unicode:** 16.0.0 via the `unicode-general-category` crate, matching CPython
   3.14's `unicodedata` table; an older CPython escapes code points assigned
   after its own Unicode version where onix renders them literally (the `str`
-  escaping in `onix_core::path` — see `crates/onix-py/tests/test_sets.py`'s BMP
-  differential test).
+  escaping in `onix_core::path` — see `crates/onix-py/tests/test_sets.py`'s
+  BMP differential test).
 
 ## Regenerating
 
@@ -181,8 +174,8 @@ uv run scripts/gen_goldens.py
 ```
 
 This is the **only** source of `expected.json` (and, for full reproducibility,
-`a.json`/`b.json` too) — never hand-edit any file in this directory. Every case
-is defined in `scripts/gen_goldens.py`'s `CASES` dict; add a case there and
+`a.json`/`b.json` too) — never hand-edit any file in this directory. Every
+case is defined in `scripts/gen_goldens.py`'s `CASES` dict; add a case there and
 re-run to add a new golden. The script overwrites existing case directories in
 place, so a clean re-run should produce no `git diff` unless `CASES` or the
 pinned `deepdiff` version changed.
@@ -190,31 +183,33 @@ pinned `deepdiff` version changed.
 ## Case coverage
 
 `scripts/gen_goldens.py`'s `CASES` is the case list; a fuzz batch is built by
-the generator function its row names, and `_TIME_FUZZ_CASE_COUNT` there sets
-the size of the time/`timedelta` batches. Spec pages are under `docs/design/`.
+the generator function its row names, and `_TIME_FUZZ_CASE_COUNT` there sets the
+size of the time/`timedelta` batches. Spec pages are under `docs/design/`;
+`scripts/differential_fuzz.py` is a separate, larger-scale fuzzer, not part of
+this corpus.
 
 | Glob | Pins | Spec page |
 | --- | --- | --- |
 | `values_changed_*`, `float_change`, `null_vs_value`, `large_integer_*` | scalar `values_changed` | — |
 | `type_change_*` | `type_changes` pairings (int/float/bool/`None`/dict/list), root and depth | — |
 | `dictionary_*` | `dictionary_item_added`/`removed`, together at depth, to/from an empty dict | — |
-| `iterable_item_*`, `same_length_*` | `iterable_item_added`/`removed`: to/from an empty list, tail growth/shrink by absolute original index, a same-length element change | — |
+| `iterable_item_*`, `same_length_*` | `iterable_item_added`/`removed`: from/to empty, tail growth/shrink, same-length change | — |
 | `nested_*` | dict-in-dict, list-in-list, dict-in-list, list-in-dict | — |
-| `key_*`, `unicode_key` | key quoting/escaping: single quote, double quote, both, backslash, control characters, unicode | — |
-| `path_rendering_collision` | one adversarial path-rendering collision | — |
-| `dict_key_*` | non-`str` dict keys: `repr()` paths, tuple split, `==` matching, nested value stringification | — |
-| `threshold_collapse_*` | `threshold_to_diff_deeper=0.33` dict-vs-dict collapse: root, nested, the boundary at exactly `0.33` and just below | — |
+| `key_*`, `unicode_key` | key quoting: quotes, backslash, control characters, unicode | — |
+| `path_rendering_collision` | the one path-rendering collision case | — |
+| `dict_key_*` | non-`str` dict keys: added, removed, changed, matched, nested | — |
+| `threshold_collapse_*` | `threshold_to_diff_deeper=0.33` dict-vs-dict collapse and its boundary | — |
 | `big_int_*`, `negative_big_int_*`, `list_big_int_*` | integers beyond `i64`/`u64` compared and rendered by exact value | — |
-| `list_lcs_*` | `difflib`-style matching for all-scalar lists: reorder, replace, insert/delete, shift, repeats, disqualification by an unhashable element, `[1]`/`[1.0]`, `new_path` on index drift, the tie rule, `autojunk=False` at 200 or more items | `list-diff.md` |
+| `list_lcs_*` | `difflib`-style scalar-list matching: reorder, shift, repeats, `new_path` | `list-diff.md` |
 | `list_lcs_fuzz_*` | seeded random list-LCS cases (`_generate_fuzz_cases`) | `list-diff.md` |
-| `tuple_*`, `ignore_order_tuple_*`, `ignore_order_unhashable_tuple_*` | positional tuple diff, tuple versus list, the difflib match, hash pairing under `ignore_order`, `DeepHash` shared-cache digests | `ignore-order.md` |
-| `set_*`, `frozenset_*`, `ignore_order_set_*`, `ignore_order_unhashable_set_*` | `set_item_added`/`removed`, item rendering per kind, Python-equality membership, set versus other containers | `value-model.md` |
-| `datetime_*`, `date_*`, `list_lcs_datetime_*`, `ignore_order_date*` | instant comparison, UTC-normalized `values_changed` against raw other categories, `isoformat()` boundaries, `date` versus `datetime` | `value-model.md` |
-| `time_*`, `timedelta_*`, `list_lcs_time*`, `ignore_order_time*`, `set_time*` | raw `values_changed`, naive `time` never equal to aware, `timedelta` by `(days, seconds, microseconds)`, seeded fuzz batches | `value-model.md` |
-| `multiline_string_*`, `singleline_string_*`, `ignore_order_multiline_string_*` | the `diff` field `_diff_str` adds at `verbose_level=2`, `splitlines()` boundaries, hunks, autojunk at 250+ lines | — |
-| `object_*`, `ignore_order_object_*` | custom objects by attributes, `Enum` members, `type_changes` between classes | `value-conversion.md` |
-| `ignore_order_*` | shuffle, multiplicity, nested pairing, mixed types, the `cutoff_intersection_for_pairs=0.7` threshold, tie-breaks, `new_path` | `ignore-order.md` |
-| `ignore_order_fuzz_*` | seeded random cases (`_generate_ignore_order_fuzz_cases`); `scripts/differential_fuzz.py` is a separate, larger-scale fuzzer, not part of this corpus | `ignore-order.md` |
+| `tuple_*`, `ignore_order_tuple_*`, `ignore_order_unhashable_tuple_*` | positional diff, tuple versus list, hash pairing | `ignore-order.md` |
+| `set_*`, `frozenset_*`, `ignore_order_set_*`, `ignore_order_unhashable_set_*` | `set_item_added`/`removed`, item rendering, set versus other containers | `value-model.md` |
+| `datetime_*`, `date_*`, `list_lcs_datetime_*`, `ignore_order_date*` | instant comparison, UTC-normalized `values_changed`, `isoformat()` boundaries | `value-model.md` |
+| `time_*`, `timedelta_*`, `list_lcs_time*`, `ignore_order_time*`, `set_time*` | raw `values_changed`, naive versus aware, seeded fuzz batches | `value-model.md` |
+| `multiline_string_*`, `singleline_string_*`, `ignore_order_multiline_string_*` | the `diff` field `_diff_str` adds at `verbose_level=2` | — |
+| `object_*`, `ignore_order_object_*` | custom objects by attributes, `Enum` members | `value-conversion.md` |
+| `ignore_order_*` | shuffle, multiplicity, nested pairing, thresholds, tie-breaks | `ignore-order.md` |
+| `ignore_order_fuzz_*` | seeded random cases (`_generate_ignore_order_fuzz_cases`) | `ignore-order.md` |
 | `combined_*` | several value kinds in one report | — |
 
 ## Normalized versus raw datetimes
@@ -225,8 +220,8 @@ category carries the raw value, including the `values_changed` that `model.py`'s
 `mutual_add_removes_to_become_value_changes` post-pass folds a same-path
 add/remove pair into. The mechanism, with its source citations, is documented
 once in `crate::diff::datetime_diff` (`crates/onix-core/src/diff/scalar.rs`).
-`datetime_values_changed_normalized_to_utc` and
-`datetime_dictionary_item_added_reports_raw_value` pin the two sides.
+The cases `datetime_values_changed_normalized_to_utc` and
+`datetime_dictionary_item_added_reports_raw_value` cover the two sides.
 
 Hashing splits the same way: `DeepHash._prep_datetime` normalizes, so a naive
 and an aware value at one instant hash-match under `ignore_order`, while
@@ -254,10 +249,10 @@ own `==`. `onix` is deterministic throughout instead. Five consequences:
 **Entry order.** `_diff_set` (`diff.py`) builds `set_item_added`/
 `set_item_removed` from `t2_hashes - t1_hashes`, a Python set of SHA-256 hex
 strings, so entry order follows those hashes. `onix` sorts entries by their
-rendered path string — same findings, different order, the only one of the five
-that is order-only.
+rendered path string — same findings, different order, the only one of the
+five that is order-only.
 `test_set_entry_order_is_sorted_where_real_deepdiff_is_hash_ordered` in
-`test_sets.py` pins onix's output (no golden case: `DeepDiff`'s own answer is
+`test_sets.py` asserts onix's output (no golden case: `DeepDiff`'s own answer is
 hash-order-dependent).
 
 **Which member of an equality class wins.** `DeepHash` keys its shared cache by
@@ -267,7 +262,7 @@ which member that is follows the process's set iteration order. `onix` hashes
 each side's members in its own canonical set order, so the winner never depends
 on process hash order.
 `test_a_sets_report_does_not_depend_on_which_member_was_hashed_first` in
-`test_sets.py` pins onix's output (no golden case, same reason as above).
+`test_sets.py` asserts onix's output (no golden case, same reason as above).
 
 **`list(a_set) == some_list`.** `DeepDiff`'s distance computation asks whether
 applying the new side's type to the old value reproduces it
@@ -276,7 +271,7 @@ against a sequence that is `list(the_set) == the_list`, answered in the set's
 own iteration order — so which of two orderings of one list keeps a
 `type_changes` is process-dependent. `onix` compares the two by membership in
 either ordering. `test_a_set_versus_a_list_is_a_type_change_whatever_the_order`
-in `test_sets.py` pins onix's output (no golden case, same reason as above).
+in `test_sets.py` asserts onix's output (no golden case, same reason as above).
 
 **A naive and an aware datetime at one instant are two Python set members, but
 `DeepDiff` can report only one of them.** `_diff_set` groups members by
@@ -287,35 +282,35 @@ member survives follows the set's own iteration order. `onix` stores every
 structurally distinct member — identity for matching is by instant, but
 `SetItems` keeps both.
 `test_a_naive_and_aware_datetime_set_member_is_two_members_in_onix_one_in_deepdiff`
-in `test_sets.py` pins both the bare and the one-level-nested-in-a-tuple case.
+in `test_sets.py` asserts both the bare and the one-level-nested-in-a-tuple
+case.
 
 **A tuple or a frozenset set member matches order- and repetition-insensitively
-in real `DeepDiff`, not by Python `==`.** `DeepHash._prep_iterable`
-(`deephash.py`) runs with `ignore_iterable_order`/`ignore_repetition` for every
-iterable it hashes, so a tuple set member is affected too. `onix` compares a
-tuple member positionally (`tuple.__eq__`) and a frozenset member by membership.
+in `DeepDiff`, not by Python `==`.** `DeepHash._prep_iterable` (`deephash.py`)
+runs with `ignore_iterable_order`/`ignore_repetition` for every iterable it
+hashes, so a tuple set member is affected too. `onix` compares a tuple member
+positionally (`tuple.__eq__`) and a frozenset member by membership.
 `test_a_tuple_set_member_matches_by_position_where_deepdiff_ignores_order_and_repetition`
-in `test_sets.py` pins both shapes.
+in `test_sets.py` asserts both shapes.
 
 Only "Entry order", "Which member of an equality class wins",
 `list(a_set) == some_list` and the naive-versus-aware datetime point are
-hash-order-dependent in real `DeepDiff`; none of the five has a golden case,
-since a golden fixture pins byte parity and these diverge. The bindings' set
-fuzz batch mechanically re-diffs each pair with every set rebuilt from its
-members in reverse and skips a case where `DeepDiff` disagrees with itself; it
-caps a nested `frozenset` inside a set item at one member, because a
-multi-member one renders inside the entry's opaque path string with no
-positional key to check.
+hash-order-dependent in `DeepDiff`; none of the five has a golden case, since a
+golden fixture asserts byte parity and these diverge. The bindings' set fuzz
+batch mechanically re-diffs each pair with every set rebuilt from its members in
+reverse and skips a case where `DeepDiff` disagrees with itself; it caps a
+nested `frozenset` inside a set item at one member, because a multi-member one
+renders inside the entry's opaque path string with no positional key to check.
 
 **Canonical set order.** Everywhere a set's members become output — the JSON
 array a set serializes to, and the members of a `frozenset` rendered inside a
-`set_item_*` entry's path — `onix` emits them in one documented order, a purely
-structural comparison. The rule lives on `onix_core::value::SetItems`'s own doc;
-`scripts/golden_tags.py`'s `canonical_set_order` is its Python twin.
+`set_item_*` entry's path — `onix` emits them in one documented order, a
+purely structural comparison. The rule lives on `onix_core::value::SetItems`'s
+own doc; `scripts/golden_tags.py`'s `canonical_set_order` is its Python twin.
 
 ## Non-finite floats: where onix is deliberately different
 
-For a comparison, `NaN`/`Infinity`/`-Infinity` behave like real `DeepDiff`:
+For a comparison, `NaN`/`Infinity`/`-Infinity` behave like `DeepDiff`:
 `NaN != NaN`, `Infinity == Infinity`, and `to_json()` renders the same bare
 `NaN`/`Infinity`/`-Infinity` tokens Python's `json.dumps` writes by default
 (`allow_nan=True`) rather than quoting them or raising. Under `ignore_order`,
@@ -325,7 +320,7 @@ matching agrees too: `DeepHash` digests any `NaN` by `str(obj)`
 value, or set member matches every other one; `onix`'s `ItemKey::Float`
 reproduces that by collapsing every `NaN` onto one shared key (see
 `crate::ignore_order::hash::deephash_float_bits`'s own doc, in
-`crates/onix-core/src/ignore_order/hash.rs`). They are pinned in
+`crates/onix-core/src/ignore_order/hash.rs`). They are asserted in
 `crates/onix-py/tests/test_non_finite.py`, comparing rendered JSON text, because
 `serde_json` cannot parse a bare `NaN` token.
 
@@ -340,7 +335,7 @@ NaN object to itself, while `ScalarKey::Nan` never matches.
 `crates/onix-core/src/value.rs`'s `SetItems::new` doc and
 `crates/onix-core/src/lcs.rs`'s `ScalarKey::Nan` doc have the full mechanism for
 the second and third points; `crates/onix-core/src/ignore_order/tests.rs`'s
-`dist_key_hash_collision_on_distinct_nans_never_becomes_equality` pins that a
+`dist_key_hash_collision_on_distinct_nans_never_becomes_equality` asserts that a
 hash collision between two distinct `NaN`s (matching `DeepHash`) never becomes a
 false equality in the distance memo.
 
@@ -375,34 +370,29 @@ attribute view and DeepDiff uses three.
 When an object appears as a whole value in a report (a `type_changes`'
 `old_value`/`new_value`, an object added to a list/dict, a
 `threshold_to_diff_deeper` collapse), onix renders its full diffed attribute
-set. DeepDiff's `to_json()` instead runs `serialization.json_convertor_default`,
-which serializes **only** public `@property` values, or failing that only public
+set. DeepDiff's `to_json()` runs `serialization.json_convertor_default`, which
+serializes only public `@property` values, or failing that only public
 `__dict__` entries, and raises `TypeError` for a slots-only object with neither.
 A class attribute is left out of both renders. For a plain class the two
-coincide; they differ only for a whole-value object with one of these four
-triggers: a `@property`, a private (`_x`) attribute, an `Enum` member (DeepDiff
-renders `{}`, onix its `name` and `value`), or a **slot value on a class that
-also has `__dict__`** — for `class SlotBase: __slots__ = ("p",)` and
-`class Mixed(SlotBase)` with `p` set, `vars(m)` is `{}`, so DeepDiff renders an
-added `Mixed` as `{}` while onix renders `{"p": "x"}` — and, separately, for a
-slots-only object, where DeepDiff crashes and onix renders. onix's value is
-self-consistent (the value shown equals the value diffed) and total.
+coincide; they differ for a whole-value object with a `@property`, a private
+(`_x`) attribute, an `Enum` member (DeepDiff renders `{}`, onix its `name` and
+`value`), or a slot value on a class that also has `__dict__` (`vars(m)` is
+`{}`, so DeepDiff renders the added instance as `{}` where onix renders the
+slot), and for a slots-only object, where DeepDiff crashes and onix renders.
 
 ### `ignore_order` object hashing
 
 DeepDiff's `DeepHash._prep_obj` hashes an object by its raw `__dict__` (or its
 slots), never the `dir()`-derived properties and class attributes `_diff_obj`
-reads. onix hashes the one attribute view it holds (the diffed one), so pairing
-can differ for an object whose `@property` values change what its diffed view
-contains; a class attribute is the same for every instance of a class, and the
-rough length leaves it out as `DeepHash` does. Both tag the hash with the class
-`__name__`, so a custom object never pairs with a plain `dict`, while two
-distinct classes sharing a `__name__` share a hash bucket in both. The pairing
-distance counts an object the way DeepDiff's `_get_item_length` does
-(`len(obj.__dict__)`, and for an `Enum` class the `__dict__` lengths of all its
-members) and adds the `DeepHash` count of the `__dict__` entries onix does not
-extract; an `Enum` member's own attributes each count as one node there, so one
-holding a container pairs by a slightly different distance.
+reads. onix hashes the one attribute view it holds, so pairing can differ for an
+object whose `@property` values change what its diffed view contains. Both tag
+the hash with the class `__name__`, so a custom object never pairs with a plain
+`dict`, while two distinct classes sharing a `__name__` share a hash bucket in
+both. The pairing distance counts an object as `_get_item_length` does
+(`len(obj.__dict__)`; for an `Enum` class, the `__dict__` lengths of all its
+members) plus the `DeepHash` count of the `__dict__` entries onix does not
+extract, so an `Enum` member holding a container pairs by a slightly different
+distance.
 
 ### `to_dict()` returns attribute dicts, not the original objects
 
@@ -425,41 +415,27 @@ DeepDiff. A cycle token a report shows renders as `{}` where DeepDiff's
 
 The accept-list is derived from `_diff`'s isinstance ladder. DeepDiff sends a
 **number** (`complex`, `Decimal`, `Fraction`, a `numpy` scalar or
-`numpy.datetime64` — `_diff_numbers`, or `_diff_booleans` for `numpy.bool_`), an
-**iterable** (`bytes`, `bytearray`, `memoryview`, `range`, a generator, `deque`,
-`array.array`, any `__iter__`-defining object — `_diff_str`/`_diff_iterable`), a
-**`uuid`** (`_diff_uuids`), an **`ipaddress`** value (`_diff_ipranges`) to
-dedicated handlers before ever reaching `_diff_obj`; a class object it diffs by
-its class `__dict__` and a module likewise. onix implements none of those. At
-the root such a value raises a typed, path-naming `TypeError` rather than being
-reshaped into an object — which for the attribute-less ones (`complex`, a bare
-`object()`) would otherwise silently report `{}` for two *unequal* values.
+`numpy.datetime64`), an **iterable** (`bytes`, `bytearray`, `memoryview`,
+`range`, a generator, `deque`, `array.array`, any `__iter__`-defining object), a
+**`uuid`** or an **`ipaddress`** value to dedicated handlers before it reaches
+`_diff_obj`; a class object it diffs by its class `__dict__` and a module
+likewise. onix implements none of those. At the root such a value raises a
+typed, path-naming `TypeError` rather than being reshaped into an object, which
+for the attribute-less ones (`complex`, a bare `object()`) would otherwise
+silently report `{}` for two *unequal* values.
 
-Below the root, DeepDiff's `_diff` returns before any handler when `t1 is t2`,
-so a value both sides share is never diffed. onix skips two custom objects
-converted from the identical Python object the same way, and holds a value it
-cannot convert as an identity token, equal only to the same object. A class
-attribute is a token until a report compares it with a value that shadows it; it
-is then converted once for the diff (a class-level `Enum` member, config object
-or `re.Pattern`), so the shadowing value compares against the default's value. A
-class attribute onix cannot convert (ABCMeta's `_abc_impl`, a class-level lock)
-raises `TypeError` there, and one nested past `max_depth` on its own raises
-`MaxDepthError`. An `Exception` while reading an object's attributes (a property
-that raises) keeps the object with its instance `__dict__`, equal only to itself
-and hashed under `ignore_order` by that `__dict__` as `DeepHash` hashes it: it
-raises its error only where a walk compares it with an object of its class, as
-DeepDiff does, and a report showing it whole renders that `__dict__` (DeepDiff's
-render shows only its public entries, tracked in #99). An `Exception` while
-converting what the attributes hold (an unsupported dict key, a value nested
-past `max_depth`) makes the innermost object being converted a token that raises
-wherever a report compares or shows it. The same object on both sides reports
-nothing either way; `KeyboardInterrupt` and `SystemExit` raise at once. A whole
-object in a report leaves every class attribute out, as DeepDiff's `to_json()`
-render does. A token raises a `TypeError` naming its path wherever a report
-would have to show it: as the compared value of a finding, or as an instance
-attribute of an object in the report. Two equal but distinct unsupported objects
+Below the root, DeepDiff's `_diff` returns before any handler when `t1 is t2`.
+onix holds a value it cannot convert as an identity token, equal only to the
+same object, and raises a `TypeError` naming its path wherever a report would
+have to show it: as the compared value of a finding, or as an instance attribute
+of an object in the report. Two equal but distinct unsupported objects
 (`Decimal("1")` built twice) therefore raise where DeepDiff reports nothing, and
-an added object holding one raises where DeepDiff renders it.
+an added object holding one raises where DeepDiff renders it. A class attribute
+onix cannot convert (ABCMeta's `_abc_impl`, a class-level lock) raises
+`TypeError` once a report compares it with a value that shadows it, and one
+nested past `max_depth` on its own raises `MaxDepthError`. The token rules are
+in the docs of `resolve_token` and `token_error` in
+`crates/onix-py/src/convert.rs`.
 
 ### Pydantic models
 
@@ -489,26 +465,26 @@ that also has `__dict__`) raises a `TypeError` naming the object's path, where
 DeepDiff reports the whole object as `unprocessed`, a report category onix does
 not implement.
 
-A `namedtuple` is unaffected by all of the above: it is a `tuple` subclass and
-diffs positionally (`root[1]`, not `root.field`) — the pre-existing, separately
-documented divergence, unchanged here.
-
 ## Known DeepDiff quirks
 
 ### Reproduced quirks
 
-onix reproduces these byte-for-byte; the Rust doc named in each row states the
-rule.
+onix reproduces these byte-for-byte; the doc named in each row states the rule.
 
-| Quirk | Rust doc | Golden cases |
+| Quirk | Where documented | Golden cases |
 | --- | --- | --- |
-| Key quoting does not escape anything: `DeepDiff`'s path rendering never escapes a backslash, a control character, or an embedded quote character, unlike Python `repr()` | `onix_core::path::quote_key` (`crates/onix-core/src/path.rs`) | `key_single_quote`, `key_double_quote`, `key_both_quotes`, `key_backslash`, `key_control_chars` |
-| A set item is quoted by a different rule again | `onix_core::path::set_item_repr`, which also carries the upstream code it reproduces (`model.py::TextResult._from_tree_set_item_added_or_removed`) | `set_str_item_*`, `set_str_inside_tuple_item` |
-| A non-`str` dict key's path renders via `repr()`, with a `tuple` key split into one bracket group per element | `onix_core::path::dict_key_repr` | `dict_key_*` |
-| A dict key matches across two dicts by Python `==`, not by type: `1`, `1.0` and `True` are one key, and `b`'s key object is the one reported | `crate::ignore_order::match_dict_keys`, used by `crate::diff::object::object_diff_mixed` | `dict_key_int_vs_float_changed_value_matches_by_python_equality` |
-| `[1]` vs `[1.0]` inside a list diffs to nothing at all; `DeepDiff` does the same, so this is not a divergence | `crates/onix-core/src/lcs.rs`'s `ScalarKey`/`find_longest_match` | `list_lcs_int_vs_float_single_matches_via_python_equality` |
-| A hashable tuple can inherit another tuple's hash under `ignore_order`; the `frozenset` survivor choice is not reproduced, see "Set iteration order"'s "Which member of an equality class wins" point | `docs/design/ignore-order.md`'s "Distance memo" section | `ignore_order_tuple_digest_*`, `set_tuple_item_python_equality`, `set_frozenset_item_python_equality`, `ignore_order_unhashable_set_never_collides` (a `set` is unhashable in both tools) |
-| A `time` hashes by whole seconds-of-day under `ignore_order`, dropping the microsecond and any offset entirely; a `timedelta` hashes exactly | `onix_core::datetime::Time::hash_seconds_of_day` | `ignore_order_time_microsecond_only_difference_hash_matches`, `ignore_order_time_offset_only_difference_hash_matches` |
+| Key quoting escapes nothing | `onix_core::path::quote_key` | `key_*` |
+| A set item is quoted by its own rule | `onix_core::path::set_item_repr` | `set_str_item_*`, `set_str_inside_tuple_item` |
+| A non-`str` dict key renders via `repr()`, a `tuple` key split per element | `onix_core::path::dict_key_repr` | `dict_key_*` |
+| A dict key matches across two dicts by Python `==`, not by type | `crate::ignore_order::match_dict_keys` | `dict_key_int_vs_float_changed_value_matches_by_python_equality` |
+| `[1]` vs `[1.0]` inside a list diffs to nothing | `ScalarKey` in `crates/onix-core/src/lcs.rs` | `list_lcs_int_vs_float_single_matches_via_python_equality` |
+| A hashable tuple inherits another tuple's hash under `ignore_order` | "Distance memo" in `docs/design/ignore-order.md` | `ignore_order_tuple_digest_*` |
+| A `time` hashes by whole seconds-of-day under `ignore_order` | `onix_core::datetime::Time::hash_seconds_of_day` | `ignore_order_time_microsecond_only_difference_hash_matches` |
+
+The `frozenset` equivalent of the tuple-hash row is a divergence: see "Which
+member of an equality class wins" under "Set iteration order". The cases
+`set_tuple_item_python_equality` and `set_frozenset_item_python_equality` cover
+the equality rule itself.
 
 ### Nested non-`str` dict key in `to_json()`
 
@@ -523,24 +499,23 @@ shortest-round-trip form a float *value* gets) and `onix` matches exactly
 `datetime`/`date`/`tuple` key has no such rule: `json.dumps` (and so
 `DeepDiff.to_json()`) *raises* `TypeError`, so per this crate's compatibility
 policy `onix` renders the same `repr()` text that key would get as a top-level
-path segment instead. No golden fixture can hold this crash case; pinned in
+path segment instead. No golden fixture can hold this crash case; asserted in
 `crates/onix-core/src/value_tests.rs`'s
 `to_serde_json_stringifies_a_tuple_key_via_python_repr_where_deepdiff_would_crash`
 and its `datetime` twin.
 
 ### Path-rendering collision survivor
 
-A key can make path rendering collide, in both tools. A dict key whose own
-text contains `']['`-shaped syntax (e.g. `p'"]["q'`) renders identically to an
+A key can make path rendering collide, in both tools. A dict key whose own text
+contains `']['`-shaped syntax (e.g. `p'"]["q'`) renders identically to an
 unrelated, differently-nested path (e.g. `{"p'": {"q'": ...}}`); `DeepDiff`'s
 own `to_json()` collapses this to one entry too. Which finding survives the
-collapse differs: `DeepDiff`'s follows its Python dict's original key
-insertion order, `onix` traverses `serde_json::Map`'s keys alphabetically (no
-`preserve_order` feature). See `crate::report`'s module doc for the
-structural- vs. rendered-path keying rule this follows from. The
-`path_rendering_collision` golden case and
-`crates/onix-core/tests/golden.rs`'s dedicated test (no panic, valid
-`DeepDiff`-shaped output, onix's own deterministic survivor) pin it.
+collapse differs: `DeepDiff`'s follows its Python dict's original key insertion
+order, `onix` traverses `serde_json::Map`'s keys alphabetically (no
+`preserve_order` feature). See `crate::report`'s module doc for the structural-
+vs. rendered-path keying rule this follows from. The `path_rendering_collision`
+golden case and `crates/onix-core/tests/golden.rs`'s dedicated test (no panic,
+valid `DeepDiff`-shaped output, onix's own deterministic survivor) cover it.
 
 ### `namedtuple` positional diff
 
@@ -548,135 +523,116 @@ A `namedtuple` is diffed positionally, not by field. `DeepDiff` walks a
 `namedtuple`'s fields too (`deephash.py::_prep_tuple`), reporting `root[0].x`
 rather than `root[0][0]`. `onix` accepts a `namedtuple` as an ordinary `tuple`
 subclass — carrying its class name into a `type_changes` entry like any other
-tuple subclass — but diffs its contents positionally like every other tuple: a
-permanent divergence, not an approximation.
+tuple subclass — but diffs its contents positionally like every other tuple:.
 `crates/onix-py/tests/test_tuples.py` asserts both outputs side by side. No
 golden case: the corpus's tagged encoding has no tag for a `namedtuple`.
 
 ### Every other subclass
 
 Every other subclass — `list`/`tuple`/`set`/`frozenset`/`dict`, and a
-`datetime`/`date`/`time`/`timedelta` subclass such as pandas' `Timestamp` —
-is accepted and compares as its base type, carrying its own class name
-into a `type_changes` entry, matching `DeepDiff`'s `type(obj).__name__` rule
-(one restriction: a `tuple`/`frozenset` subclass, including a `namedtuple`, is
-not accepted as a `set` member: `onix` raises `TypeError` for such a member
-where `DeepDiff` accepts it and compares it by value). See
+`datetime`/`date`/`time`/`timedelta` subclass such as pandas' `Timestamp` — is
+accepted and compares as its base type, carrying its own class name into a
+`type_changes` entry, matching `DeepDiff`'s `type(obj).__name__` rule (one
+restriction: a `tuple`/`frozenset` subclass, including a `namedtuple`, is not
+accepted as a `set` member: `onix` raises `TypeError` for such a member where
+`DeepDiff` accepts it and compares it by value). See
 `crates/onix-core/src/value.rs`'s `Typed` doc and
 `docs/design/value-conversion.md`'s "Subclasses" section for the conversion
 rules; `test_tuples.py`, `test_sets.py`, `test_datetimes.py` and
-`test_conversions.py` assert this against the real tool. No golden case uses a
+`test_conversions.py` assert this against DeepDiff. No golden case uses a
 subclass, for the same tagged-encoding reason as above.
 
 ### `to_dict()` type names
 
 `to_dict()` reports a `type_changes` entry's types as names, not classes.
-Real `DeepDiff` puts the type objects themselves (`<class 'tuple'>`) in
-`to_dict()`; `onix` puts the same names its `to_json()` uses (`"tuple"`).
-Values are unaffected.
+`DeepDiff` puts the type objects themselves (`<class 'tuple'>`) in `to_dict()`;
+`onix` puts the same names its `to_json()` uses (`"tuple"`). Values are
+unaffected.
 
 ### List-LCS `2^53` limit
 
 List-LCS numeric matching is exact only within `2^53`. The matcher's cross-type
 equality (the `[1]` vs `[1.0]` row of Reproduced quirks) normalizes any integral
-value — `bool`, `int`, or a fraction-free `float` — to one shared bucket key,
-but only exactly for magnitudes an `f64` represents every integer up to (`2^53`,
-`9_007_199_254_740_992`); beyond that, two otherwise-equal large numbers compare
-by `f64` bit pattern instead of exact value. Real Python performs exact
-arbitrary-precision comparison here. An accepted, narrow limitation of this
-port; no golden case exercises it.
+value — `bool`, `int`, or a fraction-free `float` — to one shared bucket
+key, but only exactly for magnitudes an `f64` represents every integer up to
+(`2^53`, `9_007_199_254_740_992`); beyond that, two otherwise-equal large
+numbers compare by `f64` bit pattern instead of exact value. Real Python
+performs exact arbitrary-precision comparison here. No golden case exercises it.
 
 ### Naive datetime pairing and the process timezone
 
 `ignore_order` pairing among naive datetimes depends on the process's local
-timezone in `DeepDiff`, but not in `onix`. `distance.py`'s
-`_get_datetime_distance` ranks a candidate pair through
-`datetime.timestamp()`, which reads a naive value in the local timezone, so
-real `DeepDiff`'s pairing for a list mixing naive and aware datetimes is
-machine-dependent. `onix` has no timezone database and reads a naive value as
-UTC everywhere, matching `datetime_normalize`. The two agree once the process
-timezone is UTC. See `distance_family`'s doc
-(`crates/onix-core/src/ignore_order/distance.rs`); the `utc_timezone` fixture
-in `crates/onix-py/tests/test_differential_fuzz.py` pins the comparison. No
-golden case: regeneration is byte-stable under any `TZ`.
+timezone in `DeepDiff`, but not in `onix`: `distance.py`'s
+`_get_datetime_distance` ranks a candidate pair through `datetime.timestamp()`,
+which reads a naive value in the local timezone. onix reads a naive value as UTC
+everywhere, so the two agree once the process timezone is UTC. The rationale is
+in `distance_family`'s doc (`crates/onix-core/src/ignore_order/distance.rs`);
+the `utc_timezone` fixture in `crates/onix-py/tests/test_differential_fuzz.py`
+asserts the comparison. No golden case: regeneration is byte-stable under any
+`TZ`.
 
 ### Datetime outside year `1..=9999`
 
-A datetime whose UTC form leaves year `1..=9999` cannot be compared to
-another datetime. Normalizing e.g. `9999-12-31T23:00-01:00` lands on year
-10000, and real `astimezone(timezone.utc)` raises
-`OverflowError: date value out of range` there, so `DeepDiff` raises rather
-than reporting anything; `onix` raises too, as
+A datetime whose UTC form leaves year `1..=9999` cannot be compared to another
+datetime. Normalizing e.g. `9999-12-31T23:00-01:00` lands on year 10000, and
+`astimezone(timezone.utc)` raises `OverflowError` there, so `DeepDiff` raises
+rather than reporting anything; `onix` raises too, as
 `onix_core::Error::DateTimeOutOfRange`, surfaced to Python as a `ValueError`
-naming the path. On the ordered path only `_diff_datetime` normalizes, so both
-tools raise only when two datetimes are actually compared. Under
-`ignore_order`, `DeepHash._prep_datetime` normalizes every datetime it hashes,
-so real `DeepDiff` raises even for a value merely added, removed, or shuffled;
-`onix` hashes by instant and reports it raw instead, per the compatibility
-policy, raising only where two datetimes are diffed, in the report or in a
-candidate pair's distance.
+naming the path. On the ordered path both tools raise only when two datetimes
+are actually compared. Under `ignore_order`, `DeepHash._prep_datetime`
+normalizes every datetime it hashes, so `DeepDiff` raises even for a value
+merely added, removed, or shuffled; `onix` hashes by instant and reports it raw
+instead, per the compatibility policy, raising only where two datetimes are
+diffed, in the report or in a candidate pair's distance.
 `an_unnormalizable_datetime_under_ignore_order_is_reported_raw` in
-`crates/onix-core/src/diff/tests.rs` pins onix's side.
+`crates/onix-core/src/diff/tests.rs` asserts onix's side.
 
 ### Integer beyond `f64::MAX`
 
-An integer beyond `f64::MAX` (about `21024`) crashes `DeepDiff` under
-`ignore_order`; `onix` reports the change.**
-`distance.py::_get_numbers_distance` runs `float(num1)` *outside* its `try`,
-and `float(2**1024)` raises
-`OverflowError: int too large to convert to float`. `onix` reads such an
-integer as a saturated `f64` infinity (`num-bigint`'s `to_f64`), so the pair's
-distance short-circuits and it reports `values_changed`, per the compatibility
-policy. A crash-class case directory carries the usual
-`a.json`/`b.json`/`options.json` plus a two-key `expected.json`
-(`deepdiff_raises`: the exception `DeepDiff` raises; `onix`: onix's own
-report, big integers `$bigint`-tagged); both readers detect a crash case by
-the presence of the `deepdiff_raises` key.
-`ignore_order_big_int_beyond_f64_pairs_without_panicking` in `golden.rs` pins
-the `onix-core` render (which has no exact big-int form through `serde_json`);
-`crates/onix-py/tests/test_golden_parity.py` asserts the bindings' byte-exact
-`to_dict()` against `decode_tags(expected["onix"])`. `golden.rs`'s
-`every_deepdiff_crash_case_is_pinned` asserts every case carrying the marker
-is registered.
+An integer beyond `f64::MAX` (about `2**1024`) crashes `DeepDiff` under
+`ignore_order`; `onix` reports the change. `distance.py::_get_numbers_distance`
+runs `float(num1)` outside its `try`, and `float(2**1024)` raises
+`OverflowError`. onix reads such an integer as a saturated `f64` infinity, so
+the pair's distance short-circuits and it reports `values_changed`, per the
+compatibility policy. The case directory's `expected.json` has the keys
+`deepdiff_raises` and `onix` instead of a report.
+`ignore_order_big_int_beyond_f64_pairs_without_panicking` in `golden.rs` asserts
+the `onix-core` render; `crates/onix-py/tests/test_golden_parity.py` asserts the
+bindings' `to_dict()` against `decode_tags(expected["onix"])`, and
+`every_deepdiff_crash_case_is_pinned` in `golden.rs` asserts every case carrying
+the marker is registered.
 
 ### Lone surrogate hashing
 
 A `str` (or a dict key) containing a lone (unpaired) surrogate code point is
-accepted and compared like any other `str`, matching real `DeepDiff`'s plain
-Python `==`. `crates/onix-py/src/convert.rs`'s `pystring_to_cstr` reads the
-zero-copy UTF-8 path first and, only on that borrow's failure, falls back to
-`str.encode('utf-8', 'surrogatepass')` (the CPython idiom that yields WTF-8
-bytes, `onix_core::value::Str`); equality, ordering, path rendering, and
-`to_dict()`'s reconstruction all follow from that split. The one accepted
-divergence is **hashing** one — a `set`/`frozenset` member, or any value once
-`ignore_order=True`: real `DeepDiff` crashes with an unhandled
-`UnicodeEncodeError` from `deephash.py`; `onix` hashes by code point and
-reports deterministically instead, per the compatibility policy. No golden
-case: the corpus's JSON writer cannot hold this content either
-(`ensure_ascii=False` raises the same `UnicodeEncodeError`).
-`crates/onix-py/tests/test_conversions.py` pins the directed cases (plus a
+accepted and compared like any other `str`, as in `DeepDiff`; `pystring_to_cstr`
+in `crates/onix-py/src/convert.rs` documents the conversion. The divergence is
+hashing one, a `set`/`frozenset` member or any value once `ignore_order=True`:
+`DeepDiff` crashes with an unhandled `UnicodeEncodeError` from `deephash.py`;
+`onix` hashes by code point and reports deterministically instead, per the
+compatibility policy. No golden case: the corpus's JSON writer cannot hold this
+content either (`ensure_ascii=False` raises the same `UnicodeEncodeError`).
+`crates/onix-py/tests/test_conversions.py` asserts the directed cases (plus a
 non-BMP character converting normally) and `test_differential_fuzz.py`'s
 surrogate batch runs `SEED_COUNT` generated cases through both engines.
 
 ### Empty-`tuple` dict key
 
-An empty-`tuple` (`()`) dict key is a `DeepDiff` bug, not reproduced.
-`stringify_param` (`model.py`) renders a `tuple` param as
-`']['.join(map(repr, param))`, which for `()` is the empty string, so the path
-comes back Python `None` and then the literal `"null"` dict key once
-`to_dict()`'s report reaches `to_json()`. `onix` renders `root[]` instead —
-deterministic, and a usable path — per the compatibility policy. The
-differential fuzz batch that generates `tuple` dict keys (issue #62) excludes
-the empty tuple for this reason; see
+An empty-`tuple` (`()`) dict key is a `DeepDiff` bug. `stringify_param`
+(`model.py`) renders a `tuple` param as `']['.join(map(repr, param))`, which for
+`()` is the empty string, so the path comes back Python `None` and then the
+literal `"null"` dict key once `to_dict()`'s report reaches `to_json()`. `onix`
+renders `root[]` instead — deterministic, and a usable path — per the
+compatibility policy. The differential fuzz batch that generates `tuple` dict
+keys (issue #62) excludes the empty tuple for this reason; see
 `crates/onix-py/tests/test_differential_fuzz.py`'s `_gen_non_str_dict_key`.
 
 ### Non-finite `float` dict key
 
-A non-finite `float` (`nan`/`inf`) dict key is also a `DeepDiff` bug, not
-reproduced. `stringify_param`'s `repr()`-then-`ast.literal_eval` round trip
-fails on `"nan"`/`"inf"` and silently collapses the key to `None`, the same
-way the empty-tuple case above does:
-`DeepDiff({}, {float('nan'): 1}).to_json()` is
+A non-finite `float` (`nan`/`inf`) dict key is also a `DeepDiff` bug.
+`stringify_param`'s `repr()`-then-`ast.literal_eval` round trip fails on
+`"nan"`/`"inf"` and silently collapses the key to `None`, the same way the
+empty-tuple case above does: `DeepDiff({}, {float('nan'): 1}).to_json()` is
 `{"dictionary_item_added": {"null": 1}}`. `onix` renders the key
 deterministically — `root[nan]` as a path segment, and the bare
 `NaN`/`Infinity`/`-Infinity` token text wherever the key is embedded in a
@@ -686,19 +642,17 @@ carried JSON object — per the same compatibility-policy choice. See
 
 ### `datetime`/`date` subclass dict key
 
-A `datetime`/`date` subclass dict key that `DeepDiff` must render as part of
-any path segment is the same `stringify_param` bug again, not reproduced. A
-subclass's `repr()` looks like a constructor call, which
-`literal_eval_extended` cannot parse back as a literal either, so the path
-collapses to `None`/`"null"` the same way the two cases above do — not only
-for an added/removed key, but for the same subclass key on both sides holding
-a container value with its own internal change, since that also needs a path
-built past the key: `{MyDT(...): {1, 2, 3}}` vs `{MyDT(...): {1, 2, 4}}` gives
+A subclass's `repr()` looks like a constructor call, which
+`literal_eval_extended` cannot parse back as a literal, so the path of a
+`datetime`/`date` subclass key collapses to `None`/`"null"` through the same
+`stringify_param` bug as the two cases above — not only for an added/removed
+key, but for the same subclass key on both sides holding a container value with
+its own internal change, since that also needs a path built past the key:
+`{MyDT(...): {1, 2, 3}}` vs `{MyDT(...): {1, 2, 4}}` gives
 `{'set_item_removed': ['None[3]'], 'set_item_added': ['None[4]']}`. `onix`
-renders the key path deterministically either way (a `tuple`/`namedtuple` key
-is unaffected — `stringify_param` renders any tuple-shaped key positionally,
-never through `repr()`). See
-`crates/onix-py/tests/test_differential_fuzz.py`'s
+renders the key path deterministically either way (a `tuple`/`namedtuple` key is
+unaffected — `stringify_param` renders any tuple-shaped key positionally,
+never through `repr()`). See `crates/onix-py/tests/test_differential_fuzz.py`'s
 `_generate_subclass_key_case`.
 
 ### Subclasses
