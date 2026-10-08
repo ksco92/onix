@@ -21,28 +21,29 @@ use crate::errors::map_diff_error;
 /// rather than risking a native stack overflow the interpreter cannot catch.
 pub(crate) const MAX_DEPTH_CEILING: usize = 20_000;
 
-/// Native stack per level of the recursive diff engine: 1.5 times the debug
-/// worst case, the `pairing` shape (6,721 bytes/level on macOS and Linux) of
-/// `crates/onix-core/examples/stack_frame_cost.rs`. The example's CI step
-/// fails when a shape exceeds this value.
-const PER_LEVEL_STACK_BYTES: usize = 10_240;
+/// Native stack per level of the recursive diff engine: the debug worst case,
+/// the `pairing` shape (6,721 bytes/level on macOS and Linux) of
+/// `crates/onix-core/examples/stack_frame_cost.rs`, rounded up to a power of
+/// two. The Makefile's `stack-check` target passes this value to the example.
+const PER_LEVEL_STACK_BYTES: usize = 8_192;
 
-/// Extra multiplier over the bare `ceiling * per-level` figure, so the worker
-/// stack is comfortably larger than the deepest recursion the ceiling
-/// permits.
-const STACK_SAFETY_MARGIN: usize = 4;
+/// Multiplier over the bare `ceiling * per-level` figure; the per-level
+/// product, 16,384, is 2.4 times the measured debug `pairing` cost.
+const STACK_SAFETY_MARGIN: usize = 2;
 
 /// The diff worker thread's stack size: reserved virtual address space,
-/// committed lazily. At [`MAX_DEPTH_CEILING`] it is 819,200,000 bytes
-/// (781.25 MiB), 6.1 times the debug `pairing` cost of those levels.
+/// committed lazily. At [`MAX_DEPTH_CEILING`] it is 327,680,000 bytes
+/// (312.5 MiB).
 const WORKER_STACK_BYTES: usize = MAX_DEPTH_CEILING * PER_LEVEL_STACK_BYTES * STACK_SAFETY_MARGIN;
+const _: () = assert!(WORKER_STACK_BYTES == 327_680_000);
 
 /// Depth up to which the recursive operations (the diff itself, plus
 /// serializing or dropping its result) may run directly on the calling
 /// thread; anything deeper is routed to the sized worker. Sized for thread
 /// stacks of 512 KiB and up, the common server-executor size: 32 levels of
-/// the debug `pairing` cost (6,721 bytes/level, the example above) is
-/// 215,072 bytes. A thread configured near Python's 32 KiB minimum can still
+/// the debug `pairing` cost (6,721 bytes/level, from
+/// `crates/onix-core/examples/stack_frame_cost.rs`) is 215,072 bytes, against
+/// 524,288. A thread configured near Python's 32 KiB minimum can still
 /// overflow on inline work.
 const MAX_INLINE_DEPTH: usize = 32;
 
