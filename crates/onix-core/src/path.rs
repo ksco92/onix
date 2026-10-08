@@ -733,8 +733,7 @@ mod tests {
         );
     }
 
-    /// A `str` nested inside a container item goes through Python `repr()`,
-    /// which *does* escape — the other half of the set-item rule.
+    /// A `str` nested in a tuple item is rendered by `python_repr`, which escapes.
     #[test]
     fn str_nested_in_a_tuple_item_uses_python_repr() {
         let tuple = Value::Tuple(Box::new([Value::Str("it's".into())]).into());
@@ -927,10 +926,6 @@ mod tests {
         assert_eq!(python_repr(&item), "('a b',)");
     }
 
-    /// Exercises `escape_non_printable` directly, at the two code points
-    /// each escape width's `<` comparison must reject vs. accept: `U+00FF`
-    /// stays `\xXX`, `U+0100` switches to `\uXXXX`; `U+FFFF` stays `\uXXXX`,
-    /// `U+10000` switches to `\UXXXXXXXX`.
     #[test]
     fn escape_non_printable_widths_switch_exactly_at_their_boundaries() {
         let cases = [

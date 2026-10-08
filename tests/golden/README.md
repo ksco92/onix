@@ -168,7 +168,7 @@ quirks" below). It runs as part of the normal `cargo test` / `make check`.
 - **Unicode:** 16.0.0 via the `unicode-general-category` crate, matching
   CPython 3.14's `unicodedata` table; an older CPython escapes code points
   assigned after its own Unicode version where onix renders them literally
-  (`onix_core::path::python_repr`'s `str` escaping — see
+  (`onix_core::path::is_non_printable` decides what is escaped — see
   `crates/onix-py/tests/test_sets.py`'s BMP differential test).
 
 ## Regenerating
