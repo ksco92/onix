@@ -1462,49 +1462,45 @@ fn a_dict_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
     );
 }
 
+fn assert_subclass_with_differing_members_is_a_type_change(base: &CValue, other: &CValue) {
+    assert_eq!(
+        mirror_and_report(&with_class(other, Some(sub())), base),
+        [Ok(3), Ok(3)]
+    );
+}
+
 #[test]
 fn a_list_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report()
 {
-    let list = |second: i64| vec![cv(&json!(1)), cv(&json!(second))].into_boxed_slice();
-    let subclass = CValue::Array(crate::value::Typed::with_class_name(list(3), Some(sub())));
-    assert_eq!(
-        mirror_and_report(&subclass, &carr(list(2).into_vec())),
-        [Ok(3), Ok(3)]
+    assert_subclass_with_differing_members_is_a_type_change(
+        &cv(&json!([1, 2])),
+        &cv(&json!([1, 3])),
     );
 }
 
 #[test]
 fn a_tuple_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report()
 {
-    let tuple = |second: i64| vec![cv(&json!(1)), cv(&json!(second))].into_boxed_slice();
-    let subclass = CValue::Tuple(crate::value::Typed::with_class_name(tuple(3), Some(sub())));
-    assert_eq!(
-        mirror_and_report(&subclass, &ctuple(tuple(2).into_vec())),
-        [Ok(3), Ok(3)]
+    assert_subclass_with_differing_members_is_a_type_change(
+        &ctup(&[json!(1), json!(2)]),
+        &ctup(&[json!(1), json!(3)]),
     );
 }
 
 #[test]
 fn a_set_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report() {
-    let members =
-        |second: i64| crate::value::SetItems::new(vec![cv(&json!(1)), cv(&json!(second))]);
-    assert_eq!(
-        mirror_and_report(
-            &CValue::Set(members(3).with_type_name(Some(sub()))),
-            &CValue::Set(members(2))
-        ),
-        [Ok(3), Ok(3)]
+    assert_subclass_with_differing_members_is_a_type_change(
+        &cset(&[json!(1), json!(2)]),
+        &cset(&[json!(1), json!(3)]),
     );
 }
 
 #[test]
 fn a_dict_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report()
 {
-    let entries = |b: i64| cobj(json!({"a": 1, "b": b}).as_object().unwrap());
-    let subclass = entries(3).with_dict_class(Some((sub(), std::sync::Arc::from("1"))));
-    assert_eq!(
-        mirror_and_report(&CValue::Object(subclass), &CValue::Object(entries(2))),
-        [Ok(3), Ok(3)]
+    assert_subclass_with_differing_members_is_a_type_change(
+        &cv(&json!({"a": 1, "b": 2})),
+        &cv(&json!({"a": 1, "b": 3})),
     );
 }
 
@@ -3319,14 +3315,17 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
             prop::collection::vec(("[a-c]", inner), 0..3)
                 .prop_map(|entries| crate::value::Builder::new().object(entries)),
         ];
-        container.prop_flat_map(|value| {
-            prop_oneof![Just(value.clone()), Just(with_class(&value, Some(sub())))]
+        (container, any::<bool>()).prop_map(|(value, subclass)| {
+            if subclass {
+                with_class(&value, Some(sub()))
+            } else {
+                value
+            }
         })
     })
 }
 
-/// `value` as an instance of the subclass `class` (`None`: the base type);
-/// scalars pass through.
+/// `value` re-typed as `class` (`None`: base type); scalars unchanged.
 fn with_class(value: &CValue, class: Option<std::sync::Arc<str>>) -> CValue {
     let typed =
         |items: &[CValue]| crate::value::Typed::with_class_name(items.into(), class.clone());
