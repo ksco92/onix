@@ -253,9 +253,10 @@ hash-order-dependent).
 **Which member of an equality class wins.** `DeepHash` keys its shared cache by
 `_make_hash_key(obj)` (`deephash.py`), so a Python-equal tuple or frozenset
 hashed earlier in the run fixes the digest for every later Python-equal one, and
-which member that is follows the process's set iteration order. `onix` hashes
-each side's members in its own canonical set order, so the winner never depends
-on process hash order.
+which member that is follows the process's set iteration order. The cache is
+read at every node, so an inner container can hit it while its outer tuple
+misses. `onix` hashes each side's members in its own canonical set order, so the
+winner never depends on process hash order.
 `test_a_sets_report_does_not_depend_on_which_member_was_hashed_first` in
 `test_sets.py` asserts onix's output (no golden case, same reason as above).
 
