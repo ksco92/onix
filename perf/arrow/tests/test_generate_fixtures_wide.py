@@ -139,7 +139,7 @@ def test_wide_value_changed_columns_carry_a_positive_count(tmp_path: Path) -> No
 
 
 def test_wide_value_changed_covers_float16_decimal32_decimal64_and_the_view_types(tmp_path: Path) -> None:
-    """The six added types each carry their own `value_changed` count."""
+    """Each of these six types carries its own `value_changed` count."""
     manifest = generate(20_000, SEED, tmp_path / "fixture", kind="wide")
     for column in (
         "float16_col", "decimal32_col", "decimal64_col", "utf8_view_col", "binary_view_col", "fixed_size_binary_col",

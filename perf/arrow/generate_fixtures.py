@@ -12,8 +12,7 @@ has five columns:
 `b.parquet` applies a fixed mutation mix on top, in the same streaming pass:
 
     * 2% of surviving rows modified: half get a new `amount`, half a new
-      `payload` (both guaranteed different from the original -- see
-      `_random_amount`/`_random_payload`'s disjoint ranges/prefixes).
+      `payload`, always different (`_random_amount`/`_random_payload`).
     * 1% of rows deleted (excluded from `b.parquet` entirely).
     * 1% new rows appended with fresh, higher ids (ascending continues).
     * `category` re-typed to `dictionary<int32, string>` (values unchanged).
@@ -22,21 +21,17 @@ has five columns:
     * a new `note` column: `null` for every carried-over row, `"added"`
       for the 1% of new rows.
 
-No duplicate `id` values are introduced on either side by construction
-(each side's ids are strictly unique and ascending); duplicate-key handling
-is exercised by issue #39's own synthetic/property tests, not by this fixture.
+Ids are unique on both sides by construction.
 
-Every exact count (deleted, added, modified per column, unchanged, and the
-three schema changes) is written to a sidecar `manifest.json` next to the
-two parquet files, so `oracle_duckdb.py`'s counts can be checked against a
-ground truth that isn't derived from the oracle itself.
+Every exact count (deleted, added, modified per column, unchanged, the three
+schema changes) is written to a sidecar `manifest.json`: a ground truth not
+derived from `oracle_duckdb.py`.
 
-**Determinism is the whole point of this file**, same as
-`perf/generate_fixtures.py`: a single `random.Random(seed)` instance drives
-every draw in a fixed order, and row order is always construction order (see
-`generate`). Two runs of this script with the same `--rows`/`--seed` must
-produce byte-identical
-`a.parquet`/`b.parquet`/`manifest.json`. To prove it:
+Generation is deterministic, as in `perf/generate_fixtures.py`: a single
+`random.Random(seed)` instance drives every draw in a fixed order, and row
+order is always construction order (see `generate_narrow`). Two runs with the
+same `--rows`/`--seed` produce byte-identical `a.parquet`/`b.parquet`/
+`manifest.json`. To prove it:
 
     cd perf/arrow
     uv run --group perf generate_fixtures.py --rows 100000 --out /tmp/run1
@@ -51,41 +46,32 @@ Usage::
 
 # The `wide` kind (`--kind wide`, #84)
 
-`wide` trades the five columns above for one of every scalar type `onix-arrow`'s row diff
-hashes, cast-normalizes, or renders (see `docs/design/row-diff.md`'s "Value
-semantics"/"Per-cell changes" sections and `schema.rs`'s normalization rules), at the same 5 GB-per-side
-target, so fewer, much wider rows (see `_wide_column_specs` for the exact list and
-`WIDE_DEFAULT_ROWS`'s comment for the row-count derivation). Nested types are out (the row diff
-skips a nested non-key column entirely -- see `is_nested` in row_diff.rs).
+`wide` trades the five columns above for one of every scalar type `onix-arrow`'s row diff hashes,
+cast-normalizes, or renders (see `docs/design/row-diff.md`'s "Value semantics"/"Per-cell changes"
+sections and `schema.rs`'s normalization rules), at the same 5 GB-per-side target, so fewer, much
+wider rows (`_wide_column_specs` lists them). Nested types are out (the row diff skips a nested
+non-key column entirely -- see `is_nested` in row_diff.rs).
 
-Four gaps follow from what pyarrow and Parquet can represent, verified empirically against this
-repo's pinned pyarrow, plus one deliberate omission:
+What pyarrow and Parquet can represent shapes the column set:
 
 * `month_day_nano_interval` has no Parquet representation (`ArrowNotImplementedError` on write) and
   `date64` is silently downcast to `date32` on write (Parquet's DATE logical type is a 32-bit day
   count only). Both are stored as raw integer components instead -- `interval` as
   `interval_months`/`interval_days`/`interval_nanos` (int32/int32/int64), `date64` as
   `date64_millis` (int64, whole-day-aligned per Arrow's Date64 contract) -- and every tool,
-  `onix` included, reads them as plain integers rather than paying to rebuild the real type
-  (`bench_tables.py`'s module docstring measures that rebuild's own cost as prohibitive at this
-  size). Neither is ever mutated between `a` and `b`, so every tool's cells-changed count for them
+  `onix` included, reads them as plain integers rather than paying to rebuild the real type.
+  Neither is ever mutated between `a` and `b`, so every tool's cells-changed count for them
   is zero regardless of which type it reads.
 * `decimal256` above precision 38 is a second, more severe gap: DuckDB's parquet reader silently
   decodes it to the wrong number instead of erroring, and polars' parquet and IPC readers both
   fail outright rather than raise a catchable error. `dec256` is kept at precision 38 -- distinct
   from `decimal128` at the Arrow-type level, which is what the row diff's `Decimal256` hashing arm
   needs, but numerically representable by both baselines -- and is never mutated.
-* `Interval(YearMonth)` and `Interval(DayTime)` -- two of the three interval variants
-  `row_diff.rs` hashes -- have no pyarrow constructor at all (only `month_day_nano_interval`
-  exists), so neither is in this fixture; only the interval cross-variant `type_changed` path is
-  therefore untested here, and stays covered by `row_diff.rs`'s own unit tests.
-* `DataType::Null` -- `row_diff.rs` hashes it (every row a null) -- has no column here, deliberately:
-  an all-null column has no value variance to hash or render beyond the null branch, which every
-  other nullable column in this fixture already exercises.
+* No YearMonth/DayTime interval (no pyarrow constructor) and no Null column.
 
 The `ts_cast` column is `wide`'s "one unit cast": nanosecond, zone-aware on `a`; microsecond,
-zone-naive on `b`. Dropping the zone alongside the unit is deliberate -- a zone-aware/naive pair is
-always `type_changed` regardless of whether the instant value differs, so this column gives every
+zone-naive on `b`. The zone is dropped alongside the unit: a zone-aware/naive pair is always
+`type_changed` regardless of whether the instant value differs, so this column gives every
 surviving row a `type_changed` cell with an exact, derived count (`rows - rows_deleted`), the only
 way to get that change kind at all (the other three schema changes -- dictionary retype, decimal
 scale, and this column's unit half -- are lossless normalizations reported `value_changed` only
@@ -128,10 +114,7 @@ import pyarrow.parquet as pq
 ##############################################
 # Configuration
 
-# Recorded default seed and row count. `--rows`' default is tuned so the
-# default invocation lands near 5 GB compressed on the machine that
-# generated it -- see README.md's "Sizes" section for the measured figure
-# and the row count this constant was set to after that measurement.
+# `--rows`' default lands near 5 GB compressed; see README.md's "Sizes".
 DEFAULT_SEED: Final[int] = 20260904
 DEFAULT_ROWS: Final[int] = 37_000_000
 
@@ -523,10 +506,7 @@ def generate_narrow(rows: int, seed: int, out_dir: Path) -> dict[str, object]:
 # Wide-kind fixture (#84): full cell-type surface
 
 WIDE_DEFAULT_SEED: Final[int] = 20260905
-# Row density (~296 bytes/row for `a.parquet`, measured at 200,000 rows, after
-# adding the float16/decimal32/decimal64/view/fixed-size-binary columns) is
-# linear, the same convention `DEFAULT_ROWS` above was tuned with -- see
-# README.md's "Sizes" section for the measurement this constant solves for.
+# Row density and the 5 GB target: see README.md's "Sizes".
 WIDE_DEFAULT_ROWS: Final[int] = 16_875_000
 
 WIDE_DELETE_RATE: Final[float] = 0.01
@@ -936,7 +916,7 @@ def _wide_added_chunk(specs: list[_ColumnSpec], start_id: int, count: int, rng: 
 def generate_wide(rows: int, seed: int, out_dir: Path) -> dict[str, object]:
     """
     Stream the `wide`-kind fixture pair to `out_dir`, the same contract as
-    `generate` (streaming, seeded, byte-identical on re-run) -- see the
+    `generate_narrow` (streaming, seeded, byte-identical on re-run) -- see the
     module docstring's "wide" section for the column set and mutation mix.
 
     :param rows: Number of rows in `a.parquet` before any mutation.
@@ -1015,7 +995,7 @@ def generate(rows: int, seed: int, out_dir: Path, kind: str = "narrow") -> dict[
     :param rows: Number of rows in `a.parquet` before any mutation.
     :param seed: RNG seed; the same seed always produces byte-identical output.
     :param out_dir: Directory to write into (created if missing).
-    :param kind: `"narrow"` (the original five-column fixture) or `"wide"`
+    :param kind: `"narrow"` or `"wide"`
         (#84's full cell-type-surface fixture).
     :return: The manifest document (also written to `manifest.json`).
     """
