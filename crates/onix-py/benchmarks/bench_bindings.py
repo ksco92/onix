@@ -232,11 +232,7 @@ def _text_diff_callable(
 
 
 def _diff_callable(tool: str, case: str) -> Callable[[], object]:
-    """Build the diff callable for one `(tool, case)` pair; only the diff is timed.
-
-    The fixture is built outside the callable; the JSON-string cases serialize outside it and
-    parse inside it, as a real caller does.
-    """
+    """Build the callable for one `(tool, case)`; fixtures are built outside it."""
     if case in ("ignore_order", "ignore_order_json"):
         a, b = build_ignore_order_case()
         ignore_order = True
@@ -267,11 +263,8 @@ def _diff_callable(tool: str, case: str) -> Callable[[], object]:
             ignore_order,
         )
 
-        # Keep the TemporaryDirectory alive until after the diff has run by
-        # binding it into the returned callable: the files must still exist
-        # when the timed callable reads them, and cleanup must not fall inside
-        # the timed window. Its finalizer removes the dir at process exit, so
-        # nothing leaks across the subprocesses a run spawns.
+        # Binding the TemporaryDirectory into the callable keeps the files alive for
+        # the timed reads and keeps cleanup outside the timed window.
         def run_file_diff(_keep_alive: tempfile.TemporaryDirectory = tmp) -> object:
             return inner()
 

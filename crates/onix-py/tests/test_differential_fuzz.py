@@ -1,15 +1,14 @@
 """Differential fuzz test: onix's Python bindings vs real DeepDiff on live objects.
 
-Runs through `deepdiff_rs.DeepDiff`, exercising the Python-object-to-`Value`
-conversion layer. Batches of seeded cases run twice (ordered and
-`ignore_order=True`; the surrogate batch runs ordered only), comparing
-`to_json()` (parsed) and `to_dict()`; the
-custom-object batch compares `to_json()` alone and the enum and class-attribute
-batches the report structure alone, since DeepDiff renders a whole object from
-other views. The big-integer batch draws its big ints as bare scalars only,
-never inside a tuple/set, so it stays on the arbitrary-precision property under
-test rather than surfacing the pre-existing container-hashing divergence a
-biased alphabet inside a hashable container would otherwise trigger.
+Runs through `deepdiff_rs.DeepDiff`, exercising the Python-object-to-`Value` conversion
+layer. Batches of seeded cases run twice (ordered and `ignore_order=True`; the surrogate
+batch runs ordered only), comparing `to_json()` (parsed) and `to_dict()`; the
+custom-object batch compares `to_json()` alone and the enum and class-attribute batches
+the report structure alone, since DeepDiff renders a whole object from other views. The
+big-integer batch draws its big ints as bare scalars only, never inside a tuple/set, so
+it stays on the arbitrary-precision property under test rather than surfacing the
+pre-existing container-hashing divergence a biased alphabet inside a hashable container
+would otherwise trigger.
 """
 
 from __future__ import annotations
@@ -98,8 +97,7 @@ NON_STR_KEY_PROBABILITY: Final[float] = 0.4
 # Not itself a tuple: a dict key may not nest one (see `classify_dict_key` in convert.rs).
 NON_STR_KEY_TUPLE_LEAVES: Final[list[JsonValue]] = [1, "x", True, None, 2.5]
 
-# Never generates a set/frozenset: real DeepDiff crashes hashing a
-# lone surrogate (see tests/golden/README.md).
+# No set/frozenset: DeepDiff crashes hashing a lone surrogate (tests/golden/README.md).
 SURROGATE_SEED_BASE: Final[int] = 10_000_000
 
 SURROGATE_STRINGS: Final[list[str]] = [
@@ -412,8 +410,7 @@ def _diverges(a: JsonValue, b: JsonValue, ignore_order: bool) -> tuple[JsonValue
     onix = OnixDeepDiff(a, b, ignore_order=ignore_order)
 
     # The mapping only matters for the calendar batch; see `scripts/golden_tags.py`.
-    # DeepDiff's `to_json()` raises on frozenset values and nested non-`str` keys;
-    # compare `to_dict()` alone then.
+    # `to_json()` raises on frozenset values and nested non-`str` keys: compare `to_dict()`.
     try:
         expected_json = json.loads(real.to_json(default_mapping=JSON_DEFAULT_MAPPING))
         real_to_json_crashed = False

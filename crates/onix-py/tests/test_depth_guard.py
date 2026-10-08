@@ -259,12 +259,8 @@ def test_deep_report_renders_to_json_from_a_small_stack_thread() -> None:
     """
     A report nested past the inline threshold renders to JSON without crashing.
 
-    Rendering a report to JSON is natively recursive, so a deep one must go to
-    the sized worker thread; if it were rendered inline it would overflow a
-    512 KiB-stack Python thread and take the interpreter down with it. The
-    deep values are built (and torn down) on the spawning thread -- CPython's
-    own container code, unrelated to deepdiff_rs -- so the small-stack thread
-    runs only the two rendering calls.
+    Rendering is natively recursive, so a deep report must go to the sized
+    worker; the deep values are built and torn down on the spawning thread.
     """
     result = _run_isolated(
         f"""
@@ -379,12 +375,9 @@ def test_cross_arg_error_from_small_stack_thread_does_not_crash() -> None:
             for _ in range(d):
                 v = {{"a": v, "b": 2}}
             return v
-        # Build (and later tear down) the deep Python object on the normal-stack
-        # spawning thread: constructing or dropping a 19,999-deep dict is
-        # CPython's own recursive container code, unrelated to deepdiff_rs, and
-        # would overflow a 512 KiB stack on its own. The small-stack thread must
-        # run ONLY the DeepDiff call and its exception handling, so t1 is passed
-        # in by reference and kept alive here until after the thread joins.
+        # Build and tear down the deep object on the spawning thread (CPython's own
+        # recursive container code would overflow a 512 KiB stack); the small-stack
+        # thread runs only the DeepDiff call, with t1 kept alive until it joins.
         t1 = deep({MAX_DEPTH_CEILING} - 1)
         bad = {{"x": {{1j}}}}
         outcome = []
@@ -409,11 +402,9 @@ def test_tuple_hashing_cost_stays_linear_in_nesting_depth() -> None:
     """
     Hashing a nested tuple must cost O(depth), not O(depth^2).
 
-    Under ``ignore_order`` every tuple node is looked up in (and added to) the
-    run's digest cache. Keying each node by its whole subtree, rather than by
-    its children's interned ids, made a single shuffle of one deep tuple cost
-    quadratic time and retained heap. Quadratic growth would show as ~16x
-    here, linear as ~4x.
+    Under ``ignore_order`` each node is keyed in the digest cache by its
+    children's interned ids, not its whole subtree. Quadratic growth would show
+    as ~16x here, linear as ~4x.
     """
 
     def best_of_three(depth: int) -> float:
@@ -505,12 +496,9 @@ def test_frozenset_hashing_cost_stays_linear_in_nesting_depth() -> None:
     """
     Diffing a nested frozenset must cost O(depth), not O(depth^2).
 
-    Two costs meet here, and both have to stay linear. A frozenset is
-    hashable, so like a tuple every node is looked up in (and added to) the
-    run's digest cache, keyed by its members' interned ids rather than by its
-    whole subtree. And nothing may render a member to order it.
-    Quadratic growth would show as ~16x here, linear as ~4x. See
-    `test_tuple_hashing_cost_stays_linear_in_nesting_depth`.
+    Nodes are keyed by their members' interned ids, and nothing may render a
+    member to order it. Quadratic growth would show as ~16x here, linear as ~4x.
+    See `test_tuple_hashing_cost_stays_linear_in_nesting_depth`.
     """
 
     def best_of_three(depth: int) -> float:
@@ -570,10 +558,8 @@ def _nested_json_array(depth: int, leaf: int) -> str:
 
 
 def test_diff_json_moderately_deep_input_raises_max_depth_error() -> None:
-    """
-    A JSON array nested past a small custom max_depth, but well under
-    `serde_json`'s own 128-level parser recursion limit, parses fine and
-    then raises MaxDepthError from the diff itself.
+    """A JSON array past a small max_depth but under `serde_json`'s 128-level parser
+    limit parses, then raises MaxDepthError from the diff.
     """
     a = _nested_json_array(50, leaf=1)
     b = _nested_json_array(50, leaf=2)
@@ -583,12 +569,7 @@ def test_diff_json_moderately_deep_input_raises_max_depth_error() -> None:
 
 
 def test_diff_json_past_parser_recursion_limit_raises_value_error() -> None:
-    """
-    A JSON array nested past `serde_json`'s own 128-level parser recursion
-    limit fails to parse at all, raising ValueError -- a different, also
-    clean error path from MaxDepthError (which only fires once parsing has
-    already succeeded).
-    """
+    """A JSON array nested past `serde_json`'s 128-level parser limit raises ValueError."""
     a = _nested_json_array(200, leaf=1)
     b = _nested_json_array(200, leaf=2)
 
@@ -597,7 +578,7 @@ def test_diff_json_past_parser_recursion_limit_raises_value_error() -> None:
 
 
 def test_diff_json_reference_parses_with_standard_json_module() -> None:
-    """Sanity check: the fixture builder produces genuinely valid JSON."""
+    """Sanity check: the fixture builder produces valid JSON."""
     assert json.loads(_nested_json_array(5, leaf=1)) == [[[[[1]]]]]
 
 

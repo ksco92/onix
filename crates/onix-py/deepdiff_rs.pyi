@@ -47,12 +47,10 @@ class DeepDiff:
             ``list``, ``tuple``, ``set``, ``frozenset``,
             ``datetime.datetime``, ``datetime.date``, ``datetime.time``, or
             ``datetime.timedelta``, arbitrarily nested, or a subclass of
-            ``dict``, ``list``, ``tuple``, ``set``, ``frozenset``,
-            ``datetime.datetime``, ``datetime.date``, ``datetime.time``, or
-            ``datetime.timedelta`` (a ``namedtuple``, a ``set`` subclass, a
-            pandas ``Timestamp``), which converts and compares as its base
-            type but reports its own class name in a ``type_changes`` entry. Any
-            other object is diffed by its attributes as a custom object
+            any of the container or calendar types above (a ``namedtuple``, a
+            ``set`` subclass, a pandas ``Timestamp``), which converts and
+            compares as its base type but reports its own class name in a
+            ``type_changes`` entry. Any other object is diffed by its attributes as a custom object
             (``attribute_added``/``attribute_removed``, ``root.attr`` paths,
             ``type_changes`` between two different classes), except a type
             DeepDiff routes to a handler onix lacks, which raises
@@ -167,7 +165,7 @@ class TableDiff:
         a JSON string.
 
         :raises ValueError: If the row-level members would together embed
-            more than 10,000 embedded rows; use the row-level accessors, or
+            more than 10,000 rows; use the row-level accessors, or
             :meth:`ArrowTable.to_pyarrow`/``__arrow_c_stream__``, instead.
         """
 
