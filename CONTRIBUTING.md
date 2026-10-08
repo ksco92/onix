@@ -254,8 +254,7 @@ and DeepDiff must produce byte-identical canonical JSON on every fixture, else
 the run aborts), sweeps wall clock/CPU/peak RSS with `hyperfine`, and writes
 `perf/RESULTS.md`; raw per-run JSON lands in `perf/bench_raw/` (also
 gitignored). The report's own "Run procedure", "Correctness precheck", and
-"Deferred work" sections carry the full methodology and every deliberately
-scaled-down part of the matrix.
+"Not measured" sections carry the methodology and what the matrix leaves out.
 
 The Python-bindings benchmark is a separate script:
 
