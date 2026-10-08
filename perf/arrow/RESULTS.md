@@ -107,6 +107,8 @@ the size gate: the diff runs single-threaded only when both sides stay under 50,
 in-memory tables the default is never slower than `threads=1` — if anything faster, as no workers
 are spawned.
 
+Measured on `deepdiff-rs` 0.10.0, 2026-09-06, 1 to 18 threads.
+
 | Rows | threads=1 | threads=2 | threads=4 | threads=8 | threads=18 (default) |
 | --- | --- | --- | --- | --- | --- |
 | 2 (in-memory) | 0.28 ms | — | — | — | 0.22 ms |
@@ -116,14 +118,12 @@ are spawned.
 
 At 1M rows the row diff scales 2.85x from 1 to 18 threads, flattening past ~8 (the fixed spool and
 re-read cost is the serial remainder). At 2, 1,000, and 10,000 rows the default matches `threads=1`
-(the gate keeps them single-threaded); before the gate the parallel path cost about 5.4x more at 2
-rows, shrinking toward parity as the row count rose, with the crossover near 30,000-50,000 rows —
-so the 50,000-row threshold runs the workers only where they win.
+(the gate keeps them single-threaded).
 
 ## Per-pass profile
 
-Measured on `deepdiff-rs` 0.14.0 from 2026-09-24T14:49Z to 14:58Z, same machine as the Environment
-table above, each process alternating with one of 0.13.0's, while other jobs ran on it (load average
+Measured on `deepdiff-rs` 0.14.0, 2026-09-24T14:49Z to 14:58Z, 18 threads, same machine as the
+Environment table above, while other jobs ran on it (load average
 21 at the start, 40 at its peak during the `narrow full` column and 19 at the last process). The
 numbers come from the committed `row_diff_profile` example (built with the `profile` feature; the
 commands are in `perf/arrow/README.md`'s "Profiling" section and the method in the example's module
@@ -185,14 +185,6 @@ one scan. `materialize added (right candidates)` filters the rows the right's ha
 (the kernel, the validity union or the per-cell hash comparison), a part of `cell: compare and
 render`, which also renders the cells the masks select.
 
-Against 0.13.0's medians in the same alternation, `cell: compare and render` falls from 0.257 to
-0.118 s on `wide 1M` and from 3.946 to 2.412 s on `wide full`: its median share of the net wall
-drops from 26.7% to 14.7% and from 29.0% to 20.1%. The uninstrumented wall falls from 0.976 to 0.831
-s on `wide 1M` and from 14.012 to 12.050 s on `wide full`, and from 0.112 to 0.105 s on `narrow 1M`.
-`narrow full` reads 2.424 s on 0.13.0 against 2.727 s here, the whole gap in `hash and classify`, a
-pass the change does not touch: in each pair 0.13.0 ran first while the load rose. Five more pairs
-with 0.14.0 first (2026-09-24T14:59Z to 15:00Z, load average 8 to 21) give 2.291 s against 2.312 s.
-
 Serial share. Each read decodes its side on one reader thread while the workers hash and route, so a
 pass's decode sub-row is its serial floor. On `narrow full` the decode is 63% of the net wall (1.65
 of 2.61 s), and the left's second read (0.48 s) is the only decode left to remove. On `wide full` it
@@ -210,8 +202,8 @@ fixtures**: `linear` is two int64 columns (the narrow fixture has five typed col
 timestamps, intervals, binary — with ~2% of rows modified plus a zone-awareness retype), so the
 proxy walls do not match the real-fixture walls above. `spool write` is the IPC writer's time
 spooling both generated sides before the diff (file mode has no spool write). Medians of 5
-processes per shape, measured 2026-09-24T14:58Z to 14:59Z after the fixture columns, alternating
-with 0.13.0 (whose `cell: compare and render` reads 0.004 and 0.229 s), load average 19 to 10.
+processes per shape, measured on `deepdiff-rs` 0.14.0, 2026-09-24T14:58Z to 14:59Z after the fixture
+columns, 18 threads, load average 19 to 10.
 
 | Pass | `linear` 1M | `manycols` 1M |
 | --- | --- | --- |
