@@ -1472,6 +1472,39 @@ fn a_candidate_whose_trial_meets_a_resolved_value_over_the_depth_budget_fails_th
     );
 }
 
+#[test]
+fn a_distance_cached_at_a_shallow_occurrence_answers_a_deeper_one_whose_trial_would_fail() {
+    let (a, b) = lists_with_a_failing_candidate(
+        cdict_holding(cv(&json!([[2], null]))),
+        cdict_holding(copaque("1")),
+        cdict_holding(cv(&json!([[2]]))),
+    );
+    let too_deep = cv(&json!([[[[1]]]]));
+    let document = |list: &CValue, shallow_key: &str, deep_key: &str| {
+        let mut builder = crate::value::Builder::new();
+        let inner = builder.object(vec![("f", list.clone())]);
+        let deep = builder.object(vec![("e", inner)]);
+        builder.object(vec![(shallow_key, list.clone()), (deep_key, deep)])
+    };
+    let run = |shallow_key, deep_key| {
+        let mut resolver = |_: &str| Some(crate::diff::Resolution::Borrowed(&too_deep));
+        crate::diff::diff_with_resolver(
+            &document(&a, shallow_key, deep_key),
+            &document(&b, shallow_key, deep_key),
+            &ignore_order_opts(7),
+            &mut resolver,
+        )
+        .map(|report| report.is_empty())
+    };
+    assert_eq!(
+        [run("a", "z"), run("z", "a")],
+        [
+            Ok(false),
+            Err(max_depth_exceeded("root['a']['e']['f'][1]['k'][0]", 7))
+        ]
+    );
+}
+
 /// Pins the exact scale `distance_family` measures a `datetime` pair by:
 /// its instant in *seconds* (microseconds divided by `1_000_000`), the same
 /// value `DeepDiff`'s own `_get_datetime_distance` reads from

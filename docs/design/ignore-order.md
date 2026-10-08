@@ -41,10 +41,10 @@ keyed by each side's exact structural identity, bounding a subtree
 pair's own trial diff to one computation regardless of how many
 candidates embed it.
 
-Caching changes no distance: a successful `rough_distance` depends
-only on the two values' content, so a cache keyed by exact structural
-identity returns exactly what a fresh computation would; a failed
-trial raises and caches nothing.
+A failed trial raises and caches nothing. The key is content only, so
+a hit also answers a deeper occurrence of the pair whose own trial
+would meet a resolved value over the depth budget and raise: which
+occurrence is ranked first decides whether the diff fails.
 
 Two further tables share the memo's lifetime and key the same way
 `DeepHash` keys its own run-scoped cache:
