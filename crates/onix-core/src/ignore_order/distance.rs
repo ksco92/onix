@@ -1,9 +1,5 @@
-//! Structural/numeric distance between two JSON values — `DeepDiff`'s
-//! `_get_rough_distance`, plus the length/leaf-counting helpers
-//! it's built from. Consumed by `super::pairing::compute_pairs` to rank
-//! candidate pairs; has no dependency on this module's hashing layer
-//! (`super::hash`) at all — every function here operates directly on the
-//! crate's compact [`Value`].
+//! Structural and numeric distance between two values (`DeepDiff`'s `_get_rough_distance`) and the
+//! length helpers it is built from; `super::pairing::compute_pairs` ranks candidate pairs by it.
 
 use crate::value::{Number, Object, ObjectKey, ObjectKind, Value, same_class};
 
@@ -14,11 +10,8 @@ use crate::path::{entry_path_segment, object_key_path_segment};
 
 use super::IgnoreOrderMemo;
 
-/// A total-ordering wrapper for the non-negative, always-finite distances
-/// [`rough_distance`] computes, so they can key a [`BTreeMap`](std::collections::BTreeMap) (ascending
-/// iteration, for [`compute_pairs`](super::pairing::compute_pairs)'s greedy loop) and group candidates by
-/// **exact** float equality — matching `DeepDiff`'s own behavior of keying
-/// a plain Python `dict` by the raw `float` distance value.
+/// A total-ordering wrapper for [`rough_distance`]'s non-negative finite distances, so they key a
+/// [`BTreeMap`](std::collections::BTreeMap) and group candidates by exact float equality.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Distance(pub(crate) f64);
 
@@ -48,11 +41,7 @@ impl std::hash::Hash for Distance {
     }
 }
 
-/// Returns `value`'s numeric value for [`rough_distance`]'s fast path, if
-/// it has one — `Bool` counts (Python's `isinstance(True, numbers.Number)`
-/// is `True`, since `bool` subclasses `int`; confirmed empirically that a
-/// bool-vs-number pair still takes `_get_numbers_distance`, not the
-/// structural fallback, even though the two are never a hash-equal match).
+/// `value`'s number for [`rough_distance`]'s fast path; `Bool` counts, as in Python.
 pub(crate) fn numeric_value(value: &Value) -> Option<f64> {
     match value {
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
@@ -61,54 +50,27 @@ pub(crate) fn numeric_value(value: &Value) -> Option<f64> {
     }
 }
 
-/// Which of `DeepDiff`'s `TYPES_TO_DIST_FUNC` families a value belongs to,
-/// and the number(s) that family measures it by.
-///
-/// `get_numeric_types_distance` walks that list in order and takes the first
-/// entry whose type *both* values are an `isinstance` of, so a datetime
-/// against an integer finds none and falls through to the structural
-/// comparison — while a datetime against a **date** does match, on the
-/// `datetime.date` entry, because `datetime` is a `date` subclass. That
-/// mixed pair is therefore measured in *ordinals*, not timestamps, which is
-/// why a datetime carries both numbers.
+/// Which of `DeepDiff`'s `TYPES_TO_DIST_FUNC` families a value belongs to, with the numbers it is
+/// measured by. A datetime carries a timestamp and an ordinal because against a bare date it is
+/// measured by ordinal.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DistanceFamily {
     /// `only_numbers` -> `_get_numbers_distance`.
     Number(f64),
-    /// `datetime.datetime` -> `_get_datetime_distance` (`timestamp()`)
-    /// against another datetime, or `_get_date_distance` (`toordinal()`)
-    /// against a bare date.
+    /// `datetime.datetime`: `timestamp()` against a datetime, `toordinal()` against a bare date.
     DateTime { timestamp: f64, ordinal: f64 },
-    /// `datetime.date` -> `_get_date_distance`, i.e. `date.toordinal()`.
+    /// `datetime.date`: `toordinal()`.
     Date(f64),
-    /// `datetime.time` -> `_get_time_distance`, i.e.
-    /// `time_to_seconds(time)` — real `DeepDiff` never pairs a `time`
-    /// against anything but another `time` (see `TYPES_TO_DIST_FUNC`: no
-    /// entry lets a `time` `isinstance`-match a `date`/`datetime`/number).
+    /// `datetime.time`: seconds of day; no other family matches it.
     Time(f64),
-    /// `datetime.timedelta` -> `_get_timedelta_distance`, i.e.
-    /// `timedelta.total_seconds()` — likewise never cross-paired.
+    /// `datetime.timedelta`: `total_seconds()`; no other family matches it.
     TimeDelta(f64),
 }
 
 /// The distance family `value` belongs to, or `None` for a container.
 ///
-/// A naive datetime is measured as if it were UTC. Real `DeepDiff` calls
-/// `datetime.timestamp()`, which reads a naive value in the *process's local
-/// timezone*, so its own pairing for a list mixing naive and aware datetimes
-/// is machine-dependent; there is no timezone database in this crate to
-/// reproduce that with, and reading a naive value as UTC everywhere matches
-/// `datetime_normalize`, the rule that decides every reported *value*.
-///
-/// The approximation is confined to how candidate pairs are *ranked* under
-/// `ignore_order`, never to a reported value, and both sides of a comparison
-/// shift together, so it can only matter for two candidates whose distances
-/// are already within roughly `1e-5` of each other. The two tools agree
-/// exactly once the process timezone is UTC, which
-/// `crates/onix-py/tests/test_differential_fuzz.py`'s `utc_timezone` fixture
-/// pins; that fixture's own test turns red without it. This is the single
-/// home for this rationale: `tests/golden/README.md` and the fixture both
-/// point here.
+/// A naive datetime is measured as UTC, where `DeepDiff` reads it in the process timezone; this
+/// only ranks candidate pairs, never a reported value, and the two agree once the timezone is UTC.
 #[allow(
     clippy::cast_precision_loss,
     reason = "mirrors Python's own int-to-float `timestamp()`/`toordinal()` conversion, which \
@@ -134,15 +96,11 @@ fn distance_family(value: &Value) -> Option<DistanceFamily> {
     }
 }
 
-/// `DeepDiff`'s `get_numeric_types_distance` (distance.py): the distance
-/// between two values that share a [`DistanceFamily`], or `None` when they
-/// do not and the structural fallback must run instead.
+/// `DeepDiff`'s `get_numeric_types_distance`: the distance between two values of one
+/// [`DistanceFamily`], or `None` when the structural fallback must run.
 fn family_distance(removed: &Value, added: &Value, cutoff: f64) -> Option<f64> {
     let (removed, added) = (distance_family(removed)?, distance_family(added)?);
 
-    // One arm per reachable combination, each spelled out rather than folded
-    // into an or-pattern: two datetimes are measured by timestamp, and every
-    // pairing that mixes a date in is measured by ordinal.
     #[allow(
         clippy::match_same_arms,
         reason = "the arms differ in which field they read, not in what they return, and \
@@ -165,12 +123,8 @@ fn family_distance(removed: &Value, added: &Value, cutoff: f64) -> Option<f64> {
     Some(numeric_distance(removed, added, cutoff))
 }
 
-/// `DeepDiff`'s `_get_numbers_distance` (distance.py), including the
-/// "self-cancellation" quirk (`max_` appears in both the
-/// formula and the rejection threshold, so same-sign numeric pairs are
-/// almost never rejected by [`CUTOFF_DISTANCE_FOR_PAIRS`](super::pairing::CUTOFF_DISTANCE_FOR_PAIRS)) and the
-/// opposite-sign zero-sum edge case (`divisor == 0.0` returns `cutoff`
-/// itself, i.e. always-reject, rather than dividing by zero).
+/// `DeepDiff`'s `_get_numbers_distance`. `max_` appears in both formula and threshold, so same-sign
+/// pairs are almost never rejected by the cutoff; a zero divisor returns `cutoff` itself.
 #[allow(
     clippy::float_cmp,
     reason = "mirrors DeepDiff's own exact `num1 == num2` short-circuit \
@@ -187,17 +141,11 @@ pub(crate) fn numeric_distance(n1: f64, n2: f64, cutoff: f64) -> f64 {
     ((n1 - n2) / divisor).abs().min(cutoff)
 }
 
-/// `DeepHash`'s own structural node count ("counts") for a single value,
-/// independent of any diff — `deephash.py`'s `__get_item_rough_length`
-/// derivation, read directly from its `_prep_dict`/
-/// `_prep_iterable`: `1` for a scalar, `1 + sum(rough_length(child))` for an
-/// array, `1 + sum(1 + rough_length(value))` per dict entry (the extra `+1`
-/// per entry accounts for the key itself, matching `_prep_dict`'s own
-/// `counts += 1` for the key plus `counts += count` for the value).
+/// `DeepHash`'s structural node count: `1` per scalar, `1` plus the children for a container, and
+/// one more per dict key.
 ///
-/// Recurses natively — safe only because every caller first proves the
-/// value's nesting via [`crate::diff::check_value_depth`] (see
-/// `docs/design/ignore-order.md`'s "Depth safety" section).
+/// Recurses natively; callers first run [`crate::diff::check_value_depth`]
+/// (`docs/design/ignore-order.md`'s "Depth safety").
 pub(crate) fn rough_length(value: &Value) -> usize {
     match value {
         Value::Null
@@ -211,8 +159,6 @@ pub(crate) fn rough_length(value: &Value) -> usize {
         Value::Array(items) | Value::Tuple(items) => {
             1 + items.iter().map(rough_length).sum::<usize>()
         }
-        // `_prep_iterable` handles a set exactly like a list (confirmed
-        // with real `DeepHash`: `{1, 2}` and `[1, 2]` both count `3`).
         Value::Set(items) | Value::FrozenSet(items) => {
             1 + items.iter().map(rough_length).sum::<usize>()
         }
@@ -227,22 +173,9 @@ pub(crate) fn rough_length(value: &Value) -> usize {
     }
 }
 
-/// `DeepDiff`'s `_get_item_length` (distance.py) applied to one JSON value —
-/// the per-value recursion [`crate::report::Report::distance_leaf_length`]
-/// sums over a trial sub-diff's findings to get [`rough_distance`]'s
-/// structural-fallback numerator (`diff_length`).
-///
-/// `null` maps to `0` — a genuine quirk of the real function: `None`
-/// matches none of its `isinstance` branches (`Mapping`, `numbers`,
-/// `strings`, `Iterable`, `type`), so it falls through, counting nothing.
-/// Every other scalar counts as `1`; a dict/list recurses, and a dict entry
-/// is skipped entirely when its *key* matches [`is_length_excluded_key`] —
-/// confirmed against real `DeepDiff`: `_get_item_length(None) == 0` and
-/// `_get_item_length({"old_value": 5, "x": 3}) == 1` (only `"x"` counted).
-/// This exclusion is a real, faithfully-reproduced quirk of the upstream
-/// function, not something this port invented: a *user's own* dict key
-/// happening to be named e.g. `"old_value"` is undercounted the same way in
-/// both tools.
+/// `DeepDiff`'s `_get_item_length` for one value: `null` counts `0`, any other scalar `1`, a
+/// container the sum of its members; a dict entry whose key matches [`is_length_excluded_key`] is
+/// skipped.
 pub(crate) fn item_length(value: &Value) -> usize {
     match value {
         Value::Null => 0,
@@ -255,23 +188,16 @@ pub(crate) fn item_length(value: &Value) -> usize {
         | Value::TimeDelta(_) => 1,
         Value::Array(items) | Value::Tuple(items) => items.iter().map(item_length).sum(),
         Value::Set(items) | Value::FrozenSet(items) => items.iter().map(item_length).sum(),
-        // `_get_item_length`'s `__dict__` branch counts a custom object's
-        // `__dict__` keys and never recurses into their values.
+        // A custom object counts its attribute keys, never their values.
         Value::Object(map) if map.kind() == ObjectKind::Dict => item_length_of_map(map),
         Value::Object(map) => map.lengths().dict_len,
     }
 }
 
-/// [`item_length`]'s dict case, factored out so
-/// [`count_object_diff_leaves`]'s `threshold_to_diff_deeper` branch (whose
-/// "new value" is a whole map, not a [`Value`]) can share it directly.
+/// [`item_length`]'s dict case, shared with [`count_object_diff_leaves`]'s collapse branch.
 fn item_length_of_map(map: &Object) -> usize {
     map.iter()
-        // A non-`str` key, and a `str` key holding a lone surrogate (never
-        // equal to one of the plain-ASCII names below — see `ObjectKey::
-        // as_str`, `None` for both), can never match the literal exclusion
-        // list, so it is always counted — `Option::is_none_or` reads as
-        // "excluded only when this is a plain `str` key that matches".
+        // A non-`str` key, or a `str` key with a lone surrogate (`as_str` is `None`), is counted.
         .filter(|(key, _)| key.as_str().is_none_or(|s| !is_length_excluded_key(s)))
         .map(|(_, v)| item_length(v))
         .sum()
@@ -287,33 +213,10 @@ pub(crate) fn is_length_excluded_key(key: &str) -> bool {
         || key == "old_value"
 }
 
-/// A `Report`-free mirror of the recursive diff dispatch, counting exactly
-/// what [`Report::distance_leaf_length`](crate::report::Report::distance_leaf_length) would sum from the equivalent real
-/// diff — used by [`rough_distance`]'s structural fallback so a candidate
-/// pair's `diff_length` never pays for a [`Report`](crate::report::Report)'s `PathSegment`
-/// allocations, `Value` clones, or `BTreeMap` inserts. This matters: a
-/// naive "just call `diff_at` and count its `Report`" implementation would
-/// pay exactly the per-candidate object-construction cost that is the
-/// *entire* reason real `DeepDiff` is slow here (250k-plus full
-/// nested-diff-object constructions for the `ignore_order_10k`-shaped
-/// benchmark) — reproducing that bottleneck in Rust would defeat the
-/// point of this port.
-///
-/// Scalars and dicts are counted directly (no recursion into `diff_at` at
-/// all). **Arrays are the one exception**, delegating to a genuine trial
-/// [`crate::diff::diff_at`] call: replicating [`crate::diff::array_diff`]'s own
-/// LCS-vs-positional finding-count tie-break (or a further nested
-/// `ignore_order` pairing) as a *count-only* mirror would be substantial,
-/// rarely-exercised duplicate logic — a structural-distance candidate is
-/// overwhelmingly a "record" (a dict of mostly-scalar fields), not a value
-/// containing a *further* nested array needing its own tie-break decision.
-/// Correctness is preserved either way
-/// (the array branch still asks the real engine, guaranteeing the same
-/// number `DeepDiff` would compute); this hybrid trades away the Report-free
-/// property only for the substantially rarer, non-benchmarked case.
-///
-/// `depth` is the depth the pair's real diff runs at; an error is the one
-/// that diff would raise, its path relative to the pair.
+/// A `Report`-free mirror of the recursive diff dispatch, counting what
+/// [`Report::distance_leaf_length`](crate::report::Report::distance_leaf_length) would sum from the
+/// real diff. Arrays alone delegate to a trial [`crate::diff::array_diff`]. `depth` is the depth
+/// the pair's real diff runs at; an error is that diff's, its path relative to the pair.
 pub(crate) fn count_diff_leaves(
     a: &Value,
     b: &Value,
@@ -376,22 +279,8 @@ fn count_datetime_diff_leaves(x: DateTime, y: DateTime) -> Result<usize, Box<Err
     Ok(usize::from(x != y))
 }
 
-/// [`count_diff_leaves`]'s type-mismatch contribution: `DeepDiff`'s own
-/// `DELTA_VIEW` shape for a `type_changes` finding — what its real distance
-/// computation measures — is `{"old_type": ..., "new_type": ...}` plus a
-/// `"new_value"` key **unless applying the new side's own type to the old
-/// value reproduces the new value exactly** (`model.py::TreeResult
-/// ._from_tree_type_changes`, the `DELTA_VIEW`-only branch: `new_t1 =
-/// new_type(change.t1); include_values = new_t1 != change.t2`) — a real,
-/// general Python-coercion rule, not a `true`-literal special case (an
-/// earlier version of this function special-cased exactly one instance of
-/// this rule — `bool(x) == True` for any truthy `x` — because every probe
-/// used a truthy old value; generalized here after `[[0]] vs [[0.0]]`
-/// surfaced the gap: `float(0) == 0.0`, so real `DeepDiff` recurses into a
-/// `type_changes` there with `new_value` omitted, but the old special case
-/// only matched `new_value == true`). See [`coerce_for_type_change`]'s own
-/// doc for the exact coercion matrix implemented and its documented,
-/// narrow scope.
+/// [`count_diff_leaves`]'s type-mismatch count: `new_type`'s length plus [`item_length`] of the new
+/// value, which `DeepDiff` omits when `new_type(old_value)` reproduces it.
 pub(crate) fn type_change_leaf_length(old_value: &Value, new_value: &Value) -> usize {
     // `new_type`'s own length: an `Enum` class is iterable.
     let type_len = match new_value {
@@ -405,29 +294,14 @@ pub(crate) fn type_change_leaf_length(old_value: &Value, new_value: &Value) -> u
     }
 }
 
-/// Whether `new_type(old_value)` reproduces `new_value` exactly — the
-/// `include_values` test [`type_change_leaf_length`]'s doc cites.
-///
-/// The sequence pair (`list(a_tuple)` / `tuple(a_list)`) is answered
-/// directly from the two item slices rather than through
-/// [`coerce_for_type_change`]: the coerced value would be an allocation-heavy
-/// deep copy of `old_value`, built on the pairing hot path only to be
-/// compared and thrown away, and the two constructors reproduce the other
-/// sequence exactly when its items are equal *the way Python's `==` is*
-/// ([`python_eq`]), not the way this engine's own type-aware equality is.
-/// Confirmed against real `deepdiff==9.1.0`: `DeepDiff((1,), [1.0],
-/// view="_delta")` omits `new_value` (so the pair stays within the pairing
-/// cutoff and reports as a `type_changes`), while `DeepDiff((1, 2), [1, 3],
-/// view="_delta")` keeps it.
+/// Whether `new_type(old_value)` reproduces `new_value`. Sequence and set pairs are answered from
+/// the item slices by [`python_eq`], not by building a coerced copy on the pairing hot path.
 fn new_value_reproduced_by_coercion(old_value: &Value, new_value: &Value) -> bool {
     match (old_value, new_value) {
         (Value::Tuple(old_items), Value::Array(new_items))
         | (Value::Array(old_items), Value::Tuple(new_items)) => {
             sequences_python_eq(old_items, new_items)
         }
-        // `set(x)`/`frozenset(x)` over any of the four container kinds: the
-        // constructor keeps only distinct members, so what it reproduces is
-        // decided by [`unordered_python_eq`], never by order.
         (
             Value::Array(old_items) | Value::Tuple(old_items),
             Value::Set(new_items) | Value::FrozenSet(new_items),
@@ -436,11 +310,8 @@ fn new_value_reproduced_by_coercion(old_value: &Value, new_value: &Value) -> boo
             Value::Set(old_items) | Value::FrozenSet(old_items),
             Value::Set(new_items) | Value::FrozenSet(new_items),
         ) => unordered_python_eq(old_items, new_items),
-        // `list(a_set) == some_list` is the one direction whose Python
-        // answer depends on the set's own iteration order. `onix` answers it
-        // by membership instead, so both orders of the same list count as
-        // reproduced — deterministic where real `DeepDiff` is not. See
-        // `tests/golden/README.md`'s "Set iteration order" section.
+        // Python's `list(a_set)` depends on set iteration order; membership decides here
+        // (`tests/golden/README.md`'s "Set iteration order").
         (
             Value::Set(old_items) | Value::FrozenSet(old_items),
             Value::Array(new_items) | Value::Tuple(new_items),
@@ -450,32 +321,19 @@ fn new_value_reproduced_by_coercion(old_value: &Value, new_value: &Value) -> boo
     }
 }
 
-/// Python's `==` between two values: a scalar pair compares by the crate's
-/// one definition of that rule ([`crate::lcs::python_scalar_key`], which
-/// collapses `1`, `1.0` and `True`), and a container pair compares
-/// element-wise but stays **kind-distinct** — a list never equals a tuple,
-/// and neither equals a dict, exactly as in Python. Confirmed against real
-/// `deepdiff==9.1.0` at the boundary this exists for: `[(1, (2,))]` vs
-/// `[[1, [2]]]` is a whole-value change (the nested `(2,)` does not equal
-/// `[2]`), while `[(1, [2])]` vs `[[1, [2]]]` is a `type_changes`.
-///
-/// Recurses natively, like every other function in this module — safe for
-/// the same reason (see `docs/design/ignore-order.md`'s "Depth safety"
-/// section).
+/// Python's `==`: scalars compare by [`crate::lcs::python_scalar_key`] (`1`, `1.0` and `True` are
+/// equal), containers element-wise and kind-distinct (a list never equals a tuple). Recurses
+/// natively.
 fn python_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| python_eq(a, b))
         }
-        // A `set` and a `frozenset` holding equal members *are* Python-equal
-        // (unlike a list and a tuple), so these two kinds share one arm.
+        // Unlike a list and a tuple, a `set` and a `frozenset` of equal members are equal.
         (Value::Set(x) | Value::FrozenSet(x), Value::Set(y) | Value::FrozenSet(y)) => {
             unordered_python_eq(x, y)
         }
-        // A non-`str` key needs `match_dict_keys`'s python-equality
-        // matching (see its doc); dispatched to a separate function, kept
-        // off this frame for the reason `crate::diff::object::object_diff`'s
-        // own dispatch documents.
+        // Kept off this frame for the reason `object_diff`'s own dispatch documents.
         (Value::Object(x), Value::Object(y)) => {
             if x.has_non_str_keys() || y.has_non_str_keys() {
                 dict_python_eq_mixed(x, y)
@@ -493,17 +351,12 @@ fn python_eq(a: &Value, b: &Value) -> bool {
             crate::lcs::python_scalar_key(b),
         ) {
             (Some(x), Some(y)) => x == y,
-            // A container never equals a scalar, nor a container of another
-            // kind (the arms above are the only equal-kind container pairs).
             _ => false,
         },
     }
 }
 
-/// [`python_eq`]'s dict case for the (rare) pair where `a` or `b` has a
-/// non-`str` key — python-equality key matching via [`match_dict_keys`],
-/// kept out of [`python_eq`]'s own body for the reason its call site
-/// documents.
+/// [`python_eq`]'s dict case when either side has a non-`str` key, matched by [`match_dict_keys`].
 fn dict_python_eq_mixed(a: &Object, b: &Object) -> bool {
     let matched = match_dict_keys(a, b);
     matched.only_a.is_empty()
@@ -520,45 +373,16 @@ fn sequences_python_eq(a: &[Value], b: &[Value]) -> bool {
     a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| python_eq(a, b))
 }
 
-/// Python's `set(a) == set(b)`: every member of each side has a
-/// [`python_eq`] counterpart in the other. Quadratic, deliberately — this
-/// runs only on a candidate pair's distance measurement, where a set is
-/// small, and a linear version would need a hashable projection of
-/// [`python_eq`] that this crate has no other use for.
+/// Python's `set(a) == set(b)`. Quadratic: it runs only on a candidate pair's distance
+/// measurement, where a set is small.
 fn unordered_python_eq(a: &[Value], b: &[Value]) -> bool {
     a.iter().all(|x| b.iter().any(|y| python_eq(x, y)))
         && b.iter().all(|y| a.iter().any(|x| python_eq(x, y)))
 }
 
-/// Replicates Python's `new_type(old_value)` — literally calling the new
-/// side's own type as a one-argument constructor on the old value — the
-/// exact operation [`type_change_leaf_length`]'s doc cites. Returns `None`
-/// when the real Python call would raise (e.g. `int("abc")`, `dict(5)`),
-/// matching `_from_tree_type_changes`'s `except Exception: pass` (which
-/// leaves `include_values` at its pre-exception default of `True`, i.e.
-/// always keep `new_value`) — a `None` here can only ever cause an
-/// unnecessary *inclusion*, never an incorrect omission.
-///
-/// Scoped to the coercions confirmed against real `deepdiff==9.1.0` for
-/// this fix (numeric family `bool`/`int`/`float` in every direction,
-/// `str` <-> number, and `None`/`list`/`dict` -> `bool`, all via direct
-/// `DeepDiff(..., view=DELTA_VIEW)._to_delta_dict(...)` probes) — plus the
-/// `list`/`tuple` pair, which [`new_value_reproduced_by_coercion`] answers
-/// before ever calling this. Coercions
-/// *into* a container or `None` (i.e. `new_value` is `Null`/an
-/// array/object) are deliberately **not** attempted and always return
-/// `None`: every such coercion this domain could reach (e.g. `dict(5)`,
-/// `list(True)`) genuinely raises in real Python, so the conservative
-/// default is already correct there. The one acknowledged, narrow gap is
-/// the reverse direction for containers-as-*source* values feeding a
-/// `str` target (Python's `str([1])`/`str({'a': 1})` actually succeed,
-/// producing a `repr`-shaped string) — not attempted here (out of this
-/// fix's reviewed scope) and always falls through to `None`/"always
-/// include", which only ever measures a slightly larger `diff_length`
-/// than real `DeepDiff` would for that specific, uncommon pairing. A
-/// datetime or a date *is* covered for that target: `str()` of one is an
-/// ordinary string, and treating it as impossible made a calendar value
-/// paired against its own `str()` fail to pair at all.
+/// Python's `new_type(old_value)` for the numeric family, `str` and `bool` targets. `None` when
+/// Python would raise or the coercion is not modelled (a container or `None` target, a container
+/// into `str`); `None` only keeps `new_value` in the length, it never drops it wrongly.
 fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value> {
     match new_value {
         Value::Bool(_) => Some(Value::Bool(is_truthy(old_value))),
@@ -580,11 +404,7 @@ fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value>
     }
 }
 
-/// Python's `bool(value)` truthiness rule: `None`/`0`/`0.0`/`""`/`[]`/`{}`
-/// are falsy, everything else (including a non-empty string that spells
-/// out `"False"`) is truthy — confirmed against real `deepdiff` for the
-/// scalar cases (`''`/`'x'` -> `bool`) and matches Python's own documented
-/// semantics for the container cases.
+/// Python's `bool(value)`.
 #[allow(
     clippy::float_cmp,
     reason = "comparing a coerced numeric value against exact zero mirrors Python's own `bool(x)`               rule, not a computed arithmetic result"
@@ -592,20 +412,14 @@ fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value>
 fn is_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
-        // `bool(datetime(...))`/`bool(date(...))`/`bool(time(...))` is
-        // always True (confirmed against real Python — `time`'s historical
-        // "midnight is falsy" quirk was removed).
+        // Always true, including a `time` at midnight.
         Value::DateTime(_) | Value::Date(_) | Value::Time(_) => true,
-        // `bool(timedelta(...))` is `False` only for the exact-zero
-        // duration.
         Value::TimeDelta(value) => {
             value.days() != 0 || value.seconds() != 0 || value.microseconds() != 0
         }
         Value::Bool(b) => *b,
         Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        // Never empty by construction for `Str::Wtf8` (see `Str::is_empty`),
-        // so this is always `true` there — matching `bool("\udc80") ==
-        // True` in real Python.
+        // A `Str::Wtf8` is never empty (see `Str::is_empty`).
         Value::Str(s) => !s.is_empty(),
         Value::Array(items) | Value::Tuple(items) => !items.is_empty(),
         Value::Set(items) | Value::FrozenSet(items) => !items.is_empty(),
@@ -613,11 +427,7 @@ fn is_truthy(value: &Value) -> bool {
     }
 }
 
-/// Python's `float(value)`, as far as this domain needs: `bool`/`int` and
-/// already-`float` values always succeed exactly; a string is parsed with
-/// leading/trailing whitespace trimmed first (matching Python's own
-/// leniency there); a container never succeeds (`float([1])` raises in
-/// real Python).
+/// Python's `float(value)`: a string parses after whitespace trimming, a container is `None`.
 fn coerce_to_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Null
@@ -689,26 +499,12 @@ fn coerce_to_i64(value: &Value) -> Option<i64> {
     }
 }
 
-/// Python's `str(value)`: `None`/`bool` map to the literal `"None"`/
-/// `"True"`/`"False"`; an int renders as a plain decimal (matching Rust's
-/// own `i64`/`u64` `Display`); a float renders via Rust's own shortest
-/// round-trip `f64` `Display`, with a trailing `.0` appended when Rust's
-/// output has neither a `.` nor an exponent marker — Python's `str(float)`
-/// always shows a decimal point for a non-exponential value (`str(5.0) ==
-/// "5.0"`, confirmed against real `deepdiff`) where Rust's default
-/// `Display` does not. This is a best-effort match for exponential/very
-/// precise floats (not byte-verified against Python's own `repr` algorithm
-/// beyond the plain cases this fix's scope covers) — a mismatch there only
-/// ever causes an unnecessary inclusion (see [`coerce_for_type_change`]'s
-/// doc), never an incorrect omission. A container never succeeds here (see
-/// [`coerce_for_type_change`]'s doc for that documented, narrower gap).
+/// Python's `str(value)` for a scalar, `None` for a container. A float gets a trailing `.0` when
+/// Rust's output has no `.` or exponent; a mismatch on exponential floats only keeps `new_value`.
 fn coerce_to_python_str(value: &Value) -> Option<String> {
     match value {
         Value::Null => Some("None".to_string()),
-        // `str(datetime)`/`str(date)`/`str(time)`/`str(timedelta)` are
-        // ordinary strings Python produces happily, so this coercion really
-        // can reproduce a `type_changes` pair's new value — see
-        // `DateTime::python_str`.
+        // Python's `str()` of a calendar value is an ordinary string; see `DateTime::python_str`.
         Value::DateTime(value) => Some(value.python_str()),
         Value::Date(value) => Some(value.python_str()),
         Value::Time(value) => Some(value.python_str()),
@@ -735,40 +531,14 @@ fn coerce_to_python_str(value: &Value) -> Option<String> {
                     .or_else(|| n.as_big().map(ToString::to_string))
             }
         }
-        // `str(x)` is the identity for a value already a `str`, including
-        // one holding a lone surrogate — but this coercion only ever needs
-        // to build a `String`, which cannot hold one, so a `Str::Wtf8`
-        // falls through to `None` here (an accepted, narrow gap: it only
-        // costs an unnecessary type-change inclusion, never a wrong one —
-        // see this function's own doc).
+        // A lone-surrogate `Str::Wtf8` cannot become a `String`; `None` only keeps `new_value`.
         Value::Str(s) => s.as_utf8().map(ToString::to_string),
     }
 }
 
-/// `DeepDiff`'s own default `threshold_to_diff_deeper` (`_diff_dict`,
-/// diff.py) — **unrelated to `ignore_order`**, and confirmed to change a
-/// real distance computation's outcome (not just top-level report shape):
-/// a dict-vs-dict comparison whose key overlap (intersection / union) is
-/// below this collapses into a single wholesale `values_changed` instead of
-/// recursing key by key, which [`count_object_diff_leaves`] must replicate
-/// to get a correct `diff_length` for [`rough_distance`]'s pairing
-/// decisions — see that function's own doc for a worked case where skipping
-/// this flips which candidate gets paired.
-///
-/// `crate::diff::object_diff` (the real, user-facing dict-vs-dict diff)
-/// applies this exact same collapse unconditionally, whether or not
-/// `ignore_order` is set. Both call sites share the exact same ratio check,
-/// [`is_below_threshold_to_diff_deeper`], so there is exactly one place the
-/// `threshold_to_diff_deeper` arithmetic lives — this closes a route
-/// [`count_array_diff_leaves`]'s own trial sub-diff has into a nested
-/// dict-vs-dict pair through the real `array_diff`/`object_diff` engine:
-/// when that trial's pairing accepts a dict-vs-dict pair nested inside it,
-/// the *actual Report entry it builds* now already reflects the collapse,
-/// so [`Report::distance_leaf_length`](crate::report::Report::distance_leaf_length) never inherits an inflated,
-/// uncollapsed leaf count from it (found by differential fuzzing: a
-/// nested-array-of-dicts candidate pair whose true distance is 0.1364 used
-/// to be measured at 0.3182 — crossing [`CUTOFF_DISTANCE_FOR_PAIRS`](super::pairing::CUTOFF_DISTANCE_FOR_PAIRS) and
-/// producing a completely different pairing decision).
+/// `DeepDiff`'s default `threshold_to_diff_deeper`: a dict pair whose key overlap (intersection
+/// over union) is below it collapses to one `values_changed`, with or without `ignore_order`; both
+/// callers share [`is_below_threshold_to_diff_deeper`].
 pub(crate) const THRESHOLD_TO_DIFF_DEEPER: f64 = 0.33;
 
 /// A dict key's Python-equality identity — see [`match_dict_keys`]'s doc
@@ -798,9 +568,7 @@ fn dict_key_identity(key: &ObjectKey) -> Option<DictKeyIdentity> {
 /// The result of matching two [`Object`]s' keys by [`DictKeyIdentity`] — see
 /// [`match_dict_keys`].
 pub(crate) struct DictKeyMatch<'a> {
-    /// A key present (by identity) on both sides: `b`'s own key (the one
-    /// `DeepDiff` renders and recurses with — see `crate::diff::object`'s
-    /// doc), `a`'s value, then `b`'s value.
+    /// A key on both sides: `b`'s key (the one `DeepDiff` renders), `a`'s value, then `b`'s value.
     pub(crate) shared: Vec<(&'a ObjectKey, &'a Value, &'a Value)>,
     /// A key present only in `a`.
     pub(crate) only_a: Vec<(&'a ObjectKey, &'a Value)>,
@@ -808,27 +576,10 @@ pub(crate) struct DictKeyMatch<'a> {
     pub(crate) only_b: Vec<(&'a ObjectKey, &'a Value)>,
 }
 
-/// Matches `a`'s and `b`'s keys by [`DictKeyIdentity`] rather than
-/// [`Object::get`]/[`Object::contains_key`]'s structural [`ObjectKey`]
-/// equality — the rule every dict-vs-dict comparison in this crate needs
-/// once either side has a non-`str` key: `DeepDiff`'s own `dict`'s `==`
-/// (`_diff_dict`'s `SetOrdered` key intersection) collapses `1`, `1.0` and
-/// `True` into one key and compares a `tuple` key element-wise, confirmed
-/// against real `deepdiff==9.1.0`: `{1: "a"}` vs `{1.0: "a"}` is `{}`, not
-/// a removed+added pair. A key `dict_key_identity` cannot classify
-/// (unreachable from `onix-py`'s conversion, which restricts a dict key to
-/// `None`/`bool`/`int`/`float`/`str`/`datetime`/`date`/a `tuple` of those)
-/// is always reported as added/removed instead of matched.
-/// `crate::diff::object_diff`, [`count_object_diff_leaves`] and
-/// [`is_below_threshold_to_diff_deeper`] each call this once
-/// [`Object::has_non_str_keys`] says either side needs it, so an ordinary
-/// all-`str` object — the overwhelming common case — never builds the
-/// `BTreeMap` this does.
-///
-/// `O((n + m) log(n + m))`: one lookup map built from `b`'s keys, probed
-/// once per `a` key — the same complexity class `Object::get`'s binary
-/// search already gave the `str`-only path (`n` lookups at `O(log n)`
-/// each), not a quadratic case a non-`str` key newly introduces.
+/// Matches `a`'s and `b`'s keys by Python equality ([`DictKeyIdentity`]: `1`, `1.0` and `True` are
+/// one key, tuple keys compare element-wise); a key with no identity is always added or removed.
+/// `O((n + m) log(n + m))`: one map of `b`'s keys, probed once per `a` key. Callers use it only
+/// once [`Object::has_non_str_keys`] says either side needs it.
 pub(crate) fn match_dict_keys<'a>(a: &'a Object, b: &'a Object) -> DictKeyMatch<'a> {
     let mut b_by_identity: std::collections::BTreeMap<DictKeyIdentity, usize> =
         std::collections::BTreeMap::new();
@@ -870,12 +621,9 @@ pub(crate) fn match_dict_keys<'a>(a: &'a Object, b: &'a Object) -> DictKeyMatch<
     }
 }
 
-/// The shared `threshold_to_diff_deeper` ratio check backing both
-/// [`count_object_diff_leaves`] (the count-only distance mirror) and
-/// `crate::diff::object_diff`'s own unconditional collapse — see
-/// [`THRESHOLD_TO_DIFF_DEEPER`]'s own doc for why both exist. All-`str` keys
-/// are counted by a merge of the two ascending key sequences: one key
-/// comparison per step, no hashing.
+/// The `threshold_to_diff_deeper` ratio check shared by [`count_object_diff_leaves`] and
+/// `crate::diff::object_diff`. All-`str` keys are counted by merging the two ascending key
+/// sequences, with no hashing.
 pub(crate) fn is_below_threshold_to_diff_deeper(a: &Object, b: &Object) -> bool {
     let (union_len, intersect_len) = if a.has_non_str_keys() || b.has_non_str_keys() {
         let matched = match_dict_keys(a, b);
@@ -912,20 +660,9 @@ pub(crate) fn is_below_threshold_to_diff_deeper(a: &Object, b: &Object) -> bool 
     }
 }
 
-/// [`count_diff_leaves`]'s dict case: mirrors
-/// [`crate::diff::object_diff`]'s key-set walk, contributing
-/// [`item_length`] of the whole value for an added/removed key and
-/// recursing (one level deeper) into a shared key — **except** when
-/// [`is_below_threshold_to_diff_deeper`] (`DeepDiff`'s own default,
-/// confirmed via a real `DELTA_VIEW` probe to apply inside its distance
-/// computation too), in which case the whole thing collapses to
-/// [`item_length_of_map`] of `b`, matching a single wholesale
-/// `values_changed` rather than recursing — the exact same collapse
-/// `crate::diff::object_diff` applies unconditionally to its own real
-/// `Report` output (see [`THRESHOLD_TO_DIFF_DEEPER`]'s doc); this function
-/// stays a separate, `Report`-free mirror purely to avoid the allocation
-/// cost of a full `Report` for a distance measurement (see
-/// [`count_diff_leaves`]'s own doc).
+/// [`count_diff_leaves`]'s dict case: [`item_length`] for an added or removed key, a recursion for
+/// a shared one, or [`item_length_of_map`] of `b` when [`is_below_threshold_to_diff_deeper`]
+/// collapses the pair.
 pub(crate) fn count_object_diff_leaves(
     a: &Object,
     b: &Object,
@@ -934,8 +671,6 @@ pub(crate) fn count_object_diff_leaves(
     memo: &IgnoreOrderMemo,
 ) -> Result<usize, Box<Error>> {
     if is_below_threshold_to_diff_deeper(a, b) {
-        // The collapse is one wholesale `values_changed` whose new value is
-        // the whole object `b` (see [`item_length`]).
         return Ok(if b.is_custom_object() {
             b.lengths().dict_len
         } else {
@@ -967,11 +702,8 @@ pub(crate) fn count_object_diff_leaves(
     Ok(total)
 }
 
-/// [`count_object_diff_leaves`]'s walk for the (rare) case where `a` or `b`
-/// has a non-`str` key — matches keys the same way
-/// `crate::diff::object::object_diff_mixed` does (python-equality, via
-/// [`match_dict_keys`]); kept out of [`count_object_diff_leaves`]'s own
-/// body for the reason its call site documents.
+/// [`count_object_diff_leaves`]'s walk when either side has a non-`str` key, matched by
+/// [`match_dict_keys`].
 fn count_object_diff_leaves_mixed(
     a: &Object,
     b: &Object,
@@ -996,27 +728,16 @@ fn count_object_diff_leaves_mixed(
     Ok(total)
 }
 
-/// [`count_diff_leaves`]'s set case: `DeepDiff`'s delta view of a set diff
-/// is `{"set_item_added": {<path>: {<items>}}, "set_item_removed": ...}`,
-/// and `_get_item_length` sums the [`item_length`] of every added and every
-/// removed item — verified against real `deepdiff==9.1.0` (`{1, 2}` vs
-/// `{1, 2, 3, 4, 5}` measures `3`).
-///
-/// Membership goes through the same [`super::set_difference`] the real set
-/// diff uses (threading the run's shared `memo` so member digests are computed
-/// against the one cache the whole diff shares), so this count can never drift
-/// from what it mirrors.
+/// [`count_diff_leaves`]'s set case: [`item_length`] summed over every added and removed member,
+/// found by the same [`super::set_difference`] and shared `memo` the real set diff uses.
 fn count_set_diff_leaves(a: &[Value], b: &[Value], memo: &IgnoreOrderMemo) -> usize {
     let (removed, added) = super::set_difference(a, b, memo);
 
     removed.into_iter().chain(added).map(item_length).sum()
 }
 
-/// [`count_diff_leaves`]'s array case — see that function's doc for why
-/// this is the one sub-case still routed through a genuine (but small,
-/// single-pair) [`crate::diff::array_diff`] trial diff rather than a count-only
-/// mirror. The trial runs at the array's own `depth` under the caller's
-/// `max_depth`, the budget its real diff would get.
+/// [`count_diff_leaves`]'s array case: a trial [`crate::diff::array_diff`] at the array's own
+/// `depth` under the caller's `max_depth`.
 #[inline(always)]
 #[allow(
     clippy::inline_always,
@@ -1032,8 +753,7 @@ pub(crate) fn count_array_diff_leaves(
 ) -> Result<usize, Box<Error>> {
     match crate::diff::array_diff(&mut Vec::new(), a, b, depth, opts, memo) {
         Ok(mut sub_report) => {
-            // The mutual add/remove merge runs before `diff_length` is
-            // measured; it is a no-op when `array_diff` took the positional path.
+            // Runs before `diff_length` is measured; a no-op on the positional path.
             sub_report.merge_mutual_add_removes();
             Ok(sub_report.distance_leaf_length())
         }
@@ -1041,24 +761,12 @@ pub(crate) fn count_array_diff_leaves(
     }
 }
 
-/// `DeepDiff`'s `_get_rough_distance` (distance.py): the
-/// numeric fast path when both `removed`/`added` share a distance family
-/// ([`family_distance`]), else a structural fallback of
-/// `diff_length / (rough_length(removed) + rough_length(added))`, where
-/// `diff_length` comes from [`count_diff_leaves`] — a `Report`-free mirror
-/// of a trial recursive diff between `removed` and `added` (see that
-/// function's own doc for why it deliberately does *not* build a
-/// [`Report`](crate::report::Report), unlike `DeepDiff`'s own brand-new nested `DeepDiff` object
-/// built purely to measure this).
+/// `DeepDiff`'s `_get_rough_distance`: the [`family_distance`] fast path, else
+/// `count_diff_leaves(removed, added) / (rough_length(removed) + rough_length(added))`.
 ///
-/// `depth` is the depth of the *list* doing the pairing, which is also the
-/// depth a paired item's own diff runs at, so the trial gets that diff's
-/// budget (`docs/design/depth-budget.md`).
-///
-/// # Errors
-///
-/// Propagates [`count_diff_leaves`]'s error: a failed trial is never a
-/// distance.
+/// `depth` is the depth of the list doing the pairing, which is also the depth a paired item's own
+/// diff runs at, so the trial runs under that diff's `max_depth` budget
+/// (`docs/design/depth-budget.md`).
 pub(crate) fn rough_distance(
     removed: &Value,
     added: &Value,
@@ -1085,7 +793,3 @@ pub(crate) fn rough_distance(
         Ok(diff_length as f64 / rough_len as f64)
     }
 }
-
-// ---------------------------------------------------------------------
-// Pairing
-// ---------------------------------------------------------------------

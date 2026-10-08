@@ -2338,7 +2338,7 @@ fn a_time_is_truthy_and_a_timedelta_is_truthy_only_when_non_zero() {
 fn a_time_or_timedelta_pairs_with_its_own_str_via_type_change_coercion() {
     // `str(time)`/`str(timedelta)` are ordinary strings Python produces
     // happily, so `new_type(old_value)` reproduces the new value and the
-    // delta omits it — see `coerce_to_python_str`'s doc.
+    // delta omits it — see `coerce_to_python_str`'s calendar arms.
     let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
     let t = ctime(10, 30, 0, 0, None);
     let d = ctimedelta(0, 1, 0);
