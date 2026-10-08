@@ -3,7 +3,8 @@
 //!
 //! * Objects are an exactly-sized slice sorted like [`serde_json`]'s `BTreeMap`; `str` keys are
 //!   interned per session.
-//! * Numbers keep the `i64`/`u64`/`f64` distinction (see [`Number`]) plus an arbitrary-precision arm.
+//! * Numbers keep the `i64`/`u64`/`f64` distinction (see [`Number`]) plus an arbitrary-precision
+//!   arm.
 //! * [`Deserialize`] streams straight into this type, with no [`serde_json::Value`] tree.
 //!
 //! See `docs/design/value-model.md` for stack safety and subclass identity.
@@ -526,21 +527,13 @@ impl Value {
         match self {
             Value::Null => serde_json::Value::Null,
             Value::Bool(b) => serde_json::Value::Bool(*b),
-            // A non-finite float has no `serde_json::Number` form at all;
-            // `null` is what the streaming parse path already renders for
-            // one arriving that way (see `ValueVisitor::visit_f64`), and
-            // this is unreachable from the CLI (JSON text cannot carry a
-            // `NaN`/`Infinity` literal) or from the Python bindings' own
-            // `to_json()` (`onix-py`'s `guard` module emits `NaN`/`Infinity`
-            // from `Value` directly).
+            // A non-finite float has no `serde_json::Number` form; `null` matches the
+            // streaming parse path (see `Number::to_serde_number`).
             Value::Number(n) => n
                 .to_serde_number()
                 .map_or(serde_json::Value::Null, serde_json::Value::Number),
             // `serde_json::Value::String` cannot hold a `Str::Wtf8` (a
-            // lone surrogate has no valid Rust `String` representation);
-            // this method's callers can only ever construct one from JSON
-            // (see `Str`'s doc), which never carries a surrogate, so this
-            // lossy fallback is unreachable in practice.
+            // lone surrogate has no valid Rust `String` representation).
             Value::Str(s) => serde_json::Value::String(s.to_string()),
             Value::DateTime(value) => serde_json::Value::String(value.isoformat()),
             Value::Date(value) => serde_json::Value::String(value.isoformat()),
@@ -2026,8 +2019,8 @@ impl Interner {
 
     /// Converts `key` into an [`Object`] [`Key`]: an interned handle for the
     /// common [`Str::Utf8`] case (see [`Interner::intern`]), or an owned,
-    /// un-interned allocation for the rare [`Str::Wtf8`] one — see [`Key`]'s
-    /// doc for why the latter is never worth sharing.
+    /// un-interned allocation for the rare [`Str::Wtf8`] one
+    /// (`docs/design/value-conversion.md`, "Key interning").
     fn intern_key(&mut self, key: Str) -> Key {
         match key {
             Str::Utf8(s) => Key::Utf8(self.intern(&s)),
@@ -2102,8 +2095,7 @@ impl Builder {
 
     /// [`Builder::intern`]'s [`Str`]-aware twin: interns a plain `str` key
     /// exactly as that method does, or passes a key holding a lone
-    /// surrogate code point through un-interned — see [`Key`]'s doc for why
-    /// that rare shape is never worth sharing. For a caller building an
+    /// surrogate code point through un-interned. For a caller building an
     /// [`ObjectKey::Str`] directly (for [`Builder::object_with_keys`])
     /// alongside a mix of other key kinds.
     #[must_use]
