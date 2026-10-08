@@ -45,9 +45,17 @@ pub enum Error {
 
 impl Error {
     /// This error with its path, rendered relative to a sub-diff's root,
-    /// re-rooted under `prefix`.
-    pub(crate) fn under(mut self, prefix: &[PathSegment]) -> Self {
-        let (Error::MaxDepthExceeded { path, .. } | Error::DateTimeOutOfRange { path }) = &mut self;
+    /// re-rooted under `prefix`. Cold and never inlined, so the recursive
+    /// distance frames that call it reserve no stack for the rendering.
+    #[cold]
+    #[inline(never)]
+    #[allow(
+        clippy::unnecessary_box_returns,
+        reason = "the distance frames carry their error boxed so their `Result` stays two words"
+    )]
+    pub(crate) fn under(mut self: Box<Self>, prefix: &[PathSegment]) -> Box<Self> {
+        let (Error::MaxDepthExceeded { path, .. } | Error::DateTimeOutOfRange { path }) =
+            &mut *self;
         let rerooted = format!(
             "{}{}",
             render_path(prefix),

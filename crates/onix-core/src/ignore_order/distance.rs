@@ -311,15 +311,15 @@ pub(crate) fn is_length_excluded_key(key: &str) -> bool {
 /// number `DeepDiff` would compute); this hybrid trades away the Report-free
 /// property only for the substantially rarer, non-benchmarked case.
 ///
-/// `depth` is the depth the pair's real diff runs at; an error comes from a
-/// nested array's trial, its path relative to the pair.
+/// `depth` is the depth the pair's real diff runs at; an error is the one
+/// that diff would raise, its path relative to the pair.
 pub(crate) fn count_diff_leaves(
     a: &Value,
     b: &Value,
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> Result<usize, Error> {
+) -> Result<usize, Box<Error>> {
     if IgnoreOrderMemo::skips(a, b) {
         return Ok(0);
     }
@@ -330,7 +330,7 @@ pub(crate) fn count_diff_leaves(
         let b = resolved_b.as_deref().unwrap_or(b);
         return count_diff_leaves(a, b, depth, opts, memo);
     }
-    Ok(match (a, b) {
+    let count = match (a, b) {
         (Value::Null, Value::Null) => 0,
         (Value::Bool(x), Value::Bool(y)) => usize::from(x != y),
         (Value::Str(x), Value::Str(y)) => usize::from(x != y),
@@ -355,7 +355,7 @@ pub(crate) fn count_diff_leaves(
             }
         }
         (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
-            count_array_diff_leaves(x, y, depth, opts, memo)?
+            return count_array_diff_leaves(x, y, depth, opts, memo);
         }
         (Value::Set(x), Value::Set(y)) | (Value::FrozenSet(x), Value::FrozenSet(y)) => {
             count_set_diff_leaves(x, y, memo)
@@ -367,10 +367,11 @@ pub(crate) fn count_diff_leaves(
         // the whole-value change `DeepDiff` would report, not a spurious
         // near-zero attribute diff.
         (Value::Object(x), Value::Object(y)) if x.same_class(y) => {
-            count_object_diff_leaves(x, y, depth, opts, memo)?
+            return count_object_diff_leaves(x, y, depth, opts, memo);
         }
         _ => type_change_leaf_length(a, b),
-    })
+    };
+    Ok(count)
 }
 
 /// [`count_diff_leaves`]'s type-mismatch contribution: `DeepDiff`'s own
@@ -929,7 +930,7 @@ pub(crate) fn count_object_diff_leaves(
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> Result<usize, Error> {
+) -> Result<usize, Box<Error>> {
     if is_below_threshold_to_diff_deeper(a, b) {
         // The collapse is one wholesale `values_changed` whose new value is
         // the whole object `b` (see [`item_length`]).
@@ -975,7 +976,7 @@ fn count_object_diff_leaves_mixed(
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> Result<usize, Error> {
+) -> Result<usize, Box<Error>> {
     let matched = match_dict_keys(a, b);
     let mut total = 0;
 
@@ -1020,12 +1021,16 @@ pub(crate) fn count_array_diff_leaves(
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> Result<usize, Error> {
-    let mut sub_report = crate::diff::array_diff(&mut Vec::new(), a, b, depth, opts, memo)?;
-    // The mutual add/remove merge runs before `diff_length` is measured; it
-    // is a no-op when `array_diff` took the positional path.
-    sub_report.merge_mutual_add_removes();
-    Ok(sub_report.distance_leaf_length())
+) -> Result<usize, Box<Error>> {
+    match crate::diff::array_diff(&mut Vec::new(), a, b, depth, opts, memo) {
+        Ok(mut sub_report) => {
+            // The mutual add/remove merge runs before `diff_length` is
+            // measured; it is a no-op when `array_diff` took the positional path.
+            sub_report.merge_mutual_add_removes();
+            Ok(sub_report.distance_leaf_length())
+        }
+        Err(error) => Err(Box::new(error)),
+    }
 }
 
 /// `DeepDiff`'s `_get_rough_distance` (distance.py): the
@@ -1053,7 +1058,7 @@ pub(crate) fn rough_distance(
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> Result<f64, Error> {
+) -> Result<f64, Box<Error>> {
     if let Some(distance) = family_distance(removed, added, cutoff) {
         return Ok(distance);
     }

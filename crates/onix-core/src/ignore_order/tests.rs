@@ -1006,7 +1006,10 @@ fn count_object_diff_leaves_shared_key_recursion_depth_boundary_is_exact() {
     };
     assert_eq!(
         (count(3), count(4)),
-        (Err(max_depth_exceeded("root['x'][0]['a']['b']", 3)), Ok(1))
+        (
+            Err(Box::new(max_depth_exceeded("root['x'][0]['a']['b']", 3))),
+            Ok(1)
+        )
     );
 }
 
@@ -1109,7 +1112,10 @@ fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact()
     };
     assert_eq!(
         (count(3), count(4)),
-        (Err(max_depth_exceeded("root[5][0]['a']['b']", 3)), Ok(1))
+        (
+            Err(Box::new(max_depth_exceeded("root[5][0]['a']['b']", 3))),
+            Ok(1)
+        )
     );
 }
 
@@ -1362,7 +1368,7 @@ fn rough_distance_depth_boundary_is_exact() {
     assert_eq!(
         (distance(2), distance(3)),
         (
-            Err(max_depth_exceeded("root[0]['a']['b']", 2)),
+            Err(Box::new(max_depth_exceeded("root[0]['a']['b']", 2))),
             Ok(1.0 / 12.0)
         )
     );
@@ -1398,9 +1404,9 @@ fn rough_distance_of_a_pair_whose_trial_compares_an_unnormalizable_datetime_is_i
     );
     assert_eq!(
         distance,
-        Err(crate::error::Error::DateTimeOutOfRange {
+        Err(Box::new(crate::error::Error::DateTimeOutOfRange {
             path: "root['k'][0]".to_string()
-        })
+        }))
     );
 }
 
@@ -3577,7 +3583,8 @@ proptest! {
                 let mirror =
                     super::distance::count_diff_leaves(&old, &new, 0, &opts, &IgnoreOrderMemo::new());
                 let report = crate::diff::diff_with_options(&old, &new, &opts)
-                    .map(|report| report.distance_leaf_length());
+                    .map(|report| report.distance_leaf_length())
+                    .map_err(Box::new);
                 prop_assert_eq!(mirror, report);
             }
         }

@@ -71,7 +71,7 @@ pub(crate) fn compute_pairs(
     depth: usize,
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
-) -> Result<HashMap<Rc<ItemKey>, Rc<ItemKey>>, Error> {
+) -> Result<HashMap<Rc<ItemKey>, Rc<ItemKey>>, Box<Error>> {
     let mut most_in_common_pairs: HashMap<Rc<ItemKey>, AddedCandidates> = HashMap::default();
     let mut distances_to_from_hashes: BTreeMap<Distance, Vec<Rc<ItemKey>>> = BTreeMap::new();
 
@@ -95,8 +95,21 @@ pub(crate) fn compute_pairs(
         let (_, added_value) = t2.get(added_key);
         for (removed_idx, removed_key) in hashes_removed.iter().enumerate() {
             let (old_idx, removed_value) = t1.get(removed_key);
-            let measure = || {
-                rough_distance(
+            // Memoize container-vs-container candidates — the pairs whose
+            // distance is a recursive trial diff and so the ones that
+            // re-compute exponentially without a cache. The key is content
+            // only, so a hit also answers a deeper occurrence whose own trial
+            // could exceed the depth budget (`docs/design/ignore-order.md`).
+            let cache_key = match (&removed_dist[removed_idx], &added_dist[added_idx]) {
+                (Some(removed_dist_key), Some(added_dist_key)) if memo.caching_enabled() => {
+                    Some((removed_dist_key.clone(), added_dist_key.clone()))
+                }
+                _ => None,
+            };
+            let distance = if let Some(cached) = cache_key.as_ref().and_then(|key| memo.get(key)) {
+                cached
+            } else {
+                let computed = rough_distance(
                     removed_value,
                     added_value,
                     CUTOFF_DISTANCE_FOR_PAIRS,
@@ -104,27 +117,11 @@ pub(crate) fn compute_pairs(
                     opts,
                     memo,
                 )
-                .map_err(|error| error.under(&[PathSegment::Index(old_idx)]))
-            };
-            // Memoize container-vs-container candidates — the pairs whose
-            // distance is a recursive trial diff and so the ones that
-            // re-compute exponentially without a cache. `rough_distance` is a
-            // pure function of the two subtrees' content on this path, so a
-            // value cached under their exact `DistKey` pair is identical to a
-            // fresh one — see `docs/design/ignore-order.md`'s "Distance
-            // memo" section for the proof.
-            let distance = match (&removed_dist[removed_idx], &added_dist[added_idx]) {
-                (Some(removed_dist_key), Some(added_dist_key)) if memo.caching_enabled() => {
-                    let key = (removed_dist_key.clone(), added_dist_key.clone());
-                    if let Some(cached) = memo.get(&key) {
-                        cached
-                    } else {
-                        let computed = measure()?;
-                        memo.put(key, computed);
-                        computed
-                    }
+                .map_err(|error| error.under(&[PathSegment::Index(old_idx)]))?;
+                if let Some(key) = cache_key {
+                    memo.put(key, computed);
                 }
-                _ => measure()?,
+                computed
             };
             if distance >= CUTOFF_DISTANCE_FOR_PAIRS {
                 continue;
