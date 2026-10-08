@@ -118,8 +118,7 @@ pub(crate) fn datetime_diff(
 }
 /// Normalizes both sides of a datetime comparison to UTC, or reports
 /// [`Error::DateTimeOutOfRange`] at `path` when one of them has no
-/// normalized form — see [`DateTime::to_utc`] for the boundary and why real
-/// `DeepDiff` raises there too.
+/// normalized form; see `tests/golden/README.md`, "Datetime outside year `1..=9999`".
 ///
 /// # Errors
 ///
