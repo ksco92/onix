@@ -685,9 +685,8 @@ fn type_change_leaf_length_omits_new_value_when_the_coercion_reproduces_it() {
 
 #[test]
 fn ignore_order_pairing_applies_the_general_coercion_rule_to_a_nested_type_change() {
-    // A minimal repro: a structural pair whose distance depends on the general
-    // coercion rule (float(0) == 0.0). Distance 0.25 < 0.3: pairs, recursing to a
-    // nested type_changes.
+    // A structural pair whose distance depends on the general coercion rule
+    // (float(0) == 0.0). Distance 0.25 < 0.3: pairs, recursing to a nested type_changes.
     let a = json!([[["", ""], []], {}]);
     let b = json!([[1, [], true, {"c": true}], {}]);
     assert_eq!(
@@ -707,7 +706,7 @@ fn ignore_order_pairing_applies_the_general_coercion_rule_to_a_nested_type_chang
 
 #[test]
 fn ignore_order_pairing_omits_new_value_when_float_of_old_equals_new() {
-    // The sibling repro: [[0]] vs [[0.0]] recurses to a nested type_changes
+    // `[[0]]` vs `[[0.0]]` recurses to a nested type_changes
     // (float(0) == 0.0, new_value omitted).
     let a = json!([[0]]);
     let b = json!([[0.0]]);
@@ -1095,7 +1094,6 @@ fn signed_zero_floats_share_a_set_member_digest_too() {
 
 #[test]
 fn signed_zero_floats_dedup_to_one_removal_under_ignore_order() {
-    // Full-diff regression for the signed-zero item_key normalization.
     assert_eq!(
         ignore_order_diff(&json!([0.0, -0.0]), &json!([])),
         json!({"iterable_item_removed": {"root[0]": 0.0}})
@@ -1529,7 +1527,8 @@ fn a_distance_cached_at_a_shallow_occurrence_answers_a_deeper_one_whose_trial_wo
     );
 }
 
-/// Pins the datetime pair's scale: instants in seconds, as `_get_datetime_distance` reads `timestamp()`.
+/// Pins the datetime pair's scale: instants in seconds, as `_get_datetime_distance`
+/// reads `timestamp()`.
 #[test]
 #[allow(
     clippy::cast_precision_loss,
@@ -1640,9 +1639,7 @@ proptest! {
 
     /// The distance memo must change no decision: an `ignore_order` diff run
     /// with the memo enabled produces a byte-identical report to one run with
-    /// it disabled, over generated nested shapes. This is the empirical
-    /// counterpart to the purity argument in `docs/design/ignore-order.md`'s
-    /// "Distance memo" section.
+    /// it disabled, over generated nested shapes.
     #[test]
     fn memoized_and_unmemoized_reports_are_byte_identical(
         a in arb_nested(),
@@ -1665,8 +1662,7 @@ proptest! {
 }
 
 /// A memoized deep-nested `ignore_order` diff recomputes each level's pairing
-/// distance once: a depth-`d` single-element chain records `d - 1` memo puts
-/// (issue #33).
+/// distance once: a depth-`d` single-element chain records `d - 1` memo puts.
 #[test]
 fn deep_nested_ignore_order_memoizes_distance_computations_linearly() {
     let opts = DiffOptions {
@@ -1693,7 +1689,6 @@ fn deep_nested_ignore_order_memoizes_distance_computations_linearly() {
         memo.put_count()
     };
 
-    // Unmemoized, depth 25 takes tens of seconds.
     for depth in [20usize, 25] {
         let puts = recomputations_at(depth);
         assert_eq!(
@@ -1922,8 +1917,7 @@ fn the_collision_is_positional_not_the_order_insensitive_content_digest() {
 fn which_member_of_an_equality_class_is_hashed_first_is_observable() {
     // The content digest deduplicates, so `(1, 1)` and `(1,)` share one. The
     // float tuple is not Python-equal to `(1, 1)`, so when it is hashed first
-    // it fixes the class digest as the float one and the two no longer match
-    // — real DeepDiff behaves this way round.
+    // it fixes the class digest as the float one and the two no longer match.
     assert_eq!(
         ignore_order_diff_compact(
             &carr(vec![ctup(&[json!(1)])]),
@@ -2773,9 +2767,7 @@ fn unhashable_set_members_of_different_kinds_stay_distinct() {
 
 /// The per-node cache decision holds whether a naive/aware (or int/float)
 /// difference sits at the member's own root or nested below it: a member's
-/// digest is built through the shared cache at every node. Pins the
-/// root-level rows and the below-root rows; every pairing but the
-/// bare-number sibling is `{}`.
+/// digest is built through the shared cache at every node.
 #[test]
 fn a_set_member_collapses_a_calendar_difference_at_the_root_and_below_it() {
     let n = || cdt(2024, 1, 1, None);
@@ -2863,8 +2855,7 @@ fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
         .expect("set-member hashing and comparison complete on a small stack");
 }
 
-/// Interning `K` set/list members must never collapse onto one hash bucket
-/// (issue #33).
+/// Interning `K` set/list members must never collapse onto one hash bucket.
 ///
 /// Integral and half-integer floats land in pairwise-distinct low-32-bit
 /// buckets that grow linearly with `K`: [`super::hash::item_key`]'s `Float` arm
@@ -2932,7 +2923,7 @@ fn float_hash_buckets_stay_distinct_and_grow_linearly_with_member_count() {
     }
 }
 
-// --- distance-memo repetition-collision regression (issue #31) ---
+// --- distance-memo repetition collision ---
 
 /// Two sibling subtrees whose list elements share an `ItemKey` (order- and
 /// repetition-insensitive) but differ in element repetition have different
@@ -3036,8 +3027,7 @@ fn arb_repeating_siblings_pair() -> impl Strategy<Value = (serde_json::Value, se
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(800))]
 
-    /// Targeted at the repetition-collision regression (issue #31): over dicts
-    /// of single-element lists wrapping repetition-varying lists — the shape
+    /// Over dicts of single-element lists wrapping repetition-varying lists — the shape
     /// where sibling candidates share an `ItemKey` but not a distance, and
     /// where those distances straddle the 0.3 pairing cutoff — the distance memo
     /// must still change no decision.
@@ -3110,7 +3100,7 @@ fn distance_memo_only_caches_container_pairs_when_enabled() {
     );
 }
 
-// --- DistKey hashing stack safety (issue #31) -------------------------
+// --- DistKey hashing stack safety ---
 
 /// [`DistKey`]'s `Hash` walks the value with an explicit stack, never native
 /// recursion, so hashing a distance-cache key can never overflow the native
@@ -3548,7 +3538,7 @@ fn item_length_of_a_custom_object_is_its_attribute_count_not_its_values() {
     // attribute *names* (one each), never recursing into the values, unlike a
     // `dict` (the `Mapping` branch). This object has two attributes whose
     // values sum to four leaves as a dict would count them, so the two rules
-    // give different answers and this pins the object rule.
+    // give different answers.
     let object = ccustom("A", json!({"x": [1, 2, 3], "y": 5}).as_object().unwrap());
     assert_eq!(super::distance::item_length(&object), 2);
 
@@ -4029,7 +4019,7 @@ fn an_object_reports_the_address_it_was_converted_from() {
     );
 }
 
-// --- default-path hash flooding (issue #136) ---
+// --- default-path hash flooding ---
 
 /// `n` distinct 16-byte UTF-8 keys that drive `FxHasher` to one final state once `prefix` (the
 /// words hashed before the key's bytes) is written: an 8-byte ASCII word, then a second word
