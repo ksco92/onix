@@ -64,8 +64,7 @@ struct TableDiffJson<'a> {
 }
 
 impl TableDiff {
-    /// Builds a result from a finished schema diff and row diff. Internal to
-    /// the crate; callers use [`crate::diff_tables`].
+    /// Builds a result from a finished schema diff and row diff.
     pub(crate) fn new(schema: Vec<SchemaChange>, rows: RowDiff) -> Self {
         Self { schema, rows }
     }
@@ -110,8 +109,7 @@ impl TableDiff {
     /// object per row keyed by column name (a null cell as JSON `null`,
     /// every other cell as its canonical string rendering — the same
     /// rendering [`TableDiff::cells_changed`]'s `old_value`/`new_value`
-    /// columns use). See [`crate::MAX_JSON_ROWS`]'s own doc for the row cap
-    /// this enforces and why.
+    /// columns use).
     ///
     /// # Errors
     ///
@@ -120,8 +118,7 @@ impl TableDiff {
     ///   [`crate::MAX_JSON_ROWS`].
     /// - [`TableDiffError::Render`] if a row-level cell cannot be rendered to
     ///   its canonical string, naming the column.
-    /// - [`TableDiffError::Json`] if serialization itself fails, which does
-    ///   not happen for the value shapes this type holds.
+    /// - [`TableDiffError::Json`] if serialization itself fails.
     pub fn to_json(&self) -> Result<String, TableDiffError> {
         let total_rows = self.rows.rows_added.num_rows()
             + self.rows.rows_removed.num_rows()
@@ -155,9 +152,8 @@ impl TableDiff {
     ///
     /// # Errors
     ///
-    /// Returns an [`ArrowError`] only if the fixed, internally-consistent
-    /// column arrays fail to assemble into a batch, which does not happen in
-    /// practice.
+    /// Returns an [`ArrowError`] if the column arrays fail to assemble into
+    /// a batch.
     pub fn schema_record_batch(&self) -> Result<RecordBatch, ArrowError> {
         let columns: StringArray = self
             .schema

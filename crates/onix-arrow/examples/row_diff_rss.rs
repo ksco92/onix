@@ -41,22 +41,12 @@
 //!
 //! Each side is generated on the fly, batch by batch, and nothing is retained
 //! between batches, so the process's peak RSS is the diff's own state, not the
-//! table data. The **linear** shape (`id`, `value` int64 columns) exercises the
-//! per-row hash vectors: the left is ids `0..n`, the right `step..n + step` with
-//! `step = n / 100`, so 1% removed, 1% added, ~2% changed — and the cell pass
-//! materializes those ~2% changed rows on both sides. The **nochange** variant
-//! keeps the 1% added/removed but makes every shared row equal, so the cell pass
-//! materializes nothing: the difference in peak RSS between it and the default
-//! run is the cell pass's cost. The **allchange** variant drops the offset and
-//! changes every shared row (no added/removed), so the cell pass materializes
-//! and renders every row. The **wide** shape (`id` int64, `value` a
-//! `value_width`-byte Utf8 that differs between the sides) changes every row too
-//! and renders `value_width` bytes per changed cell — the rendering worst case,
-//! whose peak RSS scales with changed cells times cell width. The **dup** shape
-//! (`key` Utf8 of the given width, `value` int64) makes every key appear twice
-//! on each side, so every distinct
-//! key is a duplicate and the whole `duplicate_keys` report is materialized —
-//! the term that scales with distinct duplicated keys times the key width.
+//! table data. The shapes run are `linear`, `nochange`, `allchange`, `wide`,
+//! `widesame`, `manycols`, `dup`, and the view and duplicate shapes in the
+//! commands above, each defined by its `Case` variant in
+//! `examples/shared/gen_shapes.rs`. The peak RSS of `linear` over `nochange` is
+//! the cell pass's cost; `wide` scales with changed cells times cell width, and
+//! `dup` with distinct duplicated keys times the key width.
 
 use onix_arrow::{TableDiffOptions, diff_tables};
 

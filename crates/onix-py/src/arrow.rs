@@ -45,8 +45,7 @@ impl TableInput for SpooledInput {
     }
 
     fn open(&self) -> Result<Box<dyn RecordBatchReader + Send>, TableDiffError> {
-        // Re-read the anonymous spool file from the start; the row diff opens
-        // each side sequentially, so rewinding is safe (see `onix_arrow::spool`).
+        // Re-read the anonymous spool file from the start.
         Ok(Box::new(spool::reopen(&self.file)?))
     }
 }

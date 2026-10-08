@@ -19,19 +19,14 @@ use crate::row_diff::{SideRenderer, cell_is_null};
 /// [`RecordBatch`]; see the module doc for what this bounds.
 pub const MAX_JSON_ROWS: usize = 10_000;
 
-/// Renders every row of `batch` to a JSON object keyed by column name, or
-/// [`TableDiffError::TooManyJsonRows`] if `batch` has more than
-/// [`MAX_JSON_ROWS`] rows. A null cell renders as JSON `null`; every other
-/// cell renders through [`SideRenderer`], the same renderer
-/// [`crate::TableDiff::cells_changed`] uses.
+/// Renders every row of `batch` to a JSON object keyed by column name.
 ///
 /// # Errors
 ///
 /// - [`TableDiffError::TooManyJsonRows`] if `batch.num_rows()` exceeds
 ///   [`MAX_JSON_ROWS`].
 /// - [`TableDiffError::Render`] if a cell cannot be rendered to its
-///   canonical string (naming the column), the same failure
-///   [`crate::TableDiff::cells_changed`] can raise.
+///   canonical string.
 pub(crate) fn rows_to_json(batch: &RecordBatch) -> Result<Vec<JsonValue>, TableDiffError> {
     if batch.num_rows() > MAX_JSON_ROWS {
         return Err(TableDiffError::TooManyJsonRows {

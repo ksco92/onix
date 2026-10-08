@@ -22,10 +22,6 @@ pub type SpoolReader = StreamReader<BufReader<File>>;
 /// Maps a spool failure to a [`TableDiffError::Read`] naming the temporary
 /// directory and `TMPDIR`, so a full or unwritable temp filesystem points the
 /// caller at what to change. `context` is a verb phrase like `"write to"`.
-///
-/// # Errors
-///
-/// This constructs the error; it does not fail.
 pub fn error(context: &str, error: &dyn std::fmt::Display) -> TableDiffError {
     TableDiffError::Read {
         message: format!(
@@ -54,7 +50,7 @@ pub fn open(schema: &SchemaRef) -> Result<(File, SpoolWriter), TableDiffError> {
 }
 
 /// Reopens a spool file for reading from the start through a fresh, rewound
-/// handle. The caller opens each spool sequentially, so rewinding is safe.
+/// handle.
 ///
 /// # Errors
 ///

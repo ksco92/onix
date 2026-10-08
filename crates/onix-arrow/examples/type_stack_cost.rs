@@ -5,7 +5,7 @@
 //! The bound protects several recursive operations on a deeply nested type:
 //! `schema::normalized_type` (which rebuilds a normalized copy per level, like
 //! `Clone`), the type's `Display` (used to render the report), and its own
-//! `Clone`/`Drop`. This example exercises the public worst case — clone the
+//! derived `PartialEq`, `Clone`, and `Drop`. This example exercises the public worst case — clone the
 //! type, render it with `Display`, and drop the clone — on a thread with a
 //! fixed stack size, and binary-searches the deepest input that does not
 //! overflow. `bytes_per_level ≈ stack / max_ok_depth` is then the per-level
