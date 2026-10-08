@@ -5,9 +5,12 @@ and keyword-only markers against ``inspect.signature()`` of the compiled object.
 """
 
 import ast
+import functools
 import importlib.metadata
 import inspect
+import re
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -121,6 +124,23 @@ def test_method_signature_matches_the_stub(class_name: str, method_name: str) ->
     real_class = getattr(deepdiff_rs, class_name)
     runtime_params = _runtime_params(getattr(real_class, method_name))
     assert stub_params == runtime_params
+
+
+STUB_ITEMS = {
+    **FUNCTIONS,
+    **CLASSES,
+    **{f"{c}.{m}": n for c, node in CLASSES.items() for m, n in _class_members(node).items()},
+}
+
+
+@pytest.mark.parametrize("path", sorted(STUB_ITEMS))
+def test_stub_docstring_is_the_runtime_first_sentence(path: str) -> None:
+    """The stub carries each item's first runtime ``__doc__`` sentence, or none for a slot."""
+    runtime = functools.reduce(getattr, path.split("."), deepdiff_rs)
+    doc = None if isinstance(runtime, types.WrapperDescriptorType) else runtime.__doc__
+    first = re.split(r"(?<=\.)\s", doc.strip(), maxsplit=1)[0] if doc else None
+    expected = " ".join(first.split()).replace("`", "``") if first else None
+    assert ast.get_docstring(STUB_ITEMS[path]) == expected
 
 
 @pytest.mark.parametrize(("class_name", "property_name"), [("TableDiff", "schema"), ("TableDiff", "schema_arrow")])
