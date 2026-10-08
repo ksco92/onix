@@ -8,7 +8,8 @@
 // unused by one example is not dead across the pair.
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use arrow_array::{
     ArrayRef, BinaryViewArray, Int64Array, RecordBatch, RecordBatchReader, StringArray,
@@ -315,6 +316,27 @@ impl Case {
     }
 }
 
+/// The `Utf8View`, `BinaryView` and `Utf8` columns of an [`Shape::Int64Diff`]
+/// batch of `len` rows, built once per `(width, len)` so both sides hold the
+/// same buffers.
+fn equal_columns(width: usize, len: i64) -> Vec<ArrayRef> {
+    type Key = (usize, i64);
+    static CACHE: Mutex<BTreeMap<Key, Vec<ArrayRef>>> = Mutex::new(BTreeMap::new());
+    CACHE
+        .lock()
+        .unwrap()
+        .entry((width, len))
+        .or_insert_with(|| {
+            let cell = "a".repeat(width);
+            let rows = 0..len;
+            let view: StringViewArray = rows.clone().map(|_| Some(cell.as_str())).collect();
+            let bin: BinaryViewArray = rows.clone().map(|_| Some(cell.as_bytes())).collect();
+            let text: StringArray = rows.map(|_| Some(cell.as_str())).collect();
+            vec![Arc::new(view), Arc::new(bin), Arc::new(text)]
+        })
+        .clone()
+}
+
 /// A table generated on demand, retaining nothing between batches.
 pub struct Generated {
     pub schema: SchemaRef,
@@ -407,18 +429,9 @@ impl Iterator for GenReader {
             Shape::Int64Diff { width, delta } => {
                 let ids: Int64Array = (self.next..end).map(Some).collect();
                 let values: Int64Array = (self.next..end).map(|i| Some(i + delta)).collect();
-                let cell = "a".repeat(width);
-                let view: StringViewArray = (self.next..end).map(|_| Some(cell.as_str())).collect();
-                let bin: BinaryViewArray =
-                    (self.next..end).map(|_| Some(cell.as_bytes())).collect();
-                let text: StringArray = (self.next..end).map(|_| Some(cell.as_str())).collect();
-                vec![
-                    Arc::new(ids),
-                    Arc::new(values),
-                    Arc::new(view),
-                    Arc::new(bin),
-                    Arc::new(text),
-                ]
+                let mut columns: Vec<ArrayRef> = vec![Arc::new(ids), Arc::new(values)];
+                columns.extend(equal_columns(width, end - self.next));
+                columns
             }
             Shape::View { width, fill, keys } => {
                 let (ids, rows): (Vec<i64>, Vec<i64>) = (self.next..end)
