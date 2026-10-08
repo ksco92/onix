@@ -1,10 +1,7 @@
 """Checks that ``deepdiff_rs.pyi`` cannot drift from the built module.
 
-For every function, method, and property the stub declares, this compares
-its parameter names, defaults, and keyword-only markers against
-``inspect.signature()`` of the real, compiled object — so a signature change
-on either side that is not mirrored on the other fails a test, rather than
-surfacing later as a wrong IDE tooltip or a `mypy` false negative.
+Compares each stub function, method, and property's parameter names, defaults,
+and keyword-only markers against ``inspect.signature()`` of the compiled object.
 """
 
 import ast
@@ -72,10 +69,6 @@ CONSTANTS = {
 
 def test_stub_declares_the_whole_public_surface() -> None:
     """Every public name the built module actually exports has a stub entry, and vice versa.
-
-    Compares against `dir(deepdiff_rs)` rather than a literal set: a public
-    symbol added to the module with no matching stub entry fails this test
-    instead of passing silently.
     """
     module_names = {
         n for n in dir(deepdiff_rs) if (not n.startswith("_") or n == "__version__") and n != "deepdiff_rs"
@@ -111,9 +104,7 @@ def test_deepdiff_init_signature_matches_the_stub() -> None:
 
 
 def _every_stub_method() -> list[tuple[str, str]]:
-    """Every non-``__init__``, non-property method declared on a stub class —
-    generated from the stub itself, so a method added to the stub without a
-    matching entry here cannot go unchecked."""
+    """Every non-``__init__``, non-property method declared on a stub class."""
     pairs = []
     for class_name, node in CLASSES.items():
         for method_name, member in _class_members(node).items():
