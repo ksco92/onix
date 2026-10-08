@@ -45,13 +45,15 @@ way the diff can misclassify, has probability on the order of
 ## Value semantics
 
 Cell hashing matches `onix-core`'s scalar comparison except for NaN,
-which folds to one canonical form here (`onix-core` carries NaN from
-the bindings and never compares two NaNs equal), because the renderer cannot show two NaN
-payloads apart: integers and integral floats within `±2⁵³` fold to
-one integer form, other floats hash by bit pattern, decimals hash by
-exact value with trailing zeros removed, timestamps/times/durations
-normalize to nanoseconds, and a null is a distinct value equal only
-to another null (`IS DISTINCT FROM`).
+which folds to one canonical form here, because the renderer cannot show
+two NaN payloads apart (`onix-core` carries NaN from the bindings; its
+ordered comparison keeps every NaN distinct, while `ignore_order` and
+set dedup match NaNs by content; see "Non-finite floats" in
+`tests/golden/README.md`): integers and integral floats within `±2⁵³`
+fold to one integer form, other floats hash by bit pattern, decimals
+hash by exact value with trailing zeros removed,
+timestamps/times/durations normalize to nanoseconds, and a null is a
+distinct value equal only to another null (`IS DISTINCT FROM`).
 
 ## Per-cell changes
 

@@ -754,10 +754,12 @@ fn hash_int(hasher: &mut CellHasher, value: i128) {
 /// predicate and the `±2⁵³` bound are duplicated here on purpose because the
 /// crates are decoupled, and both sites move together): an integral value in
 /// range folds to the integer form (so `-0.0` and `0.0` both become `0`). The
-/// NaN canonicalization is this crate's own rule, not `onix-core`'s (which
-/// never compares two NaNs equal): every NaN folds to one canonical NaN so two
-/// NaNs always hash equal, because the renderer cannot show two NaN payloads apart.
-/// Any other value keeps its raw bit pattern.
+/// NaN canonicalization is this crate's own rule (`onix-core` carries NaN
+/// from the bindings; its ordered comparison keeps every NaN distinct,
+/// while `ignore_order` and set dedup match NaNs by content). Here every
+/// NaN folds to one canonical NaN so two NaNs always hash equal, because
+/// the renderer cannot show two NaN payloads apart. Any other value keeps
+/// its raw bit pattern.
 fn hash_float(hasher: &mut CellHasher, value: f64) {
     if value.is_nan() {
         // Fold every NaN (any payload, any sign bit) to one canonical NaN, so
