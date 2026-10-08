@@ -11,7 +11,8 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    ArrayRef, Int64Array, RecordBatch, RecordBatchReader, StringArray, StringViewArray,
+    ArrayRef, BinaryViewArray, Int64Array, RecordBatch, RecordBatchReader, StringArray,
+    StringViewArray,
 };
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use onix_arrow::{TableDiffError, TableInput};
@@ -52,6 +53,10 @@ pub enum Shape {
         width: usize,
         first_fill: u8,
     },
+    /// `(id, value, view, bin, text)`: `value` is the row index plus `delta`;
+    /// the `Utf8View`, `BinaryView` and `Utf8` columns hold a `width`-byte cell
+    /// equal on both sides.
+    Int64Diff { width: usize, delta: i64 },
     /// `(id, v0, v1)`, two `width`-byte `Utf8View` columns starting with `fill`;
     /// `keys` maps row `i` to its id, or omits it.
     View {
@@ -126,6 +131,9 @@ pub enum Case {
     ManyCols { ncols: usize, width: usize },
     /// Every `key_width`-byte string key appearing twice on each side.
     Dup(usize),
+    /// Every row changed in one `Int64` column (`+1` on the right) beside three
+    /// equal `width`-byte `Utf8View`, `BinaryView` and `Utf8` columns.
+    Int64Diff(usize),
     /// Two `width`-byte view columns; every left row removed (right empty).
     ViewRemoved(usize),
     /// [`Case::ViewRemoved`] mirrored: every right row added (left empty).
@@ -275,6 +283,17 @@ impl Case {
                     "id",
                 )
             }
+            Case::Int64Diff(width) => {
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new("id", DataType::Int64, false),
+                    Field::new("value", DataType::Int64, false),
+                    Field::new("view", DataType::Utf8View, false),
+                    Field::new("bin", DataType::BinaryView, false),
+                    Field::new("text", DataType::Utf8, false),
+                ]));
+                let shape = |delta| Shape::Int64Diff { width, delta };
+                (schema, shape(0), shape(1), "id")
+            }
             Case::ViewRemoved(_)
             | Case::ViewAdded(_)
             | Case::ViewAddedByValue(_)
@@ -384,6 +403,22 @@ impl Iterator for GenReader {
                     columns.push(Arc::new(values));
                 }
                 columns
+            }
+            Shape::Int64Diff { width, delta } => {
+                let ids: Int64Array = (self.next..end).map(Some).collect();
+                let values: Int64Array = (self.next..end).map(|i| Some(i + delta)).collect();
+                let cell = "a".repeat(width);
+                let view: StringViewArray = (self.next..end).map(|_| Some(cell.as_str())).collect();
+                let bin: BinaryViewArray =
+                    (self.next..end).map(|_| Some(cell.as_bytes())).collect();
+                let text: StringArray = (self.next..end).map(|_| Some(cell.as_str())).collect();
+                vec![
+                    Arc::new(ids),
+                    Arc::new(values),
+                    Arc::new(view),
+                    Arc::new(bin),
+                    Arc::new(text),
+                ]
             }
             Shape::View { width, fill, keys } => {
                 let (ids, rows): (Vec<i64>, Vec<i64>) = (self.next..end)
