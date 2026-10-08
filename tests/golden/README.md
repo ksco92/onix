@@ -230,8 +230,8 @@ removal plus an addition, while `{(1,)}` vs `{(1.0,)}` and `{frozenset({1})}` vs
 are not Python-equal, so they never collide either. Under `ignore_order` a set
 diffs identically (a set has no order to ignore), never hash-matches another
 container kind, and pairs with another set by distance like any other item. See
-"Set iteration order" below for the five places this rule is deliberately more
-deterministic than `DeepDiff`'s own.
+"Set iteration order" below for the five places this rule is more deterministic
+than `DeepDiff`'s own.
 
 **Tuple cases (`tuple_*`, `ignore_order_tuple_*`,
 `ignore_order_unhashable_tuple_*`):** a tuple diffs positionally like a list
@@ -311,8 +311,8 @@ the autojunk heuristic at 250+ lines (which `unified_diff` enables, unlike the
 ordered-list path) and its greedy backward extension over a purged popular run;
 and the `ignore_order` route, where a paired change reaches `_diff_str` and
 carries `new_path`. The field is emitted only where DeepDiff runs `_diff_str`:
-the mutual-add-remove merge and the threshold-collapse paths deliberately omit
-it. See `crates/onix-core/src/unified_diff.rs`.
+the mutual-add-remove merge and the threshold-collapse paths omit it. See
+`crates/onix-core/src/unified_diff.rs`.
 
 **`ignore_order=True` (`ignore_order_*` cases):** pure shuffle, shuffle plus a
 changed/added/removed value, duplicate-multiplicity invisibility, nested-dict
