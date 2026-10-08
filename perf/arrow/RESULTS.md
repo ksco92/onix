@@ -302,8 +302,8 @@ Measured on `deepdiff-rs` 0.13.0 and 0.14.0, 2026-09-24, 2, 18 and 64 threads.
 `int64diff` 500k x 3 x 1 KB (`Utf8View`, `BinaryView`, `Utf8` equal; `Int64` differing on every row),
 each cell the median with the run range in brackets (8 runs at 2 threads, 3 at 18 and 64), run as
 `ROW_DIFF_THREADS=<n> /usr/bin/time -l target/release/examples/row_diff_rss 500000 int64diff 1024`
-in a fresh process per run, on a machine with no other benchmark job running (load average 5 to 7 from macOS
-background services):
+on a machine with no other benchmark job running (load average 5 to 7). The figures include the
+shared equal columns (about 0.3 GB):
 
 | threads | 0.17.0 |
 | --- | --- |

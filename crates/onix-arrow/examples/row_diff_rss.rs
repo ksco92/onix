@@ -43,7 +43,8 @@
 //! ```
 //!
 //! Each side is generated on the fly, batch by batch, and nothing is retained
-//! between batches, so the process's peak RSS is the diff's own state, not the
+//! between batches (except `int64diff`'s shared equal columns, about 0.3 GB at
+//! 500k rows, which its figures include), so the process's peak RSS is the diff's own state, not the
 //! table data. The shapes run are `linear`, `nochange`, `allchange`, `wide`,
 //! `widesame`, `manycols`, `int64diff`, `dup`, and the remaining shapes in the
 //! commands above, each defined by its `Case` variant in
