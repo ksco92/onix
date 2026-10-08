@@ -433,22 +433,18 @@ sampling, same command sequence every invocation of `run_bench.sh`.
 | heavy (~12-17s/diff on this machine) | `flat_dict_1m`, `identical_1m`, `ignore_order_10k` | 1 | 5 |
 | very heavy (~1-1.5min/diff on this machine) | `nested_uniform_d6_b10`, `api_payloads` | 0 | 3 |
 
-The two "very heavy" fixtures use only 3 runs (no warmup) purely for total
-harness runtime: a single deepdiff diff-only call already takes over a
-minute at that size; onix's own run count is unaffected by this (it is not
-what makes those fixtures slow) but hyperfine measures both commands
-together in one comparison sweep.
+The two "very heavy" fixtures use only 3 runs (no warmup) to bound total
+harness runtime.
 
-Three independent measurement passes run per fixture, each using this same
-warmup/run tier: the correctness precheck (one run per tool, not tallied
-above, whose only job is the byte-identical canonical-JSON comparison), the
-diff-only timing sample loop (the tier's full warmup+runs, feeding the
-Headline table's medians below), and the hyperfine sweep (also the tier's
-full warmup+runs, feeding wall clock/CPU/RSS). Diff-only timing is
-deliberately its own pass, not reused from the precheck or hyperfine runs.
-This harness always reports a median over N runs, never a single
-sample, and hyperfine's own runs don't expose per-run stderr to extract
-`diff_ns` from.
+Three passes run per fixture: the correctness precheck (one run per tool,
+not tallied above), the diff-only timing sample loop (the tier's full
+warmup+runs, feeding the Headline table), and the hyperfine sweep (also the
+tier's full warmup+runs, feeding wall clock/CPU/RSS). Diff-only timing is
+its own pass because hyperfine's runs don't expose per-run stderr to
+extract `diff_ns` from.
+
+Diff-only, peak-RSS and tracemalloc cells are medians over the tier's runs;
+wall-clock and CPU cells are hyperfine means over the same runs.
 """
 
 
@@ -941,10 +937,7 @@ def main() -> None:
 
     sections = [
         "# onix vs. DeepDiff: benchmark results\n",
-        "Generated entirely by `perf/run_bench.sh` (via `perf/summarize_results.py`). "
-        "Every number below traces back to a real, timestamped run captured under "
-        "`perf/bench_raw/` (gitignored; regenerate with `perf/run_bench.sh`). "
-        "No number here was hand-written.\n",
+        "Generated entirely by `perf/run_bench.sh` (via `perf/summarize_results.py`).\n",
         render_environment_header(load_json(RAW_DIR / "env.json")),
         render_fixture_matrix(report),
         render_run_procedure(),
