@@ -2,7 +2,8 @@
 //! partition spill and the Python bindings' input spool. Each file is a
 //! [`tempfile::tempfile`] — unlinked at creation, mode 0600, never given a path,
 //! so nothing is left on disk on abnormal exit — re-read through a rewound
-//! `try_clone`.
+//! `try_clone`. Every `try_clone` handle shares one file offset, so a spool
+//! never has two readers alive at once; callers open each spool sequentially.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom};
@@ -22,10 +23,6 @@ pub type SpoolReader = StreamReader<BufReader<File>>;
 /// Maps a spool failure to a [`TableDiffError::Read`] naming the temporary
 /// directory and `TMPDIR`, so a full or unwritable temp filesystem points the
 /// caller at what to change. `context` is a verb phrase like `"write to"`.
-///
-/// # Errors
-///
-/// This constructs the error; it does not fail.
 pub fn error(context: &str, error: &dyn std::fmt::Display) -> TableDiffError {
     TableDiffError::Read {
         message: format!(
@@ -54,7 +51,7 @@ pub fn open(schema: &SchemaRef) -> Result<(File, SpoolWriter), TableDiffError> {
 }
 
 /// Reopens a spool file for reading from the start through a fresh, rewound
-/// handle. The caller opens each spool sequentially, so rewinding is safe.
+/// handle.
 ///
 /// # Errors
 ///

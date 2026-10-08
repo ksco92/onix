@@ -3,11 +3,9 @@
 //! [`diff_tables`] compares two tables presented as [`TableInput`]s and
 //! returns a [`TableDiff`] carrying the schema diff, the keyed row diff, and
 //! the per-cell diff. The two tables are matched on a required, non-empty
-//! set of key columns, carried in [`TableDiffOptions`]. The row diff may read
-//! a side more than once, so [`diff_tables`] takes a re-openable
-//! [`TableInput`] rather than a single-use `RecordBatchReader`. In-memory
-//! tables use [`MemoryInput`]; a one-shot stream spools to a temporary file
-//! and implements [`TableInput`] over it, as the Python bindings do.
+//! set of key columns, carried in [`TableDiffOptions`]. In-memory tables use
+//! [`MemoryInput`]; a one-shot stream spools to a temporary file and
+//! implements [`TableInput`] over it, as the Python bindings do.
 //!
 //! See `src/row_diff.rs` for the row-matching passes, `docs/design/row-diff.md`
 //! for the algorithm, hashing, and value-comparison rules, and `src/schema.rs`
@@ -57,7 +55,7 @@
 //! // id 1 is only on the left (removed), id 3 only on the right (added).
 //! assert_eq!(diff.summary().rows_removed, 1);
 //! assert_eq!(diff.summary().rows_added, 1);
-//! assert_eq!(diff.rows_added().unwrap().num_rows(), 1);
+//! assert_eq!(diff.rows_added().num_rows(), 1);
 //! ```
 
 mod error;
@@ -78,9 +76,10 @@ pub use schema::{ChangeKind, SchemaChange, diff_schemas};
 pub use table_diff::{TableDiff, TableDiffSummary};
 
 /// The maximum column-type nesting depth [`diff_tables`] will compare; deeper is refused
-/// with [`TableDiffError::MaxDepthExceeded`], bounding the native-stack recursion in
-/// comparison, `Display`, `Clone`, and the drop of values onix builds from accepted
-/// input — not a caller's own drop of a `DataType` it built past this depth.
+/// with [`TableDiffError::MaxDepthExceeded`]. It bounds the native-stack recursion of every
+/// recursive `DataType` operation onix runs on accepted input: derived `PartialEq` (the
+/// comparison), `Clone`, `Drop`, `Display`, and `normalized_type`. It does not cover a caller's
+/// own drop of a `DataType` it built past this depth.
 /// Per-level cost is measured by `crates/onix-arrow/examples/type_stack_cost.rs`.
 pub const MAX_NESTING_DEPTH: usize = 128;
 
@@ -89,10 +88,6 @@ pub const MAX_NESTING_DEPTH: usize = 128;
 pub const MAX_THREADS: usize = 1024;
 
 /// Diffs two tables presented as re-openable [`TableInput`]s.
-///
-/// See the [crate-level docs](crate) for the key-column contract; the
-/// row-diff rules are in `row_diff.rs` and the type-comparison rules in
-/// `schema.rs`.
 ///
 /// # Errors
 ///
@@ -112,8 +107,6 @@ pub const MAX_THREADS: usize = 1024;
 ///   to its canonical string.
 /// - [`TableDiffError::TooManyChangedRows`] if one side has more than
 ///   `u32::MAX` changed rows.
-/// - [`TableDiffError::EqualRenderings`] never fires for real input; it
-///   guards an internal invariant.
 pub fn diff_tables(
     left: &impl TableInput,
     right: &impl TableInput,
@@ -145,14 +138,7 @@ pub fn diff_tables(
             });
         }
 
-        // The key's own hashability (a nested or otherwise unhashable key) is
-        // checked, along with every other column, by `row_diff::diff_rows`; only
-        // key existence and the type-mismatch below live here.
-
-        // A key whose normalized type differs across sides is a schema type
-        // change; refuse it rather than guess row identity across a changed key
-        // type (the conservative choice). The schema diff above already computed
-        // this.
+        // A key whose type differs across sides is refused.
         if changes
             .iter()
             .any(|change| &change.column == key && change.change == ChangeKind::TypeChanged)
@@ -254,7 +240,7 @@ mod tests {
     #[test]
     fn dictionary_key_column_is_accepted() {
         // A dictionary key is a scalar encoding, so it passes the up-front
-        // hashable-key check (covering the dictionary arm of `is_hashable`).
+        // hashable-key check.
         let dict = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
         let left = reader(vec![Field::new("id", dict.clone(), false)]);
         let right = reader(vec![Field::new("id", dict, false)]);
@@ -280,7 +266,7 @@ mod tests {
     fn unhashable_and_type_mismatched_key_reports_type_mismatch() {
         // A key that is both unhashable (a nested list on the left) and
         // type-changed across sides: the type-mismatch refusal is checked first,
-        // so it wins over the unhashable-column refusal. Pins that priority.
+        // so it wins over the unhashable-column refusal.
         let list = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
         let left = reader(vec![Field::new("id", list, true)]);
         let right = reader(vec![Field::new("id", DataType::Int64, false)]);

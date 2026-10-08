@@ -61,22 +61,19 @@ pub struct SchemaChange {
 }
 
 /// Normalizes a data type to the canonical form used for comparison, so that
-/// columns whose types differ only in a *physical* encoding compare equal —
-/// what a data engineer means by "the same type". The rules, applied
-/// recursively through list, struct, and map children:
+/// columns whose types differ only in a physical encoding compare equal. The
+/// rules, applied recursively through list, struct, and map children:
 ///
 /// - a dictionary-encoded type becomes its value type (dictionary-encoded
 ///   string == plain string; `list<dictionary<int32, string>>` ==
-///   `list<string>` — polars and `DuckDB` emit dictionary/categorical
-///   encodings routinely);
+///   `list<string>`);
 /// - `Utf8View` and `LargeUtf8` become `Utf8`, `BinaryView`/`LargeBinary`
 ///   become `Binary`;
 /// - every variable-length list variant (`List`/`LargeList`/`ListView`/
 ///   `LargeListView`) becomes `List`, and its element field's name and
-///   nullability are dropped (canonicalized to `item`, nullable), because
-///   producers disagree on both (`DuckDB` names the element `l`, pyarrow
-///   `item`, Parquet `element`); a `FixedSizeList` keeps its width but has its
-///   element normalized the same way;
+///   nullability are dropped (canonicalized to `item`, nullable); a
+///   `FixedSizeList` keeps its width but has its element normalized the same
+///   way;
 /// - a `Map`, and any list variant whose element carries the map signature
 ///   (see [`map_entries`]), both become one canonical `Map` shape, so a map
 ///   column compares equal across libraries.
@@ -93,13 +90,6 @@ fn normalized_type(data_type: &DataType) -> DataType {
         DataType::Dictionary(_, value) => normalized_type(value),
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => DataType::Utf8,
         DataType::Binary | DataType::LargeBinary | DataType::BinaryView => DataType::Binary,
-        // Any list variant whose element carries the map signature (see
-        // [`map_entries`]) is read as a map, on every library path: polars has
-        // no map type and re-exports both a real Arrow map and an ordinary list
-        // of key/value structs as the identical `LargeList<Struct<key, value>>`,
-        // while pyarrow uses `List` for such a list, so every list variant must
-        // normalize the same way to keep cross-library identity. Every list
-        // variant otherwise normalizes to `List`.
         DataType::List(field)
         | DataType::LargeList(field)
         | DataType::ListView(field)
@@ -195,11 +185,8 @@ fn types_equal(left: &DataType, right: &DataType) -> bool {
 
 /// Whether `data_type` is nested deeper than `limit` levels, counting each
 /// nesting wrapper (dictionary, any list, struct, map, union, run-end) as one
-/// level. **Iterative** — an explicit heap work-stack, no native recursion —
-/// so it is itself safe to run on any input depth, and it is the guard that
-/// keeps [`normalized_type`], the type's `Display` (used to render the report),
-/// and the type's own `Drop` from overflowing the native stack on
-/// adversarially deep input.
+/// level. Iterative (heap work-stack), so safe at any depth; it is the guard
+/// for the recursive operations listed at [`crate::MAX_NESTING_DEPTH`].
 fn depth_exceeds(data_type: &DataType, limit: usize) -> bool {
     let mut stack: Vec<(&DataType, usize)> = vec![(data_type, 0)];
 
@@ -667,11 +654,6 @@ mod tests {
 
     #[test]
     fn list_and_large_list_of_key_value_struct_both_read_as_a_map() {
-        // polars re-exports both a real map and a plain list of key/value
-        // structs as the same LargeList<Struct<key,value>>, so a List (pyarrow)
-        // and a LargeList (polars) of that struct, and a real Map, must all
-        // normalize to the same type — an accepted false negative (a real map
-        // and a list of key/value structs are not distinguished).
         let kv = || {
             DataType::Struct(
                 vec![
@@ -854,12 +836,7 @@ mod tests {
 
     #[test]
     fn depth_check_covers_list_nesting_without_native_recursion() {
-        // A list nested far past what a recursive walk (or `DataType`'s own
-        // recursive `Drop`) could survive is rejected cleanly, proving the
-        // check is iterative. The fixture is built iteratively and `forget`en
-        // rather than dropped, so its recursive teardown cannot crash this
-        // (non-subprocess) test harness and mask the result — the crashing
-        // path itself is covered end to end in the Python subprocess tests.
+        // `forget`en, not dropped: the recursive `Drop` of this depth would crash the harness.
         let mut ty = DataType::Int64;
         for _ in 0..50_000 {
             ty = DataType::List(std::sync::Arc::new(Field::new("item", ty, true)));

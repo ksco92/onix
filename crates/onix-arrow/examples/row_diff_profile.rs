@@ -22,13 +22,9 @@
 //! ```
 //!
 //! Generated args: `[rows [shape [threads [shape params...]]]]`, key `id`,
-//! `threads` defaulting to `ROW_DIFF_THREADS` or available parallelism. Shapes:
-//!
-//! - `linear`: `id`/`value` int64; 1% of keys added, 1% removed, ~2% changed.
-//! - `allchange`: `id`/`value` int64, every row changed.
-//! - `wide [width=512]`: `id` plus one `width`-byte string, every row changed.
-//! - `manycols [ncols=34 [width=64]]`: `id` plus `ncols` `width`-byte strings,
-//!   only the first differing, so the spill carries every value column.
+//! `threads` defaulting to `ROW_DIFF_THREADS` or available parallelism. Shapes,
+//! each defined by its `Case` variant in `examples/shared/gen_shapes.rs`:
+//! `linear`, `allchange`, `wide [width=512]`, `manycols [ncols=34 [width=64]]`.
 
 use std::fs::File;
 use std::io::BufReader;

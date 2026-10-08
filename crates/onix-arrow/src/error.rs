@@ -30,9 +30,6 @@ impl fmt::Display for Side {
 }
 
 /// Errors that can occur while diffing two tables.
-///
-/// Marked `#[non_exhaustive]` so future work can add variants without a
-/// breaking change; matching on it must keep a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TableDiffError {
@@ -46,23 +43,16 @@ pub enum TableDiffError {
         /// The side whose schema lacks the column.
         side: Side,
     },
-    /// One of the inputs has two or more columns with the same name. A table
-    /// diff needs column names to be unique on each side: columns are matched
-    /// across the two sides by name, and the later row diff keys on unique
-    /// column names too.
+    /// One of the inputs has two or more columns with the same name; column
+    /// names must be unique on each side.
     DuplicateColumn {
         /// The duplicated column name.
         column: String,
         /// The side whose schema contains the duplicate.
         side: Side,
     },
-    /// A column's Arrow type is nested more deeply than the diff will walk.
-    /// Arrow nesting depth is attacker-controlled and unbounded, and every
-    /// recursive walk over a [`arrow_schema::DataType`] (the comparison here,
-    /// plus the type's own `Display`, `Clone`, and `Drop`) is a native-stack
-    /// sink; this bound turns a would-be stack overflow into a recoverable
-    /// error. The bound is far above any real schema — see
-    /// [`crate::MAX_NESTING_DEPTH`].
+    /// A column's type is nested past [`crate::MAX_NESTING_DEPTH`], which
+    /// bounds native-stack recursion over `DataType`; see its doc.
     MaxDepthExceeded {
         /// The column whose type is too deeply nested.
         column: String,
@@ -80,10 +70,8 @@ pub enum TableDiffError {
         /// The unsupported Arrow type, rendered.
         data_type: String,
     },
-    /// A key column has a different (normalized) Arrow type on each side. This
-    /// is the deliberate conservative choice: a primary key that changed type is
-    /// refused rather than guessed — the row diff will not coerce one side to
-    /// the other's type to decide row identity.
+    /// A key column has a different (normalized) Arrow type on each side; the
+    /// row diff never coerces a key.
     KeyTypeMismatch {
         /// The key column whose type differs across the two inputs.
         column: String,
@@ -96,9 +84,7 @@ pub enum TableDiffError {
     },
     /// A cell value could not be rendered to its canonical string for the
     /// per-cell diff — for example a temporal value outside the range the
-    /// formatter can format. Reported as a typed error rather than written into
-    /// the output as error prose (which a real string cell could not be told
-    /// apart from).
+    /// formatter can format.
     Render {
         /// The column whose cell could not be rendered.
         column: String,
@@ -112,11 +98,8 @@ pub enum TableDiffError {
         /// The number of changed rows that overflowed.
         rows: usize,
     },
-    /// A `value_changed` cell rendered identically on both sides — a broken
-    /// invariant, not a caller error. The per-cell diff renders each side in a
-    /// common comparison form so a value change always shows two different
-    /// strings; this variant guards that guarantee and cannot fire for any real
-    /// input.
+    /// A `value_changed` cell rendered identically on both sides: an internal
+    /// invariant violation.
     EqualRenderings {
         /// The column whose two renderings were equal.
         column: String,
@@ -132,26 +115,18 @@ pub enum TableDiffError {
         max: usize,
     },
     /// [`crate::TableDiff::to_json`]'s `serde_json` serialization failed.
-    /// Its input is a fixed set of already-rendered strings, numbers, and
-    /// nested objects/arrays, so this does not happen in practice; it is a
-    /// typed error rather than a panic because a public API must return,
-    /// not abort, on an unexpected failure.
     Json {
         /// The underlying `serde_json` error's message.
         message: String,
     },
-    /// A worker thread in the parallel row diff panicked. The panic is caught
-    /// and surfaced as this typed error rather than allowed to abort the
-    /// process, so a bug or an unexpected failure inside one worker fails the
-    /// diff recoverably.
+    /// A worker thread in the parallel row diff panicked; the panic is caught
+    /// and reported here.
     WorkerPanicked {
         /// The panic payload, when it was a string.
         message: String,
     },
-    /// The requested worker-thread count exceeds [`crate::MAX_THREADS`]. The
-    /// row diff spawns one worker per requested thread, so an unbounded count
-    /// is refused before any thread is spawned rather than risking thread
-    /// exhaustion.
+    /// The requested worker-thread count exceeds [`crate::MAX_THREADS`]; it is
+    /// refused before any thread is spawned.
     ThreadCountTooLarge {
         /// The requested thread count.
         threads: usize,

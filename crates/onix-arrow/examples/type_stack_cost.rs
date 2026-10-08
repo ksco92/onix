@@ -2,13 +2,11 @@
 //! over an Arrow `DataType` that `crates/onix-arrow/src/schema.rs` guards with
 //! [`onix_arrow::MAX_NESTING_DEPTH`] — the empirical basis for that bound.
 //!
-//! The bound protects several recursive operations on a deeply nested type:
-//! `schema::normalized_type` (which rebuilds a normalized copy per level, like
-//! `Clone`), the type's `Display` (used to render the report), and its own
-//! `Clone`/`Drop`. This example exercises the public worst case — clone the
-//! type, render it with `Display`, and drop the clone — on a thread with a
-//! fixed stack size, and binary-searches the deepest input that does not
-//! overflow. `bytes_per_level ≈ stack / max_ok_depth` is then the per-level
+//! The bound protects the recursive operations listed at
+//! [`onix_arrow::MAX_NESTING_DEPTH`]; this example clones the type, renders it
+//! with `Display`, and drops the clone, on a thread with a fixed stack size,
+//! and binary-searches the deepest input that does not overflow.
+//! `bytes_per_level ≈ stack / max_ok_depth` is then the per-level
 //! cost for this build profile and shape.
 //!
 //! Each probe runs in a child process (this same binary, re-invoked with

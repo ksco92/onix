@@ -7,10 +7,8 @@ use crate::error::TableDiffError;
 /// Options for [`crate::diff_tables`].
 ///
 /// The key columns are the table's primary key: rows are matched across the
-/// two inputs by their values (in the later row-diff versions), and the key
-/// must be non-empty. Later versions add more fields (value-comparison
-/// tolerances and the like); construct this through [`TableDiffOptions::new`]
-/// rather than a struct literal so those additions stay backward compatible.
+/// two inputs by their values, and the key must be non-empty. Construct this
+/// through [`TableDiffOptions::new`] rather than a struct literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableDiffOptions {
     /// The key columns, in the order given. Required and non-empty; an empty
@@ -19,17 +17,12 @@ pub struct TableDiffOptions {
     key: Vec<String>,
     /// Worker threads the row diff hashes and classifies rows with. Defaults to
     /// the machine's available parallelism; `1` runs the single-threaded path.
-    /// The result is byte-identical at any value.
     threads: NonZeroUsize,
 }
 
 impl TableDiffOptions {
     /// Creates options keyed on `key`, with [`threads`](Self::threads)
     /// defaulting to the machine's available parallelism.
-    ///
-    /// No validation happens here — an empty `key` is reported by
-    /// [`crate::diff_tables`] so every misuse surfaces through one error
-    /// channel.
     #[must_use]
     pub fn new(key: Vec<String>) -> Self {
         Self {
