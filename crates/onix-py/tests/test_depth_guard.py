@@ -293,6 +293,44 @@ def test_deep_report_renders_to_json_from_a_small_stack_thread() -> None:
     assert "OK" in result.stdout
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="RLIMIT_AS is only enforced on Linux",
+)
+def test_default_depth_diff_runs_under_an_address_space_limit_below_the_ceiling_reservation() -> None:
+    """
+    A default-depth diff on the worker thread succeeds where a ceiling-sized one cannot spawn.
+
+    The limit sits under the ceiling's 312.5 MiB reservation plus the process's
+    own mappings; the control proves a thread of that size fails to start.
+    """
+    result = _run_isolated(
+        """
+        import resource, threading
+        limit = 320 * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+        import deepdiff_rs
+        threading.stack_size(327_680_000)
+        try:
+            threading.Thread(target=lambda: None).start()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("the limit does not bind a 312.5 MiB reservation")
+
+        deep_a, deep_b = [1], [2]
+        for _ in range(100):
+            deep_a, deep_b = [deep_a], [deep_b]
+        diff = deepdiff_rs.DeepDiff(deep_a, deep_b)
+        assert len(diff.to_json()) > 100
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
 def test_max_depth_above_ceiling_raises_value_error_naming_the_ceiling() -> None:
     """A max_depth above the ceiling is refused up front with a catchable ValueError."""
     with pytest.raises(ValueError, match=str(MAX_DEPTH_CEILING)) as excinfo:

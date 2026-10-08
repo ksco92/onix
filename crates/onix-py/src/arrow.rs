@@ -90,14 +90,15 @@ pub(crate) fn diff_tables(
 ) -> PyResult<TableDiff> {
     let key = extract_key(key)?;
     let threads = resolve_threads(threads)?;
-    // Import, diff and drop run on the stack-sized worker: the recursive Arrow
-    // FFI import and drop are native-stack sinks and depth is unknowable before
-    // importing, so the worker is unconditional.
-    // `onix_arrow::MAX_NESTING_DEPTH` then bounds the comparison.
+    // Import, diff and drop run on the worker: the recursive Arrow FFI import
+    // and drop are native-stack sinks and the schema's depth is unknowable
+    // before importing, so the worker is unconditional and sized for the
+    // ceiling, not for `onix_arrow::MAX_NESTING_DEPTH`, which bounds only the
+    // comparison after the import.
     let left = left.clone().unbind();
     let right = right.clone().unbind();
 
-    crate::guard::run_on_worker(py, move || {
+    crate::guard::run_on_worker(py, crate::guard::MAX_DEPTH_CEILING, move || {
         Python::attach(|py| {
             let left_input = spool_input(left.bind(py))?;
             let right_input = spool_input(right.bind(py))?;
