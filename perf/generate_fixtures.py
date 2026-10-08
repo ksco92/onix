@@ -36,12 +36,7 @@ FIXTURES_ROOT: Final[Path] = Path(__file__).resolve().parent / "fixtures"
 # an RNG stream regardless of generation order.
 BASE_SEED: Final[int] = 20260831
 
-# Controlled mutation rate applied between a fixture's `a` and `b` values,
-# per this harness's fixture-matrix design (~5% changed, ~2% added, ~2%
-# removed). Changed/added values are always drawn from a range disjoint from
-# the original value range (see `_changed_int`/`_added_int` below), so a
-# mutation is always a genuine, guaranteed difference rather than a
-# coincidental no-op.
+# Mutation rates applied between a fixture's `a` and `b` values.
 VALUE_CHANGE_RATE: Final[float] = 0.05
 ADD_RATE: Final[float] = 0.02
 REMOVE_RATE: Final[float] = 0.02
@@ -52,19 +47,14 @@ FLAT_DICT_SIZES: Final[dict[str, int]] = {"10k": 10_000, "100k": 100_000, "1m": 
 FLAT_LIST_SIZE: Final[int] = 100_000
 NESTED_DEPTH: Final[int] = 6
 NESTED_BRANCH: Final[int] = 10
-# 120: both tools' real depth ceiling is narrower than originally
-# anticipated — see RESULTS.md's "Finding: onix's practical depth ceiling is
-# lower than expected" section for the full empirical probe and rationale.
+# See RESULTS.md's "Finding: onix's practical depth ceiling is lower than expected" section.
 DEEP_NESTING_DEPTH: Final[int] = 120
 IGNORE_ORDER_LIST_SIZE: Final[int] = 10_000
 
-# 50_000: capped well below the originally suggested ~50-200MB so the full
-# deterministic harness (every fixture run multiple times) stays practical
-# to run in one sitting — see RESULTS.md's "Deferred work" section.
+# Capped so a deepdiff diff takes about 90 s; see RESULTS.md's "Not measured" section.
 API_PAYLOAD_RECORD_COUNT: Final[int] = 50_000
 
-# Disjoint value ranges so a "changed" or "added" scalar can never coincide
-# with an original value (see the module docstring).
+# Disjoint value ranges, so a "changed" or "added" scalar never coincides with an original value.
 _ORIGINAL_INT_RANGE: Final[tuple[int, int]] = (0, 1_000_000)
 _CHANGED_INT_RANGE: Final[tuple[int, int]] = (10_000_000, 20_000_000)
 _ADDED_INT_RANGE: Final[tuple[int, int]] = (20_000_000, 30_000_000)
@@ -415,9 +405,7 @@ def main() -> None:
         ),
     )
 
-    # identical_1m: flat_dict_1m's `a.json` copied to both sides of a new
-    # fixture (byte-identical files, not merely equal values) — the no-diff
-    # fast path this harness's design calls for.
+    # identical_1m: flat_dict_1m's `a.json` copied to both sides (byte-identical files).
     flat_dict_1m_a = FIXTURES_ROOT / "flat_dict_1m" / "a.json"
     identical_dir = FIXTURES_ROOT / "identical_1m"
     identical_dir.mkdir(parents=True, exist_ok=True)
