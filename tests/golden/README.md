@@ -320,7 +320,7 @@ carries for custom objects only. They are deterministic in every case.
 (`t1 is t2`), while `onix` reports `values_changed`. Two bit-identical NaNs in
 one set fold into one member at conversion (visible only when the set is carried
 whole into a report), and `difflib`'s `b2j` matches one repeated NaN object to
-itself where `onix` never matches. The mechanisms are in the docs of
+itself where `onix` never matches. Both are stated in the docs of
 `SetItems::new` (`crates/onix-core/src/value.rs`) and `ScalarKey::Nan`
 (`crates/onix-core/src/lcs.rs`);
 `dist_key_hash_collision_on_distinct_nans_never_becomes_equality` in
