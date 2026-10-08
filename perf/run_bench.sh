@@ -25,14 +25,7 @@ MAX_DEPTH=512
 
 log() { echo "[run_bench] $*"; }
 
-# Extra CLI flags a fixture's diff needs, on BOTH tools (onix and
-# `run_deepdiff.py` both spell it `--ignore-order`) — empty for every
-# fixture except `ignore_order_10k` (the `ignore_order=True` headline
-# comparison). `ignore_order_10k` is an all-numeric flat list, so it never
-# reaches the one case `KNOWN_DIVERGENT_CASES` holds in
-# `crates/onix-core/tests/golden.rs` (`path_rendering_collision`)
-# — the correctness precheck below applies to it exactly like every other
-# fixture, with no special-casing.
+# Extra CLI flags per fixture, on both tools; see RESULTS.md "Correctness precheck".
 extra_diff_flags_for() {
   case "$1" in
     ignore_order_10k) echo "--ignore-order" ;;
