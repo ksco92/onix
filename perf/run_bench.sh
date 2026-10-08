@@ -3,27 +3,11 @@
 # matrix (every fixture is a real two-tool comparison — see
 # `extra_diff_flags_for` below for `ignore_order_10k`'s `--ignore-order`).
 #
-# Deterministic by design (this harness's own fairness rules): fixed warmup/run
-# counts per fixture (see tier_for below — no adaptive sampling), the exact
-# same command sequence every time this script runs, and every correctness
-# precondition checked before any number is trusted. Two runs on the same
-# machine differ only in *measured values*, never in which commands ran or
-# how many times.
+# Deterministic: fixed warmup/run counts per fixture (see tier_for below),
+# the same command sequence every run, and every correctness precondition
+# checked before any number is trusted.
 #
 # Usage: perf/run_bench.sh
-#
-# The 8 steps, in order (each one is its own banner-delimited section below,
-# logged as "Step N/8" as it runs):
-#   1. Generate perf/fixtures/ if absent (skip if already present).
-#   2. cargo build --release.
-#   3. Record the environment header (machine/toolchain info) for RESULTS.md.
-#   4. Correctness precheck: onix vs. real DeepDiff must produce
-#      byte-identical canonical JSON on every fixture, or the run aborts.
-#   5. Diff-only timing: sample onix and DeepDiff N times per fixture
-#      (median + spread, never a single sample).
-#   6. hyperfine sweep: wall clock, CPU time, and peak RSS in one pass.
-#   7. Energy sampling (best-effort; skipped where unsupported).
-#   8. Write perf/RESULTS.md via perf/summarize_results.py.
 #
 # Raw per-run JSON lands in perf/bench_raw/ (gitignored — intermediate
 # machine-specific data; only RESULTS.md is committed).
@@ -56,23 +40,7 @@ extra_diff_flags_for() {
   esac
 }
 
-# Fixed warmup/run counts per fixture (this harness's own rule: ≥3 warmups
-# + ≥10 runs where feasible; fewer for the huge fixtures — document it). One tier
-# function returning "WARMUP RUNS" (space-separated; read via `read -r`),
-# not two parallel case ladders — by measured single-diff deepdiff cost on
-# this machine (see RESULTS.md's environment header for the actual
-# measured run):
-#   standard   (<10s/diff):    3 warmups, 10 runs
-#   startup    (near-zero):    5 warmups, 20 runs (cheap; better statistics)
-#   heavy      (~12-17s/diff): 1 warmup,   5 runs
-#   very_heavy (~60-90s/diff): 0 warmup,   3 runs — reduced deliberately: at
-#     these sizes a single sweep already costs several minutes.
-#
-# ignore_order_10k sits in the heavy tier, not standard: deepdiff's
-# ignore_order=True diff on this fixture costs ~12-13s (measured on this
-# machine), the same class as flat_dict_1m/identical_1m, not the
-# sub-10s standard-tier fixtures.
-#
+# Echoes "WARMUP RUNS" per fixture; the tiers are in RESULTS.md's run-procedure table.
 # A plain case statement, not `declare -A` (associative arrays): macOS
 # ships bash 3.2 as `/bin/bash` (associative arrays need bash 4+), and this
 # script must run with no extra tooling beyond what README.md already
@@ -103,9 +71,7 @@ else
   log "Step 1/8: perf/fixtures/ already present — skipping regeneration (rm -rf perf/fixtures to force)"
 fi
 
-# Every fixture in the manifest is diffed by both tools — derived from
-# manifest.json (not a second hardcoded list), so this can never drift out
-# of sync with summarize_results.py's own derivation from the same file.
+# Every fixture in the manifest is diffed by both tools.
 # shellcheck disable=SC2207  # mapfile/read -a need bash 4+; fixture names are
 # plain identifiers (no spaces/globs), so word-splitting here is safe.
 FIXTURES=($(jq -r '.fixtures[].name' "$FIXTURES_DIR/manifest.json"))
@@ -160,8 +126,7 @@ EOF
 # Step 4: correctness precheck
 #
 # One run per tool per fixture: stdout is canonicalized (jq -S) and
-# compared. Diff-only timing is NOT read from these runs (see Step 5) —
-# This harness always reports medians over N runs, never a single sample.
+# compared. Diff-only timing is not read from these runs (see Step 5).
 
 precheck_onix() {
   local fixture="$1"
@@ -207,14 +172,10 @@ done
 ##############################################
 ##############################################
 ##############################################
-# Step 5: diff-only timing sampling (methodology fix)
+# Step 5: diff-only timing sampling
 #
-# This harness's own rule: report medians and σ, never single runs. The wall-clock/CPU
-# tables already get this for free from hyperfine's N-run sweep (Step 6);
-# the self-instrumented diff-only number needs its own N-sample loop, using
-# the SAME tier-appropriate warmup/run counts as everything else. Warmup
-# runs are executed and discarded; only the `runs` measured invocations are
-# written to the samples file.
+# Its own N-sample loop with the tier's warmup/run counts; warmup runs are
+# discarded, only the measured runs are written to the samples file.
 
 sample_diff_only_onix() {
   local fixture="$1" warmup="$2" runs="$3"
@@ -291,9 +252,8 @@ done
 # Step 6: hyperfine sweep (wall clock + CPU time + peak RSS in one pass)
 #
 # hyperfine's --export-json reports, per command, mean/median/stddev wall
-# time, mean user+system CPU time, AND per-run memory_usage_byte (verified
-# against /usr/bin/time -l's "maximum resident set size" — identical value
-# on this machine) — covering wall clock, CPU time, and peak RSS in one sweep.
+# time, mean user+system CPU time, AND per-run memory_usage_byte — covering
+# wall clock, CPU time, and peak RSS in one sweep.
 
 run_hyperfine() {
   local warmup="$1" runs="$2" export_json="$3"
