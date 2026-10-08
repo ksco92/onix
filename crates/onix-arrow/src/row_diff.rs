@@ -1885,17 +1885,8 @@ fn build_duplicate_keys(
     RecordBatch::try_new(dup_key_schema.clone(), columns).map_err(|e| read_error(&e))
 }
 
-/// The value domain a column's cells are compared within. Two columns compare
-/// as values only when their domains match; a mismatch (a string versus a
-/// number, a timestamp versus a date) is reported as a `type_changed` cell
-/// rather than a value change. The grouping mirrors [`hash_cell`] exactly — two
-/// cells whose hash contributions are equal always share a domain, because each
-/// domain owns a disjoint set of the tags [`hash_cell`] writes — so the domain
-/// test never contradicts the hash. `Number` groups booleans, every integer
-/// width, and every float width because [`hash_cell`] folds an integral float
-/// to the integer form, so an int and a float of equal value hash equal;
-/// `Decimal` is separate because a decimal carries its own tag and never hashes
-/// equal to an integer.
+/// The value domain a column compares within; a mismatch is `type_changed`.
+/// Domains partition [`hash_cell`]'s tags, so equal hashes imply one domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValueDomain {
     /// All-null column (`DataType::Null`).
@@ -1920,17 +1911,9 @@ enum ValueDomain {
     Interval,
 }
 
-/// The value domain of a column type, decoding a dictionary to its value type
-/// first. Only ever called on the common non-key columns, which
-/// [`reject_unhashable_columns`] has already proven hashable, so every reachable
-/// type has an explicit arm and the catch-all is `unreachable!` — a new hashable
-/// type must be given a domain here rather than silently joining the string
-/// domain.
-///
-/// Recurses through the dictionary value type, but only after
-/// [`crate::diff_schemas`]'s depth check has rejected any column nested past
-/// [`crate::MAX_NESTING_DEPTH`], so the recursion is bounded and cannot overflow
-/// the native stack — the same bound [`is_hashable`] relies on.
+/// The value domain of a column type, decoding a dictionary first. The
+/// dictionary recursion is bounded by [`crate::MAX_NESTING_DEPTH`], checked by
+/// [`crate::diff_schemas`] before any call.
 fn value_domain(data_type: &DataType) -> ValueDomain {
     match data_type {
         DataType::Null => ValueDomain::Null,
@@ -1976,23 +1959,17 @@ pub(crate) fn cell_is_null(array: &ArrayRef, row: usize) -> bool {
     matches!(array.data_type(), DataType::Null) || array.is_null(row)
 }
 
-/// The keyed 128-bit hash of a single non-null cell, under the cell domain.
-/// Runs the same [`hash_cell`] the row hash uses, so a cell's change decision
-/// and its contribution to the row hash can never drift: two cells produce the
-/// same hash here exactly when [`hash_cell`] writes the same bytes for them, and
-/// that is exactly when they contribute equally to the row hash.
+/// The keyed hash of one non-null cell; a cell changes iff its row-hash
+/// contribution does, because both run [`hash_cell`].
 fn cell_hash(hasher: &RowHasher, array: &ArrayRef, row: usize) -> Result<u128, TableDiffError> {
     let mut cell = hasher.start(DOMAIN_CELL);
     hash_cell(&mut cell, array, "", row)?;
     Ok(cell.finish())
 }
 
-/// Renders one non-null cell to its canonical string via `try_to_string`, or a
-/// typed [`TableDiffError::Render`] naming `column`. Never `to_string()` on the
-/// formatter's `Display`: with the default `safe = true` options that writes an
-/// `ERROR: …` string into the output for a temporal value outside the
-/// formatter's range — indistinguishable from a real string cell — and it would
-/// panic outright if `safe` were ever turned off.
+/// Renders one non-null cell via `try_to_string`, or a typed
+/// [`TableDiffError::Render`] naming `column`. Never `Display`, which writes
+/// `ERROR: …` for an out-of-range temporal value.
 fn render_value(
     formatter: &ArrayFormatter,
     row: usize,
@@ -2007,12 +1984,8 @@ fn render_value(
         })
 }
 
-/// Renders a `Duration` cell as an ISO 8601 `PT<seconds>S` string from its raw
-/// value and unit (normalized to nanoseconds) — never through [`ArrayFormatter`],
-/// whose second/millisecond duration formatter writes the literal `<invalid>`
-/// for a value chrono cannot represent while still returning `Ok`, which no
-/// report value may ship. The normalized form makes two spans that hash equal
-/// render equal and two that differ render apart.
+/// Renders a `Duration` cell as ISO 8601 `PT<seconds>S` from its raw value and
+/// unit, never the formatter, which can write `<invalid>` and still succeed.
 fn render_duration(raw: i64, unit: TimeUnit) -> String {
     let nanos = unit_nanos(raw, unit);
     let abs = nanos.unsigned_abs();
@@ -2064,11 +2037,9 @@ impl<'a> SideRenderer<'a> {
     }
 }
 
-/// Enforces that a `value_changed` record never carries two equal renderings,
-/// returning [`TableDiffError::EqualRenderings`] if it does — a typed error, not
-/// a `debug_assert!` (the release wheel compiles the latter out). The common-form
-/// rendering makes this unreachable for real diffs, so the error is a
-/// construction guard; a unit test forces the equal pair to reach it.
+/// Returns [`TableDiffError::EqualRenderings`] when a `value_changed` record
+/// carries two equal renderings: a typed error, not a `debug_assert!`, which the
+/// release wheel compiles out.
 fn check_distinct_renderings(
     change: &str,
     old: Option<&String>,
@@ -2091,12 +2062,9 @@ fn is_float(data_type: &DataType) -> bool {
     )
 }
 
-/// The common type two number cells of differing width render in, so their
-/// renderings show the real difference the hash saw: two floats of unequal width
-/// widen to `Float64` (an `f32` `0.1` then renders `0.10000000149011612` against
-/// an `f64` `0.1`). Integers render in their own width — exact, so equal values
-/// hash equal and are not emitted, and unequal values already render apart.
-/// `None` means render each side as it is.
+/// The common type two cells of differing float width render in (`Float64`), or
+/// `None` to render each side as it is. Rules: `docs/design/row-diff.md`,
+/// "Per-cell changes".
 fn common_render_type(left: &DataType, right: &DataType) -> Option<DataType> {
     if is_float(left) && is_float(right) && left != right {
         Some(DataType::Float64)
@@ -2105,10 +2073,8 @@ fn common_render_type(left: &DataType, right: &DataType) -> Option<DataType> {
     }
 }
 
-/// Whether two timestamp types differ in zone-awareness (one aware, one naive).
-/// Such a pair is a type change, not a value change: they carry different
-/// meaning at the same instant, so both are rendered in their own form (the
-/// aware one keeps its zone) and labelled `type_changed`.
+/// Whether two timestamp types differ in zone-awareness (a `type_changed`
+/// pair): `docs/design/row-diff.md`, "Per-cell changes".
 fn timestamp_awareness_differs(left: &DataType, right: &DataType) -> bool {
     matches!(
         (left, right),
@@ -2116,12 +2082,8 @@ fn timestamp_awareness_differs(left: &DataType, right: &DataType) -> bool {
     )
 }
 
-/// Whether two interval types are different variants (`YearMonth`, `DayTime`,
-/// `MonthDayNano`). The hash distinguishes them by a variant tag but the
-/// formatter renders unlike variants into one human form (`DayTime` one day and
-/// `MonthDayNano` one day both read `1 days`), so a cross-variant pair is a type
-/// change and each side is rendered with its variant appended, not a value
-/// change with two equal renderings.
+/// Whether two interval types are different variants (a `type_changed` pair):
+/// `docs/design/row-diff.md`, "Per-cell changes".
 fn interval_variant_differs(left: &DataType, right: &DataType) -> bool {
     matches!(
         (left, right),
@@ -2129,13 +2091,8 @@ fn interval_variant_differs(left: &DataType, right: &DataType) -> bool {
     )
 }
 
-/// The render array and a per-cell suffix for one side of a compared column.
-/// A number of differing width is cast to the common render type; an aware
-/// timestamp is rendered as its UTC instant (zone stripped, so no timezone
-/// database is needed) with the zone appended as a suffix, so an aware and a
-/// naive timestamp at the same instant never render identically; an interval
-/// keeps its variant as a suffix, so two variants that render into one human
-/// form stay distinct.
+/// The render array and per-cell suffix for one side of a compared column;
+/// rules: `docs/design/row-diff.md`, "Per-cell changes".
 fn prepare_render(
     decoded_column: &ArrayRef,
     common: Option<&DataType>,
@@ -2155,11 +2112,9 @@ fn prepare_render(
     }
 }
 
-/// The output schema of the per-cell diff: each key column (decoded to its
-/// value type, nullable) followed by `column`, `old_value`, `new_value`, and
-/// `change`. `old_value`/`new_value` are nullable strings (null for a null
-/// cell); a single typed value column cannot represent every compared column's
-/// type at once, so the canonical string rendering is the uniform form.
+/// The output schema of the per-cell diff: the key columns (decoded, nullable),
+/// then `column`, `old_value`, `new_value`, `change`. Rules:
+/// `docs/design/row-diff.md`, "Per-cell changes".
 fn cells_changed_schema(left: &Schema, key: &[String]) -> SchemaRef {
     let mut fields = Vec::with_capacity(key.len() + 4);
     for name in key {
@@ -2234,11 +2189,8 @@ struct CellRecord {
     change: &'static str,
 }
 
-/// The read-only context for the per-cell diff: the two schemas, the key, the
-/// resolved per-side columns, the common value columns, and the shared hasher —
-/// everything but the two inputs and the changed-key set, bundled so
-/// [`diff_cells`] stays below the argument threshold (the same shape
-/// [`Materialize`] uses for the added/removed pass).
+/// The read-only context for the per-cell diff: schemas, key, per-side columns,
+/// common value columns and hasher.
 struct CellDiff<'a> {
     left_schema: &'a Schema,
     right_schema: &'a Schema,
@@ -2254,20 +2206,9 @@ struct CellDiff<'a> {
     threads: usize,
 }
 
-/// Produces the long-format per-cell diff for the changed rows (the
-/// single-threaded path; [`diff_cells_streaming`] is the parallel, spilled one,
-/// and both produce identical output).
-///
-/// Re-streams both inputs, materializes both sides' changed rows at once, and
-/// renders each changed cell in full. Pairs the rows by key hash and emits one record per differing cell —
-/// one whose [`hash_cell`] contribution differs between the two matched rows. A
-/// cell is `became_null`/`became_non_null` when exactly one side is null,
-/// `type_changed` when both are non-null and the two types are not losslessly
-/// comparable — their [`value_domain`]s differ, both are timestamps of differing
-/// zone-awareness, or both are intervals of different variants — and
-/// `value_changed` otherwise. Output rows are
-/// ordered by the canonical string rendering of the key columns (lexicographic,
-/// nulls first), then by left-schema column order.
+/// Per-cell diff of the changed rows, single-threaded (identical output to
+/// [`diff_cells_streaming`]); ordered by rendered key, then left-schema column.
+/// Kind rules: `docs/design/row-diff.md`, "Per-cell changes".
 fn diff_cells(
     left: &impl TableInput,
     right: &impl TableInput,
@@ -2310,9 +2251,7 @@ fn diff_cells(
     // and for `take`-ing the typed key columns into the output.
     let key_renders = render_key_rows(&left_rows.batch, key_count)?;
 
-    // Compared columns in left-schema order (common_values is name-sorted). The
-    // left-schema index of each common column is looked up fallibly; a common
-    // column always exists on the left, so the error arm is defensive.
+    // Compared columns in left-schema order (common_values is name-sorted).
     let mut ranks = Vec::with_capacity(ctx.common_values.len());
     for name in ctx.common_values {
         ranks.push(ctx.left_schema.index_of(name).map_err(|e| read_error(&e))?);
@@ -2423,8 +2362,6 @@ fn emit_column_records(
         } else {
             Some(right_renderer.render(right_row, name)? + &right_suffix)
         };
-        // A value_changed record must never carry equal renderings: the
-        // common-form rendering above shows every facet the hash saw differ.
         check_distinct_renderings(change, old_value.as_ref(), new_value.as_ref(), name)?;
         // The output addresses each left changed row by a `u32` index (the
         // `take` indices); refuse if there are more than `u32` can address.
@@ -2457,10 +2394,7 @@ fn projected_schema(schema: &Schema, columns: &SideColumns) -> SchemaRef {
 }
 
 /// Renders each row's key columns (timezone-stripped for timestamps) to a
-/// nullable-string tuple, the primary sort key of the output. Uses
-/// [`prepare_render`] and drops its zone suffix: key types are unified across
-/// the two sides, so a sort key never needs the aware/naive distinction the
-/// suffix draws for value cells.
+/// nullable-string tuple, the primary sort key of the output.
 fn render_key_rows(
     batch: &RecordBatch,
     key_count: usize,
@@ -2512,7 +2446,6 @@ fn build_cells_changed(
         columns.push(taken);
     }
 
-    // Move each record's owned strings into the output arrays (one copy total).
     let mut column_names = Vec::with_capacity(records.len());
     let mut old_values = Vec::with_capacity(records.len());
     let mut new_values = Vec::with_capacity(records.len());
@@ -2547,12 +2480,10 @@ fn indices_schema(schema: &Schema, indices: &[usize]) -> SchemaRef {
     SchemaRef::new(Schema::new(fields))
 }
 
-/// The type a value column is spilled as. [`decoded_type`] unwraps a dictionary
-/// to its value type first, since `take` keeps the whole values array; a byte-view
-/// type then casts to the *large* non-view type (`i64` offsets), since `take`
-/// keeps the variadic buffers and a view column can hold more than the 2 GiB an
-/// `i32`-offset `Utf8`/`Binary` array caps at; everything else spills as itself
-/// (its `take` copies only the selected rows).
+/// The type a value column is spilled as: a dictionary unwraps to its value type
+/// (`take` keeps the whole values array); a byte-view type becomes the large
+/// non-view type (`take` keeps the variadic buffers, and a view column can
+/// exceed the 2 GiB an `i32`-offset array caps at); else itself.
 fn spill_field_type(data_type: &DataType) -> DataType {
     match decoded_type(data_type) {
         DataType::Utf8View => DataType::LargeUtf8,
@@ -4404,7 +4335,6 @@ mod tests {
 
     #[test]
     fn changed_cell_reports_old_new_and_value_changed() {
-        // id 3's v changes 30 -> 31; the only changed cell.
         let diff = diff_int_tables(
             vec![Some(1), Some(2), Some(3)],
             vec![10, 20, 30],
@@ -4477,8 +4407,6 @@ mod tests {
 
     #[test]
     fn cell_with_a_domain_change_is_type_changed() {
-        // Column `c` is Utf8 on the left and Int64 on the right: a value-domain
-        // mismatch, so the cell is reported as a type change, not a value change.
         let left_sch = schema(vec![id_field(), Field::new("c", DataType::Utf8, true)]);
         let right_sch = schema(vec![id_field(), Field::new("c", DataType::Int64, true)]);
         let left = reader(
@@ -4630,7 +4558,6 @@ mod tests {
 
     #[test]
     fn equal_value_across_float_width_emits_no_record() {
-        // f32 2.0 == f64 2.0 after widening, so no cell is reported.
         let got = one_column_diff(
             DataType::Float32,
             Arc::new(Float32Array::from(vec![2.0f32])),
@@ -4642,7 +4569,6 @@ mod tests {
 
     #[test]
     fn differing_nan_payloads_are_not_a_change() {
-        // Two NaNs with different payloads fold to one canonical NaN.
         let a = f64::from_bits(0x7ff8_0000_0000_0001);
         let b = f64::from_bits(0x7ff8_0000_0000_0002);
         assert!(a.is_nan() && b.is_nan());
@@ -4673,11 +4599,8 @@ mod tests {
     #[test]
     fn interval_variant_difference_is_type_changed_with_distinct_renderings() {
         // The three interval variants render into one human form (`1 days`), so a
-        // cross-variant pair is a type change with its variant appended, never a
-        // value change with two equal renderings. Every ordered pair of distinct
-        // variants is covered — including `YearMonth` versus `DayTime`, neither
-        // of which is `MonthDayNano`, so narrowing the predicate to "either side
-        // is MonthDayNano" would fail.
+        // cross-variant pair is a type change with its variant appended. Every
+        // ordered pair of distinct variants is covered.
         let array = |unit: IntervalUnit| -> ArrayRef {
             match unit {
                 IntervalUnit::YearMonth => Arc::new(IntervalYearMonthArray::from(vec![1])),
@@ -4835,8 +4758,6 @@ mod tests {
 
     #[test]
     fn equal_renderings_for_a_value_change_are_a_typed_error() {
-        // The invariant guard: reachable only by a forced equal pair, since the
-        // common-form rendering makes it impossible for real diffs.
         let same = Some("x".to_string());
         let error = super::check_distinct_renderings(
             super::CHANGE_VALUE,
@@ -4899,11 +4820,8 @@ mod tests {
     #[test]
     fn each_value_domain_paired_with_a_string_is_type_changed() {
         // A column of each non-string, non-null value domain on the left against
-        // a Utf8 column on the right is a type change (the domains differ). Pins
-        // value_domain arm by arm: dropping any one domain's arm would fold it
-        // into the string domain, mislabelling that domain's case as
-        // value_changed. A dictionary of Int64 is included so the recursive
-        // dictionary arm is pinned too (its value domain is Number, not string).
+        // a Utf8 column on the right; a dictionary of Int64 covers the recursive
+        // dictionary arm (its value domain is Number, not string).
         let dict_keys = Int32Array::from(vec![0]);
         let dict_values = Arc::new(Int64Array::from(vec![5]));
         let dict: DictionaryArray<Int32Type> =
@@ -4965,9 +4883,6 @@ mod tests {
 
     #[test]
     fn lossless_type_change_at_equal_value_reports_no_cell() {
-        // `v` is Int32 on the left and Int64 on the right with equal values:
-        // same value domain, equal hash, so no cell change is reported even
-        // though the schema type changed.
         let left_sch = schema(vec![id_field(), Field::new("v", DataType::Int32, false)]);
         let right_sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let left = reader(
@@ -5229,7 +5144,6 @@ mod tests {
 
     #[test]
     fn int_width_change_with_equal_value_is_unchanged() {
-        // Left v is Int32, right v is Int64; the same numeric value is unchanged.
         let left_schema = schema(vec![id_field(), Field::new("v", DataType::Int32, false)]);
         let right_schema = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let left = reader(
@@ -5487,8 +5401,6 @@ mod tests {
 
     #[test]
     fn null_column_hashes_and_is_unchanged() {
-        // An all-Null column is hashable (every row a null), so two such columns
-        // compare unchanged rather than being refused.
         let sch = schema(vec![id_field(), Field::new("n", DataType::Null, true)]);
         let make = || {
             reader(
@@ -5602,13 +5514,9 @@ mod tests {
 
     #[test]
     fn adjacent_string_cells_are_not_confused_by_framing() {
-        // Pins the per-string length prefix in `hash_bytes`. The two rows are
-        // ("x", "\x04y") and ("x\x04", "y"), where `\x04` is `TAG_STR` itself:
-        // each string writes TAG_STR then its bytes, so without the length
-        // prefix both rows flatten to the identical byte stream
-        // `04 78 04 04 79` and would hash equal. With the prefix (each string's
-        // length between the tag and the bytes) they differ. Removing the prefix
-        // at `hash_bytes` makes this test go red.
+        // The two rows are ("x", "\x04y") and ("x\x04", "y"), where `\x04` is
+        // `TAG_STR` itself: without the length prefix in `hash_bytes` both flatten
+        // to the byte stream `04 78 04 04 79`.
         let tag = char::from(super::TAG_STR); // U+0004
         let sch = schema(vec![
             id_field(),
@@ -5720,8 +5628,6 @@ mod tests {
 
     #[test]
     fn columns_only_on_one_side_do_not_cause_row_changes() {
-        // only_left / only_right are not common columns, so matched rows with
-        // equal common values are unchanged.
         let left_schema = schema(vec![
             id_field(),
             Field::new("keep", DataType::Int64, false),
@@ -5813,9 +5719,6 @@ mod tests {
 
     #[test]
     fn nested_non_key_column_is_skipped_not_compared() {
-        // A list non-key column is out of scope for the row diff: it is skipped,
-        // so two rows with the same key are unchanged even though the lists
-        // differ, and the diff still succeeds.
         let list = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
         let sch = schema(vec![id_field(), Field::new("xs", list, true)]);
         let left_xs = ListArray::from_iter_primitive::<Int64Type, _, _>(vec![Some(vec![Some(1)])]);
@@ -5839,7 +5742,6 @@ mod tests {
 
     #[test]
     fn nested_key_column_is_rejected() {
-        // A nested key column cannot be hashed by value and is refused.
         let list = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
         let sch = schema(vec![
             Field::new("k", list, true),
@@ -5971,7 +5873,6 @@ mod tests {
 
     #[test]
     fn key_and_row_domains_hash_differently() {
-        // The domain tag separates a key hash from a row hash of the same cell.
         let hasher = super::RowHasher::new().unwrap();
         let cell: ArrayRef = Arc::new(Int64Array::from(vec![5]));
         let as_key = super::hash_row(
@@ -6921,10 +6822,8 @@ mod tests {
 
     #[test]
     fn dictionary_of_utf8_view_spill_bytes_do_not_scale_with_the_partition_count() {
-        // A dictionary whose value type is itself a byte view: the spill decodes
-        // the dictionary and casts the view to its large non-view type, so it
-        // spills flat across 2, 18, and 64 partitions. The plain-`Utf8` dictionary
-        // case cannot catch a non-recursive spill_field_type; this composition can.
+        // A dictionary whose value type is itself a byte view spills flat across
+        // 2, 18, and 64 partitions.
         let rows = 40_000i64;
         let strings: StringArray = (0..rows)
             .map(|i| Some(format!("value-{i}-{}", "x".repeat(64))))
@@ -6945,10 +6844,8 @@ mod tests {
 
     #[test]
     fn dictionary_spill_bytes_do_not_scale_with_the_partition_count() {
-        // `take` on a dictionary keeps the whole values array, so before the
-        // spill decodes dictionaries a spilled partition carried the entire
-        // side's dictionary. A high-cardinality (all-distinct) dictionary column
-        // must spill flat across 2, 18, and 64 partitions.
+        // A high-cardinality (all-distinct) dictionary column spills flat across
+        // 2, 18, and 64 partitions.
         let rows = 40_000i64;
         let strings: StringArray = (0..rows)
             .map(|i| Some(format!("value-{i}-{}", "x".repeat(64))))
@@ -6969,10 +6866,7 @@ mod tests {
 
     #[test]
     fn utf8_view_spill_bytes_do_not_scale_with_the_partition_count() {
-        // `take` on a byte-view column retains the source's whole variadic buffer,
-        // so before the spill casts views to their non-view type a partition
-        // carried the entire side's view data and the total grew with the
-        // partition count. The cast compacts it: flat across 2, 18, and 64.
+        // A byte-view column spills flat across 2, 18, and 64 partitions.
         let rows = 40_000i64;
         let v: ArrayRef = Arc::new(StringViewArray::from(
             (0..rows)
@@ -6982,7 +6876,6 @@ mod tests {
         let two = spill_bytes_for(v.clone(), 2);
         let eighteen = spill_bytes_for(v.clone(), 18);
         let sixty_four = spill_bytes_for(v, 64);
-        // Without the cast, 64 partitions spilled ~32x the 2-partition bytes.
         assert!(
             sixty_four <= two * 2 && eighteen <= two * 2,
             "view spill must not scale with partitions: 2={two} 18={eighteen} 64={sixty_four}"
@@ -7107,8 +7000,6 @@ mod tests {
 
     #[test]
     fn small_table_takes_the_sequential_path() {
-        // Under the real size gate a tiny table must not spawn any workers, even
-        // at a high thread count.
         use_real_size_gate();
         let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let left_rows: Vec<(Option<i64>, i64)> = (0..10).map(|i| (Some(i), i)).collect();
@@ -7126,8 +7017,6 @@ mod tests {
 
     #[test]
     fn large_table_takes_the_parallel_path_and_matches() {
-        // Just over the threshold: the parallel path runs and its output equals
-        // the single-threaded diff.
         use_real_size_gate();
         let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let n = i64::try_from(super::MIN_PARALLEL_ROWS).unwrap() + 2_000;
@@ -7169,8 +7058,8 @@ mod tests {
 
     #[test]
     fn one_large_right_side_takes_the_parallel_path() {
-        // The mirror of the previous test: a tiny left with a large right must
-        // also run the parallel path (the gate keys on either side).
+        // The mirror of `one_large_side_takes_the_parallel_path`: a tiny left with
+        // a large right also runs the parallel path.
         use_real_size_gate();
         let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let n = i64::try_from(super::MIN_PARALLEL_ROWS).unwrap() + 2_000;
@@ -7300,9 +7189,8 @@ mod tests {
 
     #[test]
     fn diff_rows_accepts_the_thread_ceiling() {
-        // Exactly MAX_THREADS is accepted end-to-end (the ceiling check runs
-        // before the size gate; a small table then runs single-threaded, so no
-        // 1024 threads are actually spawned).
+        // Exactly MAX_THREADS is accepted end-to-end; a small table still runs
+        // single-threaded.
         let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let input = reader(
             &sch,
@@ -7348,9 +7236,8 @@ mod tests {
 
     #[test]
     fn peek_byte_bound_makes_a_wide_small_row_count_large() {
-        // A side with fewer than 50,000 rows but wide cells crosses
-        // MAX_PEEK_BYTES and is therefore large, so the parallel pass runs even
-        // under the row threshold: 17,000 rows of a 4 KB string is ~68 MB.
+        // A side under MIN_PARALLEL_ROWS whose cells total over MAX_PEEK_BYTES is
+        // large, so the parallel pass runs: 17,000 rows of a 4 KB string.
         use_real_size_gate();
         let sch = schema(vec![id_field(), Field::new("v", DataType::Utf8, false)]);
         let wide = "x".repeat(4096);
