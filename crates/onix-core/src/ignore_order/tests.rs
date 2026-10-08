@@ -1462,6 +1462,48 @@ fn a_dict_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
     );
 }
 
+fn assert_subclass_with_differing_members_is_a_type_change(base: &CValue, other: &CValue) {
+    assert_eq!(
+        mirror_and_report(&with_class(other, Some(sub())), base),
+        [Ok(3), Ok(3)]
+    );
+}
+
+#[test]
+fn a_list_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report()
+{
+    assert_subclass_with_differing_members_is_a_type_change(
+        &cv(&json!([1, 2])),
+        &cv(&json!([1, 3])),
+    );
+}
+
+#[test]
+fn a_tuple_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report()
+{
+    assert_subclass_with_differing_members_is_a_type_change(
+        &ctup(&[json!(1), json!(2)]),
+        &ctup(&[json!(1), json!(3)]),
+    );
+}
+
+#[test]
+fn a_set_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report() {
+    assert_subclass_with_differing_members_is_a_type_change(
+        &cset(&[json!(1), json!(2)]),
+        &cset(&[json!(1), json!(3)]),
+    );
+}
+
+#[test]
+fn a_dict_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report()
+{
+    assert_subclass_with_differing_members_is_a_type_change(
+        &cv(&json!({"a": 1, "b": 2})),
+        &cv(&json!({"a": 1, "b": 3})),
+    );
+}
+
 #[test]
 fn a_candidate_whose_trial_compares_an_unnormalizable_datetime_fails_the_diff_at_its_path() {
     let (extreme, near) = unnormalizable_and_near();
@@ -3260,10 +3302,11 @@ fn dist_key_hash_collision_on_distinct_nans_never_becomes_equality() {
 /// An `arbitrary` compact value covering every equality class the distance-key
 /// hash must respect — including the ones JSON cannot express, so they are
 /// actually generated: tuples, sets, frozensets, datetimes (naive and aware),
-/// dates, and floats (signed zero and integral values among them).
+/// dates, floats (signed zero and integral values among them), and containers
+/// of the subclass `Sub`.
 fn arb_cvalue() -> impl Strategy<Value = CValue> {
     arb_cleaf().prop_recursive(5, 40, 4, |inner| {
-        prop_oneof![
+        let container = prop_oneof![
             prop::collection::vec(inner.clone(), 0..4).prop_map(carr),
             prop::collection::vec(inner.clone(), 0..4).prop_map(ctuple),
             prop::collection::vec(inner.clone(), 0..4).prop_map(|v| CValue::Set(SetItems::new(v))),
@@ -3271,8 +3314,32 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
                 .prop_map(|v| CValue::FrozenSet(SetItems::new(v))),
             prop::collection::vec(("[a-c]", inner), 0..3)
                 .prop_map(|entries| crate::value::Builder::new().object(entries)),
-        ]
+        ];
+        (container, any::<bool>()).prop_map(|(value, subclass)| {
+            if subclass {
+                with_class(&value, Some(sub()))
+            } else {
+                value
+            }
+        })
     })
+}
+
+/// `value` re-typed as `class` (`None`: base type); scalars unchanged.
+fn with_class(value: &CValue, class: Option<std::sync::Arc<str>>) -> CValue {
+    let typed =
+        |items: &[CValue]| crate::value::Typed::with_class_name(items.into(), class.clone());
+    match value {
+        CValue::Array(items) => CValue::Array(typed(items)),
+        CValue::Tuple(items) => CValue::Tuple(typed(items)),
+        CValue::Set(items) => CValue::Set(items.clone().with_type_name(class)),
+        CValue::FrozenSet(items) => CValue::FrozenSet(items.clone().with_type_name(class)),
+        CValue::Object(map) => CValue::Object(
+            map.clone()
+                .with_dict_class(class.map(|name| (name, std::sync::Arc::from("1")))),
+        ),
+        scalar => scalar.clone(),
+    }
 }
 
 /// [`arb_cvalue`]'s scalar leaves.
@@ -3324,7 +3391,8 @@ fn arb_cleaf() -> impl Strategy<Value = CValue> {
 /// different: datetimes re-expressed at the same instant (not below a set),
 /// signed zeros flipped, set/dict entries reversed.
 fn structural_twin(value: &CValue, in_set: bool) -> CValue {
-    match value {
+    let class = crate::value::class_name(value).map(std::sync::Arc::from);
+    let twin = match value {
         CValue::Array(items) => carr(
             items
                 .iter()
@@ -3408,7 +3476,8 @@ fn structural_twin(value: &CValue, in_set: bool) -> CValue {
             CValue::Number(crate::value::Number::from_f64(flipped))
         }
         scalar => scalar.clone(),
-    }
+    };
+    with_class(&twin, class)
 }
 
 proptest! {
@@ -3467,7 +3536,8 @@ fn tweak(leaf: &CValue) -> CValue {
 /// `value` with its leaves changed in walk order by `edits`.
 fn perturb(value: &CValue, edits: &mut impl Iterator<Item = Edit>) -> CValue {
     let mut all = |items: &[CValue]| items.iter().map(|item| perturb(item, edits)).collect();
-    match value {
+    let class = crate::value::class_name(value).map(std::sync::Arc::from);
+    let edited = match value {
         CValue::Array(items) => carr(all(items)),
         CValue::Tuple(items) => ctuple(all(items)),
         CValue::Set(items) => CValue::Set(SetItems::new(all(items))),
@@ -3482,7 +3552,8 @@ fn perturb(value: &CValue, edits: &mut impl Iterator<Item = Edit>) -> CValue {
             Some(Edit::Replace(new)) => new,
             Some(Edit::Keep) | None => leaf.clone(),
         },
-    }
+    };
+    with_class(&edited, class)
 }
 
 proptest! {
