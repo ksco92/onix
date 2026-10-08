@@ -78,9 +78,9 @@ All 10 fixtures in the matrix matched on this run,
 `ignore_order_10k` included: it's a real `onix --ignore-order`
 vs. `DeepDiff(..., ignore_order=True)` comparison, not a deepdiff-only
 baseline, and it clears the exact same precheck as every other fixture.
-It's also an all-numeric flat list, so it never reaches the disclosed,
-pre-existing `threshold_to_diff_deeper` dict-vs-dict divergence already
-tracked by `crates/onix-core/tests/golden.rs`'s `KNOWN_DIVERGENT_CASES`;
+It's also an all-numeric flat list, so it never reaches the one case
+`KNOWN_DIVERGENT_CASES` holds in `crates/onix-core/tests/golden.rs`
+(`path_rendering_collision`, an adversarial-key path collision);
 no special-casing was needed here.
 
 `api_payloads` wraps each scalar in its `tags` and `metadata.flags` lists
