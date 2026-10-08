@@ -37,20 +37,9 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
 
-  # Builds the Python extension and runs its pytest suite (the coverage
-  # authority for the cdylib, including the Arrow table-diff tests) on both
-  # ends of pyproject.toml's `requires-python` range, so a construct that
-  # only resolves under one interpreter's deferred annotation evaluation or a
-  # newer stdlib feature is caught here instead of shipping broken. Kept on a
-  # single platform to bound runtime; the release wheels are built by
-  # publish.yml. CONTRIBUTING.md's "Interpreter coverage" section lists which
-  # tests stay interpreter-pinned (and skip on 3.9) and why. `.python-version`
-  # pins 3.14, so every uv invocation below passes --python explicitly;
-  # without it `uv run` silently re-resolves against the pinned version. The
-  # bare-venv import step (3.14 only, matching the wheels actually published)
-  # proves the wheel installs and imports with no optional (pyarrow) or test
-  # dependency present; the import-blocking subprocess test in
-  # test_table_diff.py proves diff_tables itself works without pyarrow.
+  # Builds the extension and runs its pytest suite on both ends of `requires-python`; see
+  # CONTRIBUTING.md, Interpreter coverage. `.python-version` pins 3.14, so every uv invocation
+  # passes --python explicitly.
   python-test:
     name: python bindings (${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -75,6 +64,7 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
           uv tool install maturin==1.15.0
+      # Proves the wheel imports with no optional or test dependency (3.14 only, as published).
       - name: Build the wheel and import it with no optional dependencies
         if: matrix.python-version == '3.14'
         working-directory: crates/onix-py

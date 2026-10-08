@@ -13,7 +13,7 @@ cargo install cargo-mutants --locked
 make mutants        # cargo mutants --package onix-core --package onix-cli --package onix-arrow
 ```
 
-`onix-py` is out of scope; the `Makefile`'s `mutants` target documents why
+`onix-py` is out of scope; `CONTRIBUTING.md`'s Coverage scope explains why
 (same structural reason it is excluded from line coverage).
 
 ## What is deterministic, and what the tool classifies unreliably

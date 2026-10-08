@@ -23,9 +23,8 @@ has five columns:
       for the 1% of new rows.
 
 No duplicate `id` values are introduced on either side by construction
-(each side's ids are strictly unique and ascending); `perf/arrow/README.md`
-records this as a deliberate scope decision -- duplicate-key handling is
-exercised by #39's own synthetic/property tests, not by this fixture.
+(each side's ids are strictly unique and ascending); duplicate-key handling
+is exercised by issue #39's own synthetic/property tests, not by this fixture.
 
 Every exact count (deleted, added, modified per column, unchanged, and the
 three schema changes) is written to a sidecar `manifest.json` next to the

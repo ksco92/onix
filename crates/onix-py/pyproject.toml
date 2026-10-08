@@ -31,31 +31,14 @@ Homepage = "https://github.com/ksco92/onix"
 Repository = "https://github.com/ksco92/onix"
 
 [dependency-groups]
-# Test-only dependencies (never shipped in the wheel): pytest to run
-# crates/onix-py/tests/, and real deepdiff pinned to the exact version the
-# whole repo's golden corpus is generated against (see
-# ../../tests/golden/README.md) — parity is only meaningful against one
-# fixed incumbent version.
-#
-# `deepdiff==9.1.0` itself requires Python >=3.10, tighter than this
-# package's own `requires-python` (>=3.9) — the marker below keeps `uv
-# sync`'s universal (all-supported-versions) resolution satisfiable. The
-# test venv itself IS pinned, via this directory's `.python-version`:
-# Pinned to 3.14, Unicode 16.0.0; see tests/golden/README.md, Pinned versions.
-# polars, duckdb, and pandas are here (test group) only, never as runtime
-# deps: the Arrow table-diff tests feed the same data through pyarrow,
-# polars, and DuckDB and assert identical results, which needs all three
-# installed to run but none of them installed to use diff_tables; pandas is
-# also here to prove a TableDiff row member's __arrow_c_stream__ is
-# consumable by it (through pd.api.interchange.from_dataframe, which needs
-# pyarrow installed for its own reasons — see crates/onix-py/src/arrow.rs's
-# module doc), and it supplies `pandas.Timestamp`, the `datetime.datetime`
-# subclass the subclass-support tests probe against real DeepDiff (neither
-# use makes pandas a runtime dependency of the package itself). pyarrow is
-# both the `arrow` extra and a test dependency (the tests exercise
-# to_pyarrow() and pyarrow inputs). mypy runs the stub-usability check (see
-# test_stub_mypy.py). pydantic supplies the model DeepDiff diffs and onix
-# refuses (test_conversions.py).
+# Test-only, never shipped: pytest, and `deepdiff` pinned to the exact version
+# the golden corpus is generated against. The `python_version >= '3.10'` marker
+# is there because that pin requires >=3.10 while `requires-python` is >=3.9.
+# The test venv itself is pinned, via this directory's `.python-version`, to
+# 3.14, Unicode 16.0.0; see tests/golden/README.md, Pinned versions.
+# polars and duckdb: the Arrow table-diff tests cross-check the same data;
+# pandas: interchange and `pandas.Timestamp` tests. pyarrow is also the `arrow`
+# extra; mypy runs the stub check; pydantic supplies the model onix refuses.
 test = [
     "pytest>=8",
     "deepdiff==9.1.0 ; python_version >= '3.10'",

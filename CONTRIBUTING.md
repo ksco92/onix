@@ -70,14 +70,15 @@ just the public API surface.
 **Coverage scope.** `onix-cli` is held to the same 95% bar as `onix-core`
 (its `diff` subcommand has unit tests in `crates/onix-cli/src/tests.rs` and
 end-to-end tests in `crates/onix-cli/tests/cli.rs`). `onix-arrow` is held to
-the same bar (its schema-diff logic is unit-tested in-crate). `onix-py` is excluded
-from the line-coverage denominator: it is a `cdylib` whose logic is
+the same bar (its schema-diff logic is unit-tested in-crate). `onix-py` is
+excluded from the line-coverage denominator: it is a `cdylib` whose logic is
 Python-object conversion and PyO3 glue, only meaningfully exercised by calling
 the compiled wheel from real Python, so `make python-test` is its coverage
-authority instead. One tooling quirk to know: `cargo-llvm-cov` does not
-attribute lines in `#[path = "..."]`-included test modules to any file, which
-shrinks the denominator without changing what is tested; the `Makefile`'s
-`coverage` target documents the full mechanism.
+authority instead, and `make mutants` excludes it for the same reason.
+One tooling quirk to know: `cargo-llvm-cov` does not attribute lines in
+`#[path = "..."]`-included test modules to any file, which drops such modules
+out of both the numerator and the denominator, so a dead branch inside a test
+helper there is not caught.
 
 CI also exports the same `cargo llvm-cov` line-coverage run as an lcov file
 and uploads it to Codecov for the README coverage badge, so `onix-py` is
@@ -131,56 +132,8 @@ picks the simpler, deterministic behavior and documents the difference in
 [`tests/golden/README.md`](tests/golden/README.md) plus one sentence in this
 repository's `README.md`. No machinery is added solely to reproduce such a nuance.
 
-The differences shipped as of 0.5.0 — name and pointer only; the rationale for
-each lives at its pointer, not restated here:
-
-- **Entry order** — the order of `set_item_added`/`set_item_removed` entries
-  is onix's canonical order, not DeepDiff's hash order —
-  `tests/golden/README.md`'s "Set iteration order" section, its "Entry
-  order" point.
-- **Canonical set order** — a different mechanism (member order *inside* a
-  serialized set/frozenset array, not the finding-entry order above) —
-  `tests/golden/README.md`'s "Set iteration order" section, its "Canonical
-  set order" point;
-  [`onix_core::value::SetItems`](crates/onix-core/src/value.rs)'s own doc.
-- **Order-independent tuple/frozenset digest-cache winner** — `tests/golden/README.md`'s
-  "Set iteration order" section, its "Which member of an equality class wins"
-  point.
-- **Set-versus-sequence coercion never folds into `values_changed`** —
-  `tests/golden/README.md`'s "Set iteration order" section, its
-  `` `list(a_set) == some_list` `` point.
-- **A naive/aware calendar set-member pair is reported as every distinct
-  Python member it is** — `tests/golden/README.md`'s "Set iteration order"
-  section, its "A naive and an aware datetime" point.
-- **A tuple/frozenset set member matches positionally** (`tuple.__eq__`), not
-  order-/repetition-insensitively — `tests/golden/README.md`'s "Set iteration
-  order" section, its "A tuple or a frozenset set member matches order- and
-  repetition-insensitively" point.
-- **`frozenset` JSON superset** (a `frozenset` in a finding serializes as an
-  array, where `DeepDiff`'s own `to_json()` raises) — `tests/golden/README.md`'s
-  "Set iteration order" section, its "`frozenset` values are a superset" point.
-- **`date` JSON superset** — `tests/golden/README.md`'s "The `date` superset"
-  section.
-- **`time`/`timedelta` JSON superset** — `tests/golden/README.md`'s "The
-  `time`/`timedelta` superset" section.
-- **`time` hashes by whole seconds-of-day under `ignore_order`**, dropping
-  the microsecond and any offset — a real, confirmed `DeepHash` quirk this
-  reproduces exactly — `tests/golden/README.md`'s "Known DeepDiff quirks"
-  section.
-- **Naive datetimes read as UTC**, including for `ignore_order` pairing —
-  [`crates/onix-core/src/ignore_order/distance.rs`](crates/onix-core/src/ignore_order/distance.rs)'s
-  `distance_family` doc.
-- **Year-boundary rejection** — `tests/golden/README.md`'s "Known DeepDiff
-  quirks" section.
-- **Tuple/set/frozenset-subclass and namedtuple refusal** —
-  `tests/golden/README.md`'s "Known DeepDiff quirks" section, its "Every
-  other subclass" point.
-- **Fixed-offset `tzinfo` round-trip** — a `zoneinfo`/`pytz` zone comes back as
-  a plain `datetime.timezone`, not the original zone object —
-  `tests/golden/README.md`'s "Normalized versus raw datetimes" section, its
-  "Fixed-offset `tzinfo` round-trip" point;
-  [`docs/design/value-conversion.md`](docs/design/value-conversion.md)'s
-  "Subclasses" section for the same simplification on any other subclass.
+Every accepted difference is a section of `tests/golden/README.md`, which the
+README's Known limitations summarises.
 
 ## Golden corpus
 
@@ -245,11 +198,9 @@ The pure-Rust schema logic lives in `crates/onix-arrow` and is covered by
 on both ends of that range (`python-test`'s `3.9`/`3.14` matrix legs), so a
 construct that only resolves on one of them cannot merge unnoticed. The
 largest skip class follows `deepdiff` itself, which requires Python >=3.10:
-`test_conversions.py`, `test_datetimes.py`, `test_differential_fuzz.py`,
-`test_non_finite.py`, `test_sets.py`, `test_signed_zero.py`,
-`test_timedeltas.py`, `test_times.py`, and `test_tuples.py` each call
-`conftest.py`'s `require_deepdiff()` before importing it, so they skip
-wholesale on 3.9 and run their real comparisons against it from 3.10 up.
+every module except `test_golden_parity.py` that needs real `deepdiff` calls
+`conftest.py`'s `require_deepdiff()` before importing it, so it skips wholesale
+on 3.9 and runs its real comparisons against it from 3.10 up.
 Two narrower classes stay skipped below 3.14: the
 golden-corpus parity suite (`test_golden_parity.py`) and the BMP/beyond-BMP
 `str`-repr sweeps in `test_sets.py`, because the corpus and those sweeps are
@@ -330,15 +281,16 @@ uv run --group perf oracle_duckdb.py --left fixtures/100k/a.parquet --right fixt
 uv run --group perf pytest tests -q
 ```
 
-`perf/arrow/README.md` covers the mutation mix, measured sizes/timings at
-every scale, and the oracle's value-comparison semantics; nothing under
-`perf/arrow/fixtures/` is committed.
+`perf/arrow/README.md` covers measured sizes/timings at every scale and the
+oracle's value-comparison semantics; the mutation mix is in
+`generate_fixtures.py`'s module docstring. Nothing under `perf/arrow/fixtures/`
+is committed.
 
 ## Mutation testing
 
 `make mutants` runs [`cargo-mutants`](https://mutants.rs/) against `onix-core`,
-`onix-cli`, and `onix-arrow` (the crates coverage holds to the 95% bar). It is the
-coverage gate's honest sibling: 95% line coverage proves every line ran, not
+`onix-cli`, and `onix-arrow` (the crates coverage holds to the 95% bar). It
+complements coverage: 95% line coverage proves every line ran, not
 that a test would notice if that line's logic were wrong. It is slow by design
 (one rebuild and re-test per mutant), so it runs periodically, not on every
 `make check`:
@@ -348,31 +300,8 @@ cargo install cargo-mutants --locked
 make mutants
 ```
 
-**Standing result.** `make mutants` enumerates a deterministic **1274** mutants
-(20 in `onix-cli`, 980 in `onix-core`, 274 in `onix-arrow`). In `onix-arrow`,
-a standalone `cargo mutants -p onix-arrow` on a quiet machine reports 212
-caught, 52 non-compiling (`Default`-substitution on types without a usable
-`Default`), 9 timeouts, and 1 missed. The 9 timeouts are mutant-induced
-infinite loops the tests reach (the decimal trailing-zero reduction in
-`hash_decimal`, and the merge-join cursor advance in `classify`) — detected as
-hangs, not silent survivors. The 1 missed is an equivalent mutant: the
-`num_rows() > 0 -> >= 0` guard in `push_filtered` (shared by both materialize
-passes) is output-neutral because `concat_batches` ignores empty batches. In
-`onix-core`/`onix-cli`
-every viable mutant is caught except equivalent mutants confined to five
-documented spots (`onix-core/src/lcs.rs`;
-the `> 1` threshold in `onix-core/src/diff/array.rs`, provably output-neutral;
-`onix-core/src/path.rs`'s `python_float_repr`, an unreachable branch
-condition; `onix-core/src/ignore_order/distance.rs`'s datetime-scale mutant,
-an empirical `f64`-rounding finding; and `onix-core/src/ignore_order/memo.rs`'s
-caching-gate mutants) plus `Default`-substitution mutants that do not compile.
-The exact classification of each mutant (caught/missed/timeout/unviable) is
-noisy run to run, but neither the five spots nor the `Default`-substitution
-kind changes; [`perf/MUTANTS.md`](perf/MUTANTS.md) carries the tool version,
-the reproduce command, and the full argument for why no reported survivor is
-a real test gap. Work that touches this logic should re-run `make mutants`
-and confirm no viable mutant survives outside those five `onix-core` spots and
-the one `onix-arrow` spot above.
+`perf/MUTANTS.md` holds the standing result, the equivalent-mutant list and the
+reproduce command; re-run `make mutants` after touching that logic.
 
 ## Wheels and publishing
 
@@ -391,5 +320,5 @@ the sdist) and publishes via PyPI trusted publishing (OIDC, no stored token)
 whenever the `Cargo.toml` version isn't already on PyPI; otherwise it's a
 no-op. There is no separate tag or release step.
 
-The `onix-core`, `onix-cli`, and `onix-py` crates all set `publish = false` in
-their manifests; crates.io publishing is a later, deliberate decision.
+Every workspace crate sets `publish = false`; nothing is published to
+crates.io.
