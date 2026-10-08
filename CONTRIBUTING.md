@@ -45,11 +45,13 @@ own pinned Python and dependencies on demand. Benchmarking additionally needs
 `hyperfine` (`brew install hyperfine`, or `cargo install hyperfine`). The
 Python binding suite needs `uv` plus `maturin` (`uv tool install maturin`).
 
-## Quality gates
+## Quality checks
 
-`make check` is the merge gate; it is also the exact command CI runs
-(`.github/workflows/check.yml`, on every pull request and push to `main`).
-Every part must pass:
+`make check` is the merge check; it is also the command CI runs
+(`.github/workflows/check.yml`, on every pull request and push to `main`),
+followed by `make stack-check`, which fails when the debug native-stack cost
+per level exceeds the sizing in `crates/onix-py/src/guard.rs`.
+Every part of `make check` must pass:
 
 | Target | Command | Bar |
 | --- | --- | --- |

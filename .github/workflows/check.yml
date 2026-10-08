@@ -28,9 +28,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: make check
         run: make check
-      # N is PER_LEVEL_STACK_BYTES in crates/onix-py/src/guard.rs.
       - name: Stack cost stays under the worker stack sizing
-        run: cargo run --quiet -p onix-core --example stack_frame_cost -- --max-bytes-per-level 10240
+        run: make stack-check
       - name: Export lcov coverage
         run: cargo llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex 'crates/onix-py/src/'
       - name: Upload coverage to Codecov
