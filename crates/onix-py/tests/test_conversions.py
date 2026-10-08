@@ -331,7 +331,7 @@ def test_a_key_subclass_with_overridden_equality_matches_structurally_not_by_pyt
     """
     A documented nuance, not a bug: `onix` matches a subclass key by its base type's
     *value*, never by an overridden `__eq__`/`__hash__` — that is custom-object territory
-    (see `tests/golden/README.md`'s "Subclasses" section).
+    (see `tests/golden/README.md`'s "Subclass dict keys" section).
 
     Real `DeepDiff` uses the key's own (overridden) equality, so two keys this class calls
     equal collapse into one shared key there (`values_changed` at the surviving key's path);
