@@ -643,14 +643,9 @@ const I64_MIN_AS_F64: f64 = i64::MIN as f64;
 )]
 const I64_MAX_AS_F64: f64 = i64::MAX as f64;
 
-/// Python's `int(value)`: `bool` maps to `1`/`0`; a float **truncates
-/// toward zero** (`int(1.9) == 1`, `int(-1.9) == -1` — confirmed against
-/// real `deepdiff`, not rounded); a string is parsed the same
-/// whitespace-tolerant way as [`coerce_to_f64`] (Python's `int()` does not
-/// accept a decimal point, matching Rust's own `i64` parser); a container
-/// never succeeds. An out-of-`i64`-range float returns `None` (this
-/// domain's numbers stay well under that bound in practice — an accepted,
-/// narrow limitation rather than a chased-down `i128`/bignum port).
+/// Python's `int(value)`: `bool` maps to `1`/`0`, a float truncates toward
+/// zero, a string parses like [`coerce_to_f64`] without a decimal point, and
+/// a container is `None`. An out-of-`i64`-range float is `None`.
 fn coerce_to_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Null
@@ -1038,18 +1033,17 @@ pub(crate) fn count_array_diff_leaves(
     };
     // `DeepDiff`'s own `_to_delta_dict` (what its real distance computation
     // measures) also applies its whole-tree mutual-add-remove merge before
-    // measuring `diff_length` — confirmed empirically: `[3.8, 3, [true]]`
-    // vs `[0.0, 0.0, [], 3]` delta-dicts
-    // to `{"values_changed": {"root[0]": ..., "root[2]": ...}}`, not raw
-    // `iterable_item_added`/`removed` pairs — without this, a genuinely
-    // close nested-list pair can measure a spuriously large `diff_length`
-    // (unmerged add+remove instead of one merged value change), pushing an
-    // otherwise-acceptable candidate over the cutoff and silently
-    // rejecting a pairing real `DeepDiff` accepts. Skipped without effect
-    // when `array_diff` didn't go through the `ignore_order` path (no
+    // measuring `diff_length`: `[3.8, 3, [true]]` vs `[0.0, 0.0, [], 3]`
+    // delta-dicts to `{"values_changed": {"root[0]": ..., "root[2]": ...}}`, not
+    // raw `iterable_item_added`/`removed` pairs — without this, a genuinely close
+    // nested-list pair can measure a spuriously large `diff_length` (unmerged
+    // add+remove instead of one merged value change), pushing an
+    // otherwise-acceptable candidate over the cutoff and silently rejecting a
+    // pairing real `DeepDiff` accepts. Skipped without effect when `array_diff`
+    // didn't go through the `ignore_order` path (no
     // `iterable_item_added`/`removed` pair can share a path there — see
-    // `crate::diff::array_diff`'s own doc on the LCS/positional split), so
-    // this is always safe to call unconditionally.
+    // `crate::diff::array_diff`'s own doc on the LCS/positional split), so this is
+    // always safe to call unconditionally.
     sub_report.merge_mutual_add_removes();
     sub_report.distance_leaf_length()
 }

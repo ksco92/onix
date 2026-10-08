@@ -197,10 +197,6 @@ const MAX_EXACT_F64_INT: f64 = 9_007_199_254_740_992.0;
 /// Returns `true` if every element of `items` is a JSON scalar or a calendar
 /// value — `DeepDiff`'s `_all_values_basic_hashable` check over
 /// `helper.basic_types`.
-///
-/// A dict, list or tuple anywhere in `items` returns `false`. An empty slice
-/// returns `true` (vacuously — matches `DeepDiff`, whose equivalent check is
-/// also vacuously true over an empty iterable).
 #[must_use]
 pub(crate) fn all_basic_scalars(items: &[Value]) -> bool {
     items.iter().all(|item| {
