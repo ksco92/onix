@@ -2,8 +2,8 @@
 //! `BTreeMap` per finding category keyed by the *structural* path
 //! (`Vec<PathSegment>`) the traversal visited, not [`render_path`]'s
 //! rendered `String` (not injective on adversarial input). See
-//! `tests/golden/README.md`'s "Known `DeepDiff` quirks" section for the
-//! collision this avoids and its survivor rule.
+//! `tests/golden/README.md`'s "Path-rendering collision survivor" section for
+//! the collision this avoids and its survivor rule.
 
 use std::collections::BTreeMap;
 
@@ -518,8 +518,8 @@ impl Report {
     /// collision without a structural one could only arise from an
     /// ancestor prefix collision — the same, already-documented and
     /// accepted `render_path` non-injectivity class described in this
-    /// module's own doc and `tests/golden/README.md`'s "known `DeepDiff`
-    /// quirks" section, not a new divergence this pass introduces.
+    /// module's own doc and `tests/golden/README.md`'s "Path-rendering
+    /// collision survivor" section, not a new divergence this pass introduces.
     ///
     /// Runs once, globally, over the whole tree — called from
     /// [`crate::diff::diff_with_max_depth`] after the entire recursive

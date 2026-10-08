@@ -136,8 +136,8 @@ fn insert_added(report: &mut Report, kind: ObjectKind, path: Vec<PathSegment>, v
 /// A non-`str` key matches across `a` and `b` by Python `==`, not this
 /// crate's own structural `ObjectKey` equality, via
 /// [`crate::ignore_order::match_dict_keys`] — see that function's doc for
-/// the exact rule and `tests/golden/README.md`'s "A dict key matches across
-/// two dicts by Python `==`" section for the confirmed example
+/// the exact rule and `tests/golden/README.md`'s "Reproduced quirks" row "A
+/// dict key matches across two dicts by Python `==`" for the confirmed example
 /// (`{1: "a"}` vs `{1.0: "a2"}` reports `root[1.0]`, `b`'s key form).
 ///
 /// The `threshold_to_diff_deeper` collapse and the depth-counting

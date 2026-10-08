@@ -681,7 +681,7 @@ impl Value {
 /// `DeepDiff`'s own `to_json()` byte-for-byte. A non-finite `float` key
 /// renders as the bare token text a *value* of the same bits would get,
 /// rather than reproducing a real `DeepDiff` bug that garbles it to `None`
-/// — see `tests/golden/README.md`'s "Known `DeepDiff` quirks" section.
+/// — see `tests/golden/README.md`'s "Non-finite `float` dict key" section.
 ///
 /// A `datetime`, `date`, or `tuple` key has no such rule to match: Python's
 /// `json.dumps` (and so `DeepDiff.to_json()`) *raises* `TypeError` rather
@@ -690,7 +690,8 @@ impl Value {
 /// deterministic behavior, and document it) this renders the same
 /// [`crate::path::python_repr`] text the key would get as a *top-level*
 /// path segment, which is at least useful output instead of a hard failure.
-/// See `tests/golden/README.md`'s "Known `DeepDiff` quirks" section.
+/// See `tests/golden/README.md`'s "Nested non-`str` dict key in `to_json()`"
+/// section.
 // `Number`'s three-way i64/u64/f64 representation makes each `expect` below
 // prove an invariant `Number` itself guarantees (mirrors `path::number_repr`,
 // which cannot show this lint at all since it stayed `pub(crate)`).
