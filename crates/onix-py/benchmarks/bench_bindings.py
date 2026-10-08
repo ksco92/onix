@@ -40,9 +40,9 @@ type TypedRecord = dict[str, int | str | datetime | tuple[int, int] | tuple[floa
 ##############################################
 # Configuration
 
-# A fixed, recorded seed with disjoint value ranges for genuine, guaranteed
-# mutations, matching perf/generate_fixtures.py's ignore_order/api_payloads
-# conventions so the two harnesses' fixture shapes stay comparable.
+# A fixed, recorded seed with disjoint value ranges for mutations, matching
+# perf/generate_fixtures.py's ignore_order/api_payloads conventions so the two
+# harnesses' fixture shapes stay comparable.
 SEED: Final[int] = 20260901
 IGNORE_ORDER_SIZE: Final[int] = 10_000
 RECORD_COUNT: Final[int] = 20_000
@@ -198,17 +198,6 @@ def build_typed_records_case(*, shuffle: bool = False) -> tuple[list[TypedRecord
 ##############################################
 # One measured diff, run inside its own subprocess
 
-# The measurable cases: the diff each (tool, case) pair performs. The fixture
-# is built once inside the subprocess; the returned callable times only the
-# diff itself. For the JSON-string cases, serialization to text is fixture
-# setup (done before the callable), matching how a caller holding JSON text
-# starts; parsing is inside the callable because a real caller pays it (onix
-# does it inside `diff_json`; the Python side does it with `json.loads`).
-# The `_file` case models the diff-two-files-on-disk workflow: the two JSON
-# files are written from the seed as fixture setup, then both tools pay an
-# identical `read_text()` inside the callable before parsing -- so the timed
-# difference is purely materializing Python object trees (`json.loads`) versus
-# parsing straight into onix's compact value (`diff_json`).
 CASE_LABELS: Final[dict[str, str]] = {
     "ignore_order": "`ignore_order`, 10k shuffled ints, ~5% mutated (live objects)",
     "api_payloads": "Heterogeneous API-payload records, n=20,000 (live objects)",
@@ -243,7 +232,11 @@ def _text_diff_callable(
 
 
 def _diff_callable(tool: str, case: str) -> Callable[[], object]:
-    """Build the diff callable for one `(tool, case)` pair; the fixture is built outside it, so only the diff is timed."""
+    """Build the diff callable for one `(tool, case)` pair; only the diff is timed.
+
+    The fixture is built outside the callable; the JSON-string cases serialize outside it and
+    parse inside it, as a real caller does.
+    """
     if case in ("ignore_order", "ignore_order_json"):
         a, b = build_ignore_order_case()
         ignore_order = True
@@ -278,7 +271,7 @@ def _diff_callable(tool: str, case: str) -> Callable[[], object]:
         # binding it into the returned callable: the files must still exist
         # when the timed callable reads them, and cleanup must not fall inside
         # the timed window. Its finalizer removes the dir at process exit, so
-        # nothing leaks across the (up to 22) subprocesses a run spawns.
+        # nothing leaks across the subprocesses a run spawns.
         def run_file_diff(_keep_alive: tempfile.TemporaryDirectory = tmp) -> object:
             return inner()
 
