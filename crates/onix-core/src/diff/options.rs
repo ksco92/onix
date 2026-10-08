@@ -80,8 +80,7 @@ pub fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
 ///
 /// # Errors
 ///
-/// Same as [`diff_with_max_depth`] at `opts.max_depth`; under `ignore_order`,
-/// ranking a candidate pair compares datetimes too.
+/// Same as [`diff_with_max_depth`] at `opts.max_depth`.
 ///
 /// # Examples
 ///

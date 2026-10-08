@@ -829,8 +829,8 @@ and `test_differential_fuzz.py`'s subclass-key batch.
   compared. Under `ignore_order`, `DeepHash._prep_datetime` normalizes
   every datetime it hashes, so real `DeepDiff` raises even for a value
   merely added, removed, or shuffled; `onix` hashes by instant and reports
-  it raw instead, per the compatibility policy, raising only where it is
-  compared, ranking a candidate pair included.
+  it raw instead, per the compatibility policy, raising only where two
+  datetimes are diffed, in the report or in a candidate pair's distance.
   `an_unnormalizable_datetime_under_ignore_order_is_reported_raw` in
   `crates/onix-core/src/diff/tests.rs` pins onix's side.
 

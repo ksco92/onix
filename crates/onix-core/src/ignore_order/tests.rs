@@ -1425,6 +1425,22 @@ fn lists_with_a_failing_candidate(
 }
 
 #[test]
+fn a_dict_candidate_holding_an_unnormalizable_datetime_fails_the_diff_at_its_path() {
+    let (extreme, near) = unnormalizable_and_near();
+    let (a, b) = lists_with_a_failing_candidate(
+        crate::value::Builder::new().object(vec![("k", near.clone()), ("n", CValue::Null)]),
+        cdict_holding(extreme),
+        cdict_holding(near),
+    );
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH)),
+        Err(crate::error::Error::DateTimeOutOfRange {
+            path: "root[1]['k']".to_string()
+        })
+    );
+}
+
+#[test]
 fn a_candidate_whose_trial_compares_an_unnormalizable_datetime_fails_the_diff_at_its_path() {
     let (extreme, near) = unnormalizable_and_near();
     let list = |items: Vec<CValue>| carr([items, vec![cv(&json!("x")), cv(&json!("y"))]].concat());

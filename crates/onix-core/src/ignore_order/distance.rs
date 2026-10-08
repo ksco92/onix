@@ -7,6 +7,7 @@
 
 use crate::value::{Number, Object, ObjectKey, ObjectKind, Value};
 
+use crate::datetime::DateTime;
 use crate::diff::DiffOptions;
 use crate::error::Error;
 use crate::path::{entry_path_segment, object_key_path_segment};
@@ -334,12 +335,9 @@ pub(crate) fn count_diff_leaves(
         (Value::Null, Value::Null) => 0,
         (Value::Bool(x), Value::Bool(y)) => usize::from(x != y),
         (Value::Str(x), Value::Str(y)) => usize::from(x != y),
-        // By instant, and by value, mirroring `diff_at`'s own leaf dispatch
-        // for the two calendar types. Instants rather than the normalized
-        // values, so a pair `DateTime::to_utc` cannot normalize still costs a
-        // distance rather than an error: an equal-instant pair is equal
-        // either way, and this is a pairing heuristic, not a report.
-        (Value::DateTime(x), Value::DateTime(y)) => usize::from(x.instant() != y.instant()),
+        (Value::DateTime(x), Value::DateTime(y)) => {
+            return count_datetime_diff_leaves(x.value(), y.value());
+        }
         (Value::Date(x), Value::Date(y)) => usize::from(x != y),
         // Plain `_diff_time` equality (see `docs/design/value-model.md`),
         // matching `diff_at`'s own dispatch for `Time`.
@@ -372,6 +370,13 @@ pub(crate) fn count_diff_leaves(
         _ => type_change_leaf_length(a, b),
     };
     Ok(count)
+}
+
+/// [`count_diff_leaves`]'s datetime case, normalized and failing as
+/// `datetime_diff` does; its own frame keeps the pair off the recursive one.
+fn count_datetime_diff_leaves(x: DateTime, y: DateTime) -> Result<usize, Box<Error>> {
+    let (x, y) = crate::diff::normalized_pair(&[], x, y)?;
+    Ok(usize::from(x != y))
 }
 
 /// [`count_diff_leaves`]'s type-mismatch contribution: `DeepDiff`'s own
