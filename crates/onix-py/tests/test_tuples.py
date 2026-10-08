@@ -1,14 +1,4 @@
-"""Tuple support at the bindings boundary: what `to_dict()` hands back, and what it does not.
-
-The diff *results* for tuples are pinned by the golden corpus (``tuple_*`` and
-``ignore_order_tuple_*`` cases, checked against real DeepDiff by
-``test_golden_parity.py``). This file covers the parts that live only in the
-bindings: that a report crossing back into Python carries real ``tuple``
-objects wherever DeepDiff's own ``to_dict()`` does, that ``to_json()`` still
-shows them as arrays, tuple/namedtuple subclass support and its one
-documented divergence (positional rather than field-based diffing), and the
-golden corpus's tagged encoding never being interpreted by the product.
-"""
+"""Tuple support at the bindings boundary: what `to_dict()` hands back."""
 
 import collections
 import json
@@ -65,15 +55,9 @@ def test_to_dict_matches_real_deepdiff_on_tuple_values() -> None:
 
 def test_namedtuple_is_accepted_and_diffed_positionally_not_by_field() -> None:
     """
-    A namedtuple is a `tuple` subclass; onix accepts it but diffs it positionally.
+    A namedtuple diffs positionally (tests/golden/README.md, "Known DeepDiff quirks").
 
-    Real DeepDiff walks a namedtuple's fields (``root[0].x``) instead of its
-    indices; onix diffs any tuple subclass — namedtuple included — the same
-    positional way as a plain tuple (``root[0][0]``), a documented divergence
-    (see `tests/golden/README.md`, "`namedtuple` positional diff") rather
-    than an approximation of the field-walking shape. The class name still
-    carries through: a type change between the namedtuple and a plain tuple
-    names it, matching real DeepDiff.
+    The class name still carries through a type change against a plain tuple.
     """
     point = collections.namedtuple("Point", "x")
     a, b = (point(1),), (point(2),)

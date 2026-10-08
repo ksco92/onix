@@ -1,15 +1,4 @@
-"""`datetime.timedelta` behavior of the `deepdiff_rs.DeepDiff` class, against real DeepDiff.
-
-Two things this file covers that the golden corpus cannot:
-
-- the `timedelta` **superset**. Real DeepDiff's `to_json()` has no serializer for
-  `datetime.timedelta` and raises `TypeError` on a report holding one, so a
-  timedelta case's agreement with the real tool has to be asserted on `to_dict()` —
-  which is exactly what these tests do, alongside onix's own `str(timedelta)` JSON
-  rendering.
-- that, unlike `time`, a `timedelta` hashes EXACTLY under `ignore_order` (no
-  truncation), against real DeepDiff's own output.
-"""
+"""`timedelta` behavior of `DeepDiff`; see tests/golden/README.md, "JSON supersets"."""
 
 import datetime
 

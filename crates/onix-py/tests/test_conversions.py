@@ -329,13 +329,9 @@ def test_tuple_subclass_dict_key_matches_and_mismatches_by_value() -> None:
 
 def test_a_key_subclass_with_overridden_equality_matches_structurally_not_by_python_eq() -> None:
     """
-    A documented nuance, not a bug: `onix` matches a subclass key by its base type's
-    *value*, never by an overridden `__eq__`/`__hash__` — that is custom-object territory
-    (see `tests/golden/README.md`'s "Subclass dict keys" section).
+    A key subclass matches by its base value, never an overridden `__eq__`/`__hash__`.
 
-    Real `DeepDiff` uses the key's own (overridden) equality, so two keys this class calls
-    equal collapse into one shared key there (`values_changed` at the surviving key's path);
-    `onix` sees two structurally different keys and reports the whole dict changed instead.
+    See tests/golden/README.md, "Known DeepDiff quirks", "Subclass dict keys".
     """
 
     class AlwaysEqual(tuple):
@@ -597,13 +593,8 @@ def test_unsupported_dict_key_error_reports_path_to_the_dict() -> None:
         DeepDiff({"a": {complex(1, 2): "x"}}, {"a": {complex(1, 2): "y"}})
 
 
-# lone (unpaired) surrogates: legal in a Python str, not representable as UTF-8.
-# Compared and reported like any other str, matching DeepDiff's plain `==` — see
-# tests/golden/README.md for the one accepted divergence (hashing one as a set member).
-# `to_json()` is compared canonically (parsed, like test_differential_fuzz.py's own
-# comparison, since neither tool promises identical whitespace) against live
-# `deepdiff==9.1.0`, and `to_dict()` structurally — the golden-fixture corpus (plain JSON
-# files) cannot hold this content at all, see tests/golden/README.md for why.
+# Lone (unpaired) surrogates: tests/golden/README.md,
+# "Known DeepDiff quirks", "Lone surrogate hashing".
 
 
 def test_lone_surrogate_equal_pair_reports_no_change() -> None:

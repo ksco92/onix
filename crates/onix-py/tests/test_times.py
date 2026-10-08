@@ -1,15 +1,4 @@
-"""`datetime.time` behavior of the `deepdiff_rs.DeepDiff` class, against real DeepDiff.
-
-Two things this file covers that the golden corpus cannot:
-
-- the `time` **superset**. Real DeepDiff's `to_json()` has no serializer for
-  `datetime.time` and raises `TypeError` on a report holding one, so a time case's
-  agreement with the real tool has to be asserted on `to_dict()` — which is exactly
-  what these tests do, alongside onix's own `time.isoformat()` JSON rendering.
-- the confirmed `ignore_order` hashing quirk (`DeepHash` reduces a `time` to whole
-  seconds-of-day, dropping the microsecond and offset entirely) against real
-  DeepDiff's own output, not just onix's internal model.
-"""
+"""`time` behavior of `DeepDiff`; see tests/golden/README.md, "JSON supersets"."""
 
 import datetime
 
@@ -131,8 +120,7 @@ def test_ignore_order_hash_truncation_drops_microsecond_and_offset() -> None:
     `DeepHash` reduces a `time` to whole seconds-of-day before hashing.
 
     A microsecond-only or an offset-only difference hash-matches under `ignore_order`
-    even though the ordinary comparison calls the pair different — real, confirmed
-    `DeepDiff` behavior, matched exactly here.
+    even though the ordinary comparison calls the pair different.
     """
     micros_only = (
         [datetime.time(10, 30, 0, 123_456), "anchor"],
@@ -150,6 +138,4 @@ def test_ignore_order_hash_truncation_drops_microsecond_and_offset() -> None:
         assert real == {}
         assert onix == {}
 
-    # The ordinary (non-ignore_order) comparison of the same values does NOT
-    # truncate: the pair is reported.
     assert OnixDeepDiff(datetime.time(10, 30, 0, 123_456), datetime.time(10, 30, 0, 999_999))
