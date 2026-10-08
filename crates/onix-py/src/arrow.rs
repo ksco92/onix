@@ -26,10 +26,10 @@ use onix_arrow::{
 /// A record batch reader over one imported input, with its schema attached.
 type ImportedReader = RecordBatchIterator<Box<dyn RecordBatchReader + Send>>;
 
-/// One diff input, spooled to an anonymous [`onix_arrow::spool`] IPC file so the
-/// core's multi-pass row diff can re-read it (that module owns the temp-file
-/// posture). Each input is imported and fully drained before the next, so two
-/// one-shot Python streams are never open at once.
+/// One diff input, spooled to an anonymous [`onix_arrow::spool`] IPC file so
+/// the core's multi-pass row diff can re-read it (that module owns the
+/// temp-file posture). Each input is imported and fully drained before the
+/// next, so two one-shot Python streams are never open at once.
 struct SpooledInput {
     file: File,
     schema: SchemaRef,
