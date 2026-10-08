@@ -145,8 +145,7 @@ fn decode_tagged(value: &Value, builder: &mut onix_core::value::Builder) -> onix
 }
 
 /// Decodes a `$dict` fixture: a JSON object cannot represent a non-`str`
-/// key, so this tag's payload is a list of `[key, value]` pairs (mirroring
-/// `scripts/golden_tags.py`'s `encode_tags`/`decode_tags`) rather than the
+/// key, so this tag's payload is a list of `[key, value]` pairs rather than the
 /// object shape every other tag's plain-data fallback uses.
 fn decode_tagged_dict(
     map: &serde_json::Map<String, Value>,
@@ -188,8 +187,8 @@ fn decode_tagged_dict(
 }
 
 /// Decodes an `$object` fixture — a custom object (issue #66): its payload is
-/// `{"class": "<name>", "attrs": {…}, ["identity": "<module.qualname>"]}`,
-/// mirroring `scripts/golden_tags.py`'s `encode_tags`/`decode_tags`. Builds
+/// `{"class": "<name>", "attrs": {…}, ["identity": "<module.qualname>"]}`.
+/// Builds
 /// the same class-tagged, attribute-diffed value onix's own bindings build for
 /// a live instance. `identity` (the qualified type identity onix decides
 /// `type_changes` by) defaults to `class` when a fixture omits it — every
@@ -408,8 +407,7 @@ fn is_deepdiff_crash_case(expected: &Value) -> bool {
 
 /// Every golden case not listed in [`KNOWN_DIVERGENT_CASES`] must match its
 /// `expected.json` exactly. Failures across the *whole* corpus are
-/// collected and reported together, so a regression run shows every
-/// diverged case at once rather than stopping at the first one.
+/// collected and reported together.
 #[test]
 fn every_golden_case_matches_deepdiff() {
     let mut failures = Vec::new();
@@ -475,7 +473,6 @@ fn ignore_order_big_int_beyond_f64_pairs_without_panicking() {
     );
 }
 
-/// Every `deepdiff_raises` case is registered in [`DEEPDIFF_CRASH_CASES`].
 #[test]
 fn every_deepdiff_crash_case_is_pinned() {
     for name in case_names() {

@@ -1,4 +1,5 @@
-//! Property tests for `ignore_order=True`: a shuffled list diffs empty; independent lists never panic.
+//! Property tests for `ignore_order=True`: a shuffled list diffs empty; independent lists
+//! never panic.
 
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -41,7 +42,7 @@ fn arb_json_leaf() -> impl Strategy<Value = Value> {
 
 /// An arbitrary JSON-shaped value bounded to [`MAX_GENERATED_DEPTH`] — a
 /// list element, so it can itself be a nested list/dict (exercising
-/// [`crate::ignore_order`]'s canonical-key recursion), not just a scalar.
+/// the engine's `ignore_order` canonical-key recursion), not just a scalar.
 fn arb_json_value() -> impl Strategy<Value = Value> {
     arb_json_leaf().prop_recursive(
         MAX_GENERATED_DEPTH,

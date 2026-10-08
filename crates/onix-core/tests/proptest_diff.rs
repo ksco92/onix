@@ -233,7 +233,6 @@ fn assert_index_resolves_to_recorded_value(
 proptest! {
     #![proptest_config(config())]
 
-    /// Diffing any value against itself is empty.
     #[test]
     fn diff_of_a_value_with_itself_is_always_empty(value in arb_json_value()) {
         let report = diff_ok(&value, &value);
@@ -264,7 +263,6 @@ proptest! {
     /// Every reported path resolves in its expected side: added/iterable-added in `b`,
     /// removed/iterable-removed in `a`, and values_changed/type_changes in `a`, with the
     /// `b`-side location (`new_path` when present, else `path`) in `b`.
-    ///
     ///
     /// `path` itself need not resolve in `b`: `new_path` records the drift of an LCS-paired index.
     #[test]
@@ -302,7 +300,8 @@ proptest! {
                             .unwrap_or(path.as_str());
                         prop_assert!(
                             resolves_in(&b, b_side_path),
-                            "{category} path {path}'s b-side location {b_side_path} does not resolve in b"
+                            "{category} path {path}'s b-side location \
+                             {b_side_path} does not resolve in b"
                         );
                     }
                     other => panic!("unexpected report category {other}"),
@@ -311,7 +310,6 @@ proptest! {
         }
     }
 
-    /// `dictionary_item_added` keys exist in `b`'s parent object and not in `a`'s.
     #[test]
     fn dictionary_item_added_keys_exist_in_b_parent_and_not_in_a_parent(
         a in arb_json_value(),
@@ -329,7 +327,6 @@ proptest! {
         }
     }
 
-    /// `dictionary_item_removed` keys exist in `a`'s parent object and not in `b`'s.
     #[test]
     fn dictionary_item_removed_keys_exist_in_a_parent_and_not_in_b_parent(
         a in arb_json_value(),
@@ -347,7 +344,6 @@ proptest! {
         }
     }
 
-    /// `iterable_item_added` indices resolve in `b`'s parent array to the recorded value.
     #[test]
     fn iterable_item_added_indices_resolve_to_the_recorded_value_in_b(
         a in arb_json_value(),
@@ -360,12 +356,17 @@ proptest! {
                 let PathStep::Index(index) = last else {
                     panic!("iterable_item_added path {path} does not end in an index");
                 };
-                assert_index_resolves_to_recorded_value(&b, &parent_steps, index, recorded_value, path)?;
+                assert_index_resolves_to_recorded_value(
+                    &b,
+                    &parent_steps,
+                    index,
+                    recorded_value,
+                    path,
+                )?;
             }
         }
     }
 
-    /// `iterable_item_removed` indices resolve in `a`'s parent array to the recorded value.
     #[test]
     fn iterable_item_removed_indices_resolve_to_the_recorded_value_in_a(
         a in arb_json_value(),
@@ -378,7 +379,13 @@ proptest! {
                 let PathStep::Index(index) = last else {
                     panic!("iterable_item_removed path {path} does not end in an index");
                 };
-                assert_index_resolves_to_recorded_value(&a, &parent_steps, index, recorded_value, path)?;
+                assert_index_resolves_to_recorded_value(
+                    &a,
+                    &parent_steps,
+                    index,
+                    recorded_value,
+                    path,
+                )?;
             }
         }
     }
@@ -416,7 +423,6 @@ proptest! {
         }
     }
 
-    /// Diffing the same pair twice yields identical reports.
     #[test]
     fn diff_result_is_deterministic_across_repeated_calls(
         a in arb_json_value(),
