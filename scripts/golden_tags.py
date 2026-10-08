@@ -234,8 +234,6 @@ def encode_tags(value: TaggedValue) -> TaggedValue:
 def decode_tags(value: TaggedValue) -> TaggedValue:
     """
     Decode a parsed JSON value, turning tagged objects into their Python counterparts.
-
-    :raises NotImplementedError: If the value carries a reserved tag no decoder supports yet.
     """
     if isinstance(value, list):
         return [decode_tags(item) for item in value]
