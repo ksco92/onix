@@ -1,12 +1,5 @@
-//! DeepDiff-style path rendering.
-//!
-//! A path locates a value inside a nested dict/list/set structure, e.g.
-//! `root['a'][3]['b c']`. This module owns the (small) segment vocabulary and
-//! the textual rendering rules, kept isolated from the diff engine. The
-//! golden corpus (generated against real `DeepDiff`) is the final authority
-//! on quoting; see [`quote_key`]'s doc for the (surprisingly escape-free)
-//! rule it verified, and [`set_item_repr`]'s for the *different* — and
-//! equally escape-free — rule a set item follows.
+//! `DeepDiff`-style path rendering. The quoting rules live on [`quote_key`] and
+//! [`set_item_repr`].
 
 use std::fmt::Write as _;
 
@@ -15,63 +8,26 @@ use unicode_general_category::{GeneralCategory, get_general_category};
 use crate::datetime::{SECONDS_PER_DAY, div_rem_euclid};
 use crate::value::{Number, ObjectKey, ObjectKind, Str, Value, Wtf8Char, Wtf8Chars};
 
-/// One step in a path: a dict key, a list index, or a set item.
-///
-/// Derives `Ord` so a full path (`Vec<PathSegment>`) can be used as a
-/// `BTreeMap` key — see [`crate::report::Report`]'s doc for why: findings
-/// are keyed by this *structural* path, not by [`render_path`]'s rendered
-/// string, because two distinct structural paths can render to the same
-/// string (see [`quote_key`]'s doc) and only the structural form is
-/// guaranteed unique per traversal. The derived order (`Key` before
-/// `Index`; otherwise by the wrapped `String`/`usize`) is an internal
-/// implementation detail used only to pick a deterministic survivor when
-/// such a rendering collision occurs — it carries no meaning relative to
-/// `DeepDiff` and nothing outside `Report`'s serialization should depend on
-/// it.
+/// One path step. `Ord` is internal: it picks a deterministic survivor on a
+/// rendered-string collision.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PathSegment {
-    /// A dict key access, e.g. the `'a'` in `root['a']` — a [`Str`] rather
-    /// than a plain `String` so a key containing a lone surrogate code
-    /// point still has a structural identity distinct from every other key
-    /// (see [`Str`]'s own doc for why this matters for correctness, not
-    /// just representation).
+    /// A `str` dict key, quoted per [`quote_key`].
     Key(Str),
-    /// A dict key access for a non-`str` key, e.g. the `1` in `root[1]` or
-    /// the `1][2` in `root[1][2]` for a `tuple` key `(1, 2)` — carrying the
-    /// key **already rendered** by [`dict_key_repr`], the same
-    /// already-rendered posture [`PathSegment::SetItem`] takes and for the
-    /// identical reason: `DeepDiff` builds this segment from `repr()`, not
-    /// from [`quote_key`]'s dict-key-quoting rule (see [`dict_key_repr`]'s
-    /// doc for why a `tuple` key's own rendering already contains the `][`
-    /// that splits it into several bracket groups, so [`render_path`] wraps
-    /// it in exactly one outer pair, same as any other key).
+    /// A non-`str` dict key already rendered by [`dict_key_repr`], e.g. `[1]` or `[1][2]`.
     KeyRepr(String),
-    /// A custom object's attribute access, e.g. the `x` in `root.x` — a
-    /// [`Str`] for the same reason [`PathSegment::Key`] is (a distinct
-    /// structural identity per name). Rendered `.name` with no brackets and
-    /// no quoting, matching `DeepDiff`'s `AttributeRelationship`
-    /// (`param_repr_format=".{}"`, no `quote_str`); an attribute name read
-    /// from an object's `__dict__`/`__slots__` is a Python identifier, so
-    /// nothing it can hold needs escaping.
+    /// A custom object's attribute, rendered `.name` with no brackets or quoting.
     Attribute(Str),
-    /// A list index access, e.g. the `3` in `root[3]`.
+    /// A list index, rendered `[3]`.
     Index(usize),
-    /// A set item, e.g. the `1` in `root[1]` for the set `{1}` — carrying
-    /// the item **already rendered** by [`set_item_repr`], because that
-    /// rendering is the only identity `DeepDiff` gives a set item: its
-    /// `set_item_added`/`set_item_removed` entries are plain path strings
-    /// built by formatting the item into the set's own path (see
-    /// [`set_item_repr`]'s doc for the exact upstream code), never a
-    /// subscript that could be resolved back to a position.
+    /// A set item already rendered by [`set_item_repr`], e.g. `[1]`.
     SetItem(String),
 }
 
 /// Renders a path (a sequence of [`PathSegment`]s from the root) as a
-/// DeepDiff-style string.
+/// DeepDiff-style string; an empty slice is `"root"`.
 ///
-/// An empty slice renders as `"root"`. Dict keys are rendered with
-/// `DeepDiff`-compatible quoting (see [`quote_key`]); indices are rendered
-/// as plain `[N]`.
+/// Returns `Str` so a lone-surrogate key survives byte-exact.
 ///
 /// # Examples
 ///
@@ -89,15 +45,6 @@ pub enum PathSegment {
 ///     "root['a'][3]['b c']"
 /// );
 /// ```
-///
-/// Returns a [`Str`] rather than a plain `String` because a key segment can
-/// hold a lone surrogate code point (see [`Str`]'s own doc): embedding it
-/// raw here — the same "never escapes anything" rule [`quote_key`]
-/// otherwise follows — is what lets the byte-exact JSON writer (the Python
-/// bindings' `to_json()`) and `to_dict()`'s reconstructed key both recover
-/// it exactly, rather than a pre-flattened `String` losing the distinction
-/// between "a literal backslash" and "this came from a surrogate" that a
-/// correct JSON escape depends on.
 #[must_use]
 pub fn render_path(segments: &[PathSegment]) -> Str {
     let mut rendered: Vec<u8> = b"root".to_vec();
@@ -132,12 +79,7 @@ pub fn render_path(segments: &[PathSegment]) -> Str {
     bytes_to_str(rendered)
 }
 
-/// Wraps `bytes` — already known to be valid WTF-8, since every writer above
-/// only ever appends plain ASCII syntax or another [`Str`]'s own bytes — as
-/// whichever [`Str`] variant it actually is: [`Str::Utf8`] for the
-/// overwhelming common case (no surrogate anywhere in the path), costing
-/// nothing beyond the one UTF-8 validation `render_path` was already going
-/// to do implicitly by building a `String`.
+/// Wraps WTF-8 `bytes` as `Utf8` when valid, else `Wtf8`.
 fn bytes_to_str(bytes: Vec<u8>) -> Str {
     match String::from_utf8(bytes) {
         Ok(s) => Str::Utf8(s.into_boxed_str()),
@@ -145,40 +87,18 @@ fn bytes_to_str(bytes: Vec<u8>) -> Str {
     }
 }
 
-/// Quotes a dict key exactly the way `DeepDiff` does when rendering
-/// `root['key']` segments — which, per the golden corpus generated against
-/// real `DeepDiff`, is **not** Python `repr()`-style escaping.
+/// Quotes a dict key the way `DeepDiff` renders `root['key']`: nothing is
+/// escaped, only the wrapping quote varies.
 ///
-/// `DeepDiff`'s own path-rendering code
-/// (`deepdiff/model.py::ChildRelationship.stringify_param`, via
-/// `deepdiff/path.py::stringify_element`) never escapes anything —
-/// backslashes, control characters, and unicode are all embedded in the
-/// output byte-for-byte. The only decision it makes is which quote
-/// character to wrap with:
+/// - A key containing a single quote (`'`) is wrapped in double quotes:
+///   `"it's"`.
+/// - Every other key is wrapped in single quotes: `'he said "hi"'`, `'a\b'`
+///   (one literal backslash).
 ///
-/// - A key containing a single quote (`'`), regardless of whether it also
-///   contains a double quote, is wrapped in double quotes: `"it's"`.
-/// - Every other key (no single quote, whether or not it contains a double
-///   quote, a backslash, or control characters) is wrapped in single
-///   quotes: `'he said "hi"'`, `'a\b'` (one literal backslash, not two).
-///
-/// This can produce a key segment containing an unescaped copy of its own
-/// wrapping quote character (e.g. a key that is both single- and
-/// double-quoted, wrapped in double quotes with the inner double quote left
-/// bare) — `DeepDiff` does this too, confirmed empirically; matching it
-/// byte-for-byte is the correctness bar, not producing a "more correct"
-/// escaping of our own invention. See `tests/golden/README.md` for the
-/// verification commands.
-///
-/// An empty string renders as `''`.
-///
-/// A key containing a lone surrogate code point (e.g. `"\udc80"`) is
-/// embedded exactly as unescaped as every other character — the raw WTF-8
-/// bytes (see [`Str`]'s own doc), never Python's `\udcXX` escape — matching
-/// real `DeepDiff`'s own raw embedding byte-for-byte, including through the
-/// byte-exact JSON writer (the Python bindings' `to_json()`), which is the
-/// one place the surrogate's own escape is finally written, exactly as
-/// `json.dumps` writes it.
+/// Distinct paths can therefore render identically (a key holding both quote
+/// kinds keeps its inner `"` bare). An empty string renders as `''`. A lone
+/// surrogate is embedded as its raw WTF-8 bytes, never Python's `\udcXX`
+/// escape.
 ///
 /// # Examples
 ///
@@ -204,14 +124,7 @@ pub fn quote_key(key: &Str) -> Str {
     bytes_to_str(out)
 }
 
-/// Writes `s`'s content into `out` unchanged, except a lone surrogate code
-/// point, which becomes Python's own `\udcXX`/`\uXXXX` escape (the only
-/// character this crate's value model cannot otherwise carry through a
-/// plain `String` — see [`Str`]'s doc). Used by [`set_item_repr`]'s
-/// top-level `str` case: real `DeepDiff` can never actually produce that
-/// case for a lone-surrogate member (hashing one to build the set crashes
-/// first — see `tests/golden/README.md`), so there is no byte-exact target
-/// to match and this ASCII-safe escape is the simplest correct rendering.
+/// Writes `s` with each lone surrogate as `\uXXXX`.
 fn push_wtf8_unescaped(out: &mut String, s: &Str) {
     for c in s.chars() {
         match c {
@@ -224,12 +137,10 @@ fn push_wtf8_unescaped(out: &mut String, s: &Str) {
 }
 
 /// Renders one set item the way `DeepDiff` renders it inside a
-/// `set_item_added`/`set_item_removed` entry — the text that becomes a
+/// `set_item_added`/`set_item_removed` entry, the text of a
 /// [`PathSegment::SetItem`].
 ///
-/// `DeepDiff` builds those entries in
-/// `model.py::TextResult._from_tree_set_item_added_or_removed`, which is
-/// literally:
+/// Upstream (`model.py::TextResult._from_tree_set_item_added_or_removed`):
 ///
 /// ```text
 /// path = change.up.path()                  # the SET's own path
@@ -239,30 +150,14 @@ fn push_wtf8_unescaped(out: &mut String, s: &Str) {
 /// "{}[{}]".format(path, str(item))
 /// ```
 ///
-/// So the rule has three halves, and none is [`quote_key`]'s:
-///
-/// - A `str` item is wrapped in **single quotes, unconditionally, with no
-///   escaping of any kind** — `{"it's"}` renders `root['it's']`, where the
-///   *dict key* `"it's"` renders `root["it's"]`. The two rules genuinely
-///   differ; confirmed against `deepdiff==9.1.0`.
-/// - A `datetime`/`date`/`time`/`timedelta` item renders via Python's own
-///   `str()` for that type — [`crate::datetime::DateTime::python_str`]/
-///   [`crate::datetime::Date::python_str`]/[`crate::datetime::Time::python_str`]/
-///   [`crate::datetime::TimeDelta::python_str`], e.g. `{datetime(2024, 1, 1)}`
-///   renders `root[2024-01-01 00:00:00]`, `{date(2024, 1, 1)}` renders
-///   `root[2024-01-01]`, `{time(1, 0)}` renders `root[01:00:00]` and
-///   `{timedelta(seconds=1)}` renders `root[0:00:01]` — **not** `repr()`,
-///   unlike every other item kind: Python's `str()` and `repr()` agree for
-///   `None`/`bool`/number/`tuple`/`frozenset`, but these four calendar types
-///   are the ones this model holds where they genuinely differ. Confirmed
-///   against `deepdiff==9.1.0`.
-/// - Every other item is rendered by Python's `str()`, which for the
-///   remaining types a set can hold is `repr()` ([`python_repr`]) — so a
-///   `str` *or a calendar value* nested **inside** a tuple or frozenset item
-///   **is** rendered by `repr()`, unlike a top-level one:
-///   `{("it's",)}` renders `root[("it's",)]` and
-///   `{(datetime(2024, 1, 1),)}` renders
-///   `root[(datetime.datetime(2024, 1, 1, 0, 0),)]`.
+/// - A `str` item is wrapped in single quotes with no escaping: `{"it's"}`
+///   renders `root['it's']`, where the dict key `"it's"` renders `root["it's"]`.
+/// - A `datetime`/`date`/`time`/`timedelta` item renders via Python's `str()`
+///   ([`crate::datetime::DateTime::python_str`] and its siblings), not
+///   `repr()`: `{date(2024, 1, 1)}` renders `root[2024-01-01]`.
+/// - Every other item renders as `repr()` ([`python_repr`]), so a `str` or
+///   calendar value nested inside a tuple or frozenset is escaped or
+///   `repr`-formed: `{("it's",)}` renders `root[("it's",)]`.
 ///
 /// # Examples
 ///
@@ -291,22 +186,9 @@ pub fn set_item_repr(item: &Value) -> String {
     }
 }
 
-/// Renders a non-`str` [`ObjectKey::Other`] the way `DeepDiff` renders it as
-/// a `root[...]` path segment — the text a [`PathSegment::KeyRepr`] carries.
-///
-/// `DeepDiff`'s `ChildRelationship.stringify_param` (`model.py`) special-cases
-/// exactly one non-`str` shape: a `tuple` param renders as
-/// `']['.join(map(repr, param))` — each of the tuple's own top-level members
-/// gets its own bracket group, so the key `(1, 2)` produces `1][2`, which
-/// [`render_path`] then wraps in one outer `[`/`]` to give `root[1][2]`
-/// (confirmed against real `deepdiff==9.1.0`: `{(1, 2): 'x'}` added to `{}`
-/// reports at `root[1][2]`, never `root[(1, 2)]`). A member that is itself a
-/// container (this crate's dict keys allow only a `tuple` **of** the scalar
-/// kinds below, never a nested `tuple`) is out of scope and never reaches
-/// this function — see `onix-py`'s conversion table. Every other key kind
-/// (`None`, `bool`, `int`, `float`, `datetime`, `date`) renders as plain
-/// [`python_repr`], exactly as `stringify_param`'s fallback (`repr(param)`)
-/// does.
+/// Renders a non-`str` [`ObjectKey::Other`] as `DeepDiff` does: a `tuple` key
+/// is `']['.join(map(repr, key))`, so `(1, 2)` gives `1][2` and
+/// [`render_path`] yields `root[1][2]`; any other key is [`python_repr`].
 #[must_use]
 pub fn dict_key_repr(key: &Value) -> String {
     match key {
@@ -315,11 +197,9 @@ pub fn dict_key_repr(key: &Value) -> String {
     }
 }
 
-/// The [`PathSegment`] one [`ObjectKey`] contributes: a `str` key through
-/// the existing dict-key quoting rule ([`PathSegment::Key`]/[`quote_key`],
-/// unchanged), any other key through [`dict_key_repr`]
-/// ([`PathSegment::KeyRepr`]). Shared by the diff engine and the Python
-/// bindings' own conversion-error path segments, so the two cannot drift.
+/// The [`PathSegment`] one [`ObjectKey`] contributes: [`quote_key`] for a `str`
+/// key, [`dict_key_repr`] for any other. Shared by the diff engine and the
+/// Python bindings' conversion-error paths.
 #[must_use]
 pub fn object_key_path_segment(key: &ObjectKey) -> PathSegment {
     match key {
@@ -342,25 +222,10 @@ pub fn entry_path_segment(kind: ObjectKind, key: &ObjectKey) -> PathSegment {
     }
 }
 
-/// Renders `value` as Python's `repr()` would.
-///
-/// `repr()` and `str()` agree on every type this model holds except
-/// [`set_item_repr`]'s five special-cased kinds (`str` itself, and the four
-/// calendar types); a container's `str()` uses `repr()` for its elements
-/// either way, so this one function covers both sides of
-/// [`set_item_repr`]'s rule.
-///
-/// A `set`/`frozenset` renders its members in the crate's canonical set
-/// order (see [`crate::value::SetItems`]), where Python's own `str()` uses
-/// the set's hash order — the one place a rendered set item can differ from
-/// `DeepDiff`'s, and a documented one. See `tests/golden/README.md`.
-///
-/// Iterative (an explicit heap work-stack, no native recursion) all the way
-/// through, sets included — their members are stored in canonical order, so
-/// rendering one never sorts and never re-enters a comparator. This matches
-/// [`Value`]'s own stack-safety posture: nothing bounds how deep a value a
-/// caller may render, and a natively recursive renderer would be an
-/// unguarded overflow sink on adversarially nested input.
+/// Python `repr()` of `value`, iteratively, because no depth guard bounds what
+/// a caller renders and a recursive renderer would overflow the native stack on
+/// adversarial nesting; sets render in canonical order
+/// ([`crate::value::SetItems`]), not Python's hash order.
 #[must_use]
 pub fn python_repr(value: &Value) -> String {
     let mut out = String::new();
@@ -388,11 +253,8 @@ enum Work<'a> {
     Key(&'a ObjectKey),
 }
 
-/// Renders one [`ObjectKey`] the way Python's `repr()` of the whole dict
-/// would show it: a `str` key exactly as [`python_repr_bytes`] already did
-/// (unchanged for the common case, and now also covering a lone surrogate —
-/// see [`crate::value::Key`]'s doc), any other key through [`python_repr`] of its wrapped
-/// [`Value`] — `repr({1: 'x'})` is `"{1: 'x'}"`, not `"{'1': 'x'}"`.
+/// Renders one [`ObjectKey`] as the whole dict's `repr()` shows it:
+/// `{1: 'x'}`, not `{'1': 'x'}`.
 fn object_key_repr(key: &ObjectKey) -> String {
     match key {
         ObjectKey::Str(s) => python_repr_bytes(s.as_bytes()),
@@ -443,13 +305,8 @@ fn write_repr_head<'a>(out: &mut String, stack: &mut Vec<Work<'a>>, value: &'a V
     }
 }
 
-/// Python's `repr()` for a `datetime`, which is what `str()` of a container
-/// holding one shows — the form a calendar value takes *inside* a set item
-/// (a bare top-level set item uses [`crate::datetime::DateTime::python_str`]
-/// instead — see [`set_item_repr`]'s doc for both halves of the rule).
-/// Python omits the trailing zero fields: seconds appear only when the
-/// second or the microsecond is non-zero, and
-/// microseconds only when non-zero.
+/// Python `repr()` for a `datetime`; trailing zero seconds and microseconds
+/// are omitted.
 fn datetime_repr(value: crate::datetime::DateTime) -> String {
     let date = value.date();
     let mut out = format!(
@@ -473,11 +330,7 @@ fn datetime_repr(value: crate::datetime::DateTime) -> String {
     out
 }
 
-/// Python's `repr()` for a `time` — [`datetime_repr`]'s twin minus the date
-/// fields, sharing its exact same trailing-field-omission and tzinfo-suffix
-/// rules (see that function's doc); the form a `time` takes *inside* a set
-/// item (a bare top-level one uses [`crate::datetime::Time::python_str`]
-/// instead — see [`set_item_repr`]'s doc).
+/// Python `repr()` for a `time`, with [`datetime_repr`]'s omission rules.
 fn time_repr(value: crate::datetime::Time) -> String {
     let mut out = format!("datetime.time({}, {}", value.hour(), value.minute());
 
@@ -493,11 +346,8 @@ fn time_repr(value: crate::datetime::Time) -> String {
     out
 }
 
-/// The `tzinfo=...` suffix [`datetime_repr`] and [`time_repr`] both append —
-/// empty for a naive value; Python's own `timezone.utc` singleton reprs by
-/// name for a zero offset, and every other fixed offset reprs as the
-/// `timedelta` it was built from, normalizing a negative offset into whole
-/// days plus seconds.
+/// The `tzinfo=...` suffix of a `datetime`/`time` repr; a non-zero offset
+/// normalizes into whole days plus seconds.
 fn tzinfo_repr_suffix(offset: Option<i32>) -> String {
     match offset {
         None => String::new(),
@@ -514,11 +364,8 @@ fn tzinfo_repr_suffix(offset: Option<i32>) -> String {
     }
 }
 
-/// Python's `repr()` for a `timedelta`: `datetime.timedelta(days=D,
-/// seconds=S, microseconds=U)`, each field present only when non-zero, and
-/// `datetime.timedelta(0)` (a bare positional zero, not `days=0`) when all
-/// three are — verified against real Python across zero, negative and
-/// multi-field durations.
+/// Python `repr()` for a `timedelta`: non-zero fields only, and
+/// `datetime.timedelta(0)` when all are zero.
 fn timedelta_repr(value: crate::datetime::TimeDelta) -> String {
     let (days, seconds, microseconds) = (value.days(), value.seconds(), value.microseconds());
 
@@ -585,13 +432,9 @@ fn push_sequence<'a>(
     }
 }
 
-/// Python's `repr()` for a `str`: single quotes unless the string contains a
-/// single quote and no double quote (then double quotes), with `\`, the
-/// wrapping quote and every non-printable code point escaped as `\xXX`,
-/// `\uXXXX` or `\UXXXXXXXX` per [`escape_non_printable`]. Takes WTF-8 bytes
-/// (see [`Str`]) rather than a `&str` so this covers a lone surrogate too —
-/// Python's own `repr()` escapes one exactly like any other non-printable
-/// code point (`\udcXX`).
+/// Python `repr()` for a `str` given as WTF-8 bytes, so a lone surrogate
+/// escapes as `\udcXX`. Uses double quotes only when the text holds a single
+/// quote and no double quote.
 fn python_repr_bytes(bytes: &[u8]) -> String {
     let quote = if bytes.contains(&b'\'') && !bytes.contains(&b'"') {
         '"'
@@ -643,13 +486,8 @@ fn number_repr(n: &Number) -> String {
         .to_string()
 }
 
-/// Whether `c` is one of the code points Python's `repr()` escapes: every
-/// character in Unicode general categories `Cc`, `Cf`, `Cs`, `Co`, `Cn`,
-/// `Zl`, `Zp` or `Zs`, except the plain space (`U+0020`), which is `Zs` but
-/// stays printable. This is `CPython`'s own rule
-/// (`Tools/unicode/makeunicodedata.py`'s `PRINTABLE_MASK`, read from the
-/// `unicode-general-category` table pinned to Unicode 16.0.0 — the same
-/// version Python 3.14's `unicodedata` module ships).
+/// Whether Python's `repr()` escapes `c`: general categories `Cc`, `Cf`, `Cs`,
+/// `Co`, `Cn`, `Zl`, `Zp` and `Zs`, except the plain space.
 fn is_non_printable(c: char) -> bool {
     if c == ' ' {
         return false;
@@ -667,9 +505,8 @@ fn is_non_printable(c: char) -> bool {
     )
 }
 
-/// Appends `c`'s `repr()` escape to `out`: `\xXX` below `U+0100`, `\uXXXX`
-/// up to `U+FFFF`, `\UXXXXXXXX` above — the same three widths
-/// `Objects/unicodeobject.c`'s `unicode_repr` picks by.
+/// Appends `c`'s `repr()` escape: `\xXX` below `U+0100`, `\uXXXX` up to
+/// `U+FFFF`, `\UXXXXXXXX` above.
 fn escape_non_printable(out: &mut String, c: char) {
     let code_point = u32::from(c);
     // Writing into a `String` is infallible.
@@ -682,25 +519,10 @@ fn escape_non_printable(out: &mut String, c: char) {
     };
 }
 
-/// Python's `repr()` for a `float`, which is `float_repr_style="short"`: the
-/// shortest decimal string that round-trips, formatted with an exponent
-/// when the decimal point sits at or below `-4` or above `16`, and with a
-/// `.0` suffix otherwise so the result always reads as a float.
-///
-/// # Why this is two formatting calls, not one
-///
-/// `CPython`'s `repr` is `dtoa` mode 0: among the shortest digit strings
-/// that round-trip, the one *nearest* the float's exact value, ties broken
-/// to an even last digit. Rust's `{:e}` produces a shortest string that
-/// round-trips, which fixes the digit *count* but not always the last
-/// digit: about one float in 3,800 sits close enough to a midpoint that
-/// the two disagree (`160598971591683.12` renders as `...13`). So the digit
-/// count comes from `{:e}`, and the digits themselves from a second,
-/// fixed-precision `{:.*e}` at that count — Rust's exact mode, which is
-/// correctly rounded with ties to even, i.e. mode 0's own rule. Both calls
-/// are in `core::fmt`; no arbitrary-precision arithmetic and no dependency
-/// is involved. Verified against real Python `repr()` over a million random
-/// bit patterns in the bindings suite.
+/// Python `repr()` for a `float`: the shortest round-tripping digits, in
+/// exponent form when the decimal point sits at or below `-4` or above `16`.
+/// The digit count comes from `{:e}`; the digits from `{:.*e}` at that count,
+/// correctly rounded with ties to even.
 pub(crate) fn python_float_repr(value: f64) -> String {
     if !value.is_finite() {
         // `{:e}` has no exponent form for these, so the digit-count logic
@@ -823,16 +645,11 @@ mod tests {
         assert_eq!(quote_key(&"a".into()).to_string(), "'a'");
     }
 
-    /// A key containing a single quote wraps in double quotes, matching
-    /// real `DeepDiff` (verified in the golden corpus: `key_single_quote`).
     #[test]
     fn quote_key_with_single_quote_uses_double_quotes() {
         assert_eq!(quote_key(&"it's".into()).to_string(), "\"it's\"");
     }
 
-    /// A key containing only a double quote (no single quote) wraps in
-    /// single quotes, with the double quote left bare — no escaping
-    /// (golden: `key_double_quote`).
     #[test]
     fn quote_key_with_double_quote_only_uses_single_quotes_unescaped() {
         assert_eq!(
@@ -841,22 +658,14 @@ mod tests {
         );
     }
 
-    /// A key containing both quote kinds still wraps in double quotes (the
-    /// single-quote rule takes priority), leaving the inner double quotes
-    /// bare and unescaped — real `DeepDiff` produces this same
-    /// "self-quoting" output rather than escaping it
-    /// (golden: `key_both_quotes`).
     #[test]
     fn quote_key_with_both_quote_kinds_uses_double_quotes_unescaped() {
-        // key: it's "cool"    (single quote after "it", double-quoted "cool")
         let mut key = String::new();
         key.push_str("it's ");
         key.push('"');
         key.push_str("cool");
         key.push('"');
 
-        // expected: "it's "cool""   (whole key re-wrapped in double quotes,
-        // its own inner double quotes left bare and unescaped)
         let mut expected = String::new();
         expected.push('"');
         expected.push_str(&key);
@@ -865,8 +674,6 @@ mod tests {
         assert_eq!(quote_key(&key.as_str().into()).to_string(), expected);
     }
 
-    /// No escaping of any kind: a literal backslash passes through as one
-    /// character, not two (golden: `key_backslash`).
     #[test]
     fn quote_key_does_not_escape_backslashes() {
         assert_eq!(quote_key(&r"a\b".into()).to_string(), r"'a\b'");
@@ -883,7 +690,7 @@ mod tests {
     }
 
     /// A set item renders as its own path segment, with no quoting applied
-    /// on top of [`set_item_repr`]'s own (golden: `set_str_items`).
+    /// on top of [`set_item_repr`]'s own.
     #[test]
     fn set_item_segment_renders_its_text_verbatim() {
         assert_eq!(
@@ -896,11 +703,8 @@ mod tests {
         );
     }
 
-    /// A top-level `str` set item is wrapped in single quotes
-    /// unconditionally and with no escaping — deliberately **not**
-    /// [`quote_key`]'s rule, which would double-quote the second of these
-    /// (golden: `set_str_item_with_single_quote`,
-    /// `set_str_item_with_double_quote`).
+    /// A top-level `str` set item is wrapped in single quotes with no escaping,
+    /// unlike [`quote_key`]'s rule, which would double-quote the second of these.
     #[test]
     fn set_item_str_always_uses_bare_single_quotes() {
         assert_eq!(set_item_repr(&Value::Str("a".into())), "'a'");
@@ -913,7 +717,7 @@ mod tests {
         assert_ne!(
             set_item_repr(&Value::Str("it's".into())),
             quote_key(&"it's".into()).to_string(),
-            "the set-item rule and the dict-key rule genuinely differ"
+            "set-item and dict-key quoting differ"
         );
     }
 
@@ -929,9 +733,7 @@ mod tests {
         );
     }
 
-    /// A `str` nested inside a container item goes through Python `repr()`,
-    /// which *does* escape — the other half of the set-item rule (golden:
-    /// `set_str_inside_tuple_item`).
+    /// A `str` nested in a tuple item is rendered by `python_repr`, which escapes.
     #[test]
     fn str_nested_in_a_tuple_item_uses_python_repr() {
         let tuple = Value::Tuple(Box::new([Value::Str("it's".into())]).into());
@@ -988,9 +790,7 @@ mod tests {
         );
     }
 
-    /// Every float the tie-breaking rule was found to disagree on: Rust's
-    /// own shortest form rounds these away from Python's `repr`, so this
-    /// goes red on a renderer that trusts `{:e}`'s digits.
+    /// Floats near a shortest-form tie render with Python's last digit.
     #[test]
     fn python_float_repr_breaks_shortest_form_ties_pythons_way() {
         let cases = [
@@ -1022,9 +822,7 @@ mod tests {
         );
     }
 
-    /// A container nested several levels deep still renders element by
-    /// element, proving the explicit work-stack composes rather than only
-    /// handling one level.
+    /// A nested container renders element by element.
     #[test]
     fn python_repr_nests_containers() {
         let value = Value::Tuple(
@@ -1084,13 +882,10 @@ mod tests {
         }
     }
 
-    /// Every expectation here is real Python `repr()` output, verified
-    /// against `CPython` 3.14 (Unicode 16.0.0).
     #[test]
     fn python_repr_str_escapes_non_printable_code_points_above_u0100() {
         let cases = [
-            // U+00FF: printable Latin-1, the code point right after the old
-            // below-U+0100 ceiling — left bare, not escaped.
+            // U+00FF: printable Latin-1 — left bare, not escaped.
             ("a\u{ff}b", "'a\u{ff}b'"),
             // U+200B: Cf (zero width space) — \uXXXX width.
             ("a\u{200b}b", r"'a\u200bb'"),
@@ -1107,7 +902,7 @@ mod tests {
             // U+1F600: So, a printable astral emoji — left bare.
             ("a\u{1f600}b", "'a\u{1f600}b'"),
             // U+F0000: Co (a supplementary private-use plane) — \UXXXXXXXX
-            // width, the one the old port could not reach at all.
+            // width.
             ("a\u{f0000}b", r"'a\U000f0000b'"),
             // U+10FFFF: Cn, the last valid Unicode scalar value.
             ("a\u{10ffff}b", r"'a\U0010ffffb'"),
@@ -1131,10 +926,6 @@ mod tests {
         assert_eq!(python_repr(&item), "('a b',)");
     }
 
-    /// Exercises `escape_non_printable` directly, at the two code points
-    /// each escape width's `<` comparison must reject vs. accept: `U+00FF`
-    /// stays `\xXX`, `U+0100` switches to `\uXXXX`; `U+FFFF` stays `\uXXXX`,
-    /// `U+10000` switches to `\UXXXXXXXX`.
     #[test]
     fn escape_non_printable_widths_switch_exactly_at_their_boundaries() {
         let cases = [
@@ -1153,22 +944,16 @@ mod tests {
         }
     }
 
-    /// Fails `make check` if a `unicode-general-category` bump ever changes
-    /// the table `is_non_printable` reads, so a Unicode-version drift is
-    /// caught here rather than only by the Python bindings' own
-    /// interpreter-version-gated differential test (`test_sets.py`'s
-    /// `test_bmp_printability_table_matches_the_running_interpreter_on_3_14`),
-    /// which needs a Python 3.14 interpreter to run at all.
+    /// Fails if a `unicode-general-category` bump changes the table
+    /// `is_non_printable` reads.
     #[test]
     fn unicode_general_category_stays_pinned_to_16_0_0() {
         assert_eq!(unicode_general_category::UNICODE_VERSION, (16, 0, 0));
     }
 
-    /// Python's `repr()` for a calendar value — the form a container holding
-    /// one shows, and the form issue #21 will need once a calendar value may
-    /// be a set member. Every expectation here is real Python `repr()`
-    /// output, including the trailing-field trimming and the way a negative
-    /// offset's `timedelta` normalizes into whole days plus seconds.
+    /// Python's `repr()` for a calendar value, including the trailing-field
+    /// trimming and a negative offset's `timedelta` normalizing into whole
+    /// days plus seconds.
     #[test]
     fn calendar_values_render_as_python_repr() {
         let cases = [
@@ -1240,9 +1025,7 @@ mod tests {
 
     /// Python's `float.__repr__`: always a decimal point or an exponent,
     /// the exponent form at `decpt <= -4` or `decpt > 16`, and an
-    /// exponent of at least two digits with an explicit sign. Every
-    /// expectation here is real Python `repr()` output (see also the
-    /// bindings suite's seeded 1,000-float differential test).
+    /// exponent of at least two digits with an explicit sign.
     #[test]
     fn python_float_repr_matches_python() {
         let cases = [
@@ -1273,9 +1056,7 @@ mod tests {
         }
     }
 
-    /// No escaping of control characters either: newline, tab, NUL, and DEL
-    /// all pass through as their literal (unescaped) characters (golden:
-    /// `key_control_chars`, which combines all four in one key).
+    /// `quote_key` leaves control characters unescaped.
     #[test]
     fn quote_key_does_not_escape_control_characters() {
         let mut key = String::new();

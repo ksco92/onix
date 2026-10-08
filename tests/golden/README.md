@@ -168,7 +168,7 @@ quirks" below). It runs as part of the normal `cargo test` / `make check`.
 - **Unicode:** 16.0.0 via the `unicode-general-category` crate, matching
   CPython 3.14's `unicodedata` table; an older CPython escapes code points
   assigned after its own Unicode version where onix renders them literally
-  (`onix_core::path::python_repr`'s `str` escaping — see
+  (the `str` escaping in `onix_core::path` — see
   `crates/onix-py/tests/test_sets.py`'s BMP differential test).
 
 ## Regenerating
@@ -678,8 +678,8 @@ and `test_differential_fuzz.py`'s subclass-key batch.
 
 - **Key quoting does not escape anything.** `DeepDiff`'s path rendering never
   escapes a backslash, a control character, or an embedded quote character,
-  unlike Python `repr()`. The exact rule, confirmed against
-  `deepdiff==9.1.0`, lives in `onix_core`'s `path::quote_key` doc
+  unlike Python `repr()`. The exact rule lives in `onix_core`'s
+  `path::quote_key` doc
   (`crates/onix-core/src/path.rs`); the `key_single_quote`/
   `key_double_quote`/`key_both_quotes`/`key_backslash`/`key_control_chars`
   golden cases pin it.
