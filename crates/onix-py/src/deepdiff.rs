@@ -114,9 +114,8 @@ impl DeepDiff {
     /// The report as a `DeepDiff`-compatible JSON string at
     /// `verbose_level=2`; a deep report renders on the sized worker thread
     /// rather than inline. Differences from `DeepDiff`'s rendering are
-    /// documented in the onix repository's `tests/golden/README.md`, 'The
-    /// `date` superset', 'The `time`/`timedelta` superset' and 'Set
-    /// iteration order' sections.
+    /// documented in the onix repository's `tests/golden/README.md`, 'JSON
+    /// supersets' and 'Set iteration order' sections.
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
         serialize_value(
             py,
@@ -132,8 +131,7 @@ impl DeepDiff {
     /// depth. Differences from `DeepDiff`'s `to_dict()` are documented in the
     /// onix repository's `tests/golden/README.md`: its 'Normalized versus raw
     /// datetimes' section, 'Fixed-offset `tzinfo` round-trip' point, and its
-    /// 'Known `DeepDiff` quirks' section, '`to_dict()` reports a
-    /// `type_changes` entry's types as names, not classes' point.
+    /// '`to_dict()` type names' section.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         value_to_pyobject(py, &self.report_value)
     }

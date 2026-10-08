@@ -1242,7 +1242,7 @@ fn next_dict_entry<'py>(
 /// Classifies one dict key: a `str` (a UTF-8 one interned), or a scalar per
 /// [`classify_key_scalar`], or a flat `tuple` of scalars; a subclass key
 /// classifies as its base type with no class name. Divergences:
-/// `tests/golden/README.md`, "Subclasses".
+/// `tests/golden/README.md`, "Subclass dict keys".
 fn classify_dict_key(
     key: &Bound<'_, PyAny>,
     dict_path: &[PathSegment],
