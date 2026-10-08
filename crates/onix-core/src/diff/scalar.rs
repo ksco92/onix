@@ -12,15 +12,8 @@ use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
 
 use super::check_value_depth;
 
-/// The base-type name for a given [`Value`], ignoring any subclass name it
-/// carries; see [`effective_type_name`] for the name `DeepDiff` actually
-/// reports.
-///
-/// Numbers are split into `"int"` and `"float"` by the compact [`Number`]'s
-/// preserved representation (which carries `serde_json`'s original parse: a
-/// JSON literal with no decimal point or exponent, e.g. `1`, is an int; one
-/// with either, e.g. `1.0`, is a float). This mirrors `DeepDiff`'s default
-/// behavior of treating `1` and `1.0` as different types.
+/// The base-type name for `value`, ignoring any subclass name ([`effective_type_name`] has that).
+/// A number is `"float"` when its literal has a decimal point or exponent, else `"int"`.
 pub(crate) fn python_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "NoneType",
@@ -47,15 +40,8 @@ pub(crate) fn python_type_name(value: &Value) -> &'static str {
 pub(crate) fn effective_type_name(value: &Value) -> String {
     class_name(value).map_or_else(|| python_type_name(value).to_string(), str::to_string)
 }
-/// Builds a single-entry `type_changes` report at `path`, `depth` levels
-/// deep.
-///
-/// Checks both `a` and `b` with [`check_value_depth`] before cloning either
-/// one into the report — either side could be the deeply nested one (e.g. a
-/// list vs number type mismatch where the list is attacker-controlled and
-/// deep) — so a value whose own nesting, combined with `depth`, exceeds the
-/// shared `max_depth` budget is rejected cleanly instead of overflowing the
-/// stack on `.clone()`.
+/// Builds a single-entry `type_changes` report at `path`, depth-checking both values before
+/// cloning either.
 pub(crate) fn type_change_report(
     path: &[PathSegment],
     a: &Value,
@@ -79,15 +65,8 @@ pub(crate) fn type_change_report(
     );
     Ok(report)
 }
-/// Builds either an empty report (`equal`) or a single-entry
-/// `values_changed` report at `path`, `depth` levels deep.
-///
-/// Same [`check_value_depth`] guard as [`type_change_report`], run only when
-/// `!equal` (the only case that clones anything). Every current caller only
-/// ever passes scalars here (bool/string/number, all inherently depth `0`),
-/// so this can never actually trip today — the check is still here so the
-/// guarantee holds structurally rather than by relying on today's call
-/// graph never changing.
+/// Builds an empty report when `equal`, else a single-entry `values_changed` report at `path`,
+/// depth-checking both values before cloning either.
 pub(crate) fn scalar_diff(
     path: &[PathSegment],
     equal: bool,
@@ -118,14 +97,7 @@ pub(crate) fn scalar_diff(
 /// normalizing each to UTC (`_diff_datetime` -> `datetime_normalize`, with a
 /// naive value stamped as UTC rather than read in local time).
 ///
-/// The normalization is not just a comparison step: `_diff_datetime` assigns
-/// the normalized values back onto the level it then reports, so a
-/// `values_changed` entry carries the pair *as UTC* — `10:00-05:00` is
-/// reported as `15:00+00:00`. This is the one place in the engine a reported
-/// value differs from the input value; every other category (`type_changes`,
-/// the added/removed categories, and the `values_changed` that
-/// `Report::merge_mutual_add_removes` folds a same-path add/remove pair into)
-/// carries the raw value, because it never passes through this function.
+/// A `values_changed` entry carries the pair as UTC: `10:00-05:00` is reported as `15:00+00:00`.
 pub(crate) fn datetime_diff(
     path: &[PathSegment],
     old: DateTime,
@@ -185,16 +157,9 @@ pub(crate) fn numeric_diff(
     }
     scalar_diff(path, numbers_equal(old, new), a, b, depth, max_depth)
 }
-/// The single definition of numeric equality shared by [`numeric_diff`] and
-/// [`values_equal`](super::values_equal), so there is exactly one place these rules live.
-///
-/// An int and a float are never equal (mirroring `DeepDiff` always reporting
-/// that pairing as a `type_changes`, never a numeric comparison). Within the
-/// same kind: floats compare by exact IEEE-754 `==` (see [`floats_equal`]);
-/// ints compare by value across every representation via
-/// [`Number::integer_cmp`], so `9_000_000_000_000_000_000u64` and its `i64`
-/// counterpart — or an arbitrary-precision integer and its equal — compare
-/// equal even though they use different representations.
+/// Numeric equality shared by [`numeric_diff`] and [`values_equal`](super::values_equal): an int
+/// and a float are never equal, floats compare by IEEE-754 `==`, ints by value across
+/// representations ([`Number::integer_cmp`]).
 pub(crate) fn numbers_equal(old: &Number, new: &Number) -> bool {
     if old.is_f64() != new.is_f64() {
         return false;
@@ -212,15 +177,6 @@ pub(crate) fn numbers_equal(old: &Number, new: &Number) -> bool {
         old.integer_cmp(new).is_eq()
     }
 }
-/// Compares two floats for exact equality.
-///
-/// This mirrors Python's `==` semantics for floats: `0.0 == -0.0`, and —
-/// with no special-casing needed — `NaN != NaN` (matching real `DeepDiff`
-/// for two independently-obtained `NaN` values; see `tests/golden/README.md`'s
-/// "Non-finite floats" section for the one case this crate cannot
-/// reproduce, where `DeepDiff` short-circuits on `t1 is t2`), no implicit
-/// epsilon, and `Infinity == Infinity`. Exact IEEE-754 `==` is the correct
-/// (and only) rule here.
 fn floats_equal(a: f64, b: f64) -> bool {
     #[allow(
         clippy::float_cmp,

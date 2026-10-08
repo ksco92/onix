@@ -15,12 +15,9 @@ use crate::report::{Report, ValuesChangedEntry};
 
 use super::{DiffOptions, check_map_depth, check_value_depth, diff_at, scoped};
 
-/// Diffs two dicts (JSON objects) at `path`, `depth` levels deep, matching
-/// `DeepDiff`'s `_diff_dict`: keys unique to one side become
-/// `dictionary_item_removed`/`added` findings, shared keys recurse one level
-/// deeper, and a pair below
-/// [`crate::ignore_order::is_below_threshold_to_diff_deeper`]'s ratio
-/// collapses into one wholesale `values_changed` instead.
+/// Diffs two dicts at `path`, `depth` levels deep: unique keys become leaf findings, shared keys
+/// recurse one level deeper, and a pair below the `threshold_to_diff_deeper` ratio collapses into
+/// one `values_changed`.
 pub(crate) fn object_diff(
     path: &mut Vec<PathSegment>,
     a: &Object,
@@ -29,13 +26,7 @@ pub(crate) fn object_diff(
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
-    // `threshold_to_diff_deeper` collapse — see this function's own doc.
-    // The depth check runs against the borrowed maps, BEFORE either is
-    // cloned into a finding: cloning first and checking after would hand
-    // an attacker-controlled, arbitrarily deep `a`/`b` straight to the
-    // compact `Value`'s natively recursive (but depth-guarded) `Clone` with
-    // no bound in place yet — see `check_map_depth`'s own doc and
-    // `docs/design/value-model.md` on why `Clone` stays recursive.
+    // The depth check runs before either map is cloned into the finding.
     if crate::ignore_order::is_below_threshold_to_diff_deeper(a, b) {
         check_map_depth(path, a, depth, opts.max_depth)?;
         check_map_depth(path, b, depth, opts.max_depth)?;
@@ -45,7 +36,6 @@ pub(crate) fn object_diff(
         report.insert_values_changed(
             path.clone(),
             ValuesChangedEntry {
-                // Both sides are dicts here, never strings, so no `diff`.
                 diff: None,
                 old_value,
                 new_value,
@@ -70,12 +60,7 @@ pub(crate) fn object_diff(
     // kind decides the path segment and report category for the whole walk.
     let kind = a.kind();
 
-    // Stepping into a key — whether it recurses (shared key) or is a leaf
-    // finding (added/removed) — always adds one to depth, matching the
-    // module's depth-counting convention: a shared key's own recursive
-    // `diff_at` call gets `depth + 1` below, and an added/removed key's
-    // `check_value_depth` call needs that same `depth + 1` (the depth its
-    // own path sits at), not the *parent* dict's `depth`.
+    // Added/removed keys are checked at `depth + 1`, the depth their own path sits at.
     for (key, old_value) in a {
         scoped(
             path,
@@ -129,19 +114,9 @@ fn insert_added(report: &mut Report, kind: ObjectKind, path: Vec<PathSegment>, v
     }
 }
 
-/// [`object_diff`]'s walk for the (rare) case where `a` or `b` has a
-/// non-`str` key — kept out of `object_diff`'s own body; see the call
-/// site's doc for why.
-///
-/// A non-`str` key matches across `a` and `b` by Python `==`, not this
-/// crate's own structural `ObjectKey` equality, via
-/// [`crate::ignore_order::match_dict_keys`] — see that function's doc for
-/// the exact rule and `tests/golden/README.md`'s "Reproduced quirks" row "A
-/// dict key matches across two dicts by Python `==`" for the confirmed example
-/// (`{1: "a"}` vs `{1.0: "a2"}` reports `root[1.0]`, `b`'s key form).
-///
-/// The `threshold_to_diff_deeper` collapse and the depth-counting
-/// convention are exactly [`object_diff`]'s own — see that function's doc.
+/// [`object_diff`]'s walk when `a` or `b` has a non-`str` key, which matches across the two by
+/// Python `==` through [`crate::ignore_order::match_dict_keys`]; `{1: "a"}` vs `{1.0: "a2"}`
+/// reports `root[1.0]`.
 fn object_diff_mixed(
     path: &mut Vec<PathSegment>,
     a: &Object,
