@@ -57,8 +57,7 @@ hashes, cast-normalizes, or renders (see `docs/design/row-diff.md`'s "Value
 semantics"/"Per-cell changes" sections and `schema.rs`'s normalization rules), at the same 5 GB-per-side
 target, so fewer, much wider rows (see `_wide_column_specs` for the exact list and
 `WIDE_DEFAULT_ROWS`'s comment for the row-count derivation). Nested types are out (the row diff
-skips a nested non-key column entirely -- see row_diff.rs's "Which column types are hashed,
-refused, or skipped").
+skips a nested non-key column entirely -- see `is_nested` in row_diff.rs).
 
 Four gaps follow from what pyarrow and Parquet can represent, verified empirically against this
 repo's pinned pyarrow, plus one deliberate omission:

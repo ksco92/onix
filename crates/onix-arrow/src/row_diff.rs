@@ -1,37 +1,6 @@
 //! Keyed row diff: which rows were added, removed, or changed between two tables, matched
 //! by a required primary key, in memory proportional to the row count rather than the data
 //! size. See `docs/design/row-diff.md` for the algorithm, hashing, and value-semantics detail.
-//!
-//! - **Hash pass** — hashes every row's key and non-key columns; classifies keys by presence
-//!   and hash equality across the two sides.
-//! - **Materialize pass** — re-reads each side, keeping only added/removed rows and one row
-//!   per duplicate key.
-//! - **Cell pass** — pairs changed rows by key hash and reports each differing cell.
-//!
-//! # Which column types are hashed, refused, or skipped
-//!
-//! - **Hashed** (compared): `Null` (every row a null); boolean; every signed
-//!   and unsigned integer width; `Float16`/`Float32`/`Float64`; `Decimal32`,
-//!   `Decimal64`, `Decimal128`, and `Decimal256` (all by exact value, so equal
-//!   values of different widths or scales hash equal); `Utf8`, `LargeUtf8`,
-//!   `Utf8View`; `Binary`, `LargeBinary`, `BinaryView`, `FixedSizeBinary`;
-//!   `Timestamp` (any unit, with or without a zone); `Date32` and `Date64` (both
-//!   by day count, so a `Date32` and a whole-day `Date64` of the same calendar
-//!   day hash equal; a non-whole-day `Date64`, which Arrow's whole-day contract
-//!   forbids, keeps its raw value distinctly); `Time32` (second, millisecond),
-//!   `Time64` (microsecond, nanosecond), and `Duration` (all normalized to
-//!   nanoseconds, so the same clock time or elapsed span at a different unit
-//!   hashes equal); `Interval` (by its per-variant fields); and a `Dictionary`
-//!   of any of these (decoded first).
-//! - **Refused** with [`TableDiffError::UnsupportedRowType`], key or non-key:
-//!   `RunEndEncoded`, and the `Time32`/`Time64` unit and `FixedSizeBinary` width
-//!   combinations arrow-rs has no array type for (e.g. `Time32(Nanosecond)`, a
-//!   negative fixed-size width). A scalar column is always hashed or refused,
-//!   never silently skipped.
-//! - **Skipped** (not compared, so a change in it is not reported): a *nested*
-//!   non-key column (`List` and its variants, `FixedSizeList`, `Struct`, `Map`,
-//!   `Union`), which is out of scope for the row diff. A nested *key* column is
-//!   refused.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -104,13 +73,7 @@ macro_rules! accum {
 }
 
 /// A re-openable source of one table's record batches.
-///
-/// The row diff may read a side more than once — to hash every row, then to
-/// materialize the added, removed and changed rows — so it needs a source it can
-/// open more than once rather than a single-use [`RecordBatchReader`]. A caller whose input is a one-shot
-/// reader (a Python Arrow stream, say) spools it to an anonymous temporary Arrow
-/// IPC file first and re-reads that file through a fresh, rewound handle on each
-/// `open`; an in-memory table is re-openable directly (see [`MemoryInput`]).
+/// The diff opens it once per pass.
 pub trait TableInput {
     /// The table's schema, without opening a reader.
     fn schema(&self) -> SchemaRef;
@@ -157,11 +120,7 @@ impl TableInput for MemoryInput {
 
 use crate::error::TableDiffError;
 
-/// The largest exact integer a binary64 float can hold (`2^53`); a float
-/// integral and within `±` this folds to the integer hash form. `onix-core`
-/// carries the identical bound and rationale as `MAX_EXACT_F64_INT` in
-/// `crates/onix-core/src/lcs.rs`; the two crates are decoupled by design, so
-/// this is a deliberate copy that must move with it.
+/// Mirrors onix-core's `MAX_EXACT_F64_INT` in lcs.rs; change both.
 const MAX_EXACT_F64_INT: f64 = 9_007_199_254_740_992.0;
 
 /// Domain-separation tag mixed into a key-column hash, so a key hash and a row
@@ -173,19 +132,14 @@ const DOMAIN_ROW: u8 = 2;
 /// diff to decide whether one column's value differs between two matched rows.
 const DOMAIN_CELL: u8 = 3;
 
-/// The `change` label written for a cell whose value differs. A cell is
-/// reported changed if and only if its [`hash_cell`] contribution differs — the
-/// exact same helper the row hash uses — so `cells_changed` lists precisely the
-/// columns that put a row in the changed set.
+/// The `change` label for a cell whose value differs.
 const CHANGE_VALUE: &str = "value_changed";
 /// The `change` label for a cell non-null on the left and null on the right.
 const CHANGE_BECAME_NULL: &str = "became_null";
 /// The `change` label for a cell null on the left and non-null on the right.
 const CHANGE_BECAME_NON_NULL: &str = "became_non_null";
-/// The `change` label for a cell whose column has a different value domain on
-/// each side (a string versus a number, a timestamp versus a date): the two
-/// values are not comparable, so the difference is reported as a type change
-/// rather than a value change. See [`value_domain`].
+/// The `change` label for a cell whose value domain differs between the sides.
+/// See [`value_domain`].
 const CHANGE_TYPE: &str = "type_changed";
 
 // Per-cell type tags, written before the value so two values of different kinds
@@ -240,8 +194,7 @@ impl RowHasher {
 }
 
 /// One row's keyed 128-bit hash in progress. Values are written little-endian so
-/// the byte stream is stable within a run (cross-run stability is not needed —
-/// the key is per-run).
+/// the byte stream is stable within a run.
 struct CellHasher(SipHasher13);
 
 impl CellHasher {
@@ -327,9 +280,6 @@ struct SideColumns {
 /// Resolves, for one schema, the key columns in the caller's order and the
 /// common non-key columns (present on both sides) in sorted-name order.
 fn side_columns(schema: &Schema, key: &[String], common_values: &[String]) -> SideColumns {
-    // Both sets are already known to exist on this side (the key by
-    // `diff_tables`'s check, the common columns by construction), so
-    // `index_of` never returns `None` on the reachable path.
     let key = key
         .iter()
         .filter_map(|name| schema.index_of(name).ok())
@@ -341,12 +291,9 @@ fn side_columns(schema: &Schema, key: &[String], common_values: &[String]) -> Si
     SideColumns { key, value }
 }
 
-/// The non-key columns compared for row changes: the columns present on both
-/// schemas that are *not* nested on either side, by name, sorted. A column on
-/// only one side is a schema change, never a cell change; a nested column is out
-/// of scope for the row diff and is skipped. A non-nested (scalar) column is
-/// kept even if [`hash_cell`] cannot hash it, so it is refused there rather than
-/// silently skipped. Sorting makes both sides agree on the hashing order.
+/// The non-key columns present on both schemas and nested on neither, sorted by
+/// name so both sides agree on the hashing order. A column on one side only is a
+/// schema change, never a cell change.
 fn common_value_columns(left: &Schema, right: &Schema, key: &[String]) -> Vec<String> {
     let mut names: Vec<String> = left
         .fields()
@@ -365,14 +312,9 @@ fn common_value_columns(left: &Schema, right: &Schema, key: &[String]) -> Vec<St
     names
 }
 
-/// Refuses, up front, every column [`hash_cell`] could not hash if it reached
-/// it: a key column that is not hashable (a nested key, or a scalar the crate
-/// refuses), and any non-key non-nested column that is not hashable (a scalar
-/// the crate refuses, e.g. `RunEndEncoded`, including one present on only one
-/// side). A non-key *nested* column is skipped (out of scope), so it is left
-/// alone here. Running before any batch or empty output is built, this also
-/// keeps `RecordBatch::new_empty` from panicking on an invalid scalar type's
-/// empty array.
+/// Refuses, up front, every key column and every non-nested non-key column that
+/// [`is_hashable`] rejects; a nested non-key column is skipped. Running before any
+/// batch is built keeps `RecordBatch::new_empty` from panicking on an invalid type.
 fn reject_unhashable_columns(schema: &Schema, key: &[String]) -> Result<(), TableDiffError> {
     for field in schema.fields() {
         if is_hashable(field.data_type()) {
@@ -407,17 +349,10 @@ fn is_nested(data_type: &DataType) -> bool {
     )
 }
 
-/// Whether a column of this type can be hashed by value (see [`hash_cell`]): a
-/// scalar type this crate handles, or a dictionary of one. Used to validate key
-/// columns up front — a key of a non-hashable type (nested, or a scalar the
-/// crate refuses such as `RunEndEncoded`) is a
-/// [`TableDiffError::UnsupportedRowType`] before any row is read. The
-/// enumeration matches [`hash_cell`]'s.
+/// Whether `hash_cell` can hash this type (a supported scalar or a dictionary of one).
 ///
-/// Recurses through the dictionary value type, but only after
-/// [`crate::diff_schemas`]'s `check_depths` has rejected any column nested past
-/// [`crate::MAX_NESTING_DEPTH`], so the recursion is bounded and cannot overflow
-/// the native stack.
+/// The recursion through the dictionary value type is bounded by
+/// [`crate::MAX_NESTING_DEPTH`], which [`crate::diff_schemas`] enforces first.
 pub(crate) fn is_hashable(data_type: &DataType) -> bool {
     match data_type {
         DataType::Null
@@ -622,12 +557,9 @@ fn hash_day(hasher: &mut CellHasher, days: i64) {
     hasher.write_i64(days);
 }
 
-/// Writes a `Date64` (milliseconds since epoch). Arrow's contract is a whole
-/// number of days: a whole-day value folds to its day count (via *exact*
-/// division, so it hashes equal to the matching `Date32`), and a
-/// non-whole-day value — which the contract forbids but the hash must still
-/// distinguish — keeps its raw millisecond value under a separate discriminant,
-/// so it neither collides with a day count nor is truncated.
+/// Writes a `Date64`: a whole-day value folds to its day count (equal to the
+/// matching `Date32`); any other value keeps its raw milliseconds under a separate
+/// discriminant.
 fn hash_date64(hasher: &mut CellHasher, ms: i64) {
     if ms % MILLIS_PER_DAY == 0 {
         hash_day(hasher, ms / MILLIS_PER_DAY);
@@ -660,9 +592,7 @@ fn hash_time_like(hasher: &mut CellHasher, tag: u8, nanos: i128) {
     hasher.write_i128(nanos);
 }
 
-/// Hashes a `Time32` cell by its nanoseconds-since-midnight. Only `Second` and
-/// `Millisecond` have a `Time32` array type in arrow-rs; [`is_hashable`] refuses
-/// the other two units before any row is read, so those arms are unreachable.
+/// Hashes a `Time32` cell by its nanoseconds-since-midnight.
 fn hash_time32(hasher: &mut CellHasher, array: &ArrayRef, unit: TimeUnit, row: usize) {
     let raw = match unit {
         TimeUnit::Second => i64::from(array.as_primitive::<Time32SecondType>().value(row)),
@@ -676,10 +606,7 @@ fn hash_time32(hasher: &mut CellHasher, array: &ArrayRef, unit: TimeUnit, row: u
     hash_time_like(hasher, TAG_TIME, unit_nanos(raw, unit));
 }
 
-/// Hashes a `Time64` cell by its nanoseconds-since-midnight. Only `Microsecond`
-/// and `Nanosecond` have a `Time64` array type in arrow-rs; [`is_hashable`]
-/// refuses the other two units before any row is read, so those arms are
-/// unreachable.
+/// Hashes a `Time64` cell by its nanoseconds-since-midnight.
 fn hash_time64(hasher: &mut CellHasher, array: &ArrayRef, unit: TimeUnit, row: usize) {
     let raw = match unit {
         TimeUnit::Microsecond => array.as_primitive::<Time64MicrosecondType>().value(row),
@@ -749,14 +676,10 @@ fn hash_int(hasher: &mut CellHasher, value: i128) {
     hasher.write_i128(value);
 }
 
-/// Writes a float. The integral fold mirrors `scalar_key` in
-/// `crates/onix-core/src/lcs.rs`; every NaN folds to one canonical NaN, and
-/// any other value keeps its raw bits.
+/// Integral floats within ±2⁵³ fold to the integer form, every NaN to one NaN, anything
+/// else hashes by bits; see docs/design/row-diff.md, "Value semantics".
 fn hash_float(hasher: &mut CellHasher, value: f64) {
     if value.is_nan() {
-        // Fold every NaN (any payload, any sign bit) to one canonical NaN, so
-        // two NaNs always compare equal — no NaN-payload difference can be a
-        // change the renderer then cannot show apart.
         hasher.tag(TAG_FLOAT);
         hasher.write_u64(f64::NAN.to_bits());
     } else if value.fract() == 0.0 && value.abs() <= MAX_EXACT_F64_INT {
@@ -770,9 +693,7 @@ fn hash_float(hasher: &mut CellHasher, value: f64) {
 }
 
 /// Writes a decimal by its exact value with trailing decimal zeros removed, so
-/// `1.00` (scale 2) and `1.0000` (scale 4) hash equal. `Decimal128` cells are
-/// widened to `i256` first, so a 128-bit and a 256-bit decimal of the same value
-/// hash equal.
+/// `1.00` (scale 2) and `1.0000` (scale 4) hash equal.
 fn hash_decimal(hasher: &mut CellHasher, mut value: i256, scale: i8) {
     let ten = i256::from_i128(10);
     let mut scale = i32::from(scale);
@@ -798,10 +719,7 @@ fn hash_bytes(hasher: &mut CellHasher, tag: u8, bytes: &[u8]) {
 
 /// Writes a timestamp as its UTC instant in nanoseconds plus a flag for whether
 /// it carries a timezone, so the same instant at different precisions hashes
-/// equal while a naive timestamp stays distinct from an aware one. This mirrors
-/// `onix-core`'s `ScalarKey::DateTime { aware, instant }` in
-/// `crates/onix-core/src/lcs.rs` (instant plus an aware flag); the two are kept
-/// consistent by hand, the crates being decoupled by design.
+/// equal while a naive timestamp stays distinct from an aware one.
 fn hash_timestamp(hasher: &mut CellHasher, raw: i64, unit: TimeUnit, has_tz: bool) {
     hasher.tag(TAG_TS);
     hasher.write(&[u8::from(has_tz)]);
@@ -887,8 +805,6 @@ fn classify(mut left: Vec<(u128, u128)>, mut right: Vec<(u128, u128)>) -> Classi
     let mut li = 0;
     let mut ri = 0;
     loop {
-        // Both cursors exhausted ends the merge; otherwise the next key is the
-        // smaller of the two cursors' keys (or the only remaining one).
         let key = match (left.get(li), right.get(ri)) {
             (Some(&(lk, _)), Some(&(rk, _))) => lk.min(rk),
             (Some(&(lk, _)), None) => lk,
@@ -934,10 +850,8 @@ struct SidePartitions {
 /// One partition's `(key_hash, row_hash)` rows.
 type HashPartition = Vec<(u128, u128)>;
 
-/// The most key-hash partitions the parallel path uses, independent of the
-/// worker count. Partitions set the classify-pass parallelism and the number of
-/// shared per-partition buffers; capping them keeps that count constant so it
-/// never grows with (and is never multiplied by) the worker count.
+/// The most key-hash partitions the parallel path uses; the count never grows with,
+/// and is never multiplied by, the worker count.
 const MAX_PARTITIONS: usize = 64;
 
 /// The partition count for a given worker count: the workers, capped so the
@@ -946,8 +860,7 @@ fn partition_count(threads: usize) -> usize {
     threads.clamp(1, MAX_PARTITIONS)
 }
 
-/// The column names, hasher, and worker count the hash pass needs, bundled so
-/// the pass entry points stay below the argument threshold.
+/// The column names, hasher, and worker count the hash pass needs.
 struct HashConfig<'a> {
     key_names: &'a [&'a str],
     value_names: &'a [&'a str],
@@ -1164,15 +1077,12 @@ fn hash_parallel(
 /// whole side is buffered and small).
 type PeekedSide = (Vec<RecordBatch>, Box<dyn RecordBatchReader + Send>, bool);
 
-/// The byte bound on a side's peek: reaching it (before the row bound) marks the
-/// side large, because the parallel setup cost is negligible against this much
-/// decoded data, and it caps the peek buffer's memory regardless of cell width.
+/// The decoded-byte bound on a side's peek; reaching it marks the side large.
 const MAX_PEEK_BYTES: usize = 64 * 1024 * 1024;
 
 /// Reads from `reader` into a buffer until it reaches [`MIN_PARALLEL_ROWS`] rows
 /// or [`MAX_PEEK_BYTES`] of decoded data (marking the side large), or the reader
-/// is exhausted first (marking it small). Bounding by bytes as well as rows
-/// keeps the peek buffer bounded no matter how wide the cells are.
+/// is exhausted first (marking it small).
 fn peek_side(mut reader: Box<dyn RecordBatchReader + Send>) -> Result<PeekedSide, TableDiffError> {
     let max_rows = min_parallel_rows();
     let mut buffered = Vec::new();
@@ -1238,24 +1148,15 @@ fn hash_reader_and_prefix(
 type BatchHook<'a> =
     dyn Fn(u64, &RecordBatch, &[(u128, u128, bool)]) -> Result<(), TableDiffError> + Sync + 'a;
 
-/// The shared, per-partition destination the hash-pass workers append into
-/// directly, so the per-row hashes are never copied a second time into a
-/// combined layout: each worker holds only one batch's worth of buffered rows
-/// at a time, and the resident hash vectors are exactly one copy per side.
+/// The shared per-partition destination the hash-pass workers append into.
 struct SharedSink {
     parts: Vec<Mutex<HashPartition>>,
     null_keys: Mutex<HashSet<u128>>,
 }
 
-/// Streams one reader across `config.threads` workers, hashing each batch and
-/// appending its rows straight into the shared per-partition buffers by key
-/// hash. Only the fixed-size hashes are retained (one copy per side), plus at
-/// most one batch's rows buffered per worker before each flush — the parallel
-/// path's only memory term over the single-threaded hash vectors. `hook` runs
-/// on the worker with each batch's first-row position and row hashes; with
-/// `keep_pairs` false only the null keys are kept. Joins every worker on every
-/// exit path (including a read error) so a concurrent worker panic surfaces as
-/// [`TableDiffError::WorkerPanicked`], never an abort.
+/// Streams one reader across `config.threads` workers into the shared
+/// per-partition buffers, each worker holding at most one batch's rows. Joins
+/// every worker on every exit path, so a panic is [`TableDiffError::WorkerPanicked`].
 fn hash_side_parallel(
     prefix: Vec<RecordBatch>,
     reader: Box<dyn RecordBatchReader + Send>,
@@ -1288,9 +1189,6 @@ fn hash_side_parallel(
             let rx = Arc::clone(&rx);
             let sink = &sink;
             handles.push(scope.spawn(move || -> Result<(), TableDiffError> {
-                // One batch's rows, bucketed by partition, reused across
-                // batches and flushed into the shared buffers after each batch,
-                // so a worker never holds more than one batch's hashes.
                 let mut local: Vec<HashPartition> = (0..partitions).map(|_| Vec::new()).collect();
                 let mut local_nulls = HashSet::new();
                 loop {
@@ -1332,8 +1230,6 @@ fn hash_side_parallel(
         // gone) lets the send below fail instead of blocking.
         drop(rx);
         let mut read_err = None;
-        // Feed the peeked prefix batches first, then the rest of the reader, so
-        // the workers see the whole side in order.
         'feed: {
             let mut at = 0u64;
             let mut send = |batch: RecordBatch| {
@@ -1430,11 +1326,7 @@ fn join_results<T>(
 }
 
 /// Opens one side and streams its batches, handing each batch and its per-row
-/// key hashes to `visit`. The shared skeleton of both materialize passes (the
-/// added/removed pass and the per-cell changed pass): each opens the source,
-/// decodes the key columns of every batch, and hashes each row's key — the
-/// callers differ only in how they use the hashes (which membership set they
-/// test, whether they capture duplicates or project the batch).
+/// key hashes to `visit`.
 fn for_each_batch_with_key_hashes<F>(
     source: &impl TableInput,
     key_columns: &[usize],
@@ -1512,15 +1404,9 @@ where
     outcome
 }
 
-/// The parallel counterpart of [`for_each_batch_with_key_hashes`]: a reader
-/// thread feeds batches in order to a pool of `threads` workers over a bounded
-/// channel; each worker hashes a batch's key columns and runs `prep` on it, and
-/// the results flow back over a second bounded channel, reordered by batch index
-/// so `visit` runs on this thread in batch order. Both channels are bounded by
-/// `threads`, so at most a few batches per worker are ever in flight. A read
-/// error, a `prep` or `visit` error, or a worker panic aborts the scan: the
-/// `stop` flag and the drain release every blocked thread so the scope can join
-/// without deadlocking.
+/// The parallel counterpart of [`for_each_batch_with_key_hashes`]: a reader thread
+/// feeds `threads` workers over bounded channels, and `visit` runs on this thread
+/// in batch order. An error or worker panic stops the scan and drains the channels.
 fn for_each_batch_key_hashed_parallel<T, P, F>(
     source: &impl TableInput,
     key_columns: &[usize],
@@ -1612,11 +1498,8 @@ where
         drop(fwd_rx);
         drop(back_tx);
 
-        // Run the consumer with panic protection: `visit` runs on this thread,
-        // and if it (or the reorder loop) panics, the producers would block on
-        // the full channels forever and `thread::scope` would hang joining them.
-        // On a panic, set `stop`, drain the back channel to release every
-        // producer, then re-raise — an unwind, never a hang.
+        // A consumer panic would leave producers blocked on full channels: stop,
+        // drain, re-raise.
         let consume = || consume_reordered(&back_rx, &stop, &mut visit);
         let mut outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(consume)) {
             Ok(outcome) => outcome,
@@ -1951,8 +1834,6 @@ fn dup_key_schema(left: &Schema, key: &[String]) -> (SchemaRef, Vec<DataType>) {
     let mut fields = Vec::with_capacity(key.len() + 2);
     let mut output_types = Vec::with_capacity(key.len());
     for name in key {
-        // The key exists on the left (checked by `diff_tables`), so this
-        // lookup succeeds on the reachable path.
         let data_type = left
             .index_of(name)
             .ok()
@@ -2720,11 +2601,9 @@ struct SideSpill {
     key_hashes: Vec<Vec<u128>>,
 }
 
-/// The left side's spill plus, per partition, each row's global changed-row
-/// index (its position in scan order — the output's stable tiebreak and the
-/// index into `left_keys`), and the key columns of every changed row in scan
-/// order (`left_keys`), from which the output's typed key columns and sort
-/// renderings are built.
+/// The left side's spill, each changed row's global scan-order index per
+/// partition (the output's tiebreak and its index into `left_keys`), and the
+/// key columns of every changed row.
 struct LeftSpill {
     spill: SideSpill,
     global_index: Vec<Vec<u32>>,
@@ -3133,11 +3012,9 @@ struct FirstRow {
 /// Per key-hash partition, every right key absent from the left.
 type AbsentKeys = Vec<Mutex<HashMap<u128, FirstRow>>>;
 
-/// A right-side batch's added candidates, captured by the parallel hash pass so
-/// the right is never read again: the position of the batch's first row, the
-/// key columns of the rows kept for keys absent from the left with those rows'
-/// indices and key hashes, and, at full width, the kept rows at `full_rows`
-/// (those whose key had not repeated when last compacted).
+/// A right batch's added candidates: the position of its first row, the key
+/// columns, indices and key hashes of rows whose key is absent from the left, and,
+/// at full width, the rows at `full_rows` (key not repeated when last compacted).
 struct Candidate {
     at: u64,
     keys: RecordBatch,
@@ -3178,14 +3055,8 @@ struct RightCapture {
     spill: SideSpill,
 }
 
-/// The per-batch step of the right side's parallel hash pass, run on the
-/// workers against the indexed left, where every row is tallied (see
-/// [`KeyIndex::tally`]). A key absent from the left is counted in `absent`, and
-/// its first right row is kept as an added candidate, reduced to its key
-/// columns once the key repeats; the first right row of a key the left holds
-/// once with a different row hash is spilled for the cell pass, even if the
-/// right repeats the key later (making it a duplicate); any other row is
-/// unchanged, or a duplicate.
+/// The per-batch step of the right side's parallel hash pass, run on the workers
+/// against the indexed left. See `docs/design/row-diff.md`, "Algorithm".
 struct RightFuse<'a> {
     index: &'a KeyIndex,
     key_columns: &'a [usize],
@@ -3726,8 +3597,6 @@ fn emit_partition(
         .enumerate()
         .map(|(row, &hash)| (hash, row as u32))
         .collect();
-    // A changed key is present once on each side, so a miss is only a
-    // ~n²/2¹²⁸ hash collision; such a row is skipped, never paired.
     let right_rows: UInt32Array = data
         .left_key_hashes
         .iter()
@@ -3968,16 +3837,11 @@ fn diff_cells_streaming(
     let mut order: Vec<usize> = (0..ctx.common_values.len()).collect();
     order.sort_by_key(|&j| ranks[j]);
 
-    // Render every changed left row's key columns for the output's sort key.
     let key_renders = pass!(
         "cell: render sort keys",
         render_key_arrays(&left_spill.left_keys, key_count)?
     );
 
-    // Each partition emits its changed cells into its own output arrays; the
-    // per-partition arrays together are exactly one copy of the output. Holding
-    // them (rather than one growing set of builders) keeps the reorder below to
-    // one source and one destination copy at a time — see the build step.
     let mut gidx: Vec<u32> = Vec::new();
     let mut crank: Vec<u32> = Vec::new();
     let mut bounds: Vec<u32> = Vec::with_capacity(partitions + 1);
@@ -4038,8 +3902,7 @@ fn diff_cells_streaming(
     )
 }
 
-/// The output columns and the keys the final reorder needs, moved out of
-/// [`diff_cells_streaming`] so its body stays within the line budget.
+/// The output columns and the keys the final reorder needs.
 struct Reorder {
     key_renders: Vec<ArrayRef>,
     gidx: Vec<u32>,
@@ -4097,9 +3960,6 @@ fn reorder_output(
         let taken = arrow_select::take::take(&cast, &key_take, None).map_err(|e| read_error(&e))?;
         columns.push(taken);
     }
-    // Reorder the four cell columns, dropping each column's per-partition sources
-    // once it is built; the sources (one copy of the output) and the built
-    // columns (up to another) bound the reorder at about twice the output.
     cell_columns.reorder_into(&sources, &mut columns)?;
     RecordBatch::try_new(out_schema.clone(), columns).map_err(|e| read_error(&e))
 }
@@ -4206,7 +4066,7 @@ pub(crate) fn diff_rows(
     let setup_guard = crate::profile::enter("set-up");
     let hasher = RowHasher::new()?;
 
-    // Refuse unhashable columns of either full schema up front (see the fn doc).
+    // Refuse unhashable columns of either full schema up front.
     reject_unhashable_columns(left_schema, key)?;
     reject_unhashable_columns(right_schema, key)?;
 
