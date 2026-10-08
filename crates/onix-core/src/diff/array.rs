@@ -15,33 +15,14 @@ use super::{
     normalized_pair, python_type_name, scoped,
 };
 
-/// Diffs two lists (JSON arrays) at `path`, `depth` levels deep.
-///
-/// Dispatches between two candidate algorithms, matching `DeepDiff`'s own
-/// `_diff_iterable_in_order` dispatch exactly (see `docs/design/list-diff.md`
-/// for the full spec):
-///
-/// - **When every element of *both* `a` and `b` is a scalar** (null, bool,
-///   number, string, plus datetime and date — `DeepDiff`'s "basic hashable"
-///   check, see [`crate::lcs::all_basic_scalars`]), an LCS/`difflib`-style "cheapest
-///   edit" match ([`lcs_array_diff`]) is tried first. `DeepDiff` only trusts
-///   that match unconditionally when it produces at most one finding;
-///   otherwise it *also* computes the plain index-aligned result below and
-///   keeps whichever has **fewer total findings**, favoring the
-///   index-aligned one on a tie — replicated exactly here via
-///   [`Report::finding_count`].
-/// - **Otherwise** (either list contains a dict or a nested list anywhere),
-///   [`positional_array_diff`] alone is used, unconditionally — `DeepDiff`
-///   never even attempts the LCS match in this case.
+/// Diffs two lists at `path`, `depth` levels deep: an LCS match when both hold only scalars,
+/// else the index-aligned comparison. See `docs/design/list-diff.md`, "Condition and candidate
+/// selection".
 ///
 /// # Stack-footprint note
 ///
-/// In an unoptimized build a function's stack frame is sized for every local
-/// it declares, so keeping the scalar-branch's two [`Report`] locals in
-/// `array_diff` would enlarge every frame of the nested-list recursion
-/// below. Keeping them in [`lcs_or_positional_array_diff`] instead is what
-/// lets `DEFAULT_MAX_DEPTH` traversal fit an ordinary 2 MiB thread — see
-/// `docs/design/depth-budget.md`.
+/// The scalar branch's [`Report`] locals live in [`lcs_or_positional_array_diff`], off this
+/// recursion's frame, so `DEFAULT_MAX_DEPTH` traversal fits a 2 MiB thread.
 pub(crate) fn array_diff(
     path: &mut Vec<PathSegment>,
     a: &[Value],
@@ -59,10 +40,6 @@ pub(crate) fn array_diff(
         positional_array_diff(path, a, b, depth, opts, memo)
     }
 }
-/// The scalar-only-list candidate computation [`array_diff`] dispatches to
-/// — split out purely to keep `array_diff`'s own stack frame (on the *hot*
-/// native-recursion path for every list, scalar-only or not) small; see
-/// that function's "Stack-footprint note".
 fn lcs_or_positional_array_diff(
     path: &mut Vec<PathSegment>,
     a: &[Value],
@@ -72,21 +49,6 @@ fn lcs_or_positional_array_diff(
     memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     let lcs_report = lcs_array_diff(path, a, b, depth, opts.max_depth)?;
-    // The `> 1` here is a verified-equivalent boundary: replacing it with
-    // `>= 1` cannot change any output (a mutation there survives as an
-    // equivalent mutant). With 0 LCS findings the lists are equal and both
-    // thresholds return the LCS report unchanged; with >= 2 findings both take
-    // the positional-comparison branch below identically. The only value the
-    // two thresholds treat differently is exactly 1 LCS finding. A single LCS
-    // finding is one single-element edit (one changed element, or one element
-    // inserted/removed). If that edit is a same-length change or a tail
-    // insert/remove, the positional report the `>= 1` variant would compute is
-    // *the same single finding* at the same index, so returning it changes
-    // nothing; any non-tail insert/remove instead shifts every following
-    // index, giving the positional report >= 2 findings, so `1 >=
-    // positional_count` is false and the LCS report is returned regardless.
-    // Confirmed by ~1.7M scalar-list pairs (zero difference between the two
-    // thresholds) and by DeepDiff 9.1.0 parity at the boundary shapes.
     if lcs_report.finding_count() > 1 {
         let positional_report = positional_array_diff(path, a, b, depth, opts, memo)?;
         if lcs_report.finding_count() >= positional_report.finding_count() {
@@ -95,9 +57,6 @@ fn lcs_or_positional_array_diff(
     }
     Ok(lcs_report)
 }
-/// One pair matched by an LCS `'replace'` opcode's pairwise comparison,
-/// bundled into a struct so [`insert_lcs_pair_finding`]'s signature stays
-/// under clippy's argument-count lint.
 #[derive(Clone, Copy)]
 struct LcsPair<'a> {
     old_idx: usize,
@@ -105,44 +64,10 @@ struct LcsPair<'a> {
     old_value: &'a Value,
     new_value: &'a Value,
 }
-/// Records the `values_changed` or `type_changes` finding for one pair
-/// matched by an LCS `Replace` opcode (see [`lcs_array_diff`]), at
-/// `old_idx`, attaching [`ValuesChangedEntry::new_path`] whenever `new_idx`
-/// differs from `old_idx`.
-///
-/// A `Replace` opcode's two index ranges never share a [`crate::lcs`]-equal
-/// (Python-`==`-equal) element pair (see `crate::lcs::compute_opcodes`'s
-/// doc), and for every scalar kind but one this engine's own equality is at
-/// least as strict as Python's (it additionally distinguishes int/float and
-/// bool/int, which Python's `==` does not), so the pair is always different
-/// by *this engine's* equality too and exactly one finding is recorded.
-///
-/// **Datetimes are the one kind where Python's `==` is the stricter of the
-/// two**: it never equates a naive value with an aware one, while this
-/// engine (like `_diff_datetime`) reads a naive value as UTC and compares by
-/// instant. So a naive/aware pair at the same moment does reach this
-/// function, and must record *nothing* — which is also what keeps
-/// [`lcs_or_positional_array_diff`]'s finding-count comparison matching
-/// `DeepDiff`'s. That branch is also where the pair picks up the
-/// UTC-normalized rendering [`datetime_diff`](super::datetime_diff) documents.
-///
-/// Checks [`check_traversal_depth`] at `depth + 1` (this pair's own path
-/// depth) before recording anything — the same bound
-/// [`positional_array_diff`]'s equivalent same-index pair enforces by
-/// recursing through [`diff_at`] (whose own top check *is*
-/// [`check_traversal_depth`]). This finding is reached without ever calling
-/// `diff_at`, so without this explicit check it would silently accept a
-/// pairwise difference one level deeper than `max_depth` permits.
-///
-/// No [`check_value_depth`] guard is needed here (unlike every other
-/// clone-into-[`Report`] sink in this module): both values are guaranteed
-/// to be JSON scalars by [`array_diff`]'s own dispatch condition, and a
-/// scalar's intrinsic nesting is always `0` — [`check_value_depth`] can
-/// structurally never reject a scalar, at any `depth`/`max_depth`, so a
-/// call here would be dead-weight guard code with no reachable failure
-/// path (and an unkillable `cargo mutants` mutant to go with it). This is
-/// exactly the traversal-depth-vs-value-depth distinction
-/// [`check_traversal_depth`]'s doc draws.
+/// Records the `values_changed` or `type_changes` finding for one pair matched by an LCS
+/// `Replace` opcode, at `old_idx`, with `new_path` set when `new_idx` differs. A naive/aware
+/// datetime pair at the same instant records nothing. Checks traversal depth only. See
+/// `docs/design/list-diff.md`, "Opcode-to-finding mapping".
 fn insert_lcs_pair_finding(
     report: &mut Report,
     path: &mut Vec<PathSegment>,
@@ -194,7 +119,6 @@ fn insert_lcs_pair_finding(
                 report.insert_values_changed(
                     path.clone(),
                     ValuesChangedEntry {
-                        // Datetimes are never strings, so `_diff_str` never runs.
                         diff: None,
                         old_value: Value::DateTime(old_norm.into()),
                         new_value: Value::DateTime(new_norm.into()),
@@ -233,27 +157,9 @@ fn insert_lcs_pair_finding(
         Ok(())
     })
 }
-/// Diffs two lists of JSON scalars via a `difflib`-style LCS match — see
-/// [`array_diff`]'s doc for when this is tried, and `docs/design/list-diff.md`
-/// for the opcode-to-finding mapping this implements (a direct port of
-/// `deepdiff/diff.py::_diff_ordered_iterable_by_difflib`).
-///
-/// The only possible [`Error::MaxDepthExceeded`] source is
-/// [`insert_lcs_pair_finding`]'s traversal-depth check on a `'replace'`
-/// pair. `'delete'`/`'insert'` findings need **no** depth guard at all
-/// (unlike every other clone-into-[`Report`] sink in this module,
-/// including [`positional_array_diff`]'s own surplus tail, which still
-/// calls [`check_value_depth`] defensively): every value reaching this
-/// function is a JSON scalar, guaranteed by [`array_diff`]'s dispatch
-/// condition, and a scalar's intrinsic nesting is always `0` — exactly the
-/// reasoning [`insert_lcs_pair_finding`]'s own doc gives for skipping the
-/// same check on its `'replace'` pairs. Calling it here too would only add
-/// dead-weight guard code with no reachable failure path (and an unkillable
-/// `cargo mutants` mutant to go with it).
-///
-/// `path` is the shared traversal buffer (see [`diff_at`]'s doc); every
-/// finding below is recorded through [`scoped`], so `path` is restored to
-/// its entry state before returning, on every path (success or error).
+/// Diffs two scalar lists via a `difflib`-style LCS match; see `docs/design/list-diff.md`,
+/// "Opcode-to-finding mapping". Only [`insert_lcs_pair_finding`] can return
+/// [`Error::MaxDepthExceeded`].
 fn lcs_array_diff(
     path: &mut Vec<PathSegment>,
     a: &[Value],
@@ -321,41 +227,10 @@ fn lcs_array_diff(
 
     Ok(report)
 }
-/// The plain index-aligned list comparison: for every index present in
-/// *both* `a` and `b`, the pair at that index recurses through the engine's
-/// own internal dispatch one level deeper with the index appended to the
-/// path (so a changed, type-changed, or further-nested-container
-/// difference at that index surfaces with its own deep path, exactly like
-/// [`object_diff`](super::object_diff)'s shared-key recursion). Once the shorter list is
-/// exhausted, the longer list's surplus tail becomes
-/// `iterable_item_removed` findings (if `a` is longer) or
-/// `iterable_item_added` findings (if `b` is longer), one per surplus index,
-/// keyed by that index's *original* position in the longer list — e.g.
-/// removing index `3` of a 4-element list reports `root[3]`, not `root[0]`
-/// relative to the surplus.
-///
-/// This is [`array_diff`]'s *only* algorithm whenever either list contains
-/// a non-scalar element, and the tie-break/fallback candidate compared
-/// against [`lcs_array_diff`]'s result otherwise — see [`array_diff`]'s
-/// doc.
-///
-/// Like [`object_diff`](super::object_diff), this always recurses into same-index pairs rather
-/// than re-checking [`values_equal`](super::values_equal) first — the top-level equality check in
-/// [`diff_with_max_depth`](super::diff_with_max_depth) alone is enough (`docs/design/depth-budget.md`).
-///
-/// Every surplus-tail clone is checked with [`check_value_depth`] first,
-/// exactly like [`object_diff`](super::object_diff)'s added/removed leaf clones: a surplus
-/// element can itself be an arbitrarily deep value, so the same combined
-/// path-depth-plus-value-depth budget applies here too (see
-/// `docs/design/depth-budget.md` for the full contract).
-///
-/// `path` is the single buffer shared across the whole traversal (see
-/// [`diff_at`]'s doc): each iteration below runs its work through
-/// [`scoped`], which pushes the index segment, runs the closure with that
-/// segment in place, then pops it again before moving to the next index —
-/// restoring `path` to exactly what it was on entry before touching any
-/// sibling, so one sibling's finding never leaks a stale segment into
-/// another's path.
+/// The index-aligned comparison: same-index pairs recurse through [`diff_at`]; the longer list's
+/// surplus tail becomes `iterable_item_removed`/`iterable_item_added` at its original indices.
+/// Each surplus clone is checked with [`check_value_depth`] first
+/// (`docs/design/depth-budget.md`).
 fn positional_array_diff(
     path: &mut Vec<PathSegment>,
     a: &[Value],
@@ -367,10 +242,6 @@ fn positional_array_diff(
     let mut report = Report::new();
     let min_len = a.len().min(b.len());
 
-    // Index-aligned recursion, same depth-counting convention as
-    // object_diff: stepping into an index — whether it recurses (present on
-    // both sides) or is a leaf finding (surplus tail) — always adds one to
-    // depth.
     for i in 0..min_len {
         let sub_report = scoped(path, PathSegment::Index(i), |path| {
             diff_at(path, &a[i], &b[i], depth + 1, opts, memo)
