@@ -824,34 +824,10 @@ def render_depth_ceiling_note() -> str:
 
     return """## Finding: onix's practical depth ceiling is lower than expected
 
-The `deep_narrow_dN` fixture's target depth was originally set to
-~500, gated by DeepDiff's own Python recursion limit. Two independent ceilings were
-empirically probed while building this fixture (see
-`perf/generate_fixtures.py`'s `DEEP_NESTING_DEPTH` constant):
-
-- **Real DeepDiff 9.1.0** (default `sys.getrecursionlimit() == 1000`) on
-  this single-chain dict shape raises `RecursionError` starting at
-  **~depth 495**: probed at 495 (succeeds) and 496 (fails) on this
-  machine, but this is a Python C-stack-depth limit, not a pure
-  Python-frame-count one, so the exact boundary can shift by a few levels
-  run to run depending on intervening C-stack usage. Treat "~495" as an
-  approximate, not exact, ceiling.
-- **`onix-cli`'s actual ceiling is much lower and IS exact: 126**, and it
-  fails to *parse*, not diff. `onix-cli` parses with `serde_json`'s default
-  (non-`unbounded_depth`) parser, which hard-caps at 128 levels of *parser*
-  recursion, completely independent of `onix_core::diff_with_max_depth`'s
-  own `--max-depth`/`DEFAULT_MAX_DEPTH` guard (512 by default), which never
-  even gets exercised here because parsing fails first. This is documented
-  in `onix-cli`'s own rustdoc (the `run` function's "Stack safety on
-  adversarially deep input" section, `crates/onix-cli/src/run.rs`) as
-  expected behavior, not a bug. It means **onix's real depth ceiling
-  for JSON-file input is `serde_json`'s 128, not the 512 the CLI flag
-  suggests**, and it is the *tighter* of the two tools' ceilings, not the
-  looser ~500 originally anticipated.
-
-`deep_narrow_d120` was sized (120, with margin) to a depth both tools can
-following this harness's own guiding principle: report the depth
-ceiling of each rather than forcing an arbitrary large target like 20k.
+DeepDiff 9.1.0 raises `RecursionError` near depth 495 at the default
+recursion limit. `onix-cli` fails to parse past 128 levels (`serde_json`'s
+recursion limit, see `crates/onix-cli/src/run.rs`), whatever `--max-depth`
+is. `deep_narrow_d120` uses depth 120, which both tools handle.
 """
 
 
