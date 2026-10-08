@@ -3,53 +3,8 @@
 //! again — built *directly*, no intermediate `serde_json::Value` tree, so
 //! the two input trees only ever exist in this memory-frugal form.
 //!
-//! # Supported types (documented MVP scope)
-//!
-//! | Python | `Value` | Notes |
-//! | --- | --- | --- |
-//! | `None` | `Null` | |
-//! | `bool` | `Bool` | checked before `int` — `bool` is a Python `int` subclass |
-//! | `int` | `Number` | any magnitude — `i64`/`u64` fast path, arbitrary precision beyond it |
-//! | `float` | `Number` | `NaN`/`Infinity`/`-Infinity` included |
-//! | `str` | `Str` | UTF-8 the fast, common way; a lone surrogate code point survives too, see below |
-//! | `dict` (keys below), or a subclass | `Object` | a UTF-8 `str` key interned across the whole walk (a lone-surrogate key is not) |
-//! | `list`, or a subclass | `Array` | |
-//! | `tuple`, or a subclass (including a `namedtuple`) | `Tuple` | diffed positionally even for a `namedtuple` — `tests/golden/README.md`'s "Known `DeepDiff` quirks" section, its "A `namedtuple` is diffed positionally" point |
-//! | `set`, or a subclass | `Set` | members restricted, see below |
-//! | `frozenset`, or a subclass | `FrozenSet` | members restricted, see below |
-//! | `datetime.datetime`, or a subclass (e.g. pandas `Timestamp`) | `DateTime` | naive or any `tzinfo` — `tests/golden/README.md`'s "Normalized versus raw datetimes" section, its "Fixed-offset `tzinfo` round-trip" point |
-//! | `datetime.date`, or a subclass | `Date` | |
-//! | `datetime.time`, or a subclass | `Time` | naive or any `tzinfo`, same point as `datetime.datetime` above |
-//! | `datetime.timedelta`, or a subclass | `TimeDelta` | |
-//! | any other object | `Object` (custom) | diffed by its attributes, see below |
-//!
-//! Every subclass's classification and comparison rules (a `set`/`frozenset` member excepted,
-//! see below): `docs/design/value-model.md`'s and `docs/design/value-conversion.md`'s
-//! "Subclasses" sections. An `int` of any magnitude converts exactly through [`exact_big_int`],
-//! matching `DeepDiff`.
-//!
-//! Every other type raises a Python exception instead of converting:
-//!
-//! - A `dict` key outside `str`/`None`/`bool`/`int`/`float`/`datetime`/`date`
-//!   (or a `tuple`/`datetime`/`date` subclass, or a `tuple` of those, never
-//!   nested) raises [`PyTypeError`] naming its type and path; see
-//!   [`ObjectKey`] and [`onix_core::path::dict_key_repr`].
-//! - A `tzinfo` whose `utcoffset()` is not whole seconds raises
-//!   [`PyValueError`] (`datetime`/`time` alike).
-//! - A `set`/`frozenset` member outside `None`/`bool`/`int`/`float`/`str`/
-//!   `tuple`/`frozenset`/`datetime`/`date`/`time`/`timedelta`, or a
-//!   subclass of the last four, raises [`PyTypeError`]; a `list`/`dict`/
-//!   `set` subclass defining `__hash__` can reach one and is refused too.
-//! - A user-defined class instance (an `Enum` member included) is diffed as
-//!   a **custom object** by its attributes — see [`object_strategy`] and
-//!   `tests/golden/README.md`'s "Custom objects" section. A value routed to
-//!   a handler this MVP lacks, or an `AttributeError` reading an attribute,
-//!   raises [`PyTypeError`] (at the root, else an [`opaque`] token).
-//!
-//! A `str` holding a lone surrogate code point converts and compares like any other `str` (see
-//! [`pystring_to_cstr`] and `tests/golden/README.md`'s lone-surrogate bullet); a repeated UTF-8
-//! `str` object key is interned once per walk (a lone-surrogate key is kept per occurrence)
-//! (`docs/design/value-conversion.md`'s "Key interning" section).
+//! Supported types and the errors raised for the rest: the README's "Known
+//! limitations" section.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -79,10 +34,7 @@ use pyo3::types::{
 use crate::errors::MaxDepthError;
 use crate::guard::is_deep;
 
-/// A Python sequence being walked: a `list` or a `tuple`. The two differ
-/// only in their iterator type and in which [`CValue`] the finished items
-/// become, so every other step of the walk treats them identically — the
-/// same way the diff engine does.
+/// A Python sequence or set being walked (list, tuple, set, frozenset).
 enum SeqIter<'py> {
     List(BoundListIterator<'py>),
     Tuple(BoundTupleIterator<'py>),
@@ -100,8 +52,7 @@ impl<'py> SeqIter<'py> {
         }
     }
 
-    /// How many elements are still to come (both iterators are
-    /// `ExactSizeIterator`), so a frame can pre-size its buffer.
+    /// How many elements are still to come, so a frame can pre-size its buffer.
     fn len(&self) -> usize {
         match self {
             SeqIter::List(iter) => iter.len(),
@@ -111,9 +62,8 @@ impl<'py> SeqIter<'py> {
         }
     }
 
-    /// Wraps this sequence's finished items in the matching value shape,
-    /// attaching `class_name` (`None` for the exact base type) — see
-    /// `docs/design/value-model.md`'s "Subclasses" section.
+    /// Wraps the finished items in the matching value shape, carrying `class_name`
+    /// (`None` for the exact base type).
     fn build(&self, items: Vec<CValue>, class_name: Option<Arc<str>>) -> CValue {
         match self {
             SeqIter::List(_) => {
@@ -129,47 +79,32 @@ impl<'py> SeqIter<'py> {
         }
     }
 
-    /// Whether this sequence's elements are set members — the ones that get
-    /// a [`child_segment`] placeholder instead of an index.
+    /// Whether the elements are set members, which get a [`child_segment`] placeholder.
     fn holds_set_members(&self) -> bool {
         matches!(self, SeqIter::Set(_) | SeqIter::FrozenSet(_))
     }
 }
 
-/// One in-progress container on [`to_value`]'s explicit work-stack: either a
-/// sequence or a dict whose *n*th child has been dispatched for conversion
-/// and whose remaining children (plus everything converted so far) are parked
-/// here until that child's result comes back.
-///
-/// The next child's index (for a sequence) and every child's depth are
-/// derivable at the one place they are read, in [`advance_frame`] — the next
-/// index is `built.len()` once the finished child has been pushed, and the
-/// child depth is `path.len()` once its path segment has been pushed.
+/// One in-progress container on [`to_value`]'s work-stack, parked with its
+/// remaining children and everything converted so far until the current
+/// child's result comes back.
 enum Frame<'py> {
     Seq {
         remaining: SeqIter<'py>,
         built: Vec<CValue>,
-        /// Whether this sequence's elements are inside a set member, which
-        /// restricts the types [`classify`] accepts for them. Transitive:
-        /// true for a set's own members, and for the elements of any
-        /// container nested inside one — see [`classify`]'s own doc.
+        /// Whether the elements are inside a set member, restricting the types
+        /// [`classify`] accepts; transitive through nested containers.
         restricted: bool,
-        /// The subclass name this sequence's own container carries (`None`
-        /// for the exact base type) — see `docs/design/value-model.md`'s
-        /// "Subclasses" section. Unrelated to `restricted`, which is about
-        /// the *elements*', not this container's own, type.
+        /// The container's own subclass name (`None` for the exact base type).
         class_name: Option<Arc<str>>,
     },
     Dict {
         remaining: BoundDictIterator<'py>,
         built: Vec<(ObjectKey, CValue)>,
         current_key: ObjectKey,
-        /// The `dict` subclass or custom object's class (`None` for a plain
-        /// `dict`) — its render name and class identity. See [`PyClass`].
+        /// The `dict` subclass or custom object's class (`None` for a plain `dict`).
         class: Option<Box<PyClass>>,
-        /// Whether the entries being collected are a `dict`'s items or a
-        /// custom object's attributes — decides which `Value` this frame
-        /// builds (see [`finish_object`]).
+        /// Whether the entries are a `dict`'s items or a custom object's attributes.
         kind: ObjectKind,
     },
 }
@@ -197,18 +132,8 @@ enum Step<'py> {
     },
 }
 
-/// Tries every temporal type [`classify`] accepts (`datetime`, `date`,
-/// `time`, `timedelta`, exact or a subclass) — split out to keep `classify`
-/// itself under the line-count limit. `None` when `current` is none of
-/// these, so `classify` falls through to its remaining checks.
-///
-/// `datetime` before `date`: every `datetime` is also a `date` at the C
-/// level, so checking `date` first would swallow every `datetime` too.
-/// Each type's exact-type branch runs first so the common case pays only
-/// one cast; a subclass (pandas' `Timestamp` is the common one) falls
-/// through to the second, non-exact branch and carries its own class name
-/// — see `docs/design/value-model.md`'s "Subclasses" section. All four
-/// convert the same way whether or not they sit inside a set member.
+/// The temporal arm of [`classify`]; `None` when `current` is none of the four
+/// types. `datetime` before `date`: every `datetime` is also a `date`.
 fn classify_temporal(current: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<Option<CValue>> {
     if current.cast_exact::<PyDateTime>().is_ok() {
         return Ok(Some(datetime_to_value(current, path, None)?));
@@ -256,34 +181,9 @@ fn classify_temporal(current: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResu
     Ok(None)
 }
 
-/// Classifies a single Python object: everything [`to_value`]'s loop does per
-/// node except the `max_depth` check (needs the loop's own `depth` counter)
-/// and attaching the result to the work-stack (needs the loop's own
-/// `path`/`stack`).
-///
-/// `path` is the path to `current` itself (used verbatim for an
-/// unsupported-type error, and — when `current` is a dict — also passed
-/// through to [`next_dict_entry`] for a bad-key error). `builder` builds the
-/// one container this can finish outright, an empty dict.
-///
-/// `set_member` restricts the accepted types to the ones this MVP allows
-/// inside a set: a `list` or `dict` reaching a set member (only possible
-/// through a subclass defining `__hash__`, since a plain `list`/`dict` is
-/// unhashable and Python itself refuses to build the set) is refused with
-/// the same error any other unsupported type gets. The flag is *transitive*
-/// — it is set for a set's own members and for everything nested inside one
-/// — so `{(HashableList([1]),)}` is refused for its nested `list` subclass
-/// the same way `{HashableList([1])}` would be. A `datetime`/`date` is
-/// accepted either way: [`onix_core::path::set_item_repr`] defines how one
-/// renders as a set item, top-level or nested.
-///
-/// A `tuple`/`frozenset` **subclass** — including a `namedtuple`, a `tuple`
-/// subclass — reaching a set member is refused the same way a `list`/`dict`
-/// subclass is: only the *exact* base type is accepted there, unaffected
-/// by the general subclass support this function otherwise adds. A
-/// `datetime`/`date` subclass has no such restriction — it converts
-/// identically whether or not it sits inside a set member, exactly like
-/// the base type already does.
+/// Converts one Python object to a finished value or a container step;
+/// `set_member` (transitive) restricts it to the types a set member may be
+/// (see [`unhashable_member_error`]).
 ///
 /// A value `DeepDiff` routes to a handler onix lacks is refused at the root
 /// and becomes an opaque token anywhere below it (see [`opaque`]).
@@ -298,8 +198,7 @@ fn classify<'py>(
         return Ok(Step::Done(CValue::Null));
     }
 
-    // `bool` is a Python `int` subclass, so this check must precede the
-    // `PyInt` one below or every bool would be misread as an int.
+    // `bool` is a Python `int` subclass: check it first.
     if let Ok(b) = current.cast::<PyBool>() {
         return Ok(Step::Done(CValue::Bool(b.is_true())));
     }
@@ -333,10 +232,7 @@ fn classify<'py>(
     if let Ok(tuple) = current.cast_exact::<PyTuple>() {
         return Ok(seq_step(SeqIter::Tuple(tuple.iter()), None));
     }
-    // Non-exact, unlike the branch above: a `tuple` subclass — including a
-    // `namedtuple` — carries its own class name and compares as a plain
-    // `tuple` otherwise, except as a set member, where only the exact type
-    // is accepted (see this function's own doc).
+    // A `tuple` subclass (a `namedtuple` included) carries its class name.
     if !set_member && let Ok(tuple) = current.cast::<PyTuple>() {
         return Ok(seq_step(
             SeqIter::Tuple(tuple.iter()),
@@ -347,10 +243,7 @@ fn classify<'py>(
     if let Ok(set) = current.cast_exact::<PySet>() {
         return Ok(seq_step(SeqIter::Set(set.iter()), None));
     }
-    // Non-exact: a `set` subclass, refused as a set member like `tuple`
-    // above (a plain `set` is itself unhashable and so can never actually
-    // reach here as a member; a hashable subclass could, and is refused the
-    // same way for consistency).
+    // A `set` subclass, refused as a set member like `tuple` above.
     if !set_member && let Ok(set) = current.cast::<PySet>() {
         return Ok(seq_step(
             SeqIter::Set(set.iter()),
@@ -369,18 +262,14 @@ fn classify<'py>(
     }
 
     if !set_member && let Ok(dict) = current.cast::<PyDict>() {
-        // A plain `dict` carries no class; a `dict` subclass carries its name
-        // and class identity (a subclass is a `type_changes` against the
-        // base `dict` and against another same-named subclass from elsewhere).
+        // A `dict` subclass carries its class name and identity; a plain `dict` none.
         let class = current
             .cast_exact::<PyDict>()
             .is_err()
             .then(|| Box::new(py_class(current, ObjectLengths::default(), held)));
-        // Iterate a snapshot, not the live dict: converting a value runs user
-        // code (a `@property` getter, `__getattr__`) that can insert into this
-        // very dict, which would panic pyo3's live-dict iterator with
-        // "dictionary changed size during iteration". `dict.copy()` is what
-        // `DeepDiff`'s `_diff_dict` effectively does with its copied key sets.
+        // Iterate a snapshot: converting a value runs user code (a `@property`
+        // getter, `__getattr__`) that can insert into this dict, which would
+        // panic pyo3's live-dict iterator.
         let mut iter = dict.copy()?.iter();
 
         return Ok(match next_dict_entry(&mut iter, path, builder)? {
@@ -505,22 +394,19 @@ fn identity_of(obj: &Bound<'_, PyAny>) -> String {
     format!("{:x}", obj.as_ptr() as usize)
 }
 
-/// What one diff's conversions share: every Python object whose address a
-/// conversion keys into an identity, held so no address is reused while the
-/// diff runs; by identity, the objects class-attribute and cycle tokens stand
-/// for, their conversions and conversion errors, and the errors of the objects
-/// whose conversion failed; the custom objects on the current walk's path; each
-/// `Enum` class's length; the identities cycle tokens point back at; and
-/// whether the report needs [`render_report`] or a resolved value the sized
-/// worker.
+/// Per-diff conversion state; keeps every addressed object alive for the run.
 pub(crate) struct Held {
+    /// Objects whose addresses identities are keyed on, held so no address is reused.
     objects: Vec<Py<PyAny>>,
+    /// The objects class-attribute and cycle tokens stand for, by identity.
     resolvable: HashMap<String, Py<PyAny>>,
     pub(crate) cycle_targets: HashSet<String>,
     resolved: HashMap<String, Option<Arc<CValue>>>,
     resolution_errors: HashMap<String, PyErr>,
     failures: HashMap<String, PyErr>,
+    /// The custom objects on the current walk's path.
     on_path: Vec<usize>,
+    /// Each `Enum` class's length, by class address.
     enum_lengths: HashMap<usize, usize>,
     max_depth: usize,
     pub(crate) saw_wtf8: bool,
@@ -572,25 +458,9 @@ enum Strategy<'py> {
     Members(Bound<'py, PyDict>),
 }
 
-/// The [`Strategy`] for `obj` when it reaches `_diff_enum` or `_diff_obj` in
-/// `DeepDiff`'s `_diff` dispatch, `None` for a type `DeepDiff` routes to an
-/// earlier handler onix lacks. The refusals use `DeepDiff`'s concrete
-/// predicates in its order:
-///
-/// - a class object or a module;
-/// - a number from `DeepDiff`'s concrete tuple (`complex`, `Decimal`,
-///   `Fraction`, or a `numpy` scalar), not the `numbers.Number` ABC, plus
-///   `uuid` and `ipaddress`;
-/// - a `pydantic` model, which `DeepDiff` diffs by attributes but hashes and
-///   measures as an iterable of fields (see `tests/golden/README.md`'s
-///   "Pydantic models");
-/// - any `collections.abc.Iterable`, before the `Enum` check as in the
-///   ladder. A custom non-`dict` `Mapping` is over-refused here (see
-///   `tests/golden/README.md`'s "Refused mappings").
-///
-/// An `Enum` member is accepted. Any other object is accepted when it has a
-/// `__dict__` or `__slots__`, or when `getmembers` finds a non-dunder
-/// attribute (`re.Pattern`, `slice`); a bare `object()` is refused.
+/// The attribute strategy for `obj`, or `None` for a type `DeepDiff` routes to
+/// a handler onix lacks; predicates and order follow `diff.py::_diff`'s ladder.
+/// See `tests/golden/README.md`'s "Refused mappings".
 fn object_strategy<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Option<Strategy<'py>>> {
     let py = obj.py();
 
@@ -751,13 +621,8 @@ fn failed_object_step<'py>(
     })
 }
 
-/// The attributes `DeepDiff` 9.1.0 diffs for an accepted object, plus the
-/// lengths `onix_core::value::Object::into_class` takes. `_diff_enum` reads an
-/// `Enum` member's `name` and
-/// `value`; `_diff_obj` reads `helper.detailed__dict__` for an object with a
-/// `__dict__`, `_dict_from_slots` for one with `__slots__`, and every
-/// non-callable `getmembers` value otherwise. A name starting with `__` is
-/// dropped, as `_diff_dict` drops it.
+/// The attributes `DeepDiff` 9.1.0 diffs for an accepted object, plus the lengths
+/// `Object::into_class` takes; names starting `__` are dropped.
 fn object_attributes<'py>(
     obj: &Bound<'py, PyAny>,
     strategy: &Strategy<'py>,
@@ -991,10 +856,9 @@ fn getmembers_noncallable<'py>(
 }
 
 /// Starts one sequence: an empty one is finished outright, a non-empty one
-/// hands its first element back for conversion with the rest parked in the
-/// returned iterator. `class_name` is the subclass name the finished
-/// container carries (`None` for the exact base type) — see the module
-/// doc's "Subclasses" section.
+/// hands its first element back with the rest parked in the returned iterator.
+/// `class_name` is the subclass name (`None` for the exact base type); see
+/// `docs/design/value-model.md`'s "Subclasses" section.
 fn seq_step(mut iter: SeqIter<'_>, class_name: Option<Arc<str>>) -> Step<'_> {
     match iter.next() {
         None => Step::Done(iter.build(Vec::new(), class_name)),
@@ -1028,11 +892,6 @@ type Pending<'py> = (Bound<'py, PyAny>, usize, bool);
 /// own segment popped by the caller — see [`to_value`]. A finished custom
 /// object leaves `on_path`.
 ///
-/// On a bad dict key mid-frame the error just propagates: `built` (its
-/// completed entries, possibly including a deep subtree) drops here
-/// naturally, and the compact [`CValue`]'s iterative `Drop` cannot overflow
-/// the calling thread — no worker hand-off is needed, unlike the old
-/// `serde_json::Value` path.
 fn advance_frame<'py>(
     frame: Frame<'py>,
     value: CValue,
@@ -1051,9 +910,6 @@ fn advance_frame<'py>(
 
             Ok(match remaining.next() {
                 Some(next_item) => {
-                    // The just-finished child was appended above, so the next
-                    // child's index is the new length, and its depth is the
-                    // path length once its segment is pushed.
                     path.push(child_segment(remaining.holds_set_members(), built.len()));
                     Advance::NeedsChild {
                         pending: (next_item, path.len(), restricted),
@@ -1092,8 +948,6 @@ fn advance_frame<'py>(
                 Some((key, next_value)) => {
                     path.push(entry_path_segment(kind, &key));
                     Ok(Advance::NeedsChild {
-                        // The child's depth is the path length once its key
-                        // segment is pushed above.
                         pending: (next_value, path.len(), false),
                         frame: Frame::Dict {
                             remaining,
@@ -1230,28 +1084,23 @@ fn object_failure(
     token
 }
 
-/// Converts a Python object into an [`onix_core::Value`] — see the module doc's type table. Walks
-/// via an explicit `Vec`-backed stack, never native recursion, and every `onix_core` step run
-/// while the value is being built is iterative too (a set's canonical ordering at construction,
-/// `Value`'s `Drop` — see `docs/design/value-model.md`'s "Stack safety" section), so peak native
-/// stack and error-path teardown stay `O(1)` at any depth; only the diff engine's own recursion
-/// needs a sized worker thread ([`crate::guard`]). Recurses at most `max_depth` levels, raising
-/// [`MaxDepthError`] before `onix_core::diff_with_options`'s own guard runs, at the identical
-/// depth-counting convention (root at depth `0`) — intentionally stricter, since equality between
-/// the two inputs isn't known yet (`docs/design/depth-budget.md`'s "Equal inputs of any depth").
+/// Converts a Python object into a [`onix_core::Value`] with an explicit stack;
+/// raises [`MaxDepthError`] past `max_depth` (root at 0; see
+/// `docs/design/depth-budget.md`'s "Equal inputs of any depth").
 ///
-/// The second return value is whether this walk ever built a `Str::Wtf8`/
-/// `Key`-with-a-surrogate (see [`pystring_to_cstr`]), so
-/// [`crate::deepdiff::DeepDiff::new`] can OR the two sides' flags and let
-/// [`crate::guard::serialize_value`] skip
-/// [`onix_core::value::contains_wtf8`]'s own tree walk for the common case.
-/// `held` collects the objects the value's identities name, and must
-/// outlive the diff.
+/// Never recurses natively, and every `onix_core` step run while building (set
+/// ordering, `Value`'s `Drop`) is iterative, so native stack and error-path
+/// teardown stay O(1) at any depth; only the diff engine needs
+/// `crate::guard`'s sized worker.
+///
+/// The second return value is whether the walk built a lone-surrogate `str` or
+/// key (see [`pystring_to_cstr`]). `held` collects the objects the value's
+/// identities name, and must outlive the diff.
 ///
 /// # Errors
 ///
-/// Returns a Python `ValueError`/[`MaxDepthError`] or `TypeError` per the
-/// module doc's type table.
+/// `TypeError` (unsupported type), `ValueError` (unreadable or out-of-range
+/// value), [`MaxDepthError`] past `max_depth`.
 pub(crate) fn to_value(
     obj: &Bound<'_, PyAny>,
     max_depth: usize,
@@ -1266,10 +1115,6 @@ pub(crate) fn to_value(
     let mut finished: Option<CValue> = None;
     let mut saw_wtf8 = false;
 
-    // On any error break, `stack` (and its parked, possibly deep entries)
-    // drops here at function return. Every `CValue` has an iterative `Drop`,
-    // so that teardown is stack-safe on the calling thread at any depth — the
-    // conversion never needs a sized-worker drop path.
     loop {
         if let Some((current, depth, set_member)) = pending.take() {
             let step = if depth > max_depth {
@@ -1295,14 +1140,9 @@ pub(crate) fn to_value(
                     class_name,
                 } => {
                     let child_depth = depth + 1;
-                    // Transitive: a set's members are restricted, and so is
-                    // everything inside a container that is itself restricted.
                     let restricted = set_member || iter.holds_set_members();
                     path.push(child_segment(iter.holds_set_members(), 0));
-                    // `iter` has already yielded `first`, so the finished
-                    // sequence will hold `iter.len() + 1` elements — pre-size
-                    // for exactly that (both sequence iterators are
-                    // `ExactSizeIterator`).
+                    // `iter` has already yielded `first`.
                     let capacity = iter.len().saturating_add(1);
                     stack.push(Frame::Seq {
                         remaining: iter,
@@ -1373,15 +1213,8 @@ pub(crate) fn to_value(
     }
 }
 
-/// The path segment for one sequence element.
-///
-/// A set member has no subscript at all — `DeepDiff` names one only by its
-/// *rendered value*, which an object that fails to convert never gets — so
-/// reporting a positional index there would be inventing a path the tool
-/// cannot resolve (`root[0][2]` where `root[0]` is a set). This placeholder
-/// keeps the depth count honest and reports as
-/// `root['a'][<set member>]`, including for a failure further inside the
-/// member (`root['a'][<set member>][1]`).
+/// The path segment for one sequence element. A set member has no subscript,
+/// so it reports as the `<set member>` placeholder.
 fn child_segment(set_member: bool, index: usize) -> PathSegment {
     if set_member {
         PathSegment::SetItem("<set member>".to_string())
@@ -1390,17 +1223,8 @@ fn child_segment(set_member: bool, index: usize) -> PathSegment {
     }
 }
 
-/// Pulls the next `(key, value)` pair out of a dict iterator, classifying
-/// and validating the key — shared by [`to_value`]'s initial descent into a
-/// dict and its `Frame::Dict` advance step, so the validation (and its error
-/// message) is written exactly once.
-///
-/// `dict_path` is the path to the *dict itself* (not the entry) — that is
-/// deliberately what a bad key's error reports, since a key that fails
-/// classification has no path segment of its own to report. `builder`
-/// interns a `str` key exactly as every other object key in this walk is
-/// interned; a non-`str` key needs no interning (see the module doc's
-/// dict-key bullet).
+/// Pulls the next `(key, value)` pair out of a dict iterator, classifying its
+/// key. `dict_path` is the dict's own path, which a bad key's error reports.
 fn next_dict_entry<'py>(
     iter: &mut BoundDictIterator<'py>,
     dict_path: &[PathSegment],
@@ -1415,23 +1239,10 @@ fn next_dict_entry<'py>(
     Ok(Some((key, value)))
 }
 
-/// Classifies one Python dict key into an [`ObjectKey`] — the `str` case
-/// (a UTF-8 key interned, a lone-surrogate one kept per occurrence; see
-/// [`pystring_to_cstr`]) plus every other key `DeepDiff` also accepts:
-/// `None`, `bool`, `int`, `float`, `datetime`, `date`, or a `tuple` of those
-/// (never a nested `tuple` — see the module doc's dict-key bullet and
-/// [`classify_key_scalar`], which this delegates every non-`tuple` case to),
-/// or a subclass of `tuple`/`datetime`/`date` (including a `namedtuple`).
-/// `DeepDiff`'s own dict-key matching is plain Python `==`/`hash`, which
-/// never consults `type(obj)`, so — unlike a *value*, which carries its
-/// class name into a `type_changes` entry (see `docs/design/value-model.md`'s
-/// "Subclasses" section) — a key subclass instance is classified as its
-/// exact base type with no name tracked at all: [`ObjectKey`] has no
-/// class-name field. A subclass key matches by its base type's *value*;
-/// an overridden `__eq__`/`__hash__` is not consulted (that is custom-object
-/// territory, out of this MVP's scope), so a key subclass whose equality
-/// or hash disagrees with its base type's is a documented nuance, not a
-/// bug — see `tests/golden/README.md`'s "Subclasses" section.
+/// Classifies one dict key: a `str` (a UTF-8 one interned), or a scalar per
+/// [`classify_key_scalar`], or a flat `tuple` of scalars; a subclass key
+/// classifies as its base type with no class name. Divergences:
+/// `tests/golden/README.md`, "Subclasses".
 fn classify_dict_key(
     key: &Bound<'_, PyAny>,
     dict_path: &[PathSegment],
@@ -1442,9 +1253,6 @@ fn classify_dict_key(
         return Ok(ObjectKey::Str(builder.intern_key(s)));
     }
 
-    // Non-exact (`cast`, not `cast_exact`): a `tuple` subclass key,
-    // including a `namedtuple`, classifies the same way its base type does
-    // — see this function's own doc for why no class name is tracked.
     if let Ok(tuple) = key.cast::<PyTuple>() {
         let mut items = Vec::with_capacity(tuple.len());
         for item in tuple.iter() {
@@ -1460,17 +1268,14 @@ fn classify_dict_key(
     )?)))
 }
 
-/// Classifies one Python object as a dict-key **scalar**: every key type
-/// [`classify_dict_key`] accepts except `str` (interned separately, at the
-/// top level only) and `tuple` (split out there, since a tuple key may not
-/// itself nest one — see the module doc). Shared between a bare key and
-/// each element of a `tuple` key.
+/// Classifies one dict-key scalar (`None`, `bool`, `int`, `float`, `str`,
+/// `datetime`, `date`); shared by a bare key and each element of a `tuple` key.
 fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyResult<CValue> {
     if obj.is_none() {
         return Ok(CValue::Null);
     }
 
-    // `bool` before `int`: see the module doc.
+    // `bool` before `int`: a `bool` is a Python `int`.
     if let Ok(b) = obj.cast::<PyBool>() {
         return Ok(CValue::Bool(b.is_true()));
     }
@@ -1487,11 +1292,7 @@ fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyR
         return Ok(CValue::Str(pystring_to_cstr(s)?));
     }
 
-    // Non-exact, and `datetime` before `date` (every `datetime` is also a
-    // `date` at the C level — see `classify_temporal`'s doc and
-    // `docs/design/value-conversion.md`): a `datetime`/`date` subclass key
-    // classifies as its base type with no class name tracked, see
-    // [`classify_dict_key`]'s own doc for why.
+    // `datetime` before `date`.
     if obj.cast::<PyDateTime>().is_ok() {
         return datetime_to_value(obj, dict_path, None);
     }
@@ -1509,15 +1310,8 @@ fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyR
     )))
 }
 
-/// Converts a Python `str` into the crate's compact [`CStr`]: the fast,
-/// zero-copy UTF-8 path for the overwhelming common case, falling back only
-/// when the string contains a lone (unpaired) surrogate code point — legal
-/// in Python, not encodable as UTF-8 — to `str.encode('utf-8',
-/// 'surrogatepass')`, the `CPython` idiom for round-tripping exactly that
-/// content: WTF-8 bytes (see [`CStr`]'s own doc), with each surrogate in
-/// the same three-byte form that encoding produces. Shared by a scalar
-/// `str` value and a dict key, the two places a Python `str` enters the
-/// value model.
+/// Converts a Python `str` into a [`CStr`]: UTF-8 when it encodes, else WTF-8
+/// via `encode('utf-8', 'surrogatepass')` for a lone surrogate code point.
 fn pystring_to_cstr(s: &Bound<'_, PyString>) -> PyResult<CStr> {
     if let Ok(cow) = s.to_cow() {
         return Ok(CStr::Utf8(cow.into_owned().into_boxed_str()));
@@ -1529,13 +1323,8 @@ fn pystring_to_cstr(s: &Bound<'_, PyString>) -> PyResult<CStr> {
     Ok(CStr::Wtf8(bytes.into_boxed_slice()))
 }
 
-/// [`pystring_to_cstr`]'s inverse: rebuilds a Python `str` from WTF-8 bytes
-/// (a [`CStr`] or a [`CKey`]'s content — either offers `.as_bytes()`). The
-/// fast path is the overwhelming common case, valid UTF-8, built directly;
-/// only a `Str::Wtf8`/`Key::Wtf8` (bytes that fail `str::from_utf8`, holding
-/// a lone surrogate) takes the slower `bytes.decode('utf-8',
-/// 'surrogatepass')` round trip, the exact `CPython` idiom that reverses
-/// `pystring_to_cstr`'s `encode`.
+/// [`pystring_to_cstr`]'s inverse: rebuilds a Python `str` from WTF-8 bytes,
+/// decoding with `surrogatepass` when they are not valid UTF-8.
 fn wtf8_to_pyobject(py: Python<'_>, bytes: &[u8]) -> PyResult<Py<PyAny>> {
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.into_py_any(py);
@@ -1655,12 +1444,7 @@ fn utc_offset_seconds(
         .map_err(|_| out_of_range_error(type_name, path))
 }
 
-/// A `date`/`datetime`/`time`/`timedelta` whose fields the compact value
-/// model rejects. Python itself enforces every one of those bounds on a real
-/// object of any of the four types, so this is reachable only through a
-/// custom `tzinfo` returning an out-of-range offset (`datetime`/`time`) —
-/// never for `date`/`timedelta`, whose own constructors already enforce
-/// every bound this crate's own `new` re-checks.
+/// A temporal value whose fields the compact value model rejects.
 fn out_of_range_error(type_name: &str, path: &[PathSegment]) -> PyErr {
     PyValueError::new_err(format!(
         "{type_name} at {} is out of range for onix's internal value model",
@@ -1691,19 +1475,9 @@ fn int_to_value(i: &Bound<'_, PyInt>, path: &[PathSegment]) -> PyResult<CValue> 
     Ok(CValue::Number(CNumber::from_bigint(big)))
 }
 
-/// Reads a Python `int`'s exact value as a [`BigInt`] through `int`'s own
-/// **unbound** `bit_length`/`to_bytes`, never the object's own methods.
-///
-/// The fast `i64`/`u64` path above reads the value straight from `PyLong`'s
-/// storage; a subclass instance keeps that true value there, but can override
-/// `__str__`/`__index__`/`to_bytes` to report a *different* one, so reading a
-/// large value through any of those (as an earlier `str(int)` version did)
-/// would let a subclass control what onix compares — a false match, a
-/// fabricated value, or a flipped sign. Calling the base `int` type's own
-/// slots on the instance bypasses every override and reads the same value the
-/// fast path and `DeepDiff` do. It also sidesteps `CPython`'s `int`->`str`
-/// digit cap (`sys.set_int_max_str_digits`), so an integer of any length
-/// converts.
+/// Reads a Python `int`'s exact value through `int`'s unbound
+/// `bit_length`/`to_bytes`, which bypass subclass overrides and the `int`->`str`
+/// digit cap.
 fn exact_big_int(i: &Bound<'_, PyInt>) -> PyResult<BigInt> {
     let (int_type, kwargs) = int_type_and_signed_kwargs(i.py())?;
     let bit_length: usize = int_type.getattr("bit_length")?.call1((i,))?.extract()?;
@@ -1717,10 +1491,8 @@ fn exact_big_int(i: &Bound<'_, PyInt>) -> PyResult<BigInt> {
     Ok(BigInt::from_signed_bytes_le(&bytes))
 }
 
-/// The base `int` type object and a `{"signed": True}` kwargs dict — the shared
-/// pieces of the byte-based big-int read ([`exact_big_int`]) and write
-/// ([`number_to_pyobject`]), which both call `int.to_bytes`/`int.from_bytes`
-/// **unbound** on the base type so a subclass override cannot intercept them.
+/// The base `int` type and a `{"signed": True}` kwargs dict for the unbound
+/// `to_bytes`/`from_bytes` calls of [`exact_big_int`] and [`number_to_pyobject`].
 fn int_type_and_signed_kwargs(py: Python<'_>) -> PyResult<(Bound<'_, PyType>, Bound<'_, PyDict>)> {
     Ok((py.get_type::<PyInt>(), [("signed", true)].into_py_dict(py)?))
 }
@@ -1846,9 +1618,7 @@ pub(crate) struct Unrendered {
     pub(crate) identity: String,
 }
 
-/// The error for an object that reached a set member, or anything nested
-/// inside one, but is not a type this MVP allows there — see [`classify`]'s
-/// `set_member` parameter.
+/// The error for an object that reached a set member but is not a type one may be.
 fn unhashable_member_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
     PyTypeError::new_err(format!(
         "unsupported type for a set member: {} at {}; a set member must be \
@@ -1875,8 +1645,8 @@ fn class_name(obj: &Bound<'_, PyAny>) -> Arc<str> {
 
 /// An [`onix_core::value::Object`]'s class as onix carries it: the `__name__`
 /// `DeepDiff` renders, the identity onix decides `type_changes` by (see
-/// `onix_core::value::Object::same_class`), and the object's
-/// `ignore_order` lengths (see `onix_core::value::Object::into_class`).
+/// `onix_core::value::Object::same_class`), and the object's `ignore_order`
+/// lengths.
 struct PyClass {
     name: Arc<str>,
     identity: Arc<str>,
@@ -1900,9 +1670,7 @@ fn py_class(obj: &Bound<'_, PyAny>, lengths: ObjectLengths, held: &mut Held) -> 
     }
 }
 
-/// Which Python sequence [`value_to_pyobject`] rebuilds a run of items into
-/// — the report side of [`SeqIter`], where both shapes carry the same
-/// `&[CValue]` and only the finished object differs.
+/// Which Python sequence [`value_to_pyobject`] rebuilds a run of items into.
 #[derive(Clone, Copy)]
 enum SeqKind {
     List,
@@ -1916,21 +1684,13 @@ impl SeqKind {
         match self {
             SeqKind::List => items.into_py_any(py),
             SeqKind::Tuple => PyTuple::new(py, items)?.into_py_any(py),
-            // Every member of a `Value::Set`/`Value::FrozenSet` came through
-            // `classify`'s transitive set-member restriction, which accepts
-            // only hashable kinds all the way down (see `classify`'s own
-            // doc), so `PySet::new` cannot fail on one.
             SeqKind::Set => PySet::new(py, items)?.into_py_any(py),
             SeqKind::FrozenSet => PyFrozenSet::new(py, items)?.into_py_any(py),
         }
     }
 }
 
-/// One in-progress container on [`value_to_pyobject`]'s explicit work-stack —
-/// the same technique as [`Frame`]/[`to_value`], applied in the opposite
-/// direction (report `Value` -> Python object) so this direction is equally
-/// immune to the native-stack-overflow class on a `Value` tree deep enough to
-/// matter.
+/// One in-progress container on [`value_to_pyobject`]'s work-stack, the mirror of [`Frame`].
 enum RenderFrame<'py, 'v> {
     Seq {
         kind: SeqKind,
@@ -1944,20 +1704,10 @@ enum RenderFrame<'py, 'v> {
     },
 }
 
-/// Converts a rendered report [`onix_core::Value`] (a
-/// [`crate::deepdiff::DeepDiff`] report, or one of its nested values) into a
-/// native Python object — the parsed form
-/// [`crate::deepdiff::DeepDiff::to_dict`] returns.
-///
-/// The report is rendered as the crate's own value model
-/// ([`onix_core::Report::to_value`]) rather than as JSON, which is what lets
-/// this hand back a real `tuple` wherever the diff found one: JSON has no
-/// tuple, so a report round-tripped through `serde_json` could only ever
-/// produce the list `to_json()` shows. The only failure this can report is a
-/// Python-side allocation failure building the objects themselves.
-/// It walks via an explicit stack (see [`RenderFrame`]), not native
-/// recursion, so a deep report can never overflow the native stack
-/// converting it back.
+/// Converts a rendered report [`onix_core::Value`] into the native Python
+/// object [`crate::deepdiff::DeepDiff::to_dict`] returns, with an explicit
+/// stack. The report is a `Value`, not JSON, so a `tuple` comes back as a
+/// `tuple`.
 pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<PyAny>> {
     let mut stack: Vec<RenderFrame<'_, '_>> = Vec::new();
     let mut pending: Option<&CValue> = Some(value);
@@ -1970,12 +1720,8 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                 CValue::Bool(b) => RenderStep::Done(b.into_py_any(py)?),
                 CValue::Number(n) => RenderStep::Done(number_to_pyobject(py, n)?),
                 CValue::Str(s) => RenderStep::Done(wtf8_to_pyobject(py, s.as_bytes())?),
-                // Renders back as the plain base type, never the original
-                // subclass instance — see docs/design/value-conversion.md's
-                // "Subclasses" section; tests/golden/README.md's
-                // "Normalized versus raw datetimes" section, its
-                // "Fixed-offset tzinfo round-trip" point, documents the
-                // same simplification for a `zoneinfo`/`pytz` `tzinfo`.
+                // Renders back as the plain base type, never the subclass instance:
+                // docs/design/value-conversion.md's "Subclasses" section.
                 CValue::DateTime(value) => {
                     RenderStep::Done(datetime_to_pyobject(py, value.value())?)
                 }
@@ -2068,16 +1814,8 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
     }
 }
 
-/// Rebuilds one [`ObjectKey`] as the Python object [`value_to_pyobject`]
-/// hands back as a dict key: a `str` key via [`wtf8_to_pyobject`] (WTF-8-aware,
-/// so a lone surrogate in the key round-trips exactly), any other key by
-/// recursively rendering its wrapped [`CValue`] the same way any other
-/// value in the tree renders. That recursive call is a bounded native-stack
-/// use, not the deep-nesting hazard [`value_to_pyobject`]'s own iterative
-/// design exists to close: a dict key's `Value` is at most a `tuple` of
-/// scalars (`onix-py`'s conversion enforces this — see the module doc), so
-/// the recursion is at most two levels deep regardless of how deep the
-/// containing report is.
+/// Rebuilds one [`ObjectKey`] as a Python dict key. A non-`str` key is at most
+/// a flat tuple, so the recursion is two levels.
 fn object_key_to_pyobject(py: Python<'_>, key: &ObjectKey) -> PyResult<Py<PyAny>> {
     match key {
         ObjectKey::Str(s) => wtf8_to_pyobject(py, s.as_bytes()),
@@ -2196,11 +1934,7 @@ fn number_to_pyobject(py: Python<'_>, n: &CNumber) -> PyResult<Py<PyAny>> {
             return v.into_py_any(py);
         }
 
-        // A non-float that fits neither is an arbitrary-precision integer;
-        // rebuild a Python `int` from its exact two's-complement bytes via
-        // `int.from_bytes`, the inverse of `exact_big_int`'s read. Bytes, not
-        // decimal text, so this never trips `CPython`'s `int`<->`str` digit
-        // cap that a several-thousand-digit integer would otherwise hit.
+        // An arbitrary-precision integer: `int.from_bytes`, the inverse of `exact_big_int`'s read.
         if let Some(big) = n.as_big() {
             let (int_type, kwargs) = int_type_and_signed_kwargs(py)?;
             let bytes = big.to_signed_bytes_le();

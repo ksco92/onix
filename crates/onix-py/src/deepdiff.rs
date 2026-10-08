@@ -1,7 +1,7 @@
 //! The drop-in `DeepDiff` class: accepts live Python objects, converts them
 //! to `onix_core`'s value model exactly once, diffs natively, and exposes
-//! the result as `.to_json()`/`.to_dict()`. Supported types and every
-//! raised error: `crate::convert`'s module doc.
+//! the result as `.to_json()`/`.to_dict()`. Supported types and raised
+//! errors: the README's "Known limitations" section.
 
 use onix_core::Value;
 use onix_core::diff::Resolution;
@@ -14,12 +14,9 @@ use crate::convert::{
 use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, serialize_value};
 
 /// A drop-in subset of `deepdiff.DeepDiff`, diffing `t1`/`t2` at
-/// `verbose_level=2`. `max_depth` defaults to 512, capped at
-/// `MAX_DEPTH_CEILING` (else `ValueError`); past it raises `MaxDepthError`;
-/// deeper-than-inline input diffs on a sized worker thread. Supported types
-/// and every raised error are listed in the module doc of
-/// `crates/onix-py/src/convert.rs` in the onix repository; the depth bound and
-/// its errors in `crates/onix-py/src/guard.rs`.
+/// `verbose_level=2`. `max_depth` defaults to 512; deeper input raises
+/// `MaxDepthError`. Supported types and errors:
+/// <https://github.com/ksco92/onix#known-limitations>
 #[pyclass(module = "deepdiff_rs")]
 pub(crate) struct DeepDiff {
     report_value: Value,

@@ -1,8 +1,8 @@
 """Conversion tests: accepted types, subclasses, custom objects, and every refused-input path.
 
 Covers `deepdiff_rs.DeepDiff`'s Python-object-to-`Value` conversion (see
-`crates/onix-py/src/convert.rs`'s module doc for the authoritative
-conversion table this pins) and `deepdiff_rs.diff_json`'s JSON-parse error
+the README's "Known limitations" section for the supported types this
+pins) and `deepdiff_rs.diff_json`'s JSON-parse error
 path.
 """
 
@@ -331,8 +331,8 @@ def test_tuple_subclass_dict_key_matches_and_mismatches_by_value() -> None:
 def test_a_key_subclass_with_overridden_equality_matches_structurally_not_by_python_eq() -> None:
     """
     A documented nuance, not a bug: `onix` matches a subclass key by its base type's
-    *value*, never by an overridden `__eq__`/`__hash__` — that is custom-object territory,
-    out of this MVP's scope (see `crates/onix-py/src/convert.rs`'s `classify_dict_key` doc).
+    *value*, never by an overridden `__eq__`/`__hash__` — that is custom-object territory
+    (see `tests/golden/README.md`'s "Subclasses" section).
 
     Real `DeepDiff` uses the key's own (overridden) equality, so two keys this class calls
     equal collapse into one shared key there (`values_changed` at the surviving key's path);

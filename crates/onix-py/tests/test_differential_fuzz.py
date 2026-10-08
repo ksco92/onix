@@ -95,10 +95,10 @@ SUBCLASS_KEY_SEED_COUNT: Final[int] = 150
 
 NON_STR_KEY_PROBABILITY: Final[float] = 0.4
 
-# Not itself a tuple: a dict key may not nest one (see convert.rs's module doc).
+# Not itself a tuple: a dict key may not nest one (see `classify_dict_key` in convert.rs).
 NON_STR_KEY_TUPLE_LEAVES: Final[list[JsonValue]] = [1, "x", True, None, 2.5]
 
-# issue #59. Never generates a set/frozenset: real DeepDiff crashes hashing a
+# Never generates a set/frozenset: real DeepDiff crashes hashing a
 # lone surrogate (see tests/golden/README.md).
 SURROGATE_SEED_BASE: Final[int] = 10_000_000
 
