@@ -323,7 +323,7 @@ fn new_value_reproduced_by_coercion(old_value: &Value, new_value: &Value) -> boo
 
 /// Python's `==`: scalars compare by [`crate::lcs::python_scalar_key`] (`1`, `1.0` and `True` are
 /// equal), containers element-wise and kind-distinct (a list never equals a tuple). Recurses
-/// natively; see `docs/design/ignore-order.md`'s "Depth safety".
+/// natively.
 fn python_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
@@ -765,11 +765,8 @@ pub(crate) fn count_array_diff_leaves(
 /// `count_diff_leaves(removed, added) / (rough_length(removed) + rough_length(added))`.
 ///
 /// `depth` is the depth of the list doing the pairing, which is also the depth a paired item's own
-/// diff runs at, so the trial gets that diff's budget (`docs/design/depth-budget.md`).
-/// # Errors
-///
-/// Propagates [`count_diff_leaves`]'s error: a failed trial is never a
-/// distance.
+/// diff runs at, so the trial runs under that diff's `max_depth` budget
+/// (`docs/design/depth-budget.md`).
 pub(crate) fn rough_distance(
     removed: &Value,
     added: &Value,
