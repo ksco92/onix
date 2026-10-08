@@ -19,11 +19,10 @@ onix-arrow = { path = "../onix-arrow" }
 # Same exact Arrow pin as onix-arrow and pyo3-arrow.
 arrow-array = "=59.3.0"
 arrow-schema = "=59.3.0"
-# Each one-shot imported Python Arrow stream is spooled through `onix_arrow::spool` so the row diff can re-read it.
+# Each one-shot imported Python Arrow stream is spooled through
+# `onix_arrow::spool` so the row diff can re-read it.
 # Arrow C Data Interface bridge, keeping this crate `unsafe`-free; arrow ^59.
-# `default-features = false` drops pyo3-arrow's `buffer_protocol` feature, which
-# needs the non-abi3 CPython buffer API and so will not build under abi3-py39;
-# it is unused here.
+# `buffer_protocol` needs the non-abi3 buffer API, so it stays off under abi3-py39.
 pyo3-arrow = { version = "0.19", default-features = false }
 pyo3 = { version = "0.29", features = ["abi3-py39"] }
 serde_json = "1"

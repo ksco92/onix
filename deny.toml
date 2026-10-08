@@ -1,16 +1,3 @@
-[graph]
-targets = [
-]
-all-features = false
-no-default-features = false
-
-[output]
-feature-depth = 1
-
-[advisories]
-ignore = [
-]
-
 [licenses]
 allow = [
     "MIT",
@@ -24,39 +11,12 @@ allow = [
     # tiny-keccak, compile-time only
     "CC0-1.0",
 ]
-confidence-threshold = 0.8
-exceptions = [
-]
-
-[licenses.private]
-ignore = false
-registries = [
-]
 
 [bans]
-multiple-versions = "warn"
 wildcards = "allow"
-highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
-allow = [
-]
-allow-workspace = false
-deny = [
-]
-
-skip = [
-]
-skip-tree = [
-]
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
-
-[sources.allow-org]
-github = []
-gitlab = []
-bitbucket = []

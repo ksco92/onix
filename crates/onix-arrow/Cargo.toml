@@ -16,7 +16,8 @@ workspace = true
 profile = []
 
 [dependencies]
-# Exact pin shared with onix-py and pyo3-arrow (^59), so record batches crossing the FFI boundary are the same Rust types.
+# Exact pin shared with onix-py and pyo3-arrow (^59), so record batches crossing
+# the FFI boundary are the same Rust types.
 arrow-schema = "=59.3.0"
 arrow-array = "=59.3.0"
 # `i256` for hashing `Decimal256` cells the same way as `Decimal128`.
@@ -25,7 +26,7 @@ arrow-buffer = "=59.3.0"
 arrow-cast = "=59.3.0"
 # Filter, concat, take.
 arrow-select = "=59.3.0"
-# The anonymous spool.
+# Anonymous Arrow IPC spool files.
 arrow-ipc = "=59.3.0"
 # `arrow-ord`'s null-aware `distinct` kernel finds a partition's changed cells one
 # column at a time in the parallel cell pass.
