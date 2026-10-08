@@ -116,7 +116,6 @@ fn permutation_strategy_draws_non_identity_orders() {
 proptest! {
     #![proptest_config(config())]
 
-    /// Any permutation of a list diffs to an empty report.
     #[test]
     fn shuffled_copy_of_any_list_diffs_to_empty((a, perm) in arb_list_and_permutation()) {
         let shuffled: Vec<Value> = perm.into_iter().map(|i| a[i].clone()).collect();
@@ -124,9 +123,7 @@ proptest! {
         prop_assert_eq!(report, serde_json::json!({}));
     }
 
-    /// A basic robustness property: diffing two independently-generated
-    /// lists under `ignore_order` never panics and always returns valid
-    /// JSON (an empty object at minimum).
+    /// Always returns valid JSON (an empty object at minimum).
     #[test]
     fn two_independent_lists_never_panic_under_ignore_order(
         a in proptest::collection::vec(arb_json_value(), 0..10),

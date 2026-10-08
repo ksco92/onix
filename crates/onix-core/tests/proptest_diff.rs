@@ -239,7 +239,6 @@ proptest! {
         prop_assert_eq!(report, serde_json::json!({}));
     }
 
-    /// An identical `shared` value alongside an unrelated difference reports nothing for it.
     #[test]
     fn shared_identical_substructure_alongside_an_unrelated_difference_reports_nothing_for_it(
         shared in arb_json_value(),
@@ -260,10 +259,6 @@ proptest! {
         }
     }
 
-    /// Every reported path resolves in its expected side: added/iterable-added in `b`,
-    /// removed/iterable-removed in `a`, and values_changed/type_changes in `a`, with the
-    /// `b`-side location (`new_path` when present, else `path`) in `b`.
-    ///
     /// `path` itself need not resolve in `b`: `new_path` records the drift of an LCS-paired index.
     #[test]
     fn every_reported_path_resolves_in_its_expected_side(
@@ -390,7 +385,6 @@ proptest! {
         }
     }
 
-    /// `type_changes` entries change kind (never int/int, dict/dict, etc).
     #[test]
     fn type_changes_entries_have_different_kinds(
         a in arb_json_value(),
@@ -406,7 +400,6 @@ proptest! {
         }
     }
 
-    /// `values_changed` entries keep the same kind but differ in value.
     #[test]
     fn values_changed_entries_keep_kind_but_differ_in_value(
         a in arb_json_value(),
@@ -434,7 +427,6 @@ proptest! {
     }
 }
 
-/// `parse_path`/`resolve` on hand-written examples.
 #[test]
 fn path_resolver_helper_matches_hand_written_examples() {
     let value = serde_json::json!({"a": [1, {"b c": 2}], "": 3});
