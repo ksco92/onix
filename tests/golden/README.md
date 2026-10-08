@@ -678,8 +678,8 @@ and `test_differential_fuzz.py`'s subclass-key batch.
 
 - **Key quoting does not escape anything.** `DeepDiff`'s path rendering never
   escapes a backslash, a control character, or an embedded quote character,
-  unlike Python `repr()`. The exact rule, confirmed against
-  `deepdiff==9.1.0`, lives in `onix_core`'s `path::quote_key` doc
+  unlike Python `repr()`. The exact rule lives in `onix_core`'s
+  `path::quote_key` doc
   (`crates/onix-core/src/path.rs`); the `key_single_quote`/
   `key_double_quote`/`key_both_quotes`/`key_backslash`/`key_control_chars`
   golden cases pin it.

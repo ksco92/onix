@@ -12,7 +12,7 @@ use crate::value::{Number, ObjectKey, ObjectKind, Str, Value, Wtf8Char, Wtf8Char
 /// rendered-string collision.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PathSegment {
-    /// A `str` dict key, rendered `['a']`.
+    /// A `str` dict key, quoted per [`quote_key`].
     Key(Str),
     /// A non-`str` dict key already rendered by [`dict_key_repr`], e.g. `[1]` or `[1][2]`.
     KeyRepr(String),
@@ -222,7 +222,9 @@ pub fn entry_path_segment(kind: ObjectKind, key: &ObjectKey) -> PathSegment {
     }
 }
 
-/// Python `repr()` of `value`, iteratively; sets render in canonical order
+/// Python `repr()` of `value`, iteratively, because no depth guard bounds what
+/// a caller renders and a recursive renderer would overflow the native stack on
+/// adversarial nesting; sets render in canonical order
 /// ([`crate::value::SetItems`]), not Python's hash order.
 #[must_use]
 pub fn python_repr(value: &Value) -> String {
@@ -344,11 +346,8 @@ fn time_repr(value: crate::datetime::Time) -> String {
     out
 }
 
-/// The `tzinfo=...` suffix [`datetime_repr`] and [`time_repr`] both append —
-/// empty for a naive value; Python's own `timezone.utc` singleton reprs by
-/// name for a zero offset, and every other fixed offset reprs as the
-/// `timedelta` it was built from, normalizing a negative offset into whole
-/// days plus seconds.
+/// The `tzinfo=...` suffix of a `datetime`/`time` repr; a non-zero offset
+/// normalizes into whole days plus seconds.
 fn tzinfo_repr_suffix(offset: Option<i32>) -> String {
     match offset {
         None => String::new(),
@@ -433,13 +432,9 @@ fn push_sequence<'a>(
     }
 }
 
-/// Python's `repr()` for a `str`: single quotes unless the string contains a
-/// single quote and no double quote (then double quotes), with `\`, the
-/// wrapping quote and every non-printable code point escaped as `\xXX`,
-/// `\uXXXX` or `\UXXXXXXXX` per [`escape_non_printable`]. Takes WTF-8 bytes
-/// (see [`Str`]) rather than a `&str` so this covers a lone surrogate too —
-/// Python's own `repr()` escapes one exactly like any other non-printable
-/// code point (`\udcXX`).
+/// Python `repr()` for a `str` given as WTF-8 bytes, so a lone surrogate
+/// escapes as `\udcXX`. Uses double quotes only when the text holds a single
+/// quote and no double quote.
 fn python_repr_bytes(bytes: &[u8]) -> String {
     let quote = if bytes.contains(&b'\'') && !bytes.contains(&b'"') {
         '"'
@@ -491,13 +486,8 @@ fn number_repr(n: &Number) -> String {
         .to_string()
 }
 
-/// Whether `c` is one of the code points Python's `repr()` escapes: every
-/// character in Unicode general categories `Cc`, `Cf`, `Cs`, `Co`, `Cn`,
-/// `Zl`, `Zp` or `Zs`, except the plain space (`U+0020`), which is `Zs` but
-/// stays printable. This is `CPython`'s own rule
-/// (`Tools/unicode/makeunicodedata.py`'s `PRINTABLE_MASK`, read from the
-/// `unicode-general-category` table pinned to Unicode 16.0.0 — the same
-/// version Python 3.14's `unicodedata` module ships).
+/// Whether Python's `repr()` escapes `c`: general categories `Cc`, `Cf`, `Cs`,
+/// `Co`, `Cn`, `Zl`, `Zp` and `Zs`, except the plain space.
 fn is_non_printable(c: char) -> bool {
     if c == ' ' {
         return false;
@@ -515,9 +505,8 @@ fn is_non_printable(c: char) -> bool {
     )
 }
 
-/// Appends `c`'s `repr()` escape to `out`: `\xXX` below `U+0100`, `\uXXXX`
-/// up to `U+FFFF`, `\UXXXXXXXX` above — the same three widths
-/// `Objects/unicodeobject.c`'s `unicode_repr` picks by.
+/// Appends `c`'s `repr()` escape: `\xXX` below `U+0100`, `\uXXXX` up to
+/// `U+FFFF`, `\UXXXXXXXX` above.
 fn escape_non_printable(out: &mut String, c: char) {
     let code_point = u32::from(c);
     // Writing into a `String` is infallible.
@@ -656,14 +645,11 @@ mod tests {
         assert_eq!(quote_key(&"a".into()).to_string(), "'a'");
     }
 
-    /// A key containing a single quote wraps in double quotes.
     #[test]
     fn quote_key_with_single_quote_uses_double_quotes() {
         assert_eq!(quote_key(&"it's".into()).to_string(), "\"it's\"");
     }
 
-    /// A key containing only a double quote (no single quote) wraps in
-    /// single quotes, with the double quote left bare.
     #[test]
     fn quote_key_with_double_quote_only_uses_single_quotes_unescaped() {
         assert_eq!(
@@ -672,20 +658,14 @@ mod tests {
         );
     }
 
-    /// A key containing both quote kinds still wraps in double quotes (the
-    /// single-quote rule takes priority), leaving the inner double quotes
-    /// bare and unescaped.
     #[test]
     fn quote_key_with_both_quote_kinds_uses_double_quotes_unescaped() {
-        // key: it's "cool"    (single quote after "it", double-quoted "cool")
         let mut key = String::new();
         key.push_str("it's ");
         key.push('"');
         key.push_str("cool");
         key.push('"');
 
-        // expected: "it's "cool""   (whole key re-wrapped in double quotes,
-        // its own inner double quotes left bare and unescaped)
         let mut expected = String::new();
         expected.push('"');
         expected.push_str(&key);
@@ -694,8 +674,6 @@ mod tests {
         assert_eq!(quote_key(&key.as_str().into()).to_string(), expected);
     }
 
-    /// No escaping of any kind: a literal backslash passes through as one
-    /// character, not two.
     #[test]
     fn quote_key_does_not_escape_backslashes() {
         assert_eq!(quote_key(&r"a\b".into()).to_string(), r"'a\b'");
@@ -725,9 +703,8 @@ mod tests {
         );
     }
 
-    /// A top-level `str` set item is wrapped in single quotes
-    /// unconditionally and with no escaping — deliberately **not**
-    /// [`quote_key`]'s rule, which would double-quote the second of these.
+    /// A top-level `str` set item is wrapped in single quotes with no escaping,
+    /// unlike [`quote_key`]'s rule, which would double-quote the second of these.
     #[test]
     fn set_item_str_always_uses_bare_single_quotes() {
         assert_eq!(set_item_repr(&Value::Str("a".into())), "'a'");
@@ -740,7 +717,7 @@ mod tests {
         assert_ne!(
             set_item_repr(&Value::Str("it's".into())),
             quote_key(&"it's".into()).to_string(),
-            "the set-item rule and the dict-key rule genuinely differ"
+            "set-item and dict-key quoting differ"
         );
     }
 
@@ -814,9 +791,7 @@ mod tests {
         );
     }
 
-    /// Every float the tie-breaking rule was found to disagree on: Rust's
-    /// own shortest form rounds these away from Python's `repr`, so this
-    /// goes red on a renderer that trusts `{:e}`'s digits.
+    /// Floats near a shortest-form tie render with Python's last digit.
     #[test]
     fn python_float_repr_breaks_shortest_form_ties_pythons_way() {
         let cases = [
@@ -848,9 +823,7 @@ mod tests {
         );
     }
 
-    /// A container nested several levels deep still renders element by
-    /// element, proving the explicit work-stack composes rather than only
-    /// handling one level.
+    /// A nested container renders element by element.
     #[test]
     fn python_repr_nests_containers() {
         let value = Value::Tuple(
@@ -910,7 +883,6 @@ mod tests {
         }
     }
 
-    /// Expectations are `CPython` 3.14 (Unicode 16.0.0) `repr()` output.
     #[test]
     fn python_repr_str_escapes_non_printable_code_points_above_u0100() {
         let cases = [
