@@ -126,22 +126,10 @@ fn rendered(path: &[PathSegment]) -> Value {
     Value::Str(render_path(path))
 }
 
-/// A DeepDiff-compatible diff result, grouped into categories.
-///
-/// Categories implemented so far: `type_changes`, `values_changed`,
-/// `dictionary_item_added`, `dictionary_item_removed`,
-/// `iterable_item_added`, `iterable_item_removed`, `set_item_added`,
-/// `set_item_removed`, `attribute_added`, `attribute_removed`. Further
-/// categories would be added the same way (an additive change, no
-/// restructuring of existing ones).
-///
-/// Every category is keyed by the structural path (`Vec<PathSegment>`), not
-/// the rendered string — see this module's doc for why. The two set
-/// categories are keyed identically, even though they *serialize* as bare
-/// arrays of path strings rather than path-keyed objects (that is
-/// `DeepDiff`'s own shape for them): the item each one holds is not part of
-/// the output at all, it is what the crate-private `distance_leaf_length`
-/// measures when the finding lands inside an `ignore_order` trial diff.
+/// A DeepDiff-compatible diff result, one category map per finding kind, keyed by
+/// structural path (see this module's doc) and serialized in `DeepDiff`'s
+/// `to_json()` shape at `verbose_level=2`. The set categories serialize as bare
+/// arrays of path strings; their values only feed `distance_leaf_length`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Report {
     type_changes: BTreeMap<Vec<PathSegment>, TypeChangeEntry>,
@@ -150,33 +138,24 @@ pub struct Report {
     dictionary_item_removed: BTreeMap<Vec<PathSegment>, Value>,
     iterable_item_added: BTreeMap<Vec<PathSegment>, Value>,
     iterable_item_removed: BTreeMap<Vec<PathSegment>, Value>,
-    /// The two set categories, allocated only once a set finding exists.
-    ///
-    /// Boxed because a [`Report`] is returned by value through every level
-    /// of the engine's native recursion, so its size is part of the frame
-    /// budget `max_depth` is calibrated against (see
-    /// `crate::diff::array_diff`'s "Stack-footprint note"): two more inline
-    /// `BTreeMap`s cost 48 bytes on every frame of a deep traversal, where
-    /// one pointer costs 8 and is `None` for the overwhelming majority of
-    /// diffs, which involve no set at all.
+    /// The two set categories, allocated on the first set finding. Boxed because a
+    /// [`Report`] is returned by value through every native recursion level, so its
+    /// size is part of the `max_depth` frame budget (`crate::diff::array_diff`'s
+    /// "Stack-footprint note").
     set_items: Option<Box<SetCategories>>,
-    /// The two custom-object attribute categories, allocated only once an
-    /// attribute finding exists — boxed for the same frame-budget reason as
-    /// [`Self::set_items`], and `None` for the overwhelming majority of
-    /// diffs, which involve no custom object at all.
+    /// The two attribute categories, boxed for the same frame-budget reason as
+    /// [`Self::set_items`].
     attribute_items: Option<Box<AttributeCategories>>,
 }
 
-/// [`Report`]'s two set categories — see the field's own doc for why they
-/// live behind one pointer.
+/// [`Report`]'s two set categories, behind one pointer.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct SetCategories {
     added: BTreeMap<Vec<PathSegment>, Value>,
     removed: BTreeMap<Vec<PathSegment>, Value>,
 }
 
-/// [`Report`]'s two custom-object attribute categories — see the field's own
-/// doc for why they live behind one pointer.
+/// [`Report`]'s two attribute categories, behind one pointer.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct AttributeCategories {
     added: BTreeMap<Vec<PathSegment>, Value>,
@@ -206,37 +185,23 @@ impl Report {
     }
 }
 
-/// Inserts `value` at `path` into `map`, debug-asserting `path` wasn't
-/// already present.
-///
-/// `path` is the *structural* path (see this module's doc), so a duplicate
-/// here means the traversal visited the exact same node twice in one
-/// [`crate::diff::diff`] call — a genuine engine bug, never a legitimate
-/// rendered-string collision (those are handled separately, at
-/// serialization time, in [`Report::to_json_value`]). `debug_assert!` is a
-/// no-op in release builds, so this has no effect on release behavior or
-/// performance.
+/// Inserts `value` at `path`, debug-asserting `path` is new: a duplicate means
+/// the traversal visited one node twice.
 fn insert_checked<V>(map: &mut BTreeMap<Vec<PathSegment>, V>, path: Vec<PathSegment>, value: V) {
     debug_assert!(!map.contains_key(&path), "duplicate report path: {path:?}");
     map.insert(path, value);
 }
 
-/// Merges `src` into `dst`, one entry at a time through [`insert_checked`]
-/// (not a blind [`BTreeMap::extend`]) so the duplicate-path debug assertion
-/// still fires on a collision. Shared by [`Report::merge`]'s four raw-`Value`
-/// categories (`dictionary_item_added`/`removed`, `iterable_item_added`/
-/// `removed`), which otherwise differ only in which field they merge.
+/// Merges `src` into `dst` through [`insert_checked`], so the duplicate-path
+/// assertion fires on a collision.
 fn merge_map(dst: &mut BTreeMap<Vec<PathSegment>, Value>, src: BTreeMap<Vec<PathSegment>, Value>) {
     for (path, value) in src {
         insert_checked(dst, path, value);
     }
 }
 
-/// [`push_raw_category`]'s [`Report::to_json_value`] twin: serializes `map`
-/// into `root` under `name`, skipping an empty category, and collapsing a
-/// rendered-string collision the same way — here through
-/// `serde_json::Map::insert`, which likewise overwrites on a repeated key,
-/// so the survivor is again the last structural path visited.
+/// [`push_raw_category`] for [`Report::to_json_value`]; a rendered-string
+/// collision likewise keeps the last structural path.
 fn serialize_raw_category(
     root: &mut serde_json::Map<String, serde_json::Value>,
     name: &str,
@@ -252,22 +217,9 @@ fn serialize_raw_category(
     root.insert(name.to_string(), serde_json::Value::Object(category));
 }
 
-/// Pushes `map` onto `root` under `name` as one rendered category, skipping
-/// it entirely when `map` is empty (matching `DeepDiff`'s own `to_json()`
-/// behavior of omitting empty categories). Shared by [`Report::to_value`]'s
-/// four raw-`Value` categories (`dictionary_item_added`/`removed`,
-/// `iterable_item_added`/`removed`), which otherwise differ only in `name`
-/// and which field they read.
-///
-/// Rendering the structural keys **collapses any rendered-string collision**
-/// (two structural paths whose [`render_path`] output is identical — see
-/// this module's doc) into a single entry: [`Builder::object`] keeps the
-/// last value seen for a repeated key, so the survivor is whichever
-/// structural path is greatest, i.e. the *last* one visited in `map`'s
-/// ascending structural order. This is the one place that tie-break happens;
-/// everywhere else in this file treats `map`'s structural keys as
-/// already-unique (which, structurally, they always are — see
-/// [`insert_checked`]).
+/// Pushes `map` onto `root` under `name` as one rendered category, omitting an
+/// empty one. Structural paths that render to the same string collapse to the
+/// last in structural order (see this module's doc).
 fn push_raw_category(
     root: &mut Vec<(String, Value)>,
     builder: &mut Builder,
@@ -284,18 +236,9 @@ fn push_raw_category(
     root.push((name.to_string(), builder.object(entries)));
 }
 
-/// The documented order of a set category's entries: ascending by rendered
-/// path string, with a rendered-string collision collapsed to a single entry
-/// (the same collapse [`push_raw_category`] performs, here by deduplicating
-/// the sorted strings).
-///
-/// This is the **only** place `onix` orders anything about a set for itself,
-/// and the only order-related difference from real `DeepDiff` anywhere in
-/// the output. `DeepDiff` builds these entries from `t2_hashes - t1_hashes`
-/// (`_diff_set`), a Python set of SHA-256 hex *strings*, so their order
-/// follows `PYTHONHASHSEED` and is unreproducible even in principle — unlike
-/// a set *value*, which both tools render in the set's own iteration order
-/// (see [`crate::value::SetItems`]). See `tests/golden/README.md`.
+/// A set category's entries in ascending rendered-path order, rendered-string
+/// collisions collapsed. `DeepDiff` orders them by `PYTHONHASHSEED`; see
+/// `tests/golden/README.md`.
 fn rendered_set_entries(map: &BTreeMap<Vec<PathSegment>, Value>) -> Vec<Str> {
     let mut rendered: Vec<Str> = map.keys().map(|path| render_path(path)).collect();
     rendered.sort();
@@ -303,9 +246,8 @@ fn rendered_set_entries(map: &BTreeMap<Vec<PathSegment>, Value>) -> Vec<Str> {
     rendered
 }
 
-/// [`push_raw_category`]'s twin for a set category: a JSON **array** of
-/// rendered path strings, in [`rendered_set_entries`]'s canonical order,
-/// omitted entirely when empty.
+/// [`push_raw_category`] for a set category: an array of rendered paths in
+/// [`rendered_set_entries`] order.
 fn push_set_category(
     root: &mut Vec<(String, Value)>,
     name: &str,
@@ -360,43 +302,33 @@ impl Report {
         insert_checked(&mut self.values_changed, path, entry);
     }
 
-    /// Records a `dictionary_item_added` finding at the structural `path`:
-    /// `value` is the added value itself (not wrapped in an old/new-value
-    /// object), matching `DeepDiff`'s `to_json()` shape at
-    /// `verbose_level=2`.
+    /// Records a `dictionary_item_added` finding at the structural `path`;
+    /// `value` is the added value itself.
     pub(crate) fn insert_dictionary_item_added(&mut self, path: Vec<PathSegment>, value: Value) {
         insert_checked(&mut self.dictionary_item_added, path, value);
     }
 
-    /// Records a `dictionary_item_removed` finding at the structural `path`:
-    /// `value` is the removed value itself (not wrapped in an old/new-value
-    /// object), matching `DeepDiff`'s `to_json()` shape at
-    /// `verbose_level=2`.
+    /// Records a `dictionary_item_removed` finding at the structural `path`;
+    /// `value` is the removed value itself.
     pub(crate) fn insert_dictionary_item_removed(&mut self, path: Vec<PathSegment>, value: Value) {
         insert_checked(&mut self.dictionary_item_removed, path, value);
     }
 
-    /// Records an `iterable_item_added` finding at the structural `path`:
-    /// `value` is the added value itself (not wrapped in an old/new-value
-    /// object), matching `DeepDiff`'s `to_json()` shape at
-    /// `verbose_level=2`.
+    /// Records an `iterable_item_added` finding at the structural `path`;
+    /// `value` is the added value itself.
     pub(crate) fn insert_iterable_item_added(&mut self, path: Vec<PathSegment>, value: Value) {
         insert_checked(&mut self.iterable_item_added, path, value);
     }
 
-    /// Records an `iterable_item_removed` finding at the structural `path`:
-    /// `value` is the removed value itself (not wrapped in an old/new-value
-    /// object), matching `DeepDiff`'s `to_json()` shape at
-    /// `verbose_level=2`.
+    /// Records an `iterable_item_removed` finding at the structural `path`;
+    /// `value` is the removed value itself.
     pub(crate) fn insert_iterable_item_removed(&mut self, path: Vec<PathSegment>, value: Value) {
         insert_checked(&mut self.iterable_item_removed, path, value);
     }
 
-    /// Records a `set_item_added` finding at the structural `path`, whose
-    /// last segment is the added item itself (see
-    /// [`crate::path::PathSegment::SetItem`]). `value` is that same item,
-    /// kept for distance measurement only — the serialized output is the
-    /// rendered path and nothing else.
+    /// Records a `set_item_added` finding at `path`, whose last segment is the added
+    /// item (see [`crate::path::PathSegment::SetItem`]); `value` is that item, kept
+    /// for distance measurement only.
     pub(crate) fn insert_set_item_added(&mut self, path: Vec<PathSegment>, value: Value) {
         insert_checked(
             &mut self.set_items.get_or_insert_default().added,
@@ -415,12 +347,8 @@ impl Report {
         );
     }
 
-    /// Records an `attribute_added` finding at the structural `path` (whose
-    /// last segment is a [`crate::path::PathSegment::Attribute`]): `value` is
-    /// the added attribute's value itself, matching `DeepDiff`'s `to_json()`
-    /// shape at `verbose_level=2` — the same shape as
-    /// [`Self::insert_dictionary_item_added`], for a custom object rather
-    /// than a `dict`.
+    /// Records an `attribute_added` finding at `path`; `value` is the added
+    /// attribute's value, as for [`Self::insert_dictionary_item_added`].
     pub(crate) fn insert_attribute_added(&mut self, path: Vec<PathSegment>, value: Value) {
         insert_checked(
             &mut self.attribute_items.get_or_insert_default().added,
@@ -439,17 +367,8 @@ impl Report {
         );
     }
 
-    /// Folds another report's findings into `self`, one entry at a time
-    /// (through the guarded `insert_*` methods for `type_changes`/
-    /// `values_changed`, and through [`merge_map`] — which shares the same
-    /// [`insert_checked`] guard — for the four raw-`Value` categories) so
-    /// the duplicate-path debug assertion still fires if two subtrees ever
-    /// produce the exact same *structural* path (a genuine engine bug: each
-    /// node in a traversal is visited exactly once, so this cannot happen
-    /// today). This is independent
-    /// of whether two *different* structural paths render to the same
-    /// string, which is expected on some input and handled separately at
-    /// serialization time (see this module's doc).
+    /// Folds `other` into `self` through the guarded `insert_*` methods and
+    /// [`merge_map`], so a duplicate structural path trips the debug assertion.
     pub(crate) fn merge(&mut self, mut other: Report) {
         // The smaller report goes into the larger, so a finding at every level
         // of a deep chain is moved a logarithmic number of times, not once per
@@ -484,49 +403,9 @@ impl Report {
         }
     }
 
-    /// `DeepDiff`'s global "mutual add/remove becomes a value change" pass
-    /// (`model.py::TreeResult.mutual_add_removes_to_become_value_changes`,
-    /// invoked once, after the whole diff tree is built, from
-    /// `DeepDiff._get_view_results` whenever `report_repetition=False` —
-    /// always, for this engine).
-    ///
-    /// Whenever an `iterable_item_added` and an `iterable_item_removed`
-    /// finding render to the **exact same path string** (`DeepDiff` matches
-    /// by `i.path()`, the rendered string, not a structural identity — see
-    /// [`crate::path::render_path`]), they are purely coincidental
-    /// same-slot events, not a real pairing: this collapses each such pair
-    /// into one `values_changed` (`old_value` from the removed side,
-    /// `new_value` from the added side) and removes both originals.
-    ///
-    /// **Always produces `values_changed`, never `type_changes`, regardless
-    /// of whether the two values' types differ** — confirmed against real
-    /// `DeepDiff`: its own merge (`_from_tree_value_changed`) never
-    /// inspects type at all, unlike the ordinary scalar-comparison paths
-    /// elsewhere in this engine. **Never attaches `new_path`**: `DeepDiff`'s
-    /// merged level reuses the *removed* side's own `t2_child_rel` (`None`,
-    /// since the removed item never had a `t2`), so its new-side path
-    /// resolution falls back to the same string as its old-side path —
-    /// confirmed empirically (`DeepDiff` never emits `new_path` on a
-    /// merge-produced `values_changed`, even when the removed/added values
-    /// sit at structurally distant original indices).
-    ///
-    /// Matching by *rendered string* rather than structural path is a
-    /// deliberate fidelity choice, not an approximation: for the
-    /// `iterable_item_added`/`removed` categories specifically, a path is
-    /// always an ancestor prefix plus one trailing numeric index (no key
-    /// quoting involved at the final segment), so a rendered-string
-    /// collision without a structural one could only arise from an
-    /// ancestor prefix collision — the same, already-documented and
-    /// accepted `render_path` non-injectivity class described in this
-    /// module's own doc and `tests/golden/README.md`'s "Path-rendering
-    /// collision survivor" section, not a new divergence this pass introduces.
-    ///
-    /// Runs once, globally, over the whole tree — called from
-    /// [`crate::diff::diff_with_max_depth`] after the entire recursive
-    /// traversal completes, matching `DeepDiff`'s own timing exactly (never
-    /// from inside `array_diff`'s per-list tie-break, which must still
-    /// compare *pre-merge* finding counts, exactly like `DeepDiff`'s own
-    /// per-list decision happens before this whole-tree pass ever runs).
+    /// `DeepDiff`'s mutual add/remove pass: an `iterable_item_added`/`removed` pair
+    /// with the same rendered path becomes one `values_changed` (never
+    /// `type_changes`, no `new_path`); runs once after the traversal.
     pub(crate) fn merge_mutual_add_removes(&mut self) {
         let removed_by_rendered: BTreeMap<Str, Vec<PathSegment>> = self
             .iterable_item_removed
@@ -559,51 +438,14 @@ impl Report {
                     old_value,
                     new_value,
                     new_path: None,
-                    // No `diff`: see `ValuesChangedEntry::diff`.
                     diff: None,
                 },
             );
         }
     }
 
-    /// Rewrites [`ValuesChangedEntry::new_path`]/[`TypeChangeEntry::new_path`]
-    /// for every `values_changed`/`type_changes` finding currently in `self`
-    /// to reflect an ancestor list-index substitution: the entry's own
-    /// structural path had `PathSegment::Index(old_idx)` at position
-    /// `prefix_depth` when it was recorded, and `new_path` should resolve as
-    /// if that one segment had instead been `PathSegment::Index(new_idx)`,
-    /// with every other segment (including anything further down inside
-    /// this finding's own subtree, and including any segment a *different*,
-    /// independent substitution already rewrote) unchanged.
-    ///
-    /// Used by [`crate::ignore_order`]'s paired-item recursion: `DeepDiff`
-    /// attaches `new_path` to *every* `values_changed`/`type_changes`
-    /// finding inside a hash-paired list item whose old (`t1`) and new
-    /// (`t2`) indices differ — not just a single top-level one — confirmed
-    /// empirically against real `DeepDiff` (a nested field change two levels
-    /// inside a paired dict still carries `new_path` with the outer index
-    /// swapped and the rest of the path identical).
-    ///
-    /// **Composes with an already-retagged entry, rather than skipping it.**
-    /// A finding whose `new_path` is already `Some` (set by a *deeper*,
-    /// independent index substitution — e.g. a nested `ignore_order` list
-    /// inside this same paired item that itself needed pairing) starts this
-    /// call's substitution from that *already-substituted* structural
-    /// vector, not from the entry's own base `path` key — so an outer call
-    /// composes cleanly on top of an inner one instead of clobbering or
-    /// ignoring it. This matters for doubly-nested drift: an item whose *own*
-    /// recursive diff needs a nested `ignore_order` pairing, inside an item
-    /// that *itself* needs pairing with index drift, must carry *both* index
-    /// substitutions in its `new_path`, composing the outer and inner
-    /// rewrites rather than letting the outer one overwrite the inner.
-    /// `new_path` is kept as structural segments rather than a pre-rendered
-    /// string specifically so this composition is a plain "overwrite one
-    /// element" mutation, not string surgery on an already-rendered,
-    /// possibly-quoted path.
-    ///
-    /// `dictionary_item_added`/`removed`/`iterable_item_added`/`removed`
-    /// never carry a second path field at all (confirmed empirically), so
-    /// this only ever touches the two value-comparison categories.
+    /// Sets `new_path[prefix_depth]` on every `values_changed`/`type_changes` entry,
+    /// starting from an existing `new_path` so nested substitutions compose.
     pub(crate) fn retag_new_path(&mut self, prefix_depth: usize, new_idx: usize) {
         for (path, entry) in &mut self.values_changed {
             let base = entry.new_path.get_or_insert_with(|| path.clone());
@@ -615,24 +457,10 @@ impl Report {
         }
     }
 
-    /// `DeepDiff`'s `_get_item_length` (distance.py) applied to a whole
-    /// trial-diff report — `rough_distance`'s
-    /// structural-fallback numerator (`diff_length`).
-    ///
-    /// Mirrors exactly which sub-value `_get_item_length` would see for
-    /// each report category once its own key-exclusion rule
-    /// ([`crate::ignore_order::item_length`]'s doc) is applied: a
-    /// `values_changed` entry contributes only its `new_value` (`old_value`/
-    /// `new_path` are excluded keys); a `type_changes` entry delegates to
-    /// [`crate::ignore_order::type_change_leaf_length`] (not a flat `1 +
-    /// item_length(new_value)` — `new_value` is conditionally *omitted*
-    /// entirely by real `DeepDiff`'s own delta view, see that function's
-    /// doc; an earlier version of this method reimplemented an incomplete,
-    /// special-cased version of that same rule inline, which is exactly
-    /// the kind of duplication this crate's own conventions warn against);
-    /// the four raw-value categories contribute their value in full (their
-    /// own top-level key is a path string, never one of the excluded
-    /// names).
+    /// `DeepDiff`'s `_get_item_length` over a trial-diff report, the
+    /// `rough_distance` numerator; the per-entry rules are
+    /// [`crate::ignore_order::item_length`] and
+    /// [`crate::ignore_order::type_change_leaf_length`].
     #[must_use]
     pub(crate) fn distance_leaf_length(&self) -> usize {
         let values_changed: usize = self
@@ -678,14 +506,9 @@ impl Report {
             && self.attribute_items().removed.is_empty()
     }
 
-    /// The total number of findings across every category.
-    ///
-    /// Mirrors `DeepDiff`'s own `len(TreeResult)` (a flat count over every
-    /// report category, not per-category) — used by the list-LCS path (see
-    /// `docs/design/list-diff.md`) to pick between the LCS-matched and
-    /// the plain index-aligned candidate report for a given list: `DeepDiff`
-    /// runs both and keeps whichever has *fewer* total findings, favoring
-    /// the index-aligned one on a tie.
+    /// The total number of findings across every category, as `DeepDiff`'s
+    /// `len(TreeResult)`; the list-LCS path keeps the candidate with fewer, the
+    /// index-aligned one on a tie.
     #[must_use]
     pub(crate) fn finding_count(&self) -> usize {
         self.type_changes.len()
@@ -700,23 +523,9 @@ impl Report {
             + self.attribute_items().removed.len()
     }
 
-    /// Renders the report into the `DeepDiff` `to_json()` shape at
-    /// `verbose_level=2`, as the crate's own [`Value`] model.
-    ///
-    /// This is the type-preserving rendering: a finding whose value is a
-    /// [`Value::Tuple`] still carries a tuple here, where
-    /// [`Self::to_json_value`] (and any JSON text rendered from it) can only
-    /// show the array a tuple serializes as. A consumer that reconstructs
-    /// native values from a report — the Python bindings' `to_dict()` —
-    /// reads this; a consumer that only needs JSON reads
-    /// [`Self::to_json_value`], which does its own direct walk (see its doc
-    /// for why the two exist).
-    ///
-    /// Empty categories are omitted entirely (an empty report renders to an
-    /// empty object), matching `DeepDiff`'s own behavior. Rendering each
-    /// category's structural keys can collapse two entries into one on
-    /// adversarial input — see this module's doc, and the crate-private
-    /// `push_raw_category` for the mechanics.
+    /// Renders the report in `DeepDiff`'s `to_json()` shape as a [`Value`], keeping
+    /// types (a tuple stays a [`Value::Tuple`]), which [`Self::to_json_value`]
+    /// cannot. Empty categories are omitted.
     #[must_use]
     pub fn to_value(&self) -> Value {
         let mut builder = Builder::new();
@@ -782,20 +591,9 @@ impl Report {
         builder.object(root)
     }
 
-    /// Serializes the report to the `DeepDiff` `to_json()` shape at
-    /// `verbose_level=2` as a [`serde_json::Value`], where a
-    /// [`Value::Tuple`] becomes the JSON array `DeepDiff`'s own `to_json()`
-    /// shows for a tuple.
-    ///
-    /// This walks the findings directly rather than going through
-    /// [`Self::to_value`]: routing it through the compact rendering first
-    /// would deep-copy every finding into an intermediate tree before
-    /// converting it, which measured about twice as slow on the only output
-    /// path the CLI and the JSON entry point have (0.52 ms against 1.01 ms on
-    /// a 0.76 MB report; 0.92 ms against 1.58 ms on a 1.52 MB one). The two
-    /// renderings are deliberately parallel — same category order, same key
-    /// names, same collision collapse — and
-    /// `the_two_renderings_agree_on_every_category` pins them to each other.
+    /// Renders the report in `DeepDiff`'s `to_json()` shape as a
+    /// [`serde_json::Value`], a tuple becoming an array. It walks the findings
+    /// directly and must stay in step with [`Self::to_value`].
     #[must_use]
     pub fn to_json_value(&self) -> serde_json::Value {
         let mut root = serde_json::Map::new();
