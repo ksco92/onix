@@ -1,8 +1,9 @@
 """Differential fuzz test: onix's Python bindings vs real DeepDiff on live objects.
 
 Runs through `deepdiff_rs.DeepDiff`, exercising the Python-object-to-`Value`
-conversion layer. Fifteen batches of seeded cases run twice (ordered and
-`ignore_order=True`), comparing `to_json()` (parsed) and `to_dict()`; the
+conversion layer. Batches of seeded cases run twice (ordered and
+`ignore_order=True`; the surrogate batch runs ordered only), comparing
+`to_json()` (parsed) and `to_dict()`; the
 custom-object batch compares `to_json()` alone and the enum and class-attribute
 batches the report structure alone, since DeepDiff renders a whole object from
 other views. The big-integer batch draws its big ints as bare scalars only,
@@ -410,16 +411,9 @@ def _diverges(a: JsonValue, b: JsonValue, ignore_order: bool) -> tuple[JsonValue
     real = RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)
     onix = OnixDeepDiff(a, b, ignore_order=ignore_order)
 
-    # The mapping only matters for the calendar batch, where a report can carry
-    # a `date` that DeepDiff's stock `to_json()` refuses to serialize; it is a
-    # no-op for every other value. See `scripts/golden_tags.py`. A report
-    # that carries a raw `frozenset` value, or a *nested* dict value keyed by
-    # a `datetime`/`date`/`tuple` (a dict key any deeper than the top-level
-    # path segment has no json.dumps rule at all, unlike `int`/`bool`/`float`/
-    # `None`, which DeepDiff's own `to_json()` already stringifies), makes
-    # `to_json()` raise `TypeError` outright; both are real DeepDiff crashes,
-    # so the comparison falls back to `to_dict()` alone rather than treating a
-    # crash as a divergence to report.
+    # The mapping only matters for the calendar batch; see `scripts/golden_tags.py`.
+    # DeepDiff's `to_json()` raises on frozenset values and nested non-`str` keys;
+    # compare `to_dict()` alone then.
     try:
         expected_json = json.loads(real.to_json(default_mapping=JSON_DEFAULT_MAPPING))
         real_to_json_crashed = False
@@ -479,7 +473,7 @@ def test_differential_fuzz_matches_real_deepdiff_ordered_and_ignore_order() -> N
 
 
 def test_differential_fuzz_with_tuples_matches_real_deepdiff() -> None:
-    """Runs a second SEED_COUNT-case batch whose values also contain tuples."""
+    """Runs a SEED_COUNT-case batch whose values also contain tuples."""
     seeds = range(TUPLE_SEED_BASE, TUPLE_SEED_BASE + SEED_COUNT)
     mismatches = _run_batch(seeds, tuples=True)
 
@@ -586,7 +580,7 @@ def utc_timezone(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def test_differential_fuzz_with_calendar_values_matches_real_deepdiff(
     utc_timezone: None,
 ) -> None:
-    """Run a third SEED_COUNT-case batch whose values also contain datetimes and dates."""
+    """Run a SEED_COUNT-case batch whose values also contain datetimes and dates."""
     seeds = range(CALENDAR_SEED_BASE, CALENDAR_SEED_BASE + SEED_COUNT)
     mismatches = _run_batch(seeds, tuples=False, calendar=True)
 
@@ -599,7 +593,7 @@ def test_differential_fuzz_with_calendar_values_matches_real_deepdiff(
 def test_differential_fuzz_with_clustered_calendar_lists_matches_real_deepdiff(
     utc_timezone: None,
 ) -> None:
-    """Run a fourth batch of flat, tightly clustered calendar lists."""
+    """Run a batch of flat, tightly clustered calendar lists."""
     mismatches = []
 
     for seed in range(CLUSTERED_SEED_BASE, CLUSTERED_SEED_BASE + SEED_COUNT):
@@ -621,7 +615,7 @@ def test_differential_fuzz_with_clustered_calendar_lists_matches_real_deepdiff(
 def test_differential_fuzz_with_stringified_calendar_values_matches_real_deepdiff(
     utc_timezone: None,
 ) -> None:
-    """Run a fifth batch pairing dict-wrapped calendar values against strings of them."""
+    """Run a batch pairing dict-wrapped calendar values against strings of them."""
     mismatches = []
 
     for seed in range(STRINGIFIED_SEED_BASE, STRINGIFIED_SEED_BASE + SEED_COUNT):
@@ -874,8 +868,8 @@ def _diverges_with_sets(a: object, b: object, ignore_order: bool) -> tuple[objec
         if expected_dict != _deepdiff_answer(_reverse_sets(a), _reverse_sets(b), ignore_order):
             return None
 
-        # The pre-existing "list(a_set) == some_list" class (Set iteration
-        # order, the `list(a_set) == some_list` point), reachable through any
+        # The pre-existing "list(a_set) == some_list" class (see "Set iteration
+        # order" in `tests/golden/README.md`), reachable through any
         # batch's values, not only sets': see
         # `_is_known_set_sequence_coercion_divergence`.
         if _is_known_set_sequence_coercion_divergence(expected_dict, actual_dict):
@@ -914,7 +908,7 @@ def _as_set_insensitive(value: JsonValue) -> JsonValue:
 
 
 def test_differential_fuzz_with_sets_matches_real_deepdiff() -> None:
-    """Runs a third SEED_COUNT-case batch whose values also contain sets and frozensets."""
+    """Runs a SEED_COUNT-case batch whose values also contain sets and frozensets."""
     mismatches = []
 
     for seed in range(SET_SEED_BASE, SET_SEED_BASE + SEED_COUNT):
@@ -1027,7 +1021,7 @@ def _generate_combined_case(seed: int) -> tuple[object, object]:
 def test_differential_fuzz_with_the_combined_alphabet_matches_real_deepdiff(
     utc_timezone: None,
 ) -> None:
-    """Run a seventh, >=500-case batch drawing the full alphabet in one generator."""
+    """Run a >=500-case batch drawing the full alphabet in one generator."""
     mismatches = []
 
     for seed in range(COMBINED_SEED_BASE, COMBINED_SEED_BASE + COMBINED_SEED_COUNT):
@@ -1099,7 +1093,7 @@ def _mutate_multiline_value(rng: random.Random, value: JsonValue) -> JsonValue:
 
 
 def test_differential_fuzz_with_multiline_strings_matches_real_deepdiff() -> None:
-    """Run an eighth SEED_COUNT-case batch whose leaves are often multi-line strings."""
+    """Run a SEED_COUNT-case batch whose leaves are often multi-line strings."""
     mismatches = []
 
     for seed in range(MULTILINE_SEED_BASE, MULTILINE_SEED_BASE + SEED_COUNT):
@@ -1121,7 +1115,7 @@ def test_differential_fuzz_with_multiline_strings_matches_real_deepdiff() -> Non
 
 
 def test_differential_fuzz_with_non_str_dict_keys_matches_real_deepdiff() -> None:
-    """Run a ninth SEED_COUNT-case batch whose dicts may carry non-`str` keys."""
+    """Run a SEED_COUNT-case batch whose dicts may carry non-`str` keys."""
     seeds = range(DICT_KEY_SEED_BASE, DICT_KEY_SEED_BASE + SEED_COUNT)
     mismatches = _run_batch(seeds, tuples=True, calendar=True, dict_keys=True)
 
@@ -1199,7 +1193,7 @@ def _generate_subclass_key_case(seed: int) -> tuple[dict[object, JsonValue], dic
 
 
 def test_differential_fuzz_with_subclass_dict_keys_matches_real_deepdiff() -> None:
-    """Run a tenth batch whose dicts carry a subclass key against its base-type twin."""
+    """Run a batch whose dicts carry a subclass key against its base-type twin."""
     seeds = range(SUBCLASS_KEY_SEED_BASE, SUBCLASS_KEY_SEED_BASE + SUBCLASS_KEY_SEED_COUNT)
     mismatches = _run_batch(seeds, case_fn=_generate_subclass_key_case)
 
@@ -1279,7 +1273,7 @@ def _mutate_surrogate_keys(rng: random.Random, value: JsonValue) -> JsonValue:
 
 
 def test_differential_fuzz_with_surrogate_strings_matches_real_deepdiff() -> None:
-    """Run an eleventh SEED_COUNT-case batch whose leaves and keys often hold a lone surrogate."""
+    """Run a SEED_COUNT-case batch whose leaves and keys often hold a lone surrogate."""
     mismatches = []
 
     for seed in range(SURROGATE_SEED_BASE, SURROGATE_SEED_BASE + SEED_COUNT):
