@@ -4,25 +4,14 @@
 # ///
 """Differential fuzzer: onix's `--ignore-order` CLI vs real DeepDiff.
 
-Generates random JSON list pairs (scalars, nested dicts/lists), runs both
-onix's CLI and real `DeepDiff(ignore_order=True)`, and diffs canonical JSON
-output. This is a development-time verification tool — not part of `make
-check`, since it shells out to a debug build and to real `deepdiff`.
-
-`object_diff` applies DeepDiff's `threshold_to_diff_deeper=0.33` dict
-collapse unconditionally (root and nested, ordered and under
-ignore_order), so `is_known_threshold_divergence` below is expected to
-report zero hits.
+Generates random JSON list pairs, runs both onix's CLI and real
+`DeepDiff(ignore_order=True)`, and diffs canonical JSON output. Not part of
+`make check`: it shells out to a debug build and to real `deepdiff`.
 
 Usage::
 
-    uv run scripts/differential_fuzz.py [seed] [count] [--bias-nested-low-overlap-dicts|--bias-repeated-scalars]
-
-The optional third argument selects a biased generator:
-
-- `--bias-nested-low-overlap-dicts`: single-dict-in-a-list elements with low key overlap.
-- `--bias-repeated-scalars`: dicts of lists drawn from a tiny scalar alphabet.
-"""
+    uv run scripts/differential_fuzz.py [seed] [count]
+        [--bias-nested-low-overlap-dicts|--bias-repeated-scalars]"""
 
 import json
 import random
@@ -182,8 +171,8 @@ def mutate_toward_repeated_scalars(rng: random.Random, a: list[JsonValue]) -> li
     """Shuffle and, for each repeating-sibling dict, give *every* one of its
     keys the same shared "other" wrapped inner list. That is what makes the
     sibling keys' (removed, added) item-key pairs collide in the run memo while
-    their distances differ. A fresh shared other per dict keeps distances straddling the 0.3
-    pairing cutoff."""
+    their distances differ. A fresh shared other per dict keeps distances
+    straddling the 0.3 pairing cutoff."""
     b = list(a)
     rng.shuffle(b)
     for index, item in enumerate(b):
@@ -217,9 +206,8 @@ def run_deepdiff(a: JsonValue, b: JsonValue) -> JsonValue:
 def is_known_threshold_divergence(expected: JsonValue, actual: JsonValue) -> bool:
     """
     Heuristic: does this mismatch look like the threshold_to_diff_deeper=0.33
-    dict-collapse in the reported diff shape? Kept as a named bucket so a
-    future regression here shows up distinctly rather than as an
-    unexplained mismatch; expected to report zero hits.
+    dict-collapse in the reported diff shape? Expected to report zero hits:
+    onix applies the collapse unconditionally.
 
     :param expected: Real DeepDiff's report.
     :param actual: onix's report.
