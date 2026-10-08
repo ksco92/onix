@@ -5,11 +5,11 @@ The diff *results* for sets are pinned by the golden corpus (``set_*``,
 by ``test_golden_parity.py``). This file covers the parts that live only in the
 bindings: that a report crossing back into Python carries real ``set``/
 ``frozenset`` objects, that the two set categories come back as lists of path
-strings, the float rendering used inside a set item's path, and the places
-onix deliberately differs from real DeepDiff: the five consequences of
-DeepDiff's set results (see ``tests/golden/README.md``'s "Set iteration order"
-section), and being able to serialize a frozenset at all. Each of those is pinned here as onix's own
-output, with DeepDiff's shown alongside rather than asserted equal.
+strings, the float rendering used inside a set item's path, and the places onix
+deliberately differs from real DeepDiff: the five consequences of DeepDiff's set
+results (see ``tests/golden/README.md``'s "Set iteration order" section), and
+being able to serialize a frozenset at all. Each of those is pinned here as
+onix's own output, with DeepDiff's shown alongside rather than asserted equal.
 """
 
 import datetime
