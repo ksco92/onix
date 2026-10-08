@@ -146,14 +146,8 @@ itself is trivially empty, so its wall-clock time is dominated by
 interpreter startup + `import deepdiff` on the Python side, and binary
 exec-to-main on the Rust side.
 
-**Caveat: the deepdiff number is measured via `uv run perf/run_deepdiff.py`**
-(per this harness's own fairness rule), not a bare `python`
-invocation, so it also includes `uv`'s own subprocess-launch and
-environment-resolution overhead (typically ~10-30ms on a cached
-environment) on top of pure interpreter+import cost. This number is real
-and reproducible as measured, but is not a pure "Python interpreter +
-`import deepdiff`" figure: a bare-interpreter comparison would show a
-smaller gap.
+The deepdiff figure includes `uv run`'s launch overhead, about 10-30 ms
+cached, so it overstates bare interpreter startup.
 
 | | onix | deepdiff (via `uv run`) |
 |---|---|---|
