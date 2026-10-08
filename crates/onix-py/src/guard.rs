@@ -30,10 +30,23 @@ const PER_LEVEL_STACK_BYTES: usize = 8_192;
 /// Multiplier over the bare `ceiling * per-level` figure.
 const STACK_SAFETY_MARGIN: usize = 2;
 
-/// The diff worker thread's stack size: reserved virtual address space,
-/// committed lazily. At [`MAX_DEPTH_CEILING`] it is 312.5 MiB.
-const WORKER_STACK_BYTES: usize = MAX_DEPTH_CEILING * PER_LEVEL_STACK_BYTES * STACK_SAFETY_MARGIN;
-const _: () = assert!(WORKER_STACK_BYTES == 327_680_000);
+/// Smallest worker stack: the 512 KiB [`MAX_INLINE_DEPTH`] is sized for. The
+/// handoff cost is below what `stack_frame_cost -- --handoff` resolves (see
+/// `crates/onix-core/examples/stack_frame_cost.rs`).
+const WORKER_STACK_FLOOR_BYTES: usize = 524_288;
+
+/// The worker thread's stack size for a diff bounded by `max_depth`: reserved
+/// virtual address space, committed lazily.
+const fn worker_stack_bytes(max_depth: usize) -> usize {
+    let sized = max_depth * PER_LEVEL_STACK_BYTES * STACK_SAFETY_MARGIN;
+    if sized > WORKER_STACK_FLOOR_BYTES {
+        sized
+    } else {
+        WORKER_STACK_FLOOR_BYTES
+    }
+}
+const _: () = assert!(worker_stack_bytes(MAX_DEPTH_CEILING) == 327_680_000);
+const _: () = assert!(worker_stack_bytes(DEFAULT_MAX_DEPTH) == 8_388_608);
 
 /// Depth up to which the recursive operations (the diff itself, plus
 /// serializing or dropping its result) may run directly on the calling
@@ -94,7 +107,7 @@ pub(crate) fn diff_to_value<'r>(
         onix_core::diff::diff_with_resolver(a, b, &opts, resolver).map(|report| report.to_value())
     };
     if deep || is_deep(a) || is_deep(b) {
-        run_on_worker(py, diff)?
+        run_on_worker(py, opts.max_depth, diff)?
     } else {
         diff()
     }
@@ -103,8 +116,9 @@ pub(crate) fn diff_to_value<'r>(
 
 /// Serializes `value` to a JSON string, on the sized worker thread when
 /// `deep` is set (rendering is natively recursive too), inline otherwise.
-/// `deep` and `may_have_wtf8` are the caller's own precomputed verdicts (see
-/// [`is_deep`]) so this never re-walks `value` to answer either question.
+/// `max_depth` bounds the value's nesting. `deep` and `may_have_wtf8` are the
+/// caller's own precomputed verdicts (see [`is_deep`]) so this never re-walks
+/// `value` to answer either question.
 ///
 /// # Errors
 ///
@@ -113,11 +127,12 @@ pub(crate) fn diff_to_value<'r>(
 pub(crate) fn serialize_value(
     py: Python<'_>,
     value: &Value,
+    max_depth: usize,
     deep: bool,
     may_have_wtf8: bool,
 ) -> PyResult<String> {
     Ok(if deep {
-        run_on_worker(py, || to_json_string(value, may_have_wtf8))?
+        run_on_worker(py, max_depth, || to_json_string(value, may_have_wtf8))?
     } else {
         to_json_string(value, may_have_wtf8)
     })
@@ -246,15 +261,14 @@ fn write_json_seq<'a>(items: impl Iterator<Item = &'a Value>, out: &mut String) 
     out.push(']');
 }
 
-/// Runs `f` on a dedicated worker thread sized to run the recursive diff
-/// engine at [`MAX_DEPTH_CEILING`] without overflowing, GIL released. `f`
-/// may borrow non-`'static` data because the worker is joined before this
-/// function returns.
+/// Runs `f` on a dedicated worker thread with a [`worker_stack_bytes`]
+/// stack for `max_depth`, GIL released. `f` may borrow non-`'static` data
+/// because the worker is joined before this function returns.
 ///
 /// # Errors
 ///
 /// `RuntimeError` if the worker thread cannot be spawned or panics.
-pub(crate) fn run_on_worker<F, T>(py: Python<'_>, f: F) -> PyResult<T>
+pub(crate) fn run_on_worker<F, T>(py: Python<'_>, max_depth: usize, f: F) -> PyResult<T>
 where
     F: FnOnce() -> T + Send,
     T: Send,
@@ -264,7 +278,7 @@ where
     let outcome: Result<T, WorkerFailure> = py.detach(|| {
         std::thread::scope(|scope| {
             match std::thread::Builder::new()
-                .stack_size(WORKER_STACK_BYTES)
+                .stack_size(worker_stack_bytes(max_depth))
                 .name("deepdiff-rs-diff".to_string())
                 .spawn_scoped(scope, f)
             {

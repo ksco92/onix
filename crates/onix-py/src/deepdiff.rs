@@ -23,6 +23,8 @@ pub(crate) struct DeepDiff {
     /// Whether `report_value` needs the worker thread to render; computed once
     /// so `to_json` never re-walks it. See `crate::guard::is_deep`.
     report_is_deep: bool,
+    /// The resolved `max_depth`, which bounds the report's nesting.
+    max_depth: usize,
     /// Whether either input held a lone surrogate code point, found during
     /// conversion; lets `to_json` skip its own WTF-8 tree walk when `false`.
     may_have_wtf8: bool,
@@ -75,7 +77,7 @@ impl DeepDiff {
         }
         let report_value = if held.needs_render {
             let rendered = if is_deep(&report_value) {
-                run_on_worker(py, || render_report(&report_value))?
+                run_on_worker(py, opts.max_depth, || render_report(&report_value))?
             } else {
                 render_report(&report_value)
             };
@@ -103,6 +105,7 @@ impl DeepDiff {
         Ok(Self {
             report_value,
             report_is_deep,
+            max_depth: opts.max_depth,
             may_have_wtf8,
         })
     }
@@ -116,6 +119,7 @@ impl DeepDiff {
         serialize_value(
             py,
             &self.report_value,
+            self.max_depth,
             self.report_is_deep,
             self.may_have_wtf8,
         )

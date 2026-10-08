@@ -30,7 +30,13 @@ pub(crate) fn diff_json(
     let b_value = parse_json(b, "b")?;
     let report_value = diff_to_value(py, &a_value, &b_value, opts, &mut |_| None, false)?;
     // `false`: parsed JSON text can never hold a lone surrogate escape.
-    serialize_value(py, &report_value, is_deep(&report_value), false)
+    serialize_value(
+        py,
+        &report_value,
+        opts.max_depth,
+        is_deep(&report_value),
+        false,
+    )
 }
 
 fn parse_json(text: &str, argument_name: &str) -> PyResult<onix_core::Value> {
