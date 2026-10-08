@@ -70,9 +70,10 @@ def test_namedtuple_is_accepted_and_diffed_positionally_not_by_field() -> None:
     Real DeepDiff walks a namedtuple's fields (``root[0].x``) instead of its
     indices; onix diffs any tuple subclass — namedtuple included — the same
     positional way as a plain tuple (``root[0][0]``), a documented divergence
-    (see `tests/golden/README.md`) rather than an approximation of the
-    field-walking shape. The class name still carries through: a type change
-    between the namedtuple and a plain tuple names it, matching real DeepDiff.
+    (see `tests/golden/README.md`, Known DeepDiff quirks) rather than an
+    approximation of the field-walking shape. The class name still carries
+    through: a type change between the namedtuple and a plain tuple names it,
+    matching real DeepDiff.
     """
     point = collections.namedtuple("Point", "x")
     a, b = (point(1),), (point(2),)

@@ -6,7 +6,7 @@ by ``test_golden_parity.py``). This file covers the parts that live only in the
 bindings: that a report crossing back into Python carries real ``set``/
 ``frozenset`` objects, that the two set categories come back as lists of path
 strings, the float rendering used inside a set item's path, and the places
-onix deliberately differs from real DeepDiff: the three consequences of
+onix deliberately differs from real DeepDiff: the five consequences of
 DeepDiff's set results depending on the process's set iteration order (see
 ``tests/golden/README.md``'s "Set iteration order" section), and being able to
 serialize a frozenset at all. Each of those is pinned here as onix's own
@@ -123,7 +123,7 @@ def test_onix_serializes_a_frozenset_where_real_deepdiff_refuses() -> None:
 
 
 def test_set_entry_order_is_sorted_where_real_deepdiff_is_hash_ordered() -> None:
-    """The one documented divergence: onix sorts set entries, DeepDiff hash-orders them.
+    """Onix sorts set entries where DeepDiff hash-orders them.
 
     DeepDiff builds them from ``t2_hashes - t1_hashes``, a Python set of
     SHA-256 hex strings, so their order follows ``PYTHONHASHSEED``.
