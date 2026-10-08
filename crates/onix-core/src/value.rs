@@ -222,109 +222,53 @@ impl fmt::Display for Str {
     }
 }
 
-/// A compact JSON value: the memory-frugal counterpart of
-/// [`serde_json::Value`].
+/// A compact JSON value: the memory-frugal counterpart of [`serde_json::Value`].
 ///
-/// See the [module documentation](self) for the representation choices.
-/// Six of the variants mirror JSON's own shapes; objects
-/// are held as an [`Object`] (a sorted, exactly-sized entry slice) and
-/// numbers as a [`Number`] preserving the `i64`/`u64`/`f64` distinction.
-///
-/// Seven variants are the ones JSON itself cannot express:
-/// [`Value::Tuple`], [`Value::Set`] and [`Value::FrozenSet`] — the Python
-/// `tuple`, `set` and `frozenset` — and [`Value::DateTime`], [`Value::Date`],
-/// [`Value::Time`] and [`Value::TimeDelta`]. Each is a *different type* from
-/// every other and from `list` (a `tuple`-vs-`list` or `set`-vs-`frozenset`
-/// pairing is a `type_changes` finding, and neither pair ever hash-matches
-/// under `ignore_order`), which is exactly why each gets its own variant: the
-/// type distinction is structural, so mixing two of them can only ever be a
-/// compile error or a `type_changes`, never a silent equality. The three
-/// container kinds render to a JSON array in [`Value::to_serde_json`],
-/// matching what `DeepDiff`'s own `to_json()` shows.
-///
-/// The four calendar types (see [`mod@crate::datetime`]) are kept as
-/// *structured* values rather than pre-rendered ISO strings because
-/// `DeepDiff` renders the same datetime two different ways depending on
-/// where it lands in a report (UTC-normalized in `values_changed`, raw
-/// everywhere else) and because [`crate::Report::to_value`] must hand a real
-/// `datetime` object back to a caller holding Python objects — neither is
-/// possible once the value has collapsed to a string.
-///
-/// Neither [`From`]`<`[`serde_json::Value`]`>` nor [`Deserialize`] can
-/// produce any of the seven (JSON has no literal for them): they enter the
-/// model only from a caller holding real Python objects.
+/// Tuple, set, frozenset and the four calendar variants are types JSON cannot express; only a
+/// caller holding Python objects produces them. The size is at most 40 bytes.
 #[derive(Debug, Clone)]
 pub enum Value {
     /// JSON `null`.
     Null,
     /// A boolean.
     Bool(bool),
-    /// A number (see [`Number`] for the preserved int/float distinction).
+    /// A number, keeping the int/float distinction.
     Number(Number),
-    /// A string — see [`Str`] for the UTF-8/WTF-8 split.
+    /// A string — see [`Str`].
     Str(Str),
-    /// A Python `datetime.datetime` — see [`DateTime`], and this type's own
-    /// doc for why it is a variant rather than a pre-rendered string. Wrapped
-    /// in [`Typed`] so a `datetime` subclass (e.g. pandas `Timestamp`)
-    /// carries its own class name — see `docs/design/value-model.md`'s
-    /// "Subclasses" section.
+    /// A Python `datetime.datetime` — see [`DateTime`].
     DateTime(Typed<DateTime>),
-    /// A Python `datetime.date` — see [`Date`]. See [`Value::DateTime`]'s
-    /// doc for the [`Typed`] wrapper.
+    /// A Python `datetime.date` — see [`Date`].
     Date(Typed<Date>),
-    /// A Python `datetime.time` — see [`Time`]. See [`Value::DateTime`]'s
-    /// doc for the [`Typed`] wrapper.
+    /// A Python `datetime.time` — see [`Time`].
     Time(Typed<Time>),
-    /// A Python `datetime.timedelta` — see [`TimeDelta`]. See
-    /// [`Value::DateTime`]'s doc for the [`Typed`] wrapper.
+    /// A Python `datetime.timedelta` — see [`TimeDelta`].
     TimeDelta(Typed<TimeDelta>),
-    /// An array, stored as an exactly-sized `Box<[Value]>` — wrapped in
-    /// [`Typed`] for a `list` subclass, see `docs/design/value-model.md`'s
-    /// "Subclasses" section.
+    /// An array of exactly-sized items.
     Array(Typed<Box<[Value]>>),
-    /// A Python tuple, stored exactly like [`Value::Array`] but kept as a
-    /// distinct variant — see this type's own doc for why. Also carries a
-    /// [`Typed`] class name for a `tuple` subclass, including a
-    /// `namedtuple` — see `docs/design/value-model.md`'s "Subclasses"
-    /// section for how a `namedtuple` is diffed.
+    /// A Python tuple, a distinct type from [`Value::Array`] (a `type_changes` finding).
     Tuple(Typed<Box<[Value]>>),
-    /// A Python `set`, stored as canonically ordered [`SetItems`], which
-    /// carries its own optional class name for a `set` subclass — see
-    /// `docs/design/value-model.md`'s "Subclasses" section.
+    /// A Python `set`, held in canonical order — see [`SetItems`].
     Set(SetItems),
-    /// A Python `frozenset`, stored exactly like [`Value::Set`] but kept as
-    /// a distinct variant — see this type's own doc for why.
+    /// A Python `frozenset`, a distinct type from [`Value::Set`].
     FrozenSet(SetItems),
-    /// An object: key-sorted, exactly-sized entries (see [`Object`]), which
-    /// carries its own optional class name for a `dict` subclass — see
-    /// `docs/design/value-model.md`'s "Subclasses" section.
+    /// An object with key-sorted entries — see [`Object`].
     Object(Object),
 }
 
-/// One [`Object`] key: the `str` fast path this crate has always had
-/// ([`ObjectKey::Str`]), or any other key `DeepDiff` also accepts
-/// ([`ObjectKey::Other`]) — see `onix-py`'s conversion table for the exact
-/// set. No `Hash` impl; see `crate::ignore_order::hash`'s
-/// `object_key_item_key` for how a content hash of one is computed instead.
+/// One [`Object`] key: a `str` or any other key `DeepDiff` accepts. No `Hash` impl;
+/// `crate::ignore_order::hash`'s `object_key_item_key` hashes a key's content instead.
 #[derive(Debug, Clone)]
 pub enum ObjectKey {
-    /// A `str` key — see [`Key`] for the interned-common-case/lone-surrogate
-    /// split.
+    /// A `str` key — see [`Key`].
     Str(Key),
-    /// Any other key `DeepDiff` accepts: `None`, `bool`, `int`, `float`,
-    /// `datetime`, `date`, or a `tuple` of those — never itself a `str`
-    /// (that always takes the [`ObjectKey::Str`] arm) and never a container
-    /// other than that restricted `tuple` (`onix-py`'s conversion layer is
-    /// the boundary that enforces this; this type does not).
+    /// `None`, `bool`, `int`, `float`, `datetime`, `date`, or a `tuple` of those. `onix-py`'s
+    /// conversion enforces the set; this type does not.
     Other(Box<Value>),
 }
 
 impl ObjectKey {
-    /// This key's `str` content, or `None` for [`ObjectKey::Other`] *or* a
-    /// [`Key::Wtf8`] (a lone surrogate code point, which has no valid `&str`
-    /// form — see [`Key::as_utf8`]) — the convenience every call site
-    /// expecting a plain `str` key needs, correctly falling through to the
-    /// "not a match" case for a surrogate key too.
+    /// This key's `str` content, or `None` for [`ObjectKey::Other`] or a [`Key::Wtf8`].
     #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -334,11 +278,7 @@ impl ObjectKey {
     }
 }
 
-/// Structural equality, consistent with [`ObjectKey`]'s [`Ord`]
-/// (`object_key_cmp`): two `str` keys compare by content, two `Other` keys
-/// by [`Value`]'s own structural equality, and a `Str` never equals an
-/// `Other` (`DeepDiff` never treats a `str` key as equal to any other key
-/// kind either).
+/// Structural equality, consistent with [`Ord`]; a `Str` never equals an `Other`.
 impl PartialEq for ObjectKey {
     fn eq(&self, other: &Self) -> bool {
         object_key_cmp(self, other).is_eq()
@@ -353,24 +293,15 @@ impl PartialOrd for ObjectKey {
     }
 }
 
-/// Total order backing [`Object`]'s own sort/binary-search: every `Str` key
-/// sorts before every `Other` key (so an all-`str` object's entries land in
-/// exactly the order they always have — this variant changes nothing about
-/// it), `Str`-vs-`Str` by string content, and `Other`-vs-`Other` by
-/// `canonical_cmp` (the same structural order [`SetItems`] sorts its
-/// members with). This is an internal storage/lookup order, unrelated to
-/// `DeepDiff`'s own (unreproducible) dict iteration order — see
-/// `crate::diff::object` for the *matching* rule (Python `==`, which treats
-/// `1`/`1.0`/`True` as one key) applied on top of this when two [`Object`]s
-/// are diffed against each other.
+/// Every `Str` key sorts before every `Other` key; `Str`s by content, `Other`s by
+/// `canonical_cmp`. A storage order only: `crate::diff::object` holds the matching rule.
 impl Ord for ObjectKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         object_key_cmp(self, other)
     }
 }
 
-/// [`ObjectKey`]'s comparison, factored out so [`PartialEq`] and [`Ord`]
-/// cannot drift (equality is exactly `Ordering::Equal`).
+/// [`ObjectKey`]'s comparison, shared by [`PartialEq`] and [`Ord`] so they cannot drift.
 fn object_key_cmp(a: &ObjectKey, b: &ObjectKey) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
@@ -382,12 +313,9 @@ fn object_key_cmp(a: &ObjectKey, b: &ObjectKey) -> std::cmp::Ordering {
     }
 }
 
-/// Wraps a value with the source Python class name, when it differs from
-/// the base type this [`Value`] variant represents (`None` for the exact
-/// base type). [`PartialEq`] compares only the wrapped value, ignoring the
-/// class name — see `docs/design/value-model.md`'s "Subclasses"
-/// section, and `diff_at`'s class-name check (`crate::diff`) for where the
-/// name is checked instead.
+/// Wraps a value with its source Python class name, `None` for the exact base type.
+/// [`PartialEq`] compares only the wrapped value; `docs/design/value-model.md`'s "Subclasses"
+/// section says where the name is checked instead.
 #[derive(Debug, Clone)]
 pub struct Typed<T> {
     inner: T,
@@ -395,7 +323,7 @@ pub struct Typed<T> {
 }
 
 impl<T> Typed<T> {
-    /// Wraps `inner` with no subclass name (the exact base type).
+    /// Wraps `inner` with no subclass name.
     #[must_use]
     pub fn new(inner: T) -> Self {
         Self {
@@ -404,30 +332,26 @@ impl<T> Typed<T> {
         }
     }
 
-    /// Wraps `inner` with an explicit subclass name (`None` for the exact
-    /// base type, matching [`Typed::new`]).
+    /// Wraps `inner` with an explicit subclass name.
     #[must_use]
     pub fn with_class_name(inner: T, class_name: Option<Arc<str>>) -> Self {
         Self { inner, class_name }
     }
 
-    /// The subclass name this value carries, or `None` for the exact base
-    /// type.
+    /// The subclass name, or `None` for the exact base type.
     #[must_use]
     pub fn class_name(&self) -> Option<&str> {
         self.class_name.as_deref()
     }
 
-    /// Unwraps into the inner value, discarding the class name.
+    /// Unwraps, discarding the class name.
     pub(crate) fn into_inner(self) -> T {
         self.inner
     }
 }
 
 impl<T: Copy> Typed<T> {
-    /// A copy of the wrapped value, discarding the class name — for the
-    /// small `Copy` payloads ([`DateTime`], [`Date`]) that call sites need
-    /// to move out of a `Typed<T>` reference.
+    /// A copy of the wrapped value, discarding the class name.
     #[must_use]
     pub fn value(&self) -> T {
         self.inner
@@ -448,10 +372,7 @@ impl<T> From<T> for Typed<T> {
     }
 }
 
-/// A fixed-size boxed array (`Box::new([a, b, c])`, the common test-literal
-/// shape for [`Value::Array`]/[`Value::Tuple`]) unsize-coerces to
-/// `Box<[Value]>` on assignment, so it can build a [`Typed<Box<[Value]>>`]
-/// the same way a `Vec<Value>`'s `.into_boxed_slice()` does.
+/// Lets `Box::new([a, b, c])` build a `Typed<Box<[Value]>>`.
 impl<const N: usize> From<Box<[Value; N]>> for Typed<Box<[Value]>> {
     fn from(items: Box<[Value; N]>) -> Self {
         let items: Box<[Value]> = items;
@@ -459,22 +380,15 @@ impl<const N: usize> From<Box<[Value; N]>> for Typed<Box<[Value]>> {
     }
 }
 
-/// Content-only equality: deliberately ignores `class_name` — see
-/// [`Typed`]'s own doc for why matching identity is class-agnostic
-/// throughout the crate.
+/// Ignores `class_name`; see [`Typed`].
 impl<T: PartialEq> PartialEq for Typed<T> {
     fn eq(&self, other: &Self) -> bool {
         self.inner == other.inner
     }
 }
 
-/// The subclass name `value` carries, or `None` for the exact base type —
-/// `None` for every [`Value`] variant that cannot carry one at all (`Null`,
-/// `Bool`, `Number`, `Str`). The one place every one of [`Typed`]'s and
-/// [`SetItems`]'/[`Object`]'s `class_name`/`type_name` accessors is read
-/// together, so `diff_at`'s (`crate::diff`'s recursive dispatch core)
-/// type-change check and [`Value`]'s own structural equality (below) share
-/// one definition.
+/// The subclass name `value` carries, or `None` (always `None` for `Null`, `Bool`, `Number`,
+/// `Str`).
 #[must_use]
 pub(crate) fn class_name(value: &Value) -> Option<&str> {
     match value {
@@ -489,12 +403,8 @@ pub(crate) fn class_name(value: &Value) -> Option<&str> {
     }
 }
 
-/// Whether `a` and `b` are the same Python class, the single identity check
-/// `diff_at` (`crate::diff::dispatch`) and [`Value`]'s own structural equality
-/// both use so they cannot drift. Two [`Object`]s compare by class identity
-/// *and* kind (see [`Object::same_class`]). Every other variant compares by
-/// the subclass `__name__` alone, so two same-named `list` subclasses from
-/// different modules compare equal (issue #119).
+/// Whether `a` and `b` are the same Python class: [`Object`]s by class identity and kind
+/// ([`Object::same_class`]), every other variant by subclass `__name__` alone.
 #[must_use]
 pub(crate) fn same_class(a: &Value, b: &Value) -> bool {
     match (a, b) {
@@ -503,11 +413,7 @@ pub(crate) fn same_class(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// Delegates to the iterative `structural_eq`. The result is exactly what a
-/// derived `PartialEq` produces, verified by a differential property test
-/// against the derive before it was replaced. See
-/// `docs/design/value-model.md`'s "Stack safety" section for why equality is
-/// iterative.
+/// Iterative structural equality; see `docs/design/value-model.md`'s "Stack safety" section.
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         structural_eq(self, other)
@@ -515,25 +421,17 @@ impl PartialEq for Value {
 }
 
 impl Value {
-    /// Renders this value back into an equivalent [`serde_json::Value`].
-    ///
-    /// Objects render with keys in sorted order (the order this type already
-    /// stores them in, matching [`serde_json`]'s `BTreeMap` iteration), and
-    /// numbers reconstruct their exact `i64`/`u64`/`f64` representation, so
-    /// `to_serde_json().to_string()` is byte-identical to the string the
-    /// original [`serde_json::Value`] would have produced.
+    /// Renders back into an equivalent [`serde_json::Value`]: sorted object keys, exact number
+    /// kinds. Tuples and sets render as arrays; a lone surrogate renders lossily and a
+    /// non-finite float as `null`.
     #[must_use]
     pub fn to_serde_json(&self) -> serde_json::Value {
         match self {
             Value::Null => serde_json::Value::Null,
             Value::Bool(b) => serde_json::Value::Bool(*b),
-            // A non-finite float has no `serde_json::Number` form; `null` matches the
-            // streaming parse path (see `Number::to_serde_number`).
             Value::Number(n) => n
                 .to_serde_number()
                 .map_or(serde_json::Value::Null, serde_json::Value::Number),
-            // `serde_json::Value::String` cannot hold a `Str::Wtf8` (a
-            // lone surrogate has no valid Rust `String` representation).
             Value::Str(s) => serde_json::Value::String(s.to_string()),
             Value::DateTime(value) => serde_json::Value::String(value.isoformat()),
             Value::Date(value) => serde_json::Value::String(value.isoformat()),
@@ -542,16 +440,12 @@ impl Value {
             Value::Array(items) | Value::Tuple(items) => {
                 serde_json::Value::Array(items.iter().map(Value::to_serde_json).collect())
             }
-            // Already in canonical order: a set's source order is dropped at
-            // construction, since it is not reproducible (see [`SetItems`]).
             Value::Set(items) | Value::FrozenSet(items) => {
                 serde_json::Value::Array(items.iter().map(Value::to_serde_json).collect())
             }
             Value::Object(obj) => {
                 let mut map = serde_json::Map::with_capacity(obj.len());
                 for (key, value) in obj {
-                    // Lossy for an `ObjectKey::Str(Key::Wtf8(_))` — see this
-                    // method's own doc above for why that is accepted here.
                     map.insert(object_key_json_string(key), value.to_serde_json());
                 }
                 serde_json::Value::Object(map)
@@ -560,41 +454,11 @@ impl Value {
     }
 }
 
-/// Renders one [`ObjectKey`] as the JSON string key
-/// [`Value::to_serde_json`] embeds it under — also reused by `onix-py`'s
-/// hand-written non-finite-float/lone-surrogate JSON writer, so a report can
-/// carry a non-`str` key regardless of which of `to_json()`'s two rendering
-/// paths it takes.
-///
-/// A `Str` key renders as its own text, unchanged (the only case a JSON
-/// object can ever hold in the first place) — lossily for a
-/// [`Key::Wtf8`] (a lone surrogate code point) exactly as
-/// [`Value::to_serde_json`]'s own doc explains for a string *value*; the
-/// byte-exact rendering for that case is [`write_json_str_content`], which
-/// `onix-py`'s writer calls directly instead of going through this
-/// function. An `Other` key mirrors Python's `json.dumps`, which
-/// stringifies a non-`str` dict key rather than rejecting it — `bool` to
-/// `"true"`/`"false"`, `None` to `"null"`, `int` to its decimal text, and a
-/// finite `float` through the identical shortest-round-trip `repr()`
-/// [`crate::path::python_repr`] uses for a float *value* — so a report
-/// embedding one of these four kinds as a nested key matches real
-/// `DeepDiff`'s own `to_json()` byte-for-byte. A non-finite `float` key
-/// renders as the bare token text a *value* of the same bits would get,
-/// rather than reproducing a real `DeepDiff` bug that garbles it to `None`
-/// — see `tests/golden/README.md`'s "Non-finite `float` dict key" section.
-///
-/// A `datetime`, `date`, or `tuple` key has no such rule to match: Python's
-/// `json.dumps` (and so `DeepDiff.to_json()`) *raises* `TypeError` rather
-/// than serializing one — confirmed against real `deepdiff==9.1.0` — so per
-/// this crate's compatibility policy (crash → pick the simpler,
-/// deterministic behavior, and document it) this renders the same
-/// [`crate::path::python_repr`] text the key would get as a *top-level*
-/// path segment, which is at least useful output instead of a hard failure.
-/// See `tests/golden/README.md`'s "Nested non-`str` dict key in `to_json()`"
-/// section.
-// `Number`'s three-way i64/u64/f64 representation makes each `expect` below
-// prove an invariant `Number` itself guarantees (mirrors `path::number_repr`,
-// which cannot show this lint at all since it stayed `pub(crate)`).
+/// Renders an [`ObjectKey`] as the JSON string key [`Value::to_serde_json`] and `onix-py`'s
+/// writer embed. `Other` keys follow `json.dumps` (a non-finite float as `NaN`/`Infinity`);
+/// `datetime`, `date` and `tuple` keys render as their path text, see `tests/golden/README.md`'s
+/// "Nested non-`str` dict key in `to_json()`" section.
+// Each `expect` below proves an invariant `Number` guarantees.
 #[allow(clippy::missing_panics_doc)]
 #[must_use]
 pub fn object_key_json_string(key: &ObjectKey) -> String {
@@ -628,18 +492,8 @@ pub fn object_key_json_string(key: &ObjectKey) -> String {
     }
 }
 
-/// Whether `value` — or, transitively, any [`Object`] key inside it, down
-/// through an [`ObjectKey::Other`] tuple's own elements — holds a
-/// [`Str::Wtf8`]/[`Key::Wtf8`] (a lone surrogate code point). Iterative (see
-/// `docs/design/value-model.md`'s "Stack safety" section): a heap
-/// work-stack, so an adversarially deep report cannot overflow the native
-/// stack checking this.
-///
-/// `onix-py`'s `to_json()` writer does not call this directly (it takes a
-/// caller-tracked `may_have_wtf8` byproduct instead, computed once during
-/// Python-object conversion, to avoid a second whole-tree walk here on top
-/// of that one); this is the ground truth that byproduct approximates, kept
-/// public for tests and for any caller without such a byproduct to hand.
+/// Whether `value`, or any [`Object`] key inside it, holds a [`Str::Wtf8`] or [`Key::Wtf8`].
+/// Iterative; see `docs/design/value-model.md`'s "Stack safety" section.
 #[must_use]
 pub fn contains_wtf8(value: &Value) -> bool {
     let mut stack = vec![value];
@@ -692,12 +546,7 @@ pub fn write_json_str_content(bytes: &[u8], out: &mut String) {
     }
 }
 
-/// Escapes `run` (a real `&str`, guaranteed non-empty) exactly the way
-/// `serde_json` already does, by asking it to serialize `run` directly and
-/// stripping the surrounding quotes it adds — reusing `serde_json`'s own
-/// escaper rather than reimplementing it, so this can never drift from
-/// `Value::to_serde_json`'s (unconditionally-correct) output for the same
-/// content.
+/// Escapes `run` through `serde_json`, stripping the quotes it adds.
 fn push_escaped_run(run: &str, out: &mut String) {
     let quoted =
         serde_json::to_string(run).expect("a &str always serializes to a JSON string literal");
@@ -705,18 +554,14 @@ fn push_escaped_run(run: &str, out: &mut String) {
 }
 
 impl From<serde_json::Value> for Value {
-    /// Converts an owned [`serde_json::Value`] into a compact [`Value`],
-    /// interning object keys across the whole tree in one session so a key
-    /// repeated at many places costs one `Arc<str>` rather than one `String`
-    /// per occurrence.
+    /// Converts into a compact [`Value`], interning object keys across the whole tree.
     fn from(value: serde_json::Value) -> Self {
         let mut interner = Interner::new();
         from_serde(value, &mut interner)
     }
 }
 
-/// Recursively converts one [`serde_json::Value`] node, threading a single
-/// [`Interner`] so keys are shared across the entire tree.
+/// Converts one node, threading a single [`Interner`] across the tree.
 fn from_serde(value: serde_json::Value, interner: &mut Interner) -> Value {
     match value {
         serde_json::Value::Null => Value::Null,
@@ -745,29 +590,20 @@ fn from_serde(value: serde_json::Value, interner: &mut Interner) -> Value {
     }
 }
 
-/// Iterative destructor: hoists nested children onto a heap work-stack so no
-/// single native-stack frame recurses into the next nesting level.
-///
-/// Each node has its children *taken* (replaced with empty containers)
-/// before it is dropped, so when the emptied shell's own `Drop` runs it
-/// finds nothing to recurse into — teardown of arbitrarily deep input uses
-/// `O(1)` native stack and `O(nodes)` heap, rather than the `O(depth)`
-/// native frames a derived recursive `Drop` (like [`serde_json::Value`]'s)
-/// would need. See `docs/design/value-model.md`'s "Stack safety" section.
+/// Iterative destructor: `O(1)` native stack, see `docs/design/value-model.md`'s "Stack safety"
+/// section.
 impl Drop for Value {
     fn drop(&mut self) {
         let mut stack: Vec<Value> = Vec::new();
         take_children(self, &mut stack);
         while let Some(mut node) = stack.pop() {
             take_children(&mut node, &mut stack);
-            // `node` drops here, but its children were just taken, so its
-            // own `Drop` finds empty containers and does not recurse.
+            // Its children were taken, so this drop does not recurse.
         }
     }
 }
 
-/// Moves `value`'s direct children onto `stack`, leaving `value` holding
-/// empty containers (arrays and tuples alike). Scalars contribute nothing.
+/// Moves `value`'s direct children onto `stack`, leaving empty containers.
 fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
     match value {
         Value::Array(items) | Value::Tuple(items) => {
@@ -793,29 +629,12 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
     }
 }
 
-/// Iterative structural equality backing `Value`'s [`PartialEq`]. Semantics
-/// match a derived `PartialEq`: same-variant structural equality — so an
-/// array and a tuple holding identical items are never equal, matching
-/// `DeepDiff`'s own `tuple`-vs-`list` type distinction — with
-/// `Number`'s variant sensitivity intact (`PosInt(1)` is not equal to
-/// `Float(1.0)`); objects compare over their sorted entries (equal key sets
-/// and per-key values), and arrays over equal length and per-index values.
-///
-/// Sets compare like arrays, element-wise in stored order — which is
-/// canonical (see [`SetItems`]), so two sets built from the same members in
-/// any order do compare equal. See
-/// `docs/design/value-model.md`'s "Stack safety" section for why it is
-/// iterative rather than recursive.
+/// Iterative structural equality backing `Value`'s [`PartialEq`]: same-variant only (an array
+/// never equals a tuple), `Number` variant-sensitive (`1` is not `1.0`), sets in stored order.
 fn structural_eq(a: &Value, b: &Value) -> bool {
     let mut stack: Vec<(&Value, &Value)> = vec![(a, b)];
     while let Some((a, b)) = stack.pop() {
-        // `DeepDiff` reports a subclass-vs-base pair as a `type_changes`
-        // finding even when every field matches (see [`Typed`]'s doc), so
-        // two values that are not the same class are not structurally equal —
-        // checked once here rather than per-arm below through the one shared
-        // [`same_class`] definition `diff_at` also uses (an [`Object`] compares
-        // by class identity plus kind, every other variant by render name),
-        // a no-op (both `None`) for a variant that carries no class at all.
+        // A subclass-vs-base pair is a `type_changes` finding even when every field matches.
         if !same_class(a, b) {
             return false;
         }
@@ -838,10 +657,7 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
                 }
             }
             (Value::DateTime(x), Value::DateTime(y)) => {
-                // By instant, not by field: this backs the engine's own
-                // "equal inputs report nothing" fast path, and `DeepDiff`
-                // compares two datetimes by instant with a naive value read
-                // as UTC (see `docs/design/value-model.md`).
+                // By instant, a naive value read as UTC.
                 if x.instant() != y.instant() {
                     return false;
                 }
@@ -852,10 +668,7 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
                 }
             }
             (Value::Time(x), Value::Time(y)) => {
-                // `times_equal`, not the struct's own derived `==`: real
-                // `_diff_time` never normalizes, so this is the exact rule a
-                // naive value can never equal an aware one (see
-                // `docs/design/value-model.md`).
+                // A naive time never equals an aware one.
                 if !times_equal(x.value(), y.value()) {
                     return false;
                 }
@@ -899,44 +712,24 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
     true
 }
 
-/// A number preserving [`serde_json`]'s exact three-way representation for
-/// the values that fit — a non-negative integer (`u64`), a negative integer
-/// (`i64`), or a float (`f64`) — plus a fourth arm for a Python `int` whose
-/// magnitude exceeds `i64`/`u64`. A float built from
-/// JSON (via `Number::from_serde` or the streaming [`Deserialize`]) is
-/// always finite — JSON itself has no `NaN`/`Infinity` literal — but
-/// [`Number::from_f64`] is not limited to that boundary: it also builds the
-/// [`Number`] a Python `float` converts to, and Python's `float` can be
-/// non-finite, so a stored float need not round-trip through
-/// [`serde_json::Number`] ([`Value::to_serde_json`] falls back to `null` for
-/// one that can't, the same collapse the streaming parse path already used
-/// for a non-finite value arriving some other way).
-///
-/// The three-way split is load-bearing for byte-compatible output: `1` and
-/// `1.0` must render differently, and a `u64` above `i64::MAX` must survive
-/// as an integer.
+/// A number preserving [`serde_json`]'s `u64`/`i64`/`f64` split, plus an arbitrary-precision arm
+/// for a Python `int` beyond them, so `1` and `1.0` render differently. A float is non-finite
+/// only when built through [`Number::from_f64`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Number {
     repr: NumberRepr,
 }
 
-/// A non-negative integer, a negative integer, a float, or an
-/// arbitrary-precision integer. The first three mirror [`serde_json`]'s
-/// internal `N` enum so classification and reconstruction match exactly;
-/// [`NumberRepr::Big`] is boxed so this arm keeps the enum pointer-sized (see
-/// [`Number::from_bigint`] for the one-representation-per-value invariant).
+/// Mirrors [`serde_json`]'s internal `N`, plus a boxed `Big` that keeps the enum pointer-sized.
 #[derive(Debug, Clone, PartialEq)]
 enum NumberRepr {
-    /// A non-negative integer (covers the whole `u64` range, including
-    /// values above [`i64::MAX`]).
+    /// A non-negative integer.
     PosInt(u64),
     /// A negative integer.
     NegInt(i64),
-    /// A float — finite, or (via [`Number::from_f64`] only; a
-    /// `serde_json::Number` is always finite) `NaN`/`Infinity`/`-Infinity`.
+    /// A float; non-finite only via [`Number::from_f64`].
     Float(f64),
-    /// An arbitrary-precision integer outside `i64::MIN..=u64::MAX` — a
-    /// Python `int` too large for the fast arms above.
+    /// An integer outside `i64::MIN..=u64::MAX`.
     Big(Box<BigInt>),
 }
 
@@ -949,10 +742,8 @@ impl Number {
         }
     }
 
-    /// Builds a number from an `i64`, mirroring [`serde_json`]: a
-    /// non-negative value is stored as a `u64` (`PosInt`), a negative one as
-    /// an `i64` (`NegInt`), so both representations of the same integer
-    /// value compare and render identically.
+    /// Builds a number from an `i64`; a non-negative value is stored as `PosInt`, as
+    /// [`serde_json`] does.
     #[must_use]
     pub fn from_i64(value: i64) -> Self {
         match u64::try_from(value) {
@@ -963,15 +754,7 @@ impl Number {
         }
     }
 
-    /// Builds a number from an `f64`, finite or not.
-    ///
-    /// Unlike `Number::from_serde` (which mirrors
-    /// [`serde_json::Number::from_f64`] and only ever sees a finite value,
-    /// because a `serde_json::Number` is finite by construction), this
-    /// constructor is also the Python-`float` boundary
-    /// (`crate::convert::float_to_value` in `onix-py`), where a `NaN` or an
-    /// infinity is an ordinary, legal input — so it always succeeds and
-    /// stores exactly the bits it was given.
+    /// Builds a number from an `f64`, finite or not, storing the bits as given.
     #[must_use]
     pub fn from_f64(value: f64) -> Self {
         Self {
@@ -979,10 +762,8 @@ impl Number {
         }
     }
 
-    /// Builds a number from an arbitrary-precision integer, narrowing to the
-    /// `u64`/`i64` fast arms when it fits so every integer value keeps a
-    /// single canonical representation — the entry point for a Python `int`
-    /// (`crate::convert::int_to_value` in `onix-py`) of any magnitude.
+    /// Builds a number from an arbitrary-precision integer, narrowing to the `u64`/`i64` arms
+    /// when it fits.
     #[must_use]
     pub fn from_bigint(value: BigInt) -> Self {
         if let Some(u) = value.to_u64() {
@@ -996,15 +777,13 @@ impl Number {
         }
     }
 
-    /// Returns `true` if this number was parsed/stored as a float.
+    /// Whether this number is a float.
     #[must_use]
     pub fn is_f64(&self) -> bool {
         matches!(self.repr, NumberRepr::Float(_))
     }
 
-    /// Returns this number as an `i64` if it fits, else `None` (floats,
-    /// `u64` values above [`i64::MAX`], and arbitrary-precision integers
-    /// return `None`). Mirrors [`serde_json::Number::as_i64`].
+    /// This number as an `i64` if it fits, else `None`.
     #[must_use]
     pub fn as_i64(&self) -> Option<i64> {
         match &self.repr {
@@ -1014,8 +793,7 @@ impl Number {
         }
     }
 
-    /// Returns this number as a `u64` if it is a non-negative integer that
-    /// fits, else `None`. Mirrors [`serde_json::Number::as_u64`].
+    /// This number as a `u64` if it is a non-negative integer that fits, else `None`.
     #[must_use]
     pub fn as_u64(&self) -> Option<u64> {
         match &self.repr {
@@ -1024,10 +802,7 @@ impl Number {
         }
     }
 
-    /// Returns this number as an `f64` (always `Some`, matching
-    /// [`serde_json::Number::as_f64`]; integer values are converted, which
-    /// may lose precision for magnitudes beyond `2^53` and saturate to an
-    /// infinity beyond `f64::MAX`, matching Python's own `float(int)`).
+    /// This number as an `f64` (always `Some`); a large integer may lose precision.
     #[must_use]
     #[allow(
         clippy::cast_precision_loss,
@@ -1039,16 +814,11 @@ impl Number {
             NumberRepr::PosInt(u) => *u as f64,
             NumberRepr::NegInt(i) => *i as f64,
             NumberRepr::Float(f) => *f,
-            // num-bigint's `ToPrimitive::to_f64` is total — it saturates to an
-            // infinity beyond `f64::MAX`, never `None` — so the default is
-            // unreachable.
             NumberRepr::Big(b) => b.to_f64().unwrap_or(f64::INFINITY),
         })
     }
 
-    /// This integer's value as an `i128` when it fits, else `None` (a float,
-    /// or an integer whose magnitude exceeds `i128`). Every `u64`/`i64` value
-    /// fits, so this is `Some` for every non-`Big` integer.
+    /// This integer as an `i128`, or `None` for a float or a `Big` beyond `i128`.
     #[must_use]
     pub(crate) fn as_i128(&self) -> Option<i128> {
         match &self.repr {
@@ -1059,10 +829,7 @@ impl Number {
         }
     }
 
-    /// The arbitrary-precision payload, or `None` for a value that fits a
-    /// fast arm (a `u64`/`i64` integer or a float) — the accessor the Python
-    /// bindings and the byte-exact JSON writer read a big integer's exact
-    /// digits through.
+    /// The arbitrary-precision payload, or `None` for a fast-arm integer or a float.
     #[must_use]
     pub fn as_big(&self) -> Option<&BigInt> {
         match &self.repr {
@@ -1071,8 +838,7 @@ impl Number {
         }
     }
 
-    /// This integer's exact value as a [`BigInt`] — a `Big`'s payload, or a
-    /// fast-arm integer's `i128` value. [`Number::integer_cmp`]'s slow path.
+    /// This integer's exact value as a [`BigInt`]; [`Number::integer_cmp`]'s slow path.
     fn to_bigint(&self) -> BigInt {
         self.as_big().cloned().unwrap_or_else(|| {
             BigInt::from(
@@ -1082,12 +848,7 @@ impl Number {
         })
     }
 
-    /// Orders two integers by value across every representation. The
-    /// `i128` fast path covers every pair that does not involve a `Big`
-    /// beyond `i128` (so `u64::MAX` and `-1` order correctly without
-    /// allocating); only a genuinely huge operand falls back to a [`BigInt`]
-    /// comparison. Callers establish that both numbers are integers, never a
-    /// float.
+    /// Orders two integers by value across every representation; callers pass no float.
     #[must_use]
     pub(crate) fn integer_cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self.as_i128(), other.as_i128()) {
@@ -1096,20 +857,13 @@ impl Number {
         }
     }
 
-    /// Classifies a [`serde_json::Number`] into the compact representation,
-    /// preserving exactly which of the three kinds [`serde_json`] chose so
-    /// reconstruction is byte-identical. `serde_json`'s own parser never
-    /// yields an integer beyond `u64`/`i64` (it renders one as an `f64`
-    /// instead), so this never produces a [`NumberRepr::Big`] — that arm is
-    /// reached only from the Python-object boundary.
+    /// Classifies a [`serde_json::Number`], preserving which kind it chose. Never yields `Big`.
     fn from_serde(number: &serde_json::Number) -> Self {
         if let Some(u) = number.as_u64() {
             Self::from_u64(u)
         } else if let Some(i) = number.as_i64() {
             Self::from_i64(i)
         } else {
-            // Neither a `u64` nor an `i64`, so by construction a finite
-            // `f64` (a `serde_json::Number` is always one of the three).
             let f = number
                 .as_f64()
                 .expect("a serde_json Number that is neither u64 nor i64 is a finite f64");
@@ -1119,23 +873,8 @@ impl Number {
         }
     }
 
-    /// Reconstructs the exact [`serde_json::Number`] this value came from, or
-    /// `None` for a non-finite float — the one stored value JSON cannot
-    /// represent at all (not even as an "impossible" `serde_json::Number`;
-    /// [`serde_json::Number::from_f64`] itself rejects it). The caller
-    /// ([`Value::to_serde_json`]) falls back to `null`, matching how the
-    /// streaming parse path already collapses a non-finite value reaching it
-    /// some other way (see [`ValueVisitor::visit_f64`]).
-    ///
-    /// A [`NumberRepr::Big`] has no exact [`serde_json::Number`] form either
-    /// (`serde_json`'s number type, absent the `arbitrary_precision` feature,
-    /// tops out at `u64`/`i64`/`f64`), so it renders as its nearest `f64` —
-    /// the identical value `serde_json` would itself parse the same digits
-    /// back into. The byte-exact digits survive through the Python bindings'
-    /// own hand-written JSON writer (`onix-py`'s `guard` module) and
-    /// [`Value::to_serde_json`]'s callers that need them; this
-    /// `serde_json::Value` bridge is only the CLI/report path, where an
-    /// integer beyond `u64` cannot enter from JSON text in the first place.
+    /// The exact [`serde_json::Number`], or `None` for a non-finite float. A `Big` becomes its
+    /// nearest `f64`; its byte-exact digits go through `onix-py`'s JSON writer.
     fn to_serde_number(&self) -> Option<serde_json::Number> {
         match &self.repr {
             NumberRepr::PosInt(u) => Some(serde_json::Number::from(*u)),
@@ -1146,34 +885,11 @@ impl Number {
     }
 }
 
-/// A Python `set`'s or `frozenset`'s members: duplicate-free, and held in
-/// the crate's canonical set order.
+/// A `set`'s or `frozenset`'s members: duplicate-free, in canonical set order, so no rendering
+/// depends on Python's hash order (`tests/golden/README.md`, "Set iteration order").
 ///
-/// A set's members reach `onix` in whatever order the source iterated them,
-/// which for a real Python set is hash order — unreproducible from one
-/// process to the next, and for `str` members dependent on
-/// `PYTHONHASHSEED`. Nothing here depends on it: membership, hashing and
-/// coercion all go through order-independent identities (`set_difference`'s
-/// own doc, in `crate::ignore_order`, has the matching rule the set diff
-/// compares members by), and the source order is dropped outright at
-/// construction: [`SetItems::new`] stores the
-/// members in the crate's **canonical set order** instead, so every
-/// rendering of a set is canonical without sorting anything. Reproducing
-/// `DeepDiff`'s own order-dependent answers is impossible, and matching them
-/// is not worth being nondeterministic for. See `tests/golden/README.md`'s
-/// "Set iteration order" section.
-///
-/// The order is: `None` first, then `bool`, `int`, `float`, `str`, `tuple`,
-/// `frozenset`, `list`, `set`, `dict` and finally the two calendar kinds —
-/// each kind after the last — and within a kind by value: booleans and
-/// numbers numerically, strings by code point, datetimes by instant, dates
-/// by ordinal, and every container element by element and then by length.
-/// It is a purely structural comparison (the crate-private
-/// `canonical_cmp`), so ordering a
-/// set never renders its members.
-///
-/// A set has no duplicate members, so [`SetItems::new`] drops any member
-/// equal to an earlier one.
+/// The order is `None`, `bool`, `int`, `float`, `str`, `tuple`, `frozenset`, `list`, `set`,
+/// `dict`, `datetime`, `date`, `time`, `timedelta`, each kind by value.
 ///
 /// # Examples
 ///
@@ -1189,79 +905,16 @@ impl Number {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct SetItems {
-    /// The members. Invariants, both established by [`SetItems::new`]: in
-    /// ascending [`canonical_cmp`] order, and no two structurally equal.
+    /// Ascending in [`canonical_cmp`] order, no two structurally equal.
     items: Box<[Value]>,
-    /// The `set`/`frozenset` subclass name this value came from, or `None`
-    /// for the exact base type — see `docs/design/value-model.md`'s
-    /// "Subclasses" section (this field is that same concept, plain rather than wrapped,
-    /// since [`SetItems::new`] already has its own constructor function to
-    /// hide it behind).
+    /// The subclass name, or `None` for the exact base type.
     type_name: Option<Arc<str>>,
 }
 
 impl SetItems {
-    /// Builds a set's members, sorting them into canonical set order and
-    /// dropping any member equal to an earlier one.
-    ///
-    /// A real Python `set` cannot hold two equal members, but this
-    /// constructor cannot assume it was handed one: this type is public, so
-    /// a caller building a [`Value`] directly can still hand it two
-    /// structurally equal members. Two equal members would render to the
-    /// same path segment and so to the same *structural* report path, which
-    /// [`crate::report::Report`] requires to be unique; dropping the later
-    /// one is what a Python set would have done with the pair in the first
-    /// place.
-    ///
-    /// Equality here is the structural one `canonical_cmp` decides, which
-    /// is exactly what "renders to the same path segment" means. It is
-    /// *finer* than the membership identity the diff itself compares by —
-    /// `set_difference`'s own doc (in `crate::ignore_order`) has the exact,
-    /// two-path matching rule: two members Python would call equal but that
-    /// this crate can tell apart — `(1,)` and `(1.0,)` — are both kept here,
-    /// and then reported as the two distinct items they are. No Python set
-    /// can hold that particular pair, and the golden generator can never
-    /// write one, so it is reachable only by building a [`Value`] directly.
-    ///
-    /// A naive and an aware `datetime` at one instant are the *opposite*
-    /// case: `naive == aware` is `false` in Python, so `{naive, aware}` is a
-    /// perfectly ordinary two-member set — `canonical_cmp` keeps both here
-    /// too (it orders a `datetime` by instant, then by whether it is aware,
-    /// so the two never compare equal) — even though the matching identity
-    /// `set_difference` uses treats a same-instant naive/aware pair as one
-    /// (again, see its doc for the exact rule), for comparing across two
-    /// different sets. Storing every structurally
-    /// distinct member and matching by a coarser identity are not in
-    /// tension: this is the same split ordinary Rust `HashMap`/`HashSet`
-    /// keys make between `Eq` and a custom-normalized lookup key. See
-    /// `tests/golden/README.md`'s "Set iteration order" section for where
-    /// this leaves `DeepDiff`'s own (hash-order-dependent) answer behind.
-    ///
-    /// `canonical_cmp`'s one deliberately *coarser* spot is a bare `-0.0`
-    /// versus `0.0`: it folds them together (see `number_cmp`), so both
-    /// dedup here exactly as a real Python `set` would (they hash and
-    /// compare equal there too), instead of surviving as two members the
-    /// way `(1,)`/`(1.0,)` do.
-    ///
-    /// A `NaN` member dedups too, but only against a bit-identical `NaN` —
-    /// `canonical_cmp` never folds two differently-signed or -payloaded
-    /// `NaN`s together, so it stays no coarser there than `PartialEq` (which
-    /// never calls two `NaN`s equal at all). A real Python `set` can hold two
-    /// members that are both, individually, `float('nan')` — `nan != nan`
-    /// means they never dedup by value — so this is a real, if narrow,
-    /// divergence: this crate's value model has no notion of the *object
-    /// identity* Python's set falls back on, so a bit-identical pair of
-    /// `NaN`s collapses to one canonical member here where two independently
-    /// constructed Python `NaN` objects would not. See
-    /// `tests/golden/README.md`'s "Non-finite floats" section.
-    ///
-    /// Comparing structurally rather than by identity is also what keeps
-    /// this cheap: a comparison stops at the first difference, where
-    /// building an identity always walks the whole member, which would make
-    /// constructing a deeply nested set quadratic in its depth.
-    ///
-    /// Costs one `O(n log n)` sort of short-circuiting comparisons, and
-    /// nothing at all below two members.
+    /// Sorts into canonical order and drops structurally equal members; `-0.0` and `0.0` fold
+    /// and bit-identical `NaN`s collapse (`tests/golden/README.md`, "Non-finite floats").
+    /// Costs one `O(n log n)` sort.
     #[must_use]
     pub fn new(mut items: Vec<Value>) -> Self {
         if items.len() < 2 {
@@ -1280,17 +933,14 @@ impl SetItems {
         }
     }
 
-    /// Attaches a `set`/`frozenset` subclass name (`None` for the exact base
-    /// type), for a caller (`onix-py`'s converter) that already has a
-    /// built [`SetItems`] and knows which concrete class it came from.
+    /// Attaches a `set`/`frozenset` subclass name (`None` for the exact base type).
     #[must_use]
     pub fn with_type_name(mut self, type_name: Option<Arc<str>>) -> Self {
         self.type_name = type_name;
         self
     }
 
-    /// The subclass name this set carries, or `None` for the exact base
-    /// type.
+    /// The subclass name, or `None` for the exact base type.
     #[must_use]
     pub fn type_name(&self) -> Option<&str> {
         self.type_name.as_deref()
@@ -1314,28 +964,13 @@ impl<'a> IntoIterator for &'a SetItems {
     }
 }
 
-/// The crate's canonical set order, as a comparison — see [`SetItems`] for
-/// the rule it implements, and why it is structural rather than based on
-/// each member's rendered text (rendering a member to order it costs as much
-/// as the member is big, which makes ordering a nested set quadratic in its
-/// depth).
-///
-/// Iterative (an explicit heap work-stack, no native recursion), matching
-/// [`Value`]'s [`PartialEq`] and `Drop`. It has to be: [`SetItems::new`]
-/// sorts with it, and a set is built during *conversion*, which runs on the
-/// caller's own thread: `onix-py`'s guard module hands the *diff* a
-/// stack-sized worker thread, but conversion never gets one (see that
-/// module's doc).
-///
-/// The stack holds the comparisons still owed, deepest-first, so a container
-/// pushes its length tie-break underneath its elements and each element's
-/// own sub-comparisons land on top: popping therefore visits exactly the
-/// lexicographic order a recursive version would, and the first non-`Equal`
-/// answer wins.
+/// The canonical set order (see [`SetItems`]) as a structural comparison. Iterative: a set is
+/// built during conversion, before any depth guard runs (`docs/design/value-model.md`, "Stack
+/// safety"). Pending comparisons pop in lexicographic order; the first non-`Equal` wins.
 fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
-    /// The kind's place in the documented order.
+    /// The kind's place in the order.
     fn rank(value: &Value) -> u8 {
         match value {
             Value::Null => 0,
@@ -1355,7 +990,7 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
         }
     }
 
-    /// One comparison still owed: two values, two dict keys, or the length
+    /// One comparison still owed: two values, two keys, or a container's length tie-break.
     /// tie-break a container falls back on once its elements all matched.
     enum Work<'a> {
         Values(&'a Value, &'a Value),
@@ -1363,8 +998,7 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
         Lengths(usize, usize),
     }
 
-    /// Schedules `a` and `b`'s elements, in order, with their length
-    /// tie-break last.
+    /// Schedules the elements in order, with the length tie-break last.
     fn push_slices<'a>(stack: &mut Vec<Work<'a>>, a: &'a [Value], b: &'a [Value]) {
         stack.push(Work::Lengths(a.len(), b.len()));
         for (a, b) in a.iter().zip(b.iter()).rev() {
@@ -1388,23 +1022,14 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
                     (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
                     (Value::Number(x), Value::Number(y)) => number_cmp(x, y),
                     (Value::Str(x), Value::Str(y)) => x.cmp(y),
-                    // By instant, then by whether the value is aware, so that
-                    // two datetimes at one instant still order deterministically.
+                    // By instant, then offset, so same-instant datetimes order deterministically.
                     (Value::DateTime(x), Value::DateTime(y)) => x
                         .instant()
                         .cmp(&y.instant())
                         .then_with(|| x.utc_offset_seconds().cmp(&y.utc_offset_seconds())),
                     (Value::Date(x), Value::Date(y)) => x.ordinal().cmp(&y.ordinal()),
-                    // Naive sorts before aware (an arbitrary but total
-                    // split — `Time` has no cross-awareness instant the way
-                    // `DateTime` does, since a naive value is never Python-
-                    // equal to an aware one); within a group, by the same
-                    // instant `times_equal` compares by, then by the raw
-                    // offset as a final tie-break for two aware values that
-                    // are Python-equal despite differing stored offsets —
-                    // reachable only by building a `Value` directly, never a
-                    // real Python set (see `SetItems::new`'s doc, and
-                    // `DateTime`'s identical tie-break above).
+                    // Naive before aware, then `times_equal`'s instant, then the raw offset
+                    // (Python-equal aware times can differ in offset).
                     (Value::Time(x), Value::Time(y)) => x
                         .utc_offset_seconds()
                         .is_some()
@@ -1416,8 +1041,6 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
                         push_slices(&mut stack, x, y);
                         Ordering::Equal
                     }
-                    // A set is stored in this very order, so its members
-                    // compare element-wise like any other sequence.
                     (Value::Set(x), Value::Set(y)) | (Value::FrozenSet(x), Value::FrozenSet(y)) => {
                         push_slices(&mut stack, x, y);
                         Ordering::Equal
@@ -1432,8 +1055,7 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
                         }
                         Ordering::Equal
                     }
-                    // Equal ranks with no arm above can only be `Null`
-                    // against `Null`.
+                    // Only `Null` against `Null`.
                     _ => Ordering::Equal,
                 }
             }
@@ -1447,34 +1069,14 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     Ordering::Equal
 }
 
-/// Maps `-0.0` to `+0.0` and leaves every other float — including a `NaN` of
-/// any sign or payload — unchanged.
-///
-/// `-0.0` and `+0.0` are one value: Python's `==` and `hash` agree on it (a
-/// `set` can hold only one), and so does [`Number`]'s own [`PartialEq`]
-/// (IEEE `==`). Every place this crate orders or hashes a float folds the
-/// sign away first with this function, so all of them agree with each other
-/// and with that equality — `canonical_cmp`'s [`number_cmp`], and
-/// `crate::ignore_order::hash`'s `number_key` and `keyed`.
-///
-/// `NaN` is deliberately excluded from the `+ 0.0` fold rather than just
-/// happening to pass through it unchanged: IEEE-754 addition does not
-/// guarantee a NaN operand's own bits survive an arithmetic op — on this
-/// crate's tier-1 targets it quiets a signaling NaN (flips its top mantissa
-/// bit), which would make [`number_cmp`]'s [`f64::total_cmp`] (and
-/// `crate::ignore_order::hash`'s bit-based keys) silently key two distinct
-/// inputs on a value neither one actually is. Skipping the fold for any
-/// `NaN` keeps this function the identity on every bit pattern it does not
-/// explicitly normalize.
+/// Maps `-0.0` to `0.0`; every other float, any `NaN` included, is returned bit-identical
+/// (adding `0.0` would quiet a signaling `NaN`, so `NaN` skips it).
 pub(crate) fn fold_signed_zero(f: f64) -> f64 {
     if f.is_nan() { f } else { f + 0.0 }
 }
 
-/// [`canonical_cmp`]'s number case, for two numbers of the same kind (an
-/// int and a float are already ranked apart). Orders by [`fold_signed_zero`]
-/// of each float via [`f64::total_cmp`], so this agrees with [`Number`]'s
-/// own [`PartialEq`] on every non-`NaN` pair; see [`SetItems::new`]'s doc
-/// for the one place it is deliberately coarser (two bit-identical `NaN`s).
+/// [`canonical_cmp`]'s number case: floats by [`fold_signed_zero`] and [`f64::total_cmp`],
+/// integers by value.
 fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
     if a.is_f64() {
         let af = fold_signed_zero(a.as_f64().unwrap_or_default());
@@ -1482,9 +1084,6 @@ fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
         return af.total_cmp(&bf);
     }
 
-    // Both are integers (an int and a float rank apart, so this arm never
-    // mixes them): compare by value across every representation, including a
-    // `u64` above `i64::MAX` and an arbitrary-precision `Big`.
     a.integer_cmp(b)
 }
 

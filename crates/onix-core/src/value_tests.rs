@@ -967,8 +967,7 @@ fn set_items_dedup_signed_zero_like_a_real_python_set() {
     assert_eq!(items.len(), 1);
 }
 
-/// See `SetItems::new`'s own doc for why a bit-identical `NaN` pair dedups
-/// but a differently-signed pair does not.
+/// A bit-identical `NaN` pair dedups; a differently-signed pair stays apart.
 #[test]
 fn set_items_dedup_bit_identical_nan_but_keep_differently_signed_nan_apart() {
     let items = SetItems::new(vec![
