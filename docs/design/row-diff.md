@@ -75,9 +75,10 @@ renders its UTC instant with its zone appended, a decimal renders at
 its native scale, a string renders verbatim, a duration renders as an
 ISO 8601 `PT<seconds>S` string computed from its raw value (never the
 Arrow formatter, whose duration path can emit `<invalid>` while still
-succeeding), and a cross-variant interval renders with its variant
-appended. A `value_changed` record whose two renderings are
-nonetheless equal is `TableDiffError::EqualRenderings`
+succeeding), and a cross-variant interval, which the formatter
+renders alike (`1 days`), renders with its variant appended. A
+`value_changed` record whose two renderings are nonetheless equal is
+`TableDiffError::EqualRenderings`
 (`check_distinct_renderings`), never a silent row. There is no typed
 old/new column: a long-format table mixes every compared column's
 type in one column, so a single typed column cannot represent them
