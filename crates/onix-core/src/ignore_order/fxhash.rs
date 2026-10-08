@@ -20,8 +20,8 @@ pub(crate) type HashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxH
 /// [`HashedList`](super::hash::HashedList), `AddedCandidates`, the pairing/`used` sets and
 /// its result maps (`most_in_common_pairs`, `pairs`), `consumed_removed`, and the distance
 /// memo are `FxHash`-keyed and reached only under `ignore_order=true`: an accepted,
-/// documented `DoS` trade-off — `SipHash` there cost a measured per-call penalty on the
-/// pairing hot path (PR #4). No default-path table is `FxHash`-keyed:
+/// documented `DoS` trade-off — `SipHash` there slows the pairing hot path. No default-path
+/// table is `FxHash`-keyed:
 /// [`IgnoreOrderMemo`](super::memo::IgnoreOrderMemo)'s `tuple_ids`, which set comparison
 /// reaches through `set_member_digest` -> `tuple_keyed` -> `tuple_digest` for a tuple dict
 /// key inside a set member, is a `BTreeMap` (below), and

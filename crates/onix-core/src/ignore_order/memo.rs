@@ -17,7 +17,7 @@ use super::hash::{
 
 /// A `(removed, added)` container-pair cache key, each side a value's
 /// exact structural identity (not the order/repetition-insensitive
-/// `ItemKey`). See `docs/design/ignore-order.md`.
+/// `ItemKey`).
 type DistanceKey = (DistKey, DistKey);
 
 /// The per-diff caches described in `docs/design/ignore-order.md`'s
@@ -30,21 +30,14 @@ type DistanceKey = (DistKey, DistKey);
 /// `O(digits)` per lookup; `super::fxhash`'s doc enumerates each key's cost.
 pub(crate) struct IgnoreOrderMemo<'r> {
     cache: RefCell<HashMap<DistanceKey, f64>>,
-    /// Interns each hashable-tuple identity to its digest, shared
-    /// across the run — see `docs/design/ignore-order.md`'s "Distance
-    /// memo" section. A `BTreeMap`, reached on the default path through a
-    /// set member's tuple dict keys; its key type carries no `Hash` derive.
+    /// Interns each hashable-tuple identity to its digest, shared across the run.
     tuple_ids: RefCell<BTreeMap<PyHashKey, TupleId>>,
     /// The digest assigned to each interned identity, indexed by
     /// [`TupleId::index`].
     tuple_digests: RefCell<Vec<ItemKey>>,
-    /// Set-member Python-equality cache; see `docs/design/ignore-order.md`.
-    /// A `BTreeMap`, not `FxHash`, reached on the default path against
-    /// attacker-controlled content; its key type carries no `Hash` derive.
+    /// Set-member Python-equality cache.
     node_table: RefCell<BTreeMap<MemberHashKey, (NodeId, RepId)>>,
-    /// Set-member content interning; see `docs/design/ignore-order.md`.
-    /// A `BTreeMap`, not `FxHash`, reached on the default path against
-    /// attacker-controlled content; its key type carries no `Hash` derive.
+    /// Set-member content interning.
     member_content: RefCell<BTreeMap<MemberContent, RepId>>,
     /// The caller's resolver (see [`crate::diff::diff_with_resolver`]), and
     /// what it returned for each token identity it was called with.
@@ -176,8 +169,7 @@ impl<'r> IgnoreOrderMemo<'r> {
     }
 
     /// Interns a hashable tuple's Python equality identity and returns its
-    /// id together with its digest, computing it on a first sighting. See
-    /// `docs/design/ignore-order.md`'s "Distance memo" section.
+    /// id together with its digest, computing it on a first sighting.
     pub(crate) fn tuple_digest(
         &self,
         key: PyHashKey,
@@ -197,7 +189,6 @@ impl<'r> IgnoreOrderMemo<'r> {
 
     /// Interns one set-member content identity to its [`RepId`]: the id
     /// already assigned to an equal [`MemberContent`], or a fresh one.
-    /// See `docs/design/ignore-order.md`'s "Distance memo" section.
     pub(crate) fn content_rep(&self, content: MemberContent) -> RepId {
         let mut map = self.member_content.borrow_mut();
         if let Some(&id) = map.get(&content) {
@@ -210,8 +201,7 @@ impl<'r> IgnoreOrderMemo<'r> {
 
     /// The Python-equality half of [`super::hash::set_member_digest`]: the
     /// `(NodeId, RepId)` of the container Python-equal to `key` hashed
-    /// earlier in the run, or a fresh pair on a miss. See
-    /// `docs/design/ignore-order.md`'s "Distance memo" section.
+    /// earlier in the run, or a fresh pair on a miss.
     pub(crate) fn member_rep(
         &self,
         key: MemberHashKey,
