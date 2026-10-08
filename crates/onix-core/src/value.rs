@@ -1,20 +1,11 @@
-//! A compact, JSON-shaped value model — a memory-frugal stand-in for
+//! A compact, JSON-shaped value model: a memory-frugal stand-in for
 //! [`serde_json::Value`] with byte-identical rendering.
 //!
-//! * **Objects** are an exactly-sized, key-sorted `Box<[(ObjectKey, Value)]>`,
-//!   one heap block per object with no spare slots, iterating in the same
-//!   order [`serde_json`]'s `BTreeMap` produces for a `str`-only object. See
-//!   [`ObjectKey`] for the (additive) non-`str` key case.
-//! * **`str` keys** are interned within one conversion/parse session: the
-//!   handful of distinct keys a real payload repeats collapse to one
-//!   `Arc<str>` each, shared by cheap refcount bumps.
-//! * **Numbers** preserve [`serde_json`]'s exact `i64`/`u64`/`f64`
-//!   distinction (see [`Number`]), plus a fourth, arbitrary-precision arm
-//!   for a Python `int` outside `i64::MIN..=u64::MAX`.
-//! * **Conversions** in both directions ([`From`]`<`[`serde_json::Value`]`>`
-//!   and [`Value::to_serde_json`]) and a direct streaming [`Deserialize`]
-//!   (no transient [`serde_json::Value`] tree) let this type sit at the
-//!   parse boundary; the diff engine consumes it directly.
+//! * Objects are an exactly-sized slice sorted like [`serde_json`]'s `BTreeMap`; `str` keys are
+//!   interned per session.
+//! * Numbers keep the `i64`/`u64`/`f64` distinction (see [`Number`]) plus an arbitrary-precision
+//!   arm.
+//! * [`Deserialize`] streams straight into this type, with no [`serde_json::Value`] tree.
 //!
 //! See `docs/design/value-model.md` for stack safety and subclass identity.
 
@@ -34,42 +25,20 @@ use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess
 
 use crate::datetime::{Date, DateTime, Time, TimeDelta, times_equal};
 
-/// A Python `str`'s content: valid UTF-8 for the overwhelming common case
-/// (identical cost to the plain `Box<str>` this replaces), or WTF-8 bytes
-/// when the string holds at least one lone (unpaired) surrogate code point
-/// (e.g. `"\udc80"`) — legal in Python, but the one code point UTF-8 cannot
-/// encode. Rust's `str`/`String` can never hold one either way (their
-/// whole-type invariant is UTF-8 validity, which structurally excludes a
-/// surrogate code point), so the rare case needs its own representation.
+/// A Python `str`'s content: UTF-8, or WTF-8 when it holds a lone surrogate.
 ///
-/// [WTF-8](https://simonsapin.github.io/wtf-8/) extends UTF-8 by
-/// direct-encoding each surrogate code point in the three-byte form
-/// strict UTF-8 forbids for that range; every other code point encodes
-/// exactly as UTF-8 already does. This keeps the property this crate
-/// depends on throughout — that byte-lexicographic order equals code-point
-/// order — for both variants and across them, so every comparison below is
-/// plain byte comparison, and a [`Str::Utf8`] and a [`Str::Wtf8`] compare
-/// correctly against each other with no conversion.
-///
-/// Only [`Str::Utf8`] can be produced from JSON: [`serde_json`]'s own
-/// parser rejects a lone surrogate escape outright, so the streaming
-/// [`Deserialize`] impl below and [`From`]`<`[`serde_json::Value`]`>` never
-/// construct a [`Str::Wtf8`]. It exists only for the Python bindings, which
-/// can read one directly from a live `str` object.
+/// Byte order equals code-point order across both variants, so comparison is plain byte
+/// comparison. Only the Python bindings produce [`Str::Wtf8`].
 #[derive(Debug, Clone)]
 pub enum Str {
-    /// The common case: valid UTF-8, stored exactly as before.
+    /// Valid UTF-8.
     Utf8(Box<str>),
-    /// WTF-8 bytes; holds at least one lone surrogate code point (a
-    /// constructor that hands this variant bytes with no surrogate in them
-    /// at all should have used [`Str::Utf8`] instead — a documented
-    /// invariant, not one anything here enforces or depends on for safety).
+    /// WTF-8 bytes holding at least one lone surrogate.
     Wtf8(Box<[u8]>),
 }
 
 impl Str {
-    /// This string's content as WTF-8 bytes — valid UTF-8 bytes for
-    /// [`Str::Utf8`], since valid UTF-8 is already valid WTF-8.
+    /// This string's content as WTF-8 bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         match self {
@@ -78,8 +47,7 @@ impl Str {
         }
     }
 
-    /// This string as a real `&str`, or `None` for a [`Str::Wtf8`] (which by
-    /// construction is never valid UTF-8).
+    /// This string as a `&str`, or `None` for a [`Str::Wtf8`].
     #[must_use]
     pub fn as_utf8(&self) -> Option<&str> {
         match self {
@@ -88,19 +56,13 @@ impl Str {
         }
     }
 
-    /// Whether this string has no content, by byte length — a
-    /// [`Str::Wtf8`] is never empty (it holds at least one surrogate's three
-    /// bytes), so this only ever answers `true` for [`Str::Utf8`].
+    /// Whether this string has no bytes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.as_bytes().is_empty()
     }
 
-    /// Walks this string's content one code point at a time, each either a
-    /// real Unicode scalar value or a lone surrogate — the primitive every
-    /// surrogate-aware renderer (`crate::path`'s dict-key and `repr()`
-    /// rendering, the Python bindings' byte-exact JSON writer) builds on, so
-    /// the WTF-8 decoding rule is written exactly once.
+    /// Walks this string one code point at a time.
     #[must_use]
     pub fn chars(&self) -> Wtf8Chars<'_> {
         Wtf8Chars::new(self.as_bytes())
@@ -116,46 +78,20 @@ pub enum Wtf8Char {
     Surrogate(u16),
 }
 
-/// [`Str::chars`]'s iterator: decodes WTF-8 bytes one code point at a time.
-///
-/// Reads only the *next* sequence, never re-validating bytes already
-/// consumed or bytes still ahead: the leading byte's high bits alone give
-/// the UTF-8 sequence width (1-4, see this module's private
-/// `utf8_sequence_width`), so each
-/// call slices at most that many bytes and asks [`str::from_utf8`] to
-/// validate only that bounded slice, not `self.remaining` as a whole —
-/// validating the whole remaining slice on every call would make every
-/// walk over the string quadratic (`O(n)` per call, `O(n²)` total); this
-/// way is `O(1)` per call and `O(n)` total. A validation failure on that
-/// bounded slice can, by [`Str`]'s own invariant (every byte sequence here
-/// is WTF-8), only be the three-byte sequence WTF-8 uses to direct-encode a
-/// surrogate — the same three-byte pattern strict UTF-8 would use for a
-/// scalar in `0x0800..=0xFFFF`, just with a surrogate's code point in that
-/// range instead (both share the `0xED` leading byte, hence the shared
-/// width), so it decodes with the identical bit-packing UTF-8 itself uses
-/// for a three-byte sequence.
+/// [`Str::chars`]'s iterator over WTF-8 code points.
 pub struct Wtf8Chars<'a> {
     remaining: &'a [u8],
 }
 
 impl<'a> Wtf8Chars<'a> {
-    /// Builds a decoder over `bytes`, which must already be valid WTF-8 —
-    /// see [`Str`]'s doc. `bytes` need not come from a [`Str`]/[`Key`]
-    /// directly; a caller that already has `.as_bytes()` from either can
-    /// use this without an intermediate allocation.
+    /// Decodes `bytes`, which must be valid WTF-8.
     #[must_use]
     pub fn new(bytes: &'a [u8]) -> Self {
         Wtf8Chars { remaining: bytes }
     }
 }
 
-/// The number of bytes a UTF-8 (or WTF-8 surrogate) sequence starting with
-/// `first_byte` occupies, read from its high bits alone — never a look at
-/// any later byte, which is what keeps [`Wtf8Chars::next`] to a single
-/// bounded slice per call. `first_byte` is always a valid lead byte here
-/// (an ASCII byte, or `0xC0..=0xF7`'s continuation-count patterns): every
-/// call site holds a byte at a WTF-8 character boundary, by [`Str`]'s own
-/// invariant.
+/// Byte width of the sequence starting with `first_byte`, which sits at a character boundary.
 fn utf8_sequence_width(first_byte: u8) -> usize {
     if first_byte < 0x80 {
         1
@@ -168,17 +104,7 @@ fn utf8_sequence_width(first_byte: u8) -> usize {
     }
 }
 
-/// Test-only instrumentation proving [`Wtf8Chars::next`] validates `O(n)`
-/// bytes total over a full decode, not `O(n^2)`: a counter, incremented
-/// with the size of every slice `next` hands to `str::from_utf8`. A counter
-/// rather than a wall-clock measurement, so the check is exact and
-/// noise-free instead of tolerating a fudge factor for scheduler jitter —
-/// the same reason `crate::ignore_order::memo`'s recomputation count
-/// replaced a timing assertion (issue #37). Thread-local, not a shared
-/// `static`: the test harness runs each `#[test]` on its own thread by
-/// default, and a process-global counter would let an unrelated test's
-/// concurrent decode inflate this one's count, reintroducing exactly the
-/// kind of nondeterminism a counter is meant to avoid.
+/// Test-only: bytes `Wtf8Chars::next` validates, counted per thread.
 #[cfg(test)]
 pub(crate) mod wtf8_decode_stats {
     use std::cell::Cell;
@@ -187,7 +113,7 @@ pub(crate) mod wtf8_decode_stats {
         static STATS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     }
 
-    /// Adds `bytes` to the running total and folds it into the running max.
+    /// Adds `bytes` to the total and the running max.
     pub(crate) fn record(bytes: usize) {
         STATS.with(|c| {
             let (total, max) = c.get();
@@ -195,9 +121,7 @@ pub(crate) mod wtf8_decode_stats {
         });
     }
 
-    /// Reads `(total bytes, largest single call)` on this thread and resets
-    /// both to zero in the same step, so a caller need not remember to
-    /// clear residue from an earlier measurement separately.
+    /// Returns `(total bytes, largest single call)` and resets both.
     pub(crate) fn take() -> (usize, usize) {
         STATS.with(|c| c.replace((0, 0)))
     }
@@ -220,12 +144,7 @@ impl Iterator for Wtf8Chars<'_> {
                 .expect("a `width`-byte lead sequence always decodes to exactly one char");
             (Wtf8Char::Scalar(c), &self.remaining[c.len_utf8()..])
         } else {
-            // Invalid, on a slice that is exactly one WTF-8 character wide:
-            // by this type's own invariant, the only way that happens is
-            // the three-byte surrogate encoding WTF-8 adds on top of UTF-8
-            // (`width` is 3 here — see `utf8_sequence_width`'s doc — since
-            // only the `0xED` lead byte both a valid 3-byte scalar and a
-            // surrogate share).
+            // Only the three-byte surrogate encoding (lead byte `0xED`) fails validation here.
             let code_point = (u32::from(candidate[0] & 0x0F) << 12)
                 | (u32::from(candidate[1] & 0x3F) << 6)
                 | u32::from(candidate[2] & 0x3F);
@@ -242,11 +161,7 @@ impl Iterator for Wtf8Chars<'_> {
     }
 }
 
-/// Generates the byte-based `PartialEq`/`Eq`/`Ord`/`PartialOrd`/`Hash`
-/// impls shared by [`Str`] and [`Key`]: both compare, order, and hash
-/// purely by `as_bytes()`, which is byte equality/order — code-point
-/// order for both variants, and correct across a `Utf8`/`Wtf8` mix — see
-/// each type's own doc.
+/// Byte-based `PartialEq`/`Eq`/`Ord`/`PartialOrd`/`Hash` for [`Str`] and [`Key`].
 macro_rules! impl_wtf8_bytes_ord {
     ($ty:ty) => {
         impl PartialEq for $ty {
@@ -298,11 +213,7 @@ impl From<Box<str>> for Str {
 }
 
 impl fmt::Display for Str {
-    /// Only meaningful for [`Str::Utf8`] — a [`Str::Wtf8`] has no valid
-    /// textual form, so it renders via Rust's own lossy UTF-8 replacement
-    /// (each surrogate becomes `U+FFFD`). Nothing on the byte-exact output
-    /// path (`crate::guard`'s JSON writer in the Python bindings) uses this;
-    /// it exists for debug/test contexts that need an inspectable string.
+    /// Lossy for [`Str::Wtf8`] (each surrogate becomes `U+FFFD`); not for byte-exact output.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Str::Utf8(s) => f.write_str(s),
@@ -616,24 +527,13 @@ impl Value {
         match self {
             Value::Null => serde_json::Value::Null,
             Value::Bool(b) => serde_json::Value::Bool(*b),
-            // A non-finite float has no `serde_json::Number` form at all;
-            // `null` is what the streaming parse path already renders for
-            // one arriving that way (see `ValueVisitor::visit_f64`), and
-            // this is unreachable from the CLI (JSON text cannot carry a
-            // `NaN`/`Infinity` literal) or from the Python bindings' own
-            // `to_json()` (`crate::guard::to_json_string` in `onix-py`
-            // renders a report directly, without going through this method,
-            // precisely so it can emit `NaN`/`Infinity` instead).
+            // A non-finite float has no `serde_json::Number` form; `null` matches the
+            // streaming parse path (see `Number::to_serde_number`).
             Value::Number(n) => n
                 .to_serde_number()
                 .map_or(serde_json::Value::Null, serde_json::Value::Number),
             // `serde_json::Value::String` cannot hold a `Str::Wtf8` (a
-            // lone surrogate has no valid Rust `String` representation);
-            // this method's callers can only ever construct one from JSON
-            // (see `Str`'s doc), which never carries a surrogate, so this
-            // lossy fallback is unreachable in practice — the Python
-            // bindings' byte-exact `to_json()` renders directly from
-            // `Value` instead of through this method (`crate::guard`).
+            // lone surrogate has no valid Rust `String` representation).
             Value::Str(s) => serde_json::Value::String(s.to_string()),
             Value::DateTime(value) => serde_json::Value::String(value.isoformat()),
             Value::Date(value) => serde_json::Value::String(value.isoformat()),
@@ -771,17 +671,8 @@ pub fn contains_wtf8(value: &Value) -> bool {
     false
 }
 
-/// Writes the escaped *content* of a JSON string (no surrounding quotes) for
-/// `bytes` — WTF-8, per [`Str`]'s doc. Groups consecutive real Unicode
-/// scalars into runs and hands each run to `serde_json` for escaping
-/// (guaranteed identical to what [`Value::to_serde_json`] plus
-/// `serde_json::to_string` already produces for that content — see this
-/// module's private `push_escaped_run`), splicing in a lone surrogate's own
-/// single-backslash `\uXXXX` escape between runs, exactly where real
-/// `DeepDiff`'s `json.dumps` places it. Public so `onix-py`'s hand-written
-/// `to_json()` writer (`crate::guard`, a separate crate) can render a
-/// `Str::Wtf8`/`Key::Wtf8` byte-exactly without duplicating this escaping
-/// rule.
+/// Writes the escaped content of a JSON string (no quotes) for WTF-8 `bytes`, with a lone
+/// surrogate as a single-backslash `\uXXXX` escape. Public for `onix-py`'s `guard` module.
 pub fn write_json_str_content(bytes: &[u8], out: &mut String) {
     let mut run = String::new();
     for c in Wtf8Chars::new(bytes) {
@@ -1241,7 +1132,7 @@ impl Number {
     /// tops out at `u64`/`i64`/`f64`), so it renders as its nearest `f64` —
     /// the identical value `serde_json` would itself parse the same digits
     /// back into. The byte-exact digits survive through the Python bindings'
-    /// own hand-written JSON writer (`crate::guard` in `onix-py`) and
+    /// own hand-written JSON writer (`onix-py`'s `guard` module) and
     /// [`Value::to_serde_json`]'s callers that need them; this
     /// `serde_json::Value` bridge is only the CLI/report path, where an
     /// integer beyond `u64` cannot enter from JSON text in the first place.
@@ -1597,27 +1488,13 @@ fn number_cmp(a: &Number, b: &Number) -> std::cmp::Ordering {
     a.integer_cmp(b)
 }
 
-/// An [`Object`]'s key: an interned `Arc<str>` for the common (valid UTF-8)
-/// case, or, for a key containing a lone surrogate code point, WTF-8 bytes
-/// held in their own,
-/// un-interned allocation. Interning shares one allocation across the
-/// handful of keys a record-shaped payload repeats thousands of times;
-/// a surrogate-bearing key is never that
-/// shape in practice, so it costs its own small allocation instead of
-/// complicating the interner for a case that would not benefit from it.
+/// An [`Object`]'s key: an interned `Arc<str>`, or WTF-8 bytes for a key with a lone surrogate.
 ///
-/// See [`Str`] for why byte comparison alone orders and compares both
-/// variants correctly, including against each other. Every caller that
-/// needs a key's content — rendering, hashing, dict-vs-dict comparison —
-/// reads it through [`Key::as_bytes`] or matches the variant directly,
-/// never through a lossy conversion: two structurally different keys
-/// (differing only in which surrogate they hold) must never collapse to
-/// the same representation anywhere in this crate — the exact hazard
-/// [`Str`]'s own doc explains for values applies identically to keys used
-/// as dict-vs-dict identity.
+/// Read content through [`Key::as_bytes`] or the variant, never a lossy conversion: keys that
+/// differ only in which surrogate they hold must stay distinct.
 #[derive(Debug, Clone)]
 pub enum Key {
-    /// The common case: an interned, valid-UTF-8 key.
+    /// An interned, valid-UTF-8 key.
     Utf8(Arc<str>),
     /// A key containing a lone surrogate code point, as WTF-8 bytes.
     Wtf8(Box<[u8]>),
@@ -1633,8 +1510,7 @@ impl Key {
         }
     }
 
-    /// Walks this key's content one code point at a time — see
-    /// [`Str::chars`].
+    /// Walks this key one code point at a time; see [`Str::chars`].
     #[must_use]
     pub fn chars(&self) -> Wtf8Chars<'_> {
         Wtf8Chars::new(self.as_bytes())
@@ -1663,15 +1539,7 @@ impl From<&Key> for Str {
 }
 
 impl Key {
-    /// Renders this key to an owned `String`, lossily for a [`Key::Wtf8`]
-    /// (Rust's own UTF-8 replacement: each surrogate becomes `U+FFFD`).
-    ///
-    /// Not a `Display`/`ToString` impl: naming it explicitly
-    /// keeps every call site announcing that it accepts the lossy,
-    /// collision-capable fallback — see [`Key`]'s own doc for why that is
-    /// unsafe for anything that decides dict-vs-dict identity or byte-exact
-    /// output. [`Value::to_serde_json`] is this crate's only caller, which
-    /// is itself already documented as the non-byte-exact rendering.
+    /// Lossy rendering (each surrogate becomes `U+FFFD`); for [`Value::to_serde_json`] only.
     fn to_lossy_string(&self) -> String {
         match self {
             Key::Utf8(s) => s.to_string(),
@@ -2151,8 +2019,8 @@ impl Interner {
 
     /// Converts `key` into an [`Object`] [`Key`]: an interned handle for the
     /// common [`Str::Utf8`] case (see [`Interner::intern`]), or an owned,
-    /// un-interned allocation for the rare [`Str::Wtf8`] one — see [`Key`]'s
-    /// doc for why the latter is never worth sharing.
+    /// un-interned allocation for the rare [`Str::Wtf8`] one
+    /// (`docs/design/value-conversion.md`, "Key interning").
     fn intern_key(&mut self, key: Str) -> Key {
         match key {
             Str::Utf8(s) => Key::Utf8(self.intern(&s)),
@@ -2227,8 +2095,7 @@ impl Builder {
 
     /// [`Builder::intern`]'s [`Str`]-aware twin: interns a plain `str` key
     /// exactly as that method does, or passes a key holding a lone
-    /// surrogate code point through un-interned — see [`Key`]'s doc for why
-    /// that rare shape is never worth sharing. For a caller building an
+    /// surrogate code point through un-interned. For a caller building an
     /// [`ObjectKey::Str`] directly (for [`Builder::object_with_keys`])
     /// alongside a mix of other key kinds.
     #[must_use]
