@@ -31,13 +31,13 @@ in `lib.rs`, 4 in `error.rs`, 3 in `options.rs`), classified **212 caught, 52
 unviable, 9 timeout, 1 missed**. The 52 unviable are `Default`-substitution
 mutants on types without a usable `Default`. The 9 timeouts are
 mutant-induced infinite loops the tests reach — the trailing-zero reduction
-loop in `hash_decimal` (`==`/`/=` mutants) and the two cursor-advance loops in `classify` (the `<`/`==`/`+=`
-mutants) — detected as hangs, not silent survivors. The 1 missed is a genuine equivalent
-mutant: `row_diff.rs`'s `push_filtered` (the shared filter-and-push helper of
-both the added/removed and the per-cell materialize passes) guards
-`if selected.num_rows() > 0` before pushing a batch to `concat_batches`, and
-`> 0 -> >= 0` only adds empty batches, which `concat_batches` ignores, so the
-output is identical.
+loop in `hash_decimal` (`==`/`/=` mutants) and the two cursor-advance loops in
+`classify` (the `<`/`==`/`+=` mutants) — detected as hangs, not silent
+survivors. The 1 missed is a genuine equivalent mutant: `row_diff.rs`'s
+`push_filtered` (the shared filter-and-push helper of both the added/removed and
+the per-cell materialize passes) guards `if selected.num_rows() > 0` before
+pushing a batch to `concat_batches`, and `> 0 -> >= 0` only adds empty batches,
+which `concat_batches` ignores, so the output is identical.
 
 cargo-mutants' classification of each mutant into caught / missed / timeout /
 unviable is **not** reproducible run to run: it depends on wall-clock time (a
@@ -109,3 +109,4 @@ mutant is caught. The `ItemKey::hash` no-op mutant is caught by
 
 Future work that touches this logic should re-run `make mutants` and confirm
 that no *viable* mutant survives outside the five documented equivalent spots.
+
