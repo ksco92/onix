@@ -275,13 +275,12 @@ impl TableDiff {
 
     /// The full diff as a JSON string: the schema diff, the summary, and
     /// `rows_added`, `rows_removed`, `cells_changed`, and `duplicate_keys`
-    /// (each an array of one JSON object per row, keyed by column name,
-    /// with a null cell as JSON `null`). Raises `ValueError` naming the
-    /// count and the cap if those four members would together embed more
-    /// than `deepdiff_rs`'s row cap of 10,000 rows (README, Known limitations,
-    /// in the onix repository) — use
-    /// `rows_added()`, `rows_removed()`, `cells_changed()`, or
-    /// `duplicate_keys()` (each an `ArrowTable`: `to_pyarrow()` or
+    /// (each an array of one JSON object per row, keyed by column name, with a
+    /// null cell as JSON `null`). Raises `ValueError` naming the count and the
+    /// cap if those four members would together embed more than `deepdiff_rs`'s
+    /// row cap of 10,000 rows (README, Known limitations, in the onix
+    /// repository) — use `rows_added()`, `rows_removed()`, `cells_changed()`,
+    /// or `duplicate_keys()` (each an `ArrowTable`: `to_pyarrow()` or
     /// `__arrow_c_stream__`) for a diff this large.
     fn to_json(&self) -> PyResult<String> {
         self.core.to_json().map_err(|e| map_table_error(&e))

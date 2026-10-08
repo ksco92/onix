@@ -10,11 +10,10 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 /// Diffs two JSON documents and returns a `DeepDiff`-compatible JSON report
 /// string (`verbose_level=2` shape).
 ///
-/// Raises `ValueError` if `a` or `b` fails to parse as JSON or if
-/// `max_depth` exceeds `deepdiff_rs.MAX_DEPTH_CEILING`, and
-/// `deepdiff_rs.MaxDepthError` if diffing would recurse past `max_depth`;
-/// the depth guard lives in `crates/onix-py/src/guard.rs` in the onix
-/// repository.
+/// Raises `ValueError` if `a` or `b` fails to parse as JSON or if `max_depth`
+/// exceeds `deepdiff_rs.MAX_DEPTH_CEILING`, and `deepdiff_rs.MaxDepthError` if
+/// diffing would recurse past `max_depth`; the depth guard is in
+/// `crates/onix-py/src/guard.rs` of the onix repository.
 #[pyfunction]
 #[pyo3(signature = (a, b, ignore_order=false, max_depth=None))]
 pub(crate) fn diff_json(
