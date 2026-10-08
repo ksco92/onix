@@ -867,7 +867,7 @@ def test_to_pyarrow_propagates_a_broken_pyarrow() -> None:
             diff.schema_arrow.to_pyarrow()
         except ImportError as error:
             # The real failure is propagated; the install-the-extra hint is only
-            # for a absent pyarrow (ModuleNotFoundError).
+            # for an absent pyarrow (ModuleNotFoundError).
             assert "installed but broken" in str(error), str(error)
             assert "deepdiff-rs[arrow]" not in str(error), str(error)
         else:

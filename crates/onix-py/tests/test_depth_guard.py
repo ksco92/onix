@@ -160,9 +160,8 @@ def test_default_max_depth_matches_onix_core() -> None:
 
 
 # The sized-worker cases: unequal input nested BELOW max_depth (so conversion
-# succeeds and the diff itself runs).
-# Each runs in its own subprocess so a crash is a failed assertion, not a dead
-# suite.
+# succeeds and the diff itself runs). Each runs in its own subprocess so a
+# crash is a failed assertion, not a dead suite.
 
 
 def test_deep_unequal_lists_below_max_depth_return_correct_diff() -> None:
