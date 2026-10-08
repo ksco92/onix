@@ -1,14 +1,4 @@
-"""Datetime and date behavior of the `deepdiff_rs.DeepDiff` class, against real DeepDiff.
-
-Two things this file covers that the golden corpus cannot:
-
-- the `date` **superset**. Real DeepDiff's `to_json()` has no serializer for
-  `datetime.date` and raises `TypeError` on a report holding one, so a date case's
-  agreement with the real tool has to be asserted on `to_dict()` — which is exactly
-  what these tests do, alongside onix's own `YYYY-MM-DD` JSON rendering.
-- the Python objects `to_dict()` hands back, including the documented
-  `zoneinfo`-to-fixed-offset round trip.
-"""
+"""Datetime and date behavior of `deepdiff_rs.DeepDiff`; the date superset is in tests/golden/README.md, "JSON supersets"."""
 
 import datetime
 import zoneinfo
@@ -106,11 +96,7 @@ def test_a_zoneinfo_datetime_round_trips_as_a_fixed_offset_timezone() -> None:
     """
     A named zone comes back as the fixed offset it was in force at, not as the zone.
 
-    Documented in the top-level README and in `tests/golden/README.md`'s
-    "Normalized versus raw datetimes" section, its "Fixed-offset `tzinfo`
-    round-trip" point: onix stores a datetime's UTC offset, not its
-    `tzinfo` object. Nothing about the diff itself changes, since DeepDiff
-    compares datetimes by instant.
+    See tests/golden/README.md, "Normalized versus raw datetimes", "Fixed-offset `tzinfo` round-trip".
     """
     madrid = datetime.datetime(2024, 7, 1, 12, tzinfo=zoneinfo.ZoneInfo("Europe/Madrid"))
     result = OnixDeepDiff({}, {"t": madrid}).to_dict()
@@ -119,7 +105,6 @@ def test_a_zoneinfo_datetime_round_trips_as_a_fixed_offset_timezone() -> None:
     assert round_tripped == madrid
     assert round_tripped.tzinfo == datetime.timezone(datetime.timedelta(hours=2))
     assert not isinstance(round_tripped.tzinfo, zoneinfo.ZoneInfo)
-    # And it diffs against the same instant written any other way as equal.
     assert not OnixDeepDiff(madrid, datetime.datetime(2024, 7, 1, 10, tzinfo=UTC))
 
 
@@ -224,8 +209,6 @@ def test_a_timestamp_pair_is_accepted_and_compared_by_instant() -> None:
         }
     }
 
-    # Equal-instant Timestamps of the same class report nothing, same as two
-    # equal plain datetimes.
     assert OnixDeepDiff(a, a).to_dict() == {}
 
 
@@ -267,11 +250,6 @@ def test_a_date_subclass_is_accepted_and_compared_by_value() -> None:
 def test_a_timestamp_renders_back_as_a_plain_datetime_not_the_original_subclass() -> None:
     """
     `to_dict()` cannot reconstruct the original subclass instance.
-
-    Once a value has passed through the compact model there is nothing left
-    to rebuild a `Timestamp` from — it renders back as the plain
-    `datetime.datetime` its fields describe, the same simplification already
-    documented for the `zoneinfo`/`pytz` round trip.
     """
     stamp = pd.Timestamp("2024-01-01 10:00:00")
     result = OnixDeepDiff({}, {"t": stamp}).to_dict()
