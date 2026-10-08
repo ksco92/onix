@@ -19,7 +19,7 @@ Construction and rendering (`From<serde_json::Value>` and
 `Value::to_serde_json`) also recurse with no guard, safe only on
 values already known to be depth-bounded; the streaming `Deserialize`
 path is instead bounded by `serde_json`'s own parser recursion limit
-(128 levels), which must stay enabled.
+(127 nested arrays or objects), which must stay enabled.
 
 ## Subclasses
 
