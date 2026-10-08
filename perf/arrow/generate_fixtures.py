@@ -995,8 +995,7 @@ def generate(rows: int, seed: int, out_dir: Path, kind: str = "narrow") -> dict[
     :param rows: Number of rows in `a.parquet` before any mutation.
     :param seed: RNG seed; the same seed always produces byte-identical output.
     :param out_dir: Directory to write into (created if missing).
-    :param kind: `"narrow"` or `"wide"`
-        (#84's full cell-type-surface fixture).
+    :param kind: `"narrow"` or `"wide"`.
     :return: The manifest document (also written to `manifest.json`).
     """
     if kind == "wide":

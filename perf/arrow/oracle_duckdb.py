@@ -18,14 +18,11 @@ Used as the correctness reference for onix-arrow and as a speed baseline in
 * **Null keys.** Per #39, a null key equals itself, so a null-keyed row matches
   its counterpart on the other side. Every key join uses `_null_safe_join`,
   never `=`/`USING`; a composite key matches per component.
-* **Decimals.** `amount` is `DECIMAL(18,4)` on both sides here, so DuckDB
-  compares exact scaled integers with no floating-point rounding --
-  `IS DISTINCT FROM` on two same-scale decimals is exact. A pair whose
-  scale actually changes between sides would need an explicit `CAST` to a
-  common scale before comparing (not exercised by this fixture, since
-  `amount`'s scale never changes in the mutation mix -- see
-  `generate_fixtures.py`'s module docstring).
-* **Timestamps across units.** `a.ts` is `timestamp[us, UTC]`; `b.ts` is
+* **Decimals.** `IS DISTINCT FROM` on DECIMAL is exact (scaled integers, no
+  floating-point rounding). `narrow`'s `amount` is `DECIMAL(18,4)` on both
+  sides; `wide`'s `dec_scale4` is `(18,4)` on `a` and `(18,6)` on `b`, which
+  DuckDB promotes to a common scale implicitly, so the query needs no `CAST`.
+* **Timestamps across units.** `narrow`'s `a.ts` is `timestamp[us, UTC]`; `b.ts` is
   `timestamp[ms, UTC]`. For *value* comparisons, DuckDB's parquet reader
   normalizes both to its own internal microsecond-precision `TIMESTAMP WITH
   TIME ZONE` at read time, so `a.ts IS DISTINCT FROM b.ts` already compares
@@ -37,9 +34,9 @@ Used as the correctness reference for onix-arrow and as a speed baseline in
   does still show `TIMESTAMP_MICROS` vs. `TIMESTAMP_MILLIS`, because that
   reports the file's actual stored Parquet annotation rather than DuckDB's
   own normalized SQL type.
-* **Floats.** `f32`/`f64` carry NaN and -0.0 cells. A mutated float is always a
-  plain finite number from a disjoint range, so `IS DISTINCT FROM` never
-  compares a NaN or -0.0 against a different NaN or zero.
+* **Floats.** `IS DISTINCT FROM` is never asked to compare a NaN or -0.0
+  against a different value; the `wide` generator's mutation rule in
+  `generate_fixtures.py` guarantees it.
 * **Dictionary encoding is invisible here.** `category`'s retype to
   `dictionary<int32, string>` is an Arrow-only annotation DuckDB's parquet
   reader ignores: `DESCRIBE` reports `VARCHAR` on both sides.
