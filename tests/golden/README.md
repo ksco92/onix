@@ -126,8 +126,8 @@ it literally is; each of those paths has a test pinning that.
 DeepDiff's `serialization.JSON_CONVERTOR` maps `datetime.datetime` to
 `isoformat()` and has **no entry for `datetime.date`**, so its own `to_json()`
 raises `TypeError` on any report carrying a bare date. onix renders one as
-`YYYY-MM-DD` — the same bytes `date.isoformat()` gives — which is a deliberate
-superset, not a divergence: passing
+`YYYY-MM-DD` — the same bytes `date.isoformat()` gives — a superset of
+DeepDiff's output, not a divergence: passing
 `default_mapping={datetime.date: datetime.date.isoformat}` to DeepDiff's own
 `to_json()` makes it produce byte-identical output, and that is what
 `scripts/golden_tags.py`'s `JSON_DEFAULT_MAPPING` is, shared by the generator
@@ -401,7 +401,7 @@ in `test_sets.py` pins both the bare and the one-level-nested-in-a-tuple case.
 
 **A tuple or a frozenset set member matches order- and repetition-insensitively
 in real `DeepDiff`, not by Python `==`.** `DeepHash._prep_iterable`
-(`deephash.py`) runs with `ignore_iterable_order`/ `ignore_repetition` for every
+(`deephash.py`) runs with `ignore_iterable_order`/`ignore_repetition` for every
 iterable it hashes, so a tuple set member is affected too. `onix` compares a
 tuple member positionally (`tuple.__eq__`) and a frozenset member by membership.
 `test_a_tuple_set_member_matches_by_position_where_deepdiff_ignores_order_and_repetition`
@@ -458,8 +458,8 @@ NaN object to itself, while `ScalarKey::Nan` never matches.
 `crates/onix-core/src/lcs.rs`'s `ScalarKey::Nan` doc have the full mechanism for
 the second and third points; `crates/onix-core/src/ignore_order/tests.rs`'s
 `dist_key_hash_collision_on_distinct_nans_never_becomes_equality` pins that a
-hash collision between two distinct `NaN`s (deliberate, matching `DeepHash`)
-never becomes a false equality in the distance memo.
+hash collision between two distinct `NaN`s (matching `DeepHash`) never becomes a
+false equality in the distance memo.
 
 ## Custom objects: where onix is deliberately different
 
