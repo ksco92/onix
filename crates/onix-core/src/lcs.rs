@@ -182,7 +182,7 @@ pub(crate) enum Tag {
     /// `docs/design/list-diff.md`.
     Equal,
     /// `a[a1..a2]` should be replaced by `b[b1..b2]`; the two ranges never
-    /// share a matching element (see [`compute_opcodes`]'s doc).
+    /// share a matching element (see [`opcodes_with`]'s doc).
     Replace,
     /// `a[a1..a2]` should be deleted (`b1 == b2`).
     Delete,
@@ -404,9 +404,7 @@ fn opcodes_with(a: &[Value], b: &[Value], autojunk: bool) -> Vec<Opcode> {
     opcodes
 }
 
-/// Computes the ordered-list [`Opcode`]s turning `a` into `b`, with
-/// `difflib`'s autojunk heuristic disabled — the exact configuration
-/// `DeepDiff` uses for default list comparison (see this module's doc).
+/// Opcodes turning `a` into `b`, autojunk off.
 #[must_use]
 pub(crate) fn compute_opcodes(a: &[Value], b: &[Value]) -> Vec<Opcode> {
     opcodes_with(a, b, false)
