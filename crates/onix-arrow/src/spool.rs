@@ -2,7 +2,8 @@
 //! partition spill and the Python bindings' input spool. Each file is a
 //! [`tempfile::tempfile`] — unlinked at creation, mode 0600, never given a path,
 //! so nothing is left on disk on abnormal exit — re-read through a rewound
-//! `try_clone`.
+//! `try_clone`. Every `try_clone` handle shares one file offset, so a spool
+//! never has two readers alive at once; callers open each spool sequentially.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom};

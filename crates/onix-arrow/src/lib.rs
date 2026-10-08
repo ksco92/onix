@@ -138,7 +138,7 @@ pub fn diff_tables(
             });
         }
 
-        // A key type-changed across sides is refused: `TableDiffError::KeyTypeMismatch`.
+        // A key whose type differs across sides is refused.
         if changes
             .iter()
             .any(|change| &change.column == key && change.change == ChangeKind::TypeChanged)

@@ -42,7 +42,7 @@
 //! Each side is generated on the fly, batch by batch, and nothing is retained
 //! between batches, so the process's peak RSS is the diff's own state, not the
 //! table data. The shapes run are `linear`, `nochange`, `allchange`, `wide`,
-//! `widesame`, `manycols`, `dup`, and the view and duplicate shapes in the
+//! `widesame`, `manycols`, `dup`, and the remaining shapes in the
 //! commands above, each defined by its `Case` variant in
 //! `examples/shared/gen_shapes.rs`. The peak RSS of `linear` over `nochange` is
 //! the cell pass's cost; `wide` scales with changed cells times cell width, and

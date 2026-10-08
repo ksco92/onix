@@ -101,7 +101,8 @@ The row diff's per-pass wall time and peak RSS come from the committed
 `row_diff_profile` example (`crates/onix-arrow/examples/row_diff_profile.rs`),
 built with the `profile` feature that compiles the pass boundaries into
 `onix-arrow` (off by default, absent from the release wheel). Its own module
-docstring is the single home for the method, the two modes, and the shapes.
+docstring is the single home for the method and the two modes; the shapes are
+defined by the `Case` docs in `crates/onix-arrow/examples/shared/gen_shapes.rs`.
 
 The real fixtures are profiled in **file mode**, which reads each side from an
 uncompressed Arrow IPC file (this crate depends on no parquet reader, so convert
