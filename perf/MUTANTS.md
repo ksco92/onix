@@ -109,4 +109,3 @@ mutant is caught. The `ItemKey::hash` no-op mutant is caught by
 
 Future work that touches this logic should re-run `make mutants` and confirm
 that no *viable* mutant survives outside the five documented equivalent spots.
-
