@@ -31,8 +31,7 @@ const PER_LEVEL_STACK_BYTES: usize = 8_192;
 const STACK_SAFETY_MARGIN: usize = 2;
 
 /// The diff worker thread's stack size: reserved virtual address space,
-/// committed lazily. At [`MAX_DEPTH_CEILING`] it is 327,680,000 bytes
-/// (312.5 MiB).
+/// committed lazily. At [`MAX_DEPTH_CEILING`] it is 312.5 MiB.
 const WORKER_STACK_BYTES: usize = MAX_DEPTH_CEILING * PER_LEVEL_STACK_BYTES * STACK_SAFETY_MARGIN;
 const _: () = assert!(WORKER_STACK_BYTES == 327_680_000);
 
