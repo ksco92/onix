@@ -148,7 +148,7 @@ def test_set_entry_order_is_sorted_where_real_deepdiff_is_hash_ordered() -> None
     ],
 )
 def test_set_item_paths_match_real_deepdiff(item: object, rendered: str) -> None:
-    """Each item kind renders into the entry path exactly as real DeepDiff renders it."""
+    """Each item kind renders into the entry path as real DeepDiff renders it."""
     onix = DeepDiff({item}, {"sentinel"}).to_dict()
     real = RealDeepDiff({item}, {"sentinel"}, verbose_level=2).to_dict()
 
@@ -182,7 +182,7 @@ def test_float_set_item_paths_break_shortest_form_ties_pythons_way() -> None:
 
 
 def test_float_set_item_paths_match_python_repr_over_a_million_bit_patterns() -> None:
-    """Every finite float renders exactly as Python's ``repr()`` does.
+    """Every finite float renders as Python's ``repr()`` does.
 
     Random *bit patterns* rather than random magnitudes: repr's tie-breaking
     only bites near a decimal midpoint, which a corpus drawn from the raw
@@ -260,7 +260,7 @@ def _skip_unless_unicode_16() -> None:
 
 
 def test_str_inside_tuple_matches_python_repr_over_the_full_bmp() -> None:
-    """Every BMP code point escapes exactly like Python `repr()`, against Unicode 16.0.0."""
+    """Every BMP code point escapes like Python `repr()`, against Unicode 16.0.0."""
     _skip_unless_unicode_16()
 
     code_points = [cp for cp in range(0x10000) if not 0xD800 <= cp <= 0xDFFF]
@@ -318,9 +318,6 @@ def test_a_frozenset_subclass_is_accepted_and_compares_as_a_frozenset() -> None:
     same_type = DeepDiff(MyFrozenSet({1, 2}), MyFrozenSet({1, 3}))
     assert same_type.to_dict() == {"set_item_added": ["root[3]"], "set_item_removed": ["root[2]"]}
 
-    # Even at equal content, a root-level subclass-vs-base pair is a type
-    # change — real DeepDiff's own `type(t1) != type(t2)` check runs before
-    # any value comparison, matching the `MySet` case above.
     cross_type = DeepDiff(MyFrozenSet({1}), frozenset({1}))
     entry = cross_type.to_dict()["type_changes"]["root"]
     assert entry == {
@@ -346,7 +343,10 @@ def test_set_tags_are_ordinary_dicts_to_the_json_path() -> None:
 
 
 def test_a_nested_frozenset_renders_in_canonical_order() -> None:
-    """A frozenset rendered inside a path uses onix's order ("Set iteration order", "Canonical set order")."""
+    """
+    See tests/golden/README.md, "Set iteration order: where onix differs",
+    "Canonical set order".
+    """
     for item in (frozenset({2, 10}), frozenset({10, 2})):
         assert DeepDiff({item}, {"sentinel"}).to_dict()["set_item_removed"] == [
             "root[frozenset({2, 10})]"
@@ -361,7 +361,10 @@ def test_a_nested_frozenset_renders_in_canonical_order() -> None:
 
 
 def test_a_frozenset_never_inherits_another_ones_digest() -> None:
-    """No frozenset inherits another's digest ("Set iteration order", "Which member of an equality class wins")."""
+    """
+    See tests/golden/README.md, "Set iteration order: where onix differs",
+    "Which member of an equality class wins".
+    """
     paired = DeepDiff([frozenset({1})], [frozenset({1.0})], ignore_order=True).to_dict()
     assert paired == {
         "values_changed": {
@@ -374,8 +377,6 @@ def test_a_frozenset_never_inherits_another_ones_digest() -> None:
         "iterable_item_removed": {"root[0]": frozenset({1}), "root[1]": frozenset({1.0})}
     }
 
-    # A set is unhashable, so DeepDiff never caches one either: both tools
-    # agree here.
     sets = [{1}, {1.0}]
     assert DeepDiff(sets, [], ignore_order=True).to_dict() == RealDeepDiff(
         sets, [], ignore_order=True, verbose_level=2
@@ -383,7 +384,12 @@ def test_a_frozenset_never_inherits_another_ones_digest() -> None:
 
 
 def test_a_frozenset_bool_vs_float_member_hits_the_same_shared_cache_rule() -> None:
-    """A frozenset of `False` and one of `0.0` stay distinct ("Set iteration order", "Which member of an equality class wins")."""
+    """A frozenset of `False` and one of `0.0` stay distinct.
+
+    
+    See tests/golden/README.md, "Set iteration order: where onix differs",
+    "Which member of an equality class wins".
+    """
     assert DeepDiff([frozenset({False})], [frozenset({0.0})], ignore_order=True).to_dict() == {
         "values_changed": {
             "root[0]": {"old_value": frozenset({False}), "new_value": frozenset({0.0})}
@@ -395,7 +401,10 @@ def test_a_frozenset_bool_vs_float_member_hits_the_same_shared_cache_rule() -> N
 
 
 def test_a_set_versus_a_list_is_a_type_change_whatever_the_order() -> None:
-    """A set versus a list is a type change in either order ("Set iteration order", "`list(a_set) == some_list`")."""
+    """
+    See tests/golden/README.md, "Set iteration order: where onix differs",
+    "`list(a_set) == some_list`".
+    """
     for sibling in ([75, 47], [47, 75]):
         report = DeepDiff([{75, 47}], [sibling], ignore_order=True).to_dict()
 
@@ -403,7 +412,10 @@ def test_a_set_versus_a_list_is_a_type_change_whatever_the_order() -> None:
 
 
 def test_a_sets_report_does_not_depend_on_which_member_was_hashed_first() -> None:
-    """A set's report does not depend on which member was hashed first ("Set iteration order", "Which member of an equality class wins")."""
+    """
+    See tests/golden/README.md, "Set iteration order: where onix differs",
+    "Which member of an equality class wins".
+    """
     for members in ({((1.0,),), ((1,), 0)}, {((1,), 0), ((1.0,),)}):
         assert DeepDiff(members, {((1, 1),)}).to_dict() == {
             "set_item_added": ["root[((1, 1),)]"],
@@ -442,12 +454,7 @@ def test_a_sets_report_does_not_depend_on_which_member_was_hashed_first() -> Non
 def test_a_calendar_value_as_or_inside_a_set_member_matches_real_deepdiff(
     member: object, rendered: str
 ) -> None:
-    """A datetime/date set item renders with `str()`; nested one level, with `repr()`.
-
-    Top-level uses ``DateTime::python_str``/``Date::python_str`` (space
-    separator, no ``T``), the one item kind whose ``str()`` and ``repr()``
-    differ.
-    """
+    """A datetime/date set item renders with `str()`; nested one level, with `repr()`."""
     onix = DeepDiff({member}, {"sentinel"}).to_dict()
     real = RealDeepDiff({member}, {"sentinel"}, verbose_level=2).to_dict()
 
@@ -523,7 +530,10 @@ def test_an_unhashable_container_anywhere_inside_a_set_member_is_refused() -> No
 
 
 def test_a_naive_and_aware_datetime_set_member_is_two_members_in_onix_one_in_deepdiff() -> None:
-    """Two members in onix ("Set iteration order", "A naive and an aware datetime at one instant")."""
+    """
+    See tests/golden/README.md, "Set iteration order: where onix differs",
+    "A naive and an aware datetime at one instant".
+    """
     naive = datetime.datetime(2024, 1, 1)
     aware = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
     other = datetime.datetime(2024, 6, 1)
@@ -540,7 +550,10 @@ def test_a_naive_and_aware_datetime_set_member_is_two_members_in_onix_one_in_dee
 
 
 def test_a_tuple_set_member_matches_by_position_where_deepdiff_ignores_order_and_repetition() -> None:
-    """A tuple set member matches by position ("Set iteration order", "A tuple or a frozenset set member")."""
+    """
+    See tests/golden/README.md, "Set iteration order: where onix differs",
+    "A tuple or a frozenset set member".
+    """
     assert (1, 2) != (2, 1)
 
     onix_order = DeepDiff({(1, 2), "z"}, {(2, 1), "y"}).to_dict()
@@ -564,25 +577,23 @@ def test_a_tuple_set_member_matches_by_position_where_deepdiff_ignores_order_and
 
 
 def test_a_set_member_matches_deepdiff_by_the_per_node_cache_versus_content_decision() -> None:
-    """A set member matches as DeepHash's per-node cache decides ("Set iteration order", "Which member of an equality class wins")."""
+    """
+    See tests/golden/README.md, "Set iteration order: where onix differs",
+    "Which member of an equality class wins".
+    """
     naive = datetime.datetime(2024, 1, 1)
     aware = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
 
     cases = [
         # (a, b, expect_empty)
-        # Inner container hits the cache, outer misses -> content coincides:
         ({(naive, (1,))}, {(aware, (1.0,))}, True),
         ({(naive, (True,))}, {(aware, (1,))}, True),
         ({(naive, frozenset({True}))}, {(aware, frozenset({1}))}, True),
         ({(naive, frozenset({1}))}, {(aware, frozenset({1.0}))}, True),
         ({(naive, ((1,),))}, {(aware, ((1.0,),))}, True),
-        # A bare-number sibling is type-distinct with no shared cache entry:
         ({(naive, 1)}, {(aware, 1.0)}, False),
-        # Whole outer tuple Python-equal -> a single cache hit:
         ({(naive, 1)}, {(naive, 1.0)}, True),
-        # Outer misses (naive/aware), but the Int(1) content agrees:
         ({(naive, 1)}, {(aware, 1)}, True),
-        # A bare calendar member matches by instant:
         ({naive}, {aware}, True),
         ({naive, aware}, {aware}, True),
     ]
@@ -595,7 +606,10 @@ def test_a_set_member_matches_deepdiff_by_the_per_node_cache_versus_content_deci
 
 
 def test_a_naive_aware_difference_below_a_member_root_collapses_at_every_depth() -> None:
-    """A naive/aware difference nested at any depth collapses ("Set iteration order", "A naive and an aware datetime at one instant")."""
+    """
+    See tests/golden/README.md, "Set iteration order: where onix differs",
+    "A naive and an aware datetime at one instant".
+    """
     n = datetime.datetime(2024, 1, 1)
     a = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
 
@@ -624,11 +638,8 @@ def test_a_naive_aware_difference_below_a_member_root_collapses_at_every_depth()
 def test_a_bool_nested_in_a_tuple_set_member_is_its_own_identity_under_the_content_path() -> None:
     """A `bool` sibling forces the content path the same way a differently-typed number does.
 
-    Every other test that exercises the content-digest path (the cache path
-    blocked by a naive/aware pair) pairs the calendar element with a plain
-    `int`/`float`; this pins the `bool` element on its own, since `bool` is
-    its own `ItemKey` variant rather than folding into `Number`'s `int`/
-    `float` cases.
+    See tests/golden/README.md, "Set iteration order: where onix differs",
+    "Which member of an equality class wins".
     """
     naive = datetime.datetime(2024, 1, 1)
     aware = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)

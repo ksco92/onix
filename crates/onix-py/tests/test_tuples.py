@@ -1,4 +1,4 @@
-"""Tuple support at the bindings boundary: what `to_dict()` hands back, and the namedtuple divergence."""
+"""Tuple support at the bindings boundary: what `to_dict()` hands back."""
 
 import collections
 import json

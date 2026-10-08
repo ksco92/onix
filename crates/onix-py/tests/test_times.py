@@ -1,4 +1,4 @@
-"""`datetime.time` behavior of `deepdiff_rs.DeepDiff`; the superset is in tests/golden/README.md, "JSON supersets"."""
+"""`time` behavior of `DeepDiff`; see tests/golden/README.md, "JSON supersets"."""
 
 import datetime
 

@@ -1,4 +1,4 @@
-"""Datetime and date behavior of `deepdiff_rs.DeepDiff`; the date superset is in tests/golden/README.md, "JSON supersets"."""
+"""Datetime and date behavior of `DeepDiff`; see tests/golden/README.md, "JSON supersets"."""
 
 import datetime
 import zoneinfo
@@ -96,7 +96,8 @@ def test_a_zoneinfo_datetime_round_trips_as_a_fixed_offset_timezone() -> None:
     """
     A named zone comes back as the fixed offset it was in force at, not as the zone.
 
-    See tests/golden/README.md, "Normalized versus raw datetimes", "Fixed-offset `tzinfo` round-trip".
+    See tests/golden/README.md, "Normalized versus raw datetimes",
+    "Fixed-offset `tzinfo` round-trip".
     """
     madrid = datetime.datetime(2024, 7, 1, 12, tzinfo=zoneinfo.ZoneInfo("Europe/Madrid"))
     result = OnixDeepDiff({}, {"t": madrid}).to_dict()
@@ -195,7 +196,7 @@ def test_a_calendar_value_pairs_with_its_own_str_under_ignore_order() -> None:
 
 
 def test_a_timestamp_pair_is_accepted_and_compared_by_instant() -> None:
-    """`pandas.Timestamp`, a `datetime` subclass, diffs exactly like a plain `datetime`."""
+    """`pandas.Timestamp`, a `datetime` subclass, diffs like a plain `datetime`."""
     a, b = pd.Timestamp("2024-01-01 10:00:00"), pd.Timestamp("2024-01-01 11:00:00")
 
     expected = _normalize_types(RealDeepDiff(a, b, verbose_level=2).to_dict())

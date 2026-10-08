@@ -593,7 +593,8 @@ def test_unsupported_dict_key_error_reports_path_to_the_dict() -> None:
         DeepDiff({"a": {complex(1, 2): "x"}}, {"a": {complex(1, 2): "y"}})
 
 
-# Lone (unpaired) surrogates: tests/golden/README.md, "Known DeepDiff quirks", "Lone surrogate hashing".
+# Lone (unpaired) surrogates: tests/golden/README.md,
+# "Known DeepDiff quirks", "Lone surrogate hashing".
 
 
 def test_lone_surrogate_equal_pair_reports_no_change() -> None:
