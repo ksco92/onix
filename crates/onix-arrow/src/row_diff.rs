@@ -7124,9 +7124,7 @@ mod tests {
     #[test]
     fn hash_side_parallel_worker_panic_takes_precedence_over_a_read_error() {
         // A prefix batch makes a worker panic (out-of-range value column) and the
-        // next read yields an error. `hash_side_parallel` must still join every
-        // worker, so the panic surfaces as WorkerPanicked instead of resuming
-        // (aborting) — the read-error path must not return before join_results.
+        // next read yields an error.
         let sch = schema(vec![id_field(), Field::new("v", DataType::Int64, false)]);
         let good = RecordBatch::try_new(
             sch.clone(),
