@@ -1,9 +1,8 @@
 """Conversion tests: accepted types, subclasses, custom objects, and every refused-input path.
 
 Covers `deepdiff_rs.DeepDiff`'s Python-object-to-`Value` conversion (see
-the README's "Known limitations" section for the supported types this
-pins) and `deepdiff_rs.diff_json`'s JSON-parse error
-path.
+the README's "Known limitations" section for the supported types) and
+`deepdiff_rs.diff_json`'s JSON-parse error path.
 """
 
 import abc
@@ -551,7 +550,7 @@ def test_sub_second_utc_offset_raises_value_error() -> None:
 
 
 def test_custom_object_diffs_by_its_attributes() -> None:
-    """A custom object diffs by its attributes (issue #66), matching DeepDiff's `_diff_obj`."""
+    """A custom object diffs by its attributes, matching DeepDiff's `_diff_obj`."""
 
     class Custom:
         def __init__(self, x: int, y: int) -> None:
@@ -564,7 +563,7 @@ def test_custom_object_diffs_by_its_attributes() -> None:
 
 
 def test_two_different_classes_report_a_type_change() -> None:
-    """Two instances of different classes are a `type_changes`, named by class (issue #66)."""
+    """Two instances of different classes are a `type_changes`, named by class."""
 
     class A:
         def __init__(self) -> None:
@@ -580,7 +579,7 @@ def test_two_different_classes_report_a_type_change() -> None:
 
 
 def test_a_custom_object_nested_in_a_dict_reports_its_attribute_path() -> None:
-    """A custom object nested inside a dict keeps the dict subscript then a dotted attribute (issue #66)."""
+    """A custom object nested inside a dict keeps the dict subscript then a dotted attribute."""
 
     class Custom:
         def __init__(self, x: int) -> None:
@@ -729,7 +728,7 @@ def test_diff_json_valid_input_round_trips() -> None:
     assert result == '{"values_changed":{"root[\'a\']":{"new_value":2,"old_value":1}}}'
 
 
-# --- Object fallback: types DeepDiff routes elsewhere must raise, not {} (issue #66) ---
+# --- Object fallback: types DeepDiff routes elsewhere must raise, not {} ---
 
 
 import array as _array  # noqa: E402
@@ -785,7 +784,7 @@ def test_types_deepdiff_routes_elsewhere_raise_rather_than_reporting_empty(value
     """
     A value DeepDiff sends to a handler onix lacks (an iterable, an attribute-less
     builtin, a class object) raises TypeError, never silently reports {} for two
-    unequal values -- the invariant the object fallback must keep (issue #66).
+    unequal values -- the invariant the object fallback must keep.
     """
     a, b = value_factory(), value_factory()
     with pytest.raises(TypeError):
@@ -799,7 +798,7 @@ def test_bytes_does_not_silently_compare_equal() -> None:
 
 
 def test_a_dict_subclass_and_a_same_named_object_are_a_type_change_like_deepdiff() -> None:
-    """A dict subclass and a custom object sharing a __name__ are a type_changes (issue #66)."""
+    """A dict subclass and a custom object sharing a __name__ are a type_changes."""
     foo_dict = type("Foo", (dict,), {})
     foo_obj = type("Foo", (), {})
 
@@ -812,7 +811,7 @@ def test_a_dict_subclass_and_a_same_named_object_are_a_type_change_like_deepdiff
 
 
 def test_same_named_classes_from_different_modules_are_a_type_change_like_deepdiff() -> None:
-    """Two objects whose classes share a __name__ but differ by module are a type_changes (issue #66)."""
+    """Two objects whose classes share a __name__ but differ by module are a type_changes."""
     cls_a = type("User", (), {})
     cls_a.__module__ = "package_a.models"
     cls_b = type("User", (), {})
@@ -828,7 +827,7 @@ def test_same_named_classes_from_different_modules_are_a_type_change_like_deepdi
 
 
 def test_same_class_objects_diff_by_attribute_not_type_change() -> None:
-    """The control: two instances of one class diff by attribute, not type_changes (issue #66)."""
+    """The control: two instances of one class diff by attribute, not type_changes."""
 
     class Same:
         def __init__(self, i: int) -> None:
@@ -840,7 +839,7 @@ def test_same_class_objects_diff_by_attribute_not_type_change() -> None:
 
 
 def test_a_property_raising_non_attribute_error_propagates_at_the_path() -> None:
-    """A @property getter raising ValueError propagates as ValueError, never swallowed (issue #66)."""
+    """A @property getter raising ValueError propagates as ValueError, never swallowed."""
 
     class HasBadProperty:
         def __init__(self, x: int) -> None:
@@ -886,7 +885,7 @@ def test_an_unset_slot_beside_a_dict_is_refused_where_deepdiff_reports_unprocess
 
 
 def test_a_property_mutating_the_instance_dict_does_not_panic() -> None:
-    """A @property that mutates __dict__ mid-walk must not panic pyo3's dict iterator (issue #66)."""
+    """A @property that mutates __dict__ mid-walk must not panic pyo3's dict iterator."""
 
     class SelfMutating:
         def __init__(self, x: int) -> None:
@@ -901,7 +900,7 @@ def test_a_property_mutating_the_instance_dict_does_not_panic() -> None:
     assert "values_changed" in json.loads(DeepDiff(SelfMutating(1), SelfMutating(2)).to_json())
 
 
-# --- Object attribute enumeration strategies match DeepDiff (issue #66) ---
+# --- Object attribute enumeration strategies match DeepDiff ---
 
 
 def _canonical(a: object, b: object) -> tuple[object, object]:
@@ -910,7 +909,7 @@ def _canonical(a: object, b: object) -> tuple[object, object]:
 
 
 def test_slots_only_object_matches_deepdiff() -> None:
-    """A slots-only class is diffed by its slot values, matching `_dict_from_slots` (issue #66)."""
+    """A slots-only class is diffed by its slot values, matching `_dict_from_slots`."""
 
     class Slots:
         __slots__ = ("a", "b")
@@ -924,7 +923,7 @@ def test_slots_only_object_matches_deepdiff() -> None:
 
 
 def test_mixed_dict_and_slots_object_matches_deepdiff() -> None:
-    """A class mixing __slots__ and __dict__ is diffed across both, matching DeepDiff (issue #66)."""
+    """A class mixing __slots__ and __dict__ is diffed across both, matching DeepDiff."""
 
     class Mixed:
         __slots__ = ("a", "__dict__")
@@ -938,7 +937,7 @@ def test_mixed_dict_and_slots_object_matches_deepdiff() -> None:
 
 
 def test_dataclass_with_default_factory_matches_deepdiff() -> None:
-    """A dataclass (including a default_factory list field) is diffed by its attributes (issue #66)."""
+    """A dataclass (including a default_factory list field) is diffed by its attributes."""
     import dataclasses
 
     @dataclasses.dataclass
@@ -951,7 +950,7 @@ def test_dataclass_with_default_factory_matches_deepdiff() -> None:
 
 
 def test_name_mangled_private_attribute_matches_deepdiff() -> None:
-    """A name-mangled `_Cls__x` attribute is kept and diffed, matching detailed__dict__ (issue #66)."""
+    """A name-mangled `_Cls__x` attribute is kept and diffed, matching detailed__dict__."""
 
     class Mangled:
         def __init__(self, v: int) -> None:
@@ -963,7 +962,7 @@ def test_name_mangled_private_attribute_matches_deepdiff() -> None:
 
 
 def test_property_and_class_attribute_object_matches_deepdiff() -> None:
-    """An unchanged @property and class attribute stay out of the diff, matching DeepDiff (issue #66)."""
+    """An unchanged @property and class attribute stay out of the diff, matching DeepDiff."""
 
     class WithComputed:
         kls = "shared"
@@ -1000,7 +999,7 @@ def test_an_enum_with_its_own_attributes_reports_only_name_and_value_like_deepdi
 
 
 def test_enum_member_matches_deepdiff_via_name_and_value() -> None:
-    """An Enum member is diffed by its name/value, matching DeepDiff's _diff_enum (issue #66)."""
+    """An Enum member is diffed by its name/value, matching DeepDiff's _diff_enum."""
     onix = json.loads(DeepDiff(_Color.RED, _Color.GREEN).to_json())
     real = json.loads(RealDeepDiff(_Color.RED, _Color.GREEN, verbose_level=2).to_json())
     assert onix == real == {
@@ -1011,7 +1010,7 @@ def test_enum_member_matches_deepdiff_via_name_and_value() -> None:
     }
 
 
-# --- Accept-list: concrete-type predicates and the getmembers strategy (issue #66) ---
+# --- Accept-list: concrete-type predicates and the getmembers strategy ---
 
 
 def test_numbers_number_registered_class_diffs_by_attributes_like_deepdiff() -> None:
@@ -1039,7 +1038,7 @@ def test_c_type_with_getmembers_attributes_diffs_like_deepdiff() -> None:
 
 
 def test_two_classes_same_qualname_distinct_type_objects_are_a_type_change() -> None:
-    """Two classes created under one qualified name are distinct type objects -> type_changes (issue #66)."""
+    """Two classes created under one qualified name are distinct type objects -> type_changes."""
     e1 = type("E", (), {})
     e2 = type("E", (), {})
     a = e1()
@@ -1057,7 +1056,7 @@ def test_two_classes_same_qualname_distinct_type_objects_are_a_type_change() -> 
 
 
 def test_local_classes_of_the_same_name_are_a_type_change() -> None:
-    """A class defined in a function body is a fresh type object each call -> type_changes (issue #66)."""
+    """A class defined in a function body is a fresh type object each call -> type_changes."""
 
     def make(v: int) -> object:
         class Local:
@@ -1074,7 +1073,7 @@ def test_local_classes_of_the_same_name_are_a_type_change() -> None:
 
 
 def test_a_property_mutating_the_containing_dict_does_not_panic() -> None:
-    """A getter that inserts into the dict being converted must not panic pyo3's iterator (issue #66)."""
+    """A getter that inserts into the dict being converted must not panic pyo3's iterator."""
     holder: dict = {}
 
     class MutHolder:
@@ -1094,7 +1093,7 @@ def test_a_property_mutating_the_containing_dict_does_not_panic() -> None:
 
 
 def test_a_property_mutating_a_dict_two_levels_up_does_not_panic() -> None:
-    """The snapshot holds at every dict level: a getter mutating an outer dict still cannot panic (issue #66)."""
+    """The snapshot holds at every dict level: a getter mutating an outer dict cannot panic."""
     outer: dict = {}
 
     class Mut:
@@ -1114,7 +1113,7 @@ def test_a_property_mutating_a_dict_two_levels_up_does_not_panic() -> None:
 
 
 def test_a_dict_property_returning_a_non_dict_raises_with_the_path() -> None:
-    """An object whose __dict__ is not a mapping raises the typed, path-naming error (issue #66)."""
+    """An object whose __dict__ is not a mapping raises the typed, path-naming error."""
 
     class BadDict:
         @property
@@ -1125,7 +1124,7 @@ def test_a_dict_property_returning_a_non_dict_raises_with_the_path() -> None:
         DeepDiff({"k": BadDict()}, {"k": BadDict()})
 
 
-# --- Values DeepDiff never reaches: shared class attributes and identical objects (issue #66) ---
+# --- Values DeepDiff never reaches: shared class attributes and identical objects ---
 
 
 class _AbcBased(abc.ABC):
@@ -1269,7 +1268,7 @@ def test_an_object_holding_an_enum_against_a_bare_member_pairs_like_deepdiff_und
     } == {"values_changed": ["root[0]"]}
 
 
-# --- Class attributes in reports, shadowed class defaults, and refused models (issue #66) ---
+# --- Class attributes in reports, shadowed class defaults, and refused models ---
 
 
 class _Pair(abc.ABC):
@@ -1539,7 +1538,7 @@ def test_a_shadowed_chain_of_class_attribute_defaults_diffs_like_deepdiff(levels
     assert onix == real == {}
 
 
-# --- Identity and cycles: DeepDiff's `t1 is t2` and `parents_ids` rules (issue #66) ---
+# --- Identity and cycles: DeepDiff's `t1 is t2` and `parents_ids` rules ---
 
 
 class _Service:
