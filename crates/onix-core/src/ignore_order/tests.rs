@@ -3281,6 +3281,21 @@ fn dist_key_hash_collision_on_distinct_nans_never_becomes_equality() {
 /// actually generated: tuples, sets, frozensets, datetimes (naive and aware),
 /// dates, and floats (signed zero and integral values among them).
 fn arb_cvalue() -> impl Strategy<Value = CValue> {
+    arb_cleaf().prop_recursive(5, 40, 4, |inner| {
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..4).prop_map(carr),
+            prop::collection::vec(inner.clone(), 0..4).prop_map(ctuple),
+            prop::collection::vec(inner.clone(), 0..4).prop_map(|v| CValue::Set(SetItems::new(v))),
+            prop::collection::vec(inner.clone(), 0..4)
+                .prop_map(|v| CValue::FrozenSet(SetItems::new(v))),
+            prop::collection::vec(("[a-c]", inner), 0..3)
+                .prop_map(|entries| crate::value::Builder::new().object(entries)),
+        ]
+    })
+}
+
+/// [`arb_cvalue`]'s scalar leaves.
+fn arb_cleaf() -> impl Strategy<Value = CValue> {
     let arb_datetime = (
         2000i32..2025,
         1u8..=12,
@@ -3320,7 +3335,7 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
     .prop_filter_map("not NaN", |f| {
         (!f.is_nan()).then(|| CValue::Number(crate::value::Number::from_f64(f)))
     });
-    let leaf = prop_oneof![
+    prop_oneof![
         Just(CValue::Null),
         any::<bool>().prop_map(CValue::Bool),
         any::<i64>().prop_map(|i| CValue::Number(crate::value::Number::from_i64(i))),
@@ -3328,18 +3343,7 @@ fn arb_cvalue() -> impl Strategy<Value = CValue> {
         "[a-z]{0,3}".prop_map(|s| CValue::Str(s.into())),
         arb_datetime,
         arb_date,
-    ];
-    leaf.prop_recursive(5, 40, 4, |inner| {
-        prop_oneof![
-            prop::collection::vec(inner.clone(), 0..4).prop_map(carr),
-            prop::collection::vec(inner.clone(), 0..4).prop_map(ctuple),
-            prop::collection::vec(inner.clone(), 0..4).prop_map(|v| CValue::Set(SetItems::new(v))),
-            prop::collection::vec(inner.clone(), 0..4)
-                .prop_map(|v| CValue::FrozenSet(SetItems::new(v))),
-            prop::collection::vec(("[a-c]", inner), 0..3)
-                .prop_map(|entries| crate::value::Builder::new().object(entries)),
-        ]
-    })
+    ]
 }
 
 /// Rebuilds `value` into a twin that is equal by [`Value`]'s rules but differs
@@ -3480,6 +3484,103 @@ proptest! {
         let s2 = CValue::Set(SetItems::new(vec![cv(&json!("z")), value, CValue::Null]));
         prop_assert_eq!(&s1, &s2);
         prop_assert_eq!(dist_hash(&s1), dist_hash(&s2));
+    }
+}
+
+/// One leaf's change in [`perturb`].
+#[derive(Clone, Debug)]
+enum Edit {
+    Keep,
+    /// A same-type change: a string's first letter, a number plus one, a
+    /// flipped bool, else [`structural_twin`]'s equal-valued rewrite.
+    Tweak,
+    Replace(CValue),
+}
+
+fn tweak(leaf: &CValue) -> CValue {
+    use crate::value::Number;
+    match leaf {
+        CValue::Str(text) => {
+            let mut bytes = text.as_bytes().to_vec();
+            match bytes.first_mut() {
+                Some(first) => *first = b'a' + (first.wrapping_sub(b'a') + 1) % 26,
+                None => bytes.push(b'a'),
+            }
+            CValue::Str(String::from_utf8_lossy(&bytes).into_owned().into())
+        }
+        CValue::Number(n) => CValue::Number(match n.as_i64() {
+            Some(i) if !n.is_f64() => Number::from_i64(i.wrapping_add(1)),
+            _ => Number::from_f64(n.as_f64().map_or(0.0, |f| f + 1.0)),
+        }),
+        CValue::Bool(b) => CValue::Bool(!b),
+        other => structural_twin(other, false),
+    }
+}
+
+/// `value` with its leaves changed in walk order by `edits`.
+fn perturb(value: &CValue, edits: &mut impl Iterator<Item = Edit>) -> CValue {
+    let mut all = |items: &[CValue]| items.iter().map(|item| perturb(item, edits)).collect();
+    match value {
+        CValue::Array(items) => carr(all(items)),
+        CValue::Tuple(items) => ctuple(all(items)),
+        CValue::Set(items) => CValue::Set(SetItems::new(all(items))),
+        CValue::FrozenSet(items) => CValue::FrozenSet(SetItems::new(all(items))),
+        CValue::Object(map) => crate::value::Builder::new().object_with_keys(
+            map.iter()
+                .map(|(key, child)| (key.clone(), perturb(child, edits)))
+                .collect(),
+        ),
+        leaf => match edits.next() {
+            Some(Edit::Tweak) => tweak(leaf),
+            Some(Edit::Replace(new)) => new,
+            Some(Edit::Keep) | None => leaf.clone(),
+        },
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    /// `count_diff_leaves` counts what the `Report` of the same diff measures,
+    /// for an independent pair, a value against an edited copy, and each
+    /// under a shared sibling in a list and in a dict.
+    #[test]
+    fn count_diff_leaves_matches_the_report_of_the_same_diff(
+        a in arb_cvalue(),
+        b in arb_cvalue(),
+        edits in prop::collection::vec(
+            prop_oneof![
+                Just(Edit::Keep),
+                Just(Edit::Tweak),
+                arb_cleaf().prop_map(Edit::Replace),
+            ],
+            1..6,
+        ),
+        sibling in arb_cvalue(),
+        ignore_order in any::<bool>(),
+    ) {
+        let opts = DiffOptions {
+            ignore_order,
+            ..DiffOptions::default()
+        };
+        let edited = perturb(&a, &mut edits.into_iter().cycle());
+        let in_list = |value: &CValue| carr(vec![value.clone(), sibling.clone()]);
+        let in_dict = |value: &CValue| {
+            crate::value::Builder::new().object(vec![("k", value.clone()), ("s", sibling.clone())])
+        };
+        for (old, new) in [(&a, &b), (&a, &edited)] {
+            for (old, new) in [
+                (old.clone(), new.clone()),
+                (in_list(old), in_list(new)),
+                (in_dict(old), in_dict(new)),
+            ] {
+                let mirror =
+                    super::distance::count_diff_leaves(&old, &new, 0, &opts, &IgnoreOrderMemo::new());
+                let report = crate::diff::diff_with_options(&old, &new, &opts)
+                    .map(|report| report.distance_leaf_length());
+                prop_assert_eq!(mirror, report);
+            }
+        }
     }
 }
 
