@@ -104,6 +104,33 @@ fn max_depth_flag_trips_max_depth_exceeded_and_exits_three() {
     assert!(stderr.contains('1'));
 }
 
+fn nested_array(depth: usize, leaf: &str) -> String {
+    "[".repeat(depth) + leaf + &"]".repeat(depth)
+}
+
+#[test]
+fn json_nested_127_levels_parses_and_exits_zero() {
+    let a = write_temp_file("nest127_a.json", &nested_array(127, "1"));
+    let b = write_temp_file("nest127_b.json", &nested_array(127, "1"));
+
+    let output = run_onix(&["diff", a.to_str().unwrap(), b.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn json_nested_128_levels_exits_two_with_recursion_limit() {
+    let a = write_temp_file("nest128_a.json", &nested_array(128, "1"));
+    let b = write_temp_file("nest128_b.json", &nested_array(128, "1"));
+
+    let output = run_onix(&["diff", a.to_str().unwrap(), b.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = stderr_str(&output);
+    assert!(stderr.contains("failed to parse"));
+    assert!(stderr.contains("recursion limit exceeded"));
+}
+
 #[test]
 fn default_max_depth_is_used_when_no_flag_or_env_is_set() {
     // End-to-end companion to the same-named-in-spirit unit test in
