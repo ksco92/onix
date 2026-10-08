@@ -225,7 +225,8 @@ impl fmt::Display for Str {
 /// A compact JSON value: the memory-frugal counterpart of [`serde_json::Value`].
 ///
 /// Tuple, set, frozenset and the four calendar variants are types JSON cannot express; only a
-/// caller holding Python objects produces them. The size is at most 40 bytes.
+/// caller holding Python objects produces them. The size is at most 40 bytes (pinned by
+/// `value_is_compact`).
 #[derive(Debug, Clone)]
 pub enum Value {
     /// JSON `null`.
@@ -727,7 +728,7 @@ enum NumberRepr {
     PosInt(u64),
     /// A negative integer.
     NegInt(i64),
-    /// A float; non-finite only via [`Number::from_f64`].
+    /// A float.
     Float(f64),
     /// An integer outside `i64::MIN..=u64::MAX`.
     Big(Box<BigInt>),
@@ -857,7 +858,7 @@ impl Number {
         }
     }
 
-    /// Classifies a [`serde_json::Number`], preserving which kind it chose. Never yields `Big`.
+    /// Classifies a [`serde_json::Number`], preserving which kind it chose.
     fn from_serde(number: &serde_json::Number) -> Self {
         if let Some(u) = number.as_u64() {
             Self::from_u64(u)
@@ -991,7 +992,6 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 
     /// One comparison still owed: two values, two keys, or a container's length tie-break.
-    /// tie-break a container falls back on once its elements all matched.
     enum Work<'a> {
         Values(&'a Value, &'a Value),
         Keys(&'a ObjectKey, &'a ObjectKey),
