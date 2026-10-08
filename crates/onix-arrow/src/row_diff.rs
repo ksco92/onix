@@ -2480,10 +2480,8 @@ fn indices_schema(schema: &Schema, indices: &[usize]) -> SchemaRef {
     SchemaRef::new(Schema::new(fields))
 }
 
-/// The type a value column is spilled as: a dictionary unwraps to its value type
-/// (`take` keeps the whole values array); a byte-view type becomes the large
-/// non-view type (`take` keeps the variadic buffers, and a view column can
-/// exceed the 2 GiB an `i32`-offset array caps at); else itself.
+/// Spill type: dictionaries unwrap to their value type and byte-view types become non-view,
+/// since `take` retains the values array or buffers; large variants avoid `i32` overflow.
 fn spill_field_type(data_type: &DataType) -> DataType {
     match decoded_type(data_type) {
         DataType::Utf8View => DataType::LargeUtf8,
@@ -4598,9 +4596,9 @@ mod tests {
 
     #[test]
     fn interval_variant_difference_is_type_changed_with_distinct_renderings() {
-        // The three interval variants render into one human form (`1 days`), so a
-        // cross-variant pair is a type change with its variant appended. Every
-        // ordered pair of distinct variants is covered.
+        // `DayTime` and `MonthDayNano` render alike (`1 days`), so a cross-variant
+        // pair is a type change with its variant appended. Every ordered pair of
+        // distinct variants is covered.
         let array = |unit: IntervalUnit| -> ArrayRef {
             match unit {
                 IntervalUnit::YearMonth => Arc::new(IntervalYearMonthArray::from(vec![1])),
