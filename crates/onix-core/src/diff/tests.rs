@@ -8,8 +8,6 @@ use crate::test_support::{
 use crate::value::{Object as CObject, ObjectKey, SetItems, Typed, Value as CValue};
 use serde_json::{Map, Number, Value, json};
 
-// Thin wrappers routing each `serde_json`-literal-based test through the real
-// compact-typed engine via the shared `crate::test_support` converters.
 fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
     super::diff(&cv(a), &cv(b))
 }
@@ -65,47 +63,14 @@ fn nested_array(depth: usize, leaf: Value) -> Value {
     value
 }
 
-/// A depth just past [`DEFAULT_MAX_DEPTH`], for tests whose point is
-/// "behaves correctly once past the guard" rather than "handles an
-/// absolutely enormous structure" — small enough to build, diff, and
-/// drop entirely on a plain default-stack test thread — seeing past the
-/// guard needs only a small margin, not a `5_000`/`100_000`-scale
-/// structure.
+/// Just past `DEFAULT_MAX_DEPTH`, small enough to build and drop on a default test thread.
 const PAST_DEFAULT_MAX_DEPTH: usize = DEFAULT_MAX_DEPTH + 100;
 
-/// A depth that reliably overflows a *native-recursive* equivalent of
-/// an iterative function on this crate's test thread, reusing the
-/// threshold this file already independently establishes via
-/// `compounding_depth_regression_max_depth_20_000_...`'s traversal (see
-/// `run_on_a_large_stack`'s doc): `19_999` native `diff_at` recursion
-/// frames alone, with no deep value involved at all, is empirically
-/// confirmed to overflow a default thread's stack. Used only by tests
-/// whose actual point is proving a function (`deeper_than`,
-/// `values_equal`) is genuinely iterative — not merely correct — so a
-/// smaller depth would prove nothing beyond what the boundary tests
-/// elsewhere in this file already cover.
+/// Deep enough that a natively recursive walk overflows a default thread's stack.
 const RECURSION_OVERFLOW_DEPTH: usize = 20_000;
 
-/// Runs `f` on a dedicated thread with a generously large stack, then
-/// propagates any panic from it.
-///
-/// Two distinct reasons a test below reaches for this: (1) the *diff
-/// call itself* needs more stack, because a `max_depth` as large as
-/// `20_000` means up to `20_000` native `diff_at`/`object_diff`
-/// recursion frames just to *reach* a finding, which empirically
-/// overflows an unmodified default thread's stack — confirmed to
-/// happen even for a perfectly ordinary, bug-free diff with no deep
-/// values anywhere (a plain unequal scalar leaf at depth `19_999`);
-/// or (2) a genuinely-deep fixture (see [`RECURSION_OVERFLOW_DEPTH`])
-/// needs to be safely *dropped* at the end of the test — `serde_json`'s
-/// derived `Drop` recurses natively with no depth bound (an
-/// independent limitation of the JSON value model itself, orthogonal to
-/// this crate's own depth-guarded traversal) — without leaking it. Either
-/// way this is a *test-fixture*
-/// concern, not a production one: `max_depth` is a caller-chosen knob,
-/// and a caller who raises it this far is responsible for sizing their
-/// own thread's stack accordingly, the same way any deep native
-/// recursion in Rust requires.
+/// Runs `f` on a 256 MiB-stack thread and propagates its panic; for diffs at `max_depth` near
+/// 20,000 and for dropping 20,000-deep `serde_json` fixtures.
 fn run_on_a_large_stack(f: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
@@ -312,9 +277,7 @@ fn equal_dicts_are_empty() {
 }
 
 #[test]
-fn unequal_dicts_now_recurse_instead_of_erroring() {
-    // Regression test: this used to
-    // return Error::UnsupportedContainerDiff.
+fn unequal_dicts_recurse() {
     let report = diff(&json!({"a": 1}), &json!({"a": 2})).unwrap();
     assert_eq!(
         report.to_json_value(),
@@ -345,7 +308,6 @@ fn empty_dict_vs_nonempty_dict_is_all_added() {
 
 #[test]
 fn nonempty_dict_vs_empty_dict_is_all_removed() {
-    // Mirror of `empty_dict_vs_nonempty_dict_is_all_added` above.
     let report = diff(&json!({"a": 1}), &json!({})).unwrap();
     assert_eq!(
         report.to_json_value(),
@@ -437,9 +399,7 @@ fn identical_deep_nested_dicts_are_empty() {
 }
 
 #[test]
-fn nested_unequal_list_inside_dict_now_recurses_instead_of_erroring() {
-    // Regression test: this used to
-    // return Error::UnsupportedContainerDiff.
+fn nested_unequal_list_inside_dict_recurses() {
     let a = json!({"a": {"b": [1, 2]}});
     let b = json!({"a": {"b": [1, 3]}});
 
@@ -517,9 +477,7 @@ fn equal_lists_are_empty() {
 }
 
 #[test]
-fn unequal_lists_now_diff_index_aligned_instead_of_erroring() {
-    // Regression test: this used to
-    // return Error::UnsupportedContainerDiff.
+fn unequal_lists_diff_index_aligned() {
     let report = diff(&json!([1, 2]), &json!([1, 3])).unwrap();
     assert_eq!(
         report.to_json_value(),
@@ -592,15 +550,8 @@ fn nested_equal_list_alongside_an_unrelated_change_produces_no_finding_for_it() 
 
 #[test]
 fn equal_deeply_nested_dicts_do_not_hit_the_depth_bound() {
-    // PAST_DEFAULT_MAX_DEPTH is far beyond DEFAULT_MAX_DEPTH (512); this
-    // would overflow the native stack pre-guard (both via unbounded
-    // object_diff recursion and via serde_json's recursive derived
-    // PartialEq) if `values_equal`'s top-level fast path didn't
-    // short-circuit first. Built twice independently (not `.clone()`'d)
-    // so this test only exercises the engine under test, not
-    // serde_json's own recursive Clone. The point here is "past the
-    // guard", not "absolutely enormous" (see `PAST_DEFAULT_MAX_DEPTH`'s
-    // doc), so it drops normally with no large-stack accommodation.
+    // Equal inputs past the bound short-circuit on the top-level equality check;
+    // built twice so no recursive clone runs.
     let a = nested_dict(PAST_DEFAULT_MAX_DEPTH, json!("leaf"));
     let b = nested_dict(PAST_DEFAULT_MAX_DEPTH, json!("leaf"));
     let report = diff(&a, &b).unwrap();
@@ -620,7 +571,7 @@ fn values_equal_handles_deeply_nested_equal_dicts_without_crashing() {
     // RECURSION_OVERFLOW_DEPTH (see its doc) is deep enough that a
     // native-recursive `values_equal` would overflow; the whole test,
     // construction through drop, runs on `run_on_a_large_stack` so the
-    // fixture is genuinely reclaimed afterwards instead of leaked.
+    // fixture is reclaimed afterwards instead of leaked.
     run_on_a_large_stack(|| {
         let a = nested_dict(RECURSION_OVERFLOW_DEPTH, json!("leaf"));
         let b = nested_dict(RECURSION_OVERFLOW_DEPTH, json!("leaf"));
@@ -660,9 +611,6 @@ fn deeper_than_false_for_value_exactly_at_limit() {
 
 #[test]
 fn deeper_than_counts_object_nesting_the_same_way_as_array_nesting() {
-    // Found by mutation testing: no test above exercised `deeper_than`'s
-    // `Value::Object` arm, so a mutant that made that arm behave like a
-    // scalar leaf survived undetected.
     assert!(deeper_than(&nested_dict(4, json!(1)), 3));
     assert!(!deeper_than(&nested_dict(3, json!(1)), 3));
 }
@@ -671,10 +619,7 @@ fn deeper_than_counts_object_nesting_the_same_way_as_array_nesting() {
 fn deeper_than_counts_frozenset_nesting_the_same_way_as_array_nesting() {
     // A set/frozenset member has no JSON literal, so this builds the
     // compact `Value` directly instead of going through the `cv`-based
-    // local `deeper_than` wrapper. Mutation-found (mirrors the object case
-    // above): a `depth + 1` -> `depth * 1` mutant in this arm would count
-    // every level of set/frozenset nesting as depth `0`, never past the
-    // limit.
+    // local `deeper_than` wrapper.
     let mut value = cv(&json!(1));
     for _ in 0..4 {
         value = CValue::FrozenSet(SetItems::new(vec![value]));
@@ -713,9 +658,7 @@ fn map_deeper_than_true_for_a_map_one_level_past_limit() {
 
 #[test]
 fn map_deeper_than_false_for_a_map_exactly_at_limit() {
-    // Kills both `>` -> `==` and `>` -> `>=` mutants in `map_deeper_than`:
-    // nesting is exactly 3 (1 + 2), which must NOT count as deeper than a
-    // limit of 3 (the check is strictly `>`).
+    // Nesting of exactly 3 is not deeper than a limit of 3.
     let mut map = Map::new();
     map.insert("x".to_string(), nested_dict(2, json!(1)));
     assert!(!map_deeper_than(&map, 3));
@@ -723,9 +666,7 @@ fn map_deeper_than_false_for_a_map_exactly_at_limit() {
 
 #[test]
 fn map_deeper_than_true_for_any_nonempty_map_at_limit_zero() {
-    // Kills the `!map.is_empty()` -> `map.is_empty()` mutant: at
-    // `limit == 0`, a single scalar field already sits one level too
-    // deep, regardless of its own content.
+    // At `limit == 0`, a single scalar field already sits one level too deep.
     let mut map = Map::new();
     map.insert("x".to_string(), json!(1));
     assert!(map_deeper_than(&map, 0));
@@ -738,10 +679,7 @@ fn map_deeper_than_false_for_an_empty_map_at_limit_zero() {
 
 #[test]
 fn map_deeper_than_recurses_with_incrementing_not_constant_depth() {
-    // Kills the `depth + 1` -> `depth * 1` mutant in `map_deeper_than`'s
-    // `Value::Object` recursion arm: without the increment, the leaf at
-    // depth 2 would be (wrongly) checked at depth 1, never exceeding a
-    // limit of 1.
+    // The leaf at depth 2 must exceed a limit of 1.
     let mut inner = Map::new();
     inner.insert("y".to_string(), json!(1));
     let mut map = Map::new();
@@ -755,7 +693,7 @@ fn deeper_than_handles_a_deeply_nested_value_without_crashing() {
     // depth it is measuring — RECURSION_OVERFLOW_DEPTH (see its doc)
     // reuses this file's own established native-recursion-overflow
     // threshold. Built iteratively (a flat loop, not recursion); the
-    // whole test runs on `run_on_a_large_stack` so it is genuinely
+    // whole test runs on `run_on_a_large_stack` so it is
     // dropped afterwards instead of leaked.
     run_on_a_large_stack(|| {
         let value = nested_array(RECURSION_OVERFLOW_DEPTH, json!(1));
@@ -828,11 +766,7 @@ fn threshold_collapse_rejects_a_deep_side_cleanly_instead_of_cloning_it_first() 
 
 #[test]
 fn removed_value_at_root_is_checked_against_its_own_plus_one_depth_not_the_parents() {
-    // Found by mutation testing: pins the exact boundary the removed-key
-    // sink's `depth + 1` check needs (a `depth + 1` -> `depth` mutant
-    // survives without this test), which
-    // `removed_value_deeper_than_max_depth_...` above can't catch on its
-    // own.
+    // Pins the removed-key sink's `depth + 1` boundary.
     let deep = nested_array(10, json!(1)); // one past the correct budget of 9
     let mut a = Map::new();
     a.insert("x".to_string(), deep);
@@ -869,10 +803,8 @@ fn type_changed_value_deeper_than_max_depth_errors_cleanly_instead_of_cloning_it
 
 #[test]
 fn type_changed_deep_value_on_the_new_side_alone_errors_cleanly() {
-    // Round-2 only ever put the deep value on the old/a side; this
-    // covers type_change_report's *second* check_value_depth call
-    // (the `b` side) specifically — a is trivially shallow so only the
-    // b-side check can be what trips here.
+    // Covers type_change_report's *second* check_value_depth call
+    // (the `b` side) specifically: a is shallow, so only the b-side check can trip.
     let deep = nested_array(11, json!(1)); // one past the root (depth 0) budget of 10
     let err = diff_with_max_depth(&json!(5), &deep, 10).unwrap_err();
     assert_eq!(
@@ -886,12 +818,6 @@ fn type_changed_deep_value_on_the_new_side_alone_errors_cleanly() {
 
 #[test]
 fn scalar_diff_rejects_a_value_whose_own_nesting_exceeds_max_depth_on_the_old_side() {
-    // scalar_diff's real callers only ever pass scalars (inherently
-    // depth 0), so there is no way to reach this guard through the
-    // public diff/diff_with_max_depth API today — it is exercised
-    // directly here as a defensive unit test of the internal
-    // contract (see scalar_diff's doc). depth 20 can't overflow
-    // anything on its own, so it is dropped normally.
     let deep = nested_array(20, json!(1));
     let err = scalar_diff(&[], false, &deep, &json!(1), 0, 10).unwrap_err();
     assert_eq!(
@@ -927,8 +853,7 @@ fn scalar_diff_rejects_a_value_whose_own_nesting_exceeds_max_depth_on_the_new_si
 fn value_depth_full_budget_at_a_shallow_finding_is_accepted() {
     // At a root-level finding (path depth 0, via type_change_report),
     // the value gets the FULL max_depth budget: exactly max_depth deep
-    // is accepted. Also doubles as the to_json_value-on-a-max-legal-
-    // report regression: nothing here should fail to serialize.
+    // is accepted.
     let deep = nested_array(10, json!(1)); // == max_depth
     let report = diff_with_max_depth(&deep, &json!(5), 10).unwrap();
     assert_eq!(
@@ -997,17 +922,8 @@ fn value_depth_one_past_reduced_budget_at_a_deep_finding_errors() {
 
 #[test]
 fn many_dict_siblings_with_nested_findings_report_correct_paths_at_scale() {
-    // Regression for the shared path-buffer refactor: object_diff now
-    // pushes/pops one shared `Vec<PathSegment>` instead of cloning the
-    // whole path per key. A leaked push (forgetting to pop after a
-    // sibling's own recursion) would make every *later* sibling inherit
-    // an earlier sibling's stale segment(s) — a leak surfaces starting
-    // at the second sibling, so 3 siblings is enough to prove both "the
-    // first sibling after a leaky one is wrong" and "the leak keeps
-    // compounding into a third", with no discriminating power gained
-    // from going wider. Each sibling carries its own one-level-nested
-    // `values_changed` finding; every single path is asserted exactly
-    // correct with no leakage between siblings.
+    // Three siblings each with a nested change: a leaked path segment shows from
+    // the second sibling on.
     const SIBLINGS: usize = 3;
 
     let mut a = Map::new();
@@ -1043,9 +959,6 @@ fn many_dict_siblings_with_nested_findings_report_correct_paths_at_scale() {
 
 #[test]
 fn many_array_siblings_with_nested_findings_report_correct_paths_at_scale() {
-    // Array counterpart of the dict siblings test above, stressing
-    // array_diff's own push/pop of `PathSegment::Index` the same way —
-    // see that test's comment for why 3 siblings is enough.
     const SIBLINGS: usize = 3;
 
     let mut a_items = Vec::new();
@@ -1117,19 +1030,8 @@ fn sibling_after_a_deeply_nested_key_gets_its_own_shallow_path_not_the_deep_ones
 
 #[test]
 fn shallow_finding_with_a_value_past_the_guard_errors_cleanly() {
-    // Exercises the shallow-finding-with-a-too-deep-value shape:
-    // diff({}, {"x": <deep array>}) at DEFAULT_MAX_DEPTH.
-    // `check_value_depth`/`deeper_than` reject a
-    // too-deep value by walking at most `max_depth + 1` levels of it
-    // before short-circuiting (see `deeper_than`'s doc), so
-    // PAST_DEFAULT_MAX_DEPTH exercises identical behavior to the
-    // original 100_000-deep fixture at a fraction of the memory.
-    // Runs entirely on the default test thread (no large-stack helper):
-    // `nested_array` builds iteratively (a flat loop), diff_with_max_depth
-    // never clones this value (check_value_depth rejects it before any
-    // clone happens), and the fixture drops normally afterwards — this
-    // is itself the proof that the production path needs no special
-    // stack.
+    // A too-deep value under a shallow added key is rejected after at most
+    // `max_depth + 1` levels, on the default test thread.
     let deep = nested_array(PAST_DEFAULT_MAX_DEPTH, json!(1));
     let mut b = Map::new();
     b.insert("x".to_string(), deep);
@@ -1148,28 +1050,9 @@ fn shallow_finding_with_a_value_past_the_guard_errors_cleanly() {
 
 #[test]
 fn compounding_depth_regression_max_depth_20_000_traversal_plus_deep_added_value() {
-    // Found during review: a ~19_999-deep traversal (native
-    // diff_at/object_diff recursion, forced by an asymmetric key only
-    // at the bottom dict, so the top-level equal-inputs fast path can't
-    // short-circuit it) reaching a dict whose one extra key carries a
-    // 20_000-deep added value, at max_depth = 20_000. Before threading
-    // `depth` into check_value_depth, the value was checked against
-    // the flat max_depth (20_000) and accepted (its own depth is
-    // exactly 20_000, not "deeper than" 20_000), so a `.clone()` of a
-    // 20_000-deep value ran on top of a native call stack already
-    // ~19_999 diff_at/object_diff frames deep — a real, reproduced
-    // SIGABRT (empirically confirmed: reverting just the
-    // `.saturating_sub(depth)` to a flat `max_depth` reproduces the
-    // crash at this exact shape). After the fix, the value's budget at
-    // this position is max_depth.saturating_sub(20_000) = 0, so it is
-    // rejected before any clone happens: a clean error, never a crash.
-    //
-    // Run on `run_on_a_large_stack`: at this max_depth, the *baseline*
-    // traversal alone (no deep value at all) already needs more than a
-    // default thread's stack, empirically confirmed independent of
-    // this bug or its fix — see that helper's doc. The fixture drops
-    // normally at the end of this closure, which is safe precisely
-    // because it's still running on that same large stack.
+    // A 19,999-deep traversal reaching a 20,000-deep added value at max_depth
+    // 20,000: the value's remaining budget is 0, so it errors before any clone. Runs
+    // on a large stack because the traversal alone needs it.
     run_on_a_large_stack(|| {
         let depth = 19_999;
         let deep_added = nested_array(20_000, json!(1));
@@ -1204,20 +1087,8 @@ fn compounding_depth_regression_max_depth_20_000_traversal_plus_deep_added_value
 
 #[test]
 fn threshold_collapse_rejects_a_deep_side_on_a_constrained_stack_instead_of_crashing() {
-    // Guards the `threshold_to_diff_deeper` collapse:
-    // the collapse clones the whole `a`/`b` dict into a finding,
-    // so cloning before checking depth would hand an attacker-controlled,
-    // `RECURSION_OVERFLOW_DEPTH`-deep value straight to `serde_json::Value`'s
-    // natively recursive `Clone` with no bound in place yet. Run on a
-    // DELIBERATELY CONSTRAINED 8 MiB stack (not `run_on_a_large_stack`):
-    // empirically, reverting `object_diff`'s check-before-clone ordering
-    // reproduces a real SIGABRT at exactly this depth/stack combination,
-    // while `map_deeper_than`'s iterative (heap-stack, not native-stack)
-    // check clears it cleanly at the same size — a much larger stack (256
-    // MiB, tried while developing this test) masks the bug entirely, since
-    // `serde_json::Value::clone`'s per-frame cost is small enough that even
-    // the buggy ordering survives on a generous stack; 8 MiB is the
-    // smallest size found where the two orderings genuinely diverge.
+    // Runs on an 8 MiB stack, small enough that cloning before the depth check
+    // overflows.
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -1347,8 +1218,6 @@ fn mixed_dict_removed_key_value_is_checked_against_its_own_plus_one_depth() {
     );
 }
 
-/// [`mixed_dict_removed_key_value_is_checked_against_its_own_plus_one_depth`]'s
-/// twin for `object_diff_mixed`'s added-key (`only_b`) sink.
 #[test]
 fn mixed_dict_added_key_value_is_checked_against_its_own_plus_one_depth() {
     let a = CValue::Object(CObject::from_pairs(vec![]));
@@ -1395,9 +1264,7 @@ fn equal_inputs_deeper_than_a_tiny_configured_max_depth_still_succeed() {
 
 #[test]
 fn equal_inputs_containing_a_null_leaf_use_the_equality_fast_path_even_past_max_depth() {
-    // Found by mutation testing: no equal-inputs-of-any-depth test above
-    // used a Null leaf, so a mutant special-casing `Value::Null` in the
-    // equality fast path survived undetected.
+    // A Null leaf takes the equality fast path.
     let value = nested_dict(50, Value::Null);
     let report = diff_with_max_depth(&value, &value.clone(), 1).unwrap();
     assert!(report.is_empty());
@@ -1405,8 +1272,7 @@ fn equal_inputs_containing_a_null_leaf_use_the_equality_fast_path_even_past_max_
 
 #[test]
 fn equal_inputs_containing_a_bool_leaf_use_the_equality_fast_path_even_past_max_depth() {
-    // Same test gap as the Null case above, for `values_equal`'s
-    // `(Value::Bool(x), Value::Bool(y))` match arm.
+    // A Bool leaf takes the equality fast path.
     let value = nested_dict(50, json!(true));
     let report = diff_with_max_depth(&value, &value.clone(), 1).unwrap();
     assert!(report.is_empty());
@@ -1420,8 +1286,7 @@ fn equal_subtree_nested_under_an_unrelated_shallow_change_still_hits_the_bound()
     // unrelated "shallow" key), so that check does not fire, and the
     // "deep" key's subtree — identical on both sides, but past
     // max_depth — still recurses natively and trips the bound. This is
-    // still *safe* (a clean error, not a crash); an iterative rewrite
-    // would remove this limitation entirely.
+    // still safe (a clean error, not a crash).
     let deep_equal_a = nested_dict(50, json!("same"));
     let deep_equal_b = nested_dict(50, json!("same"));
     let mut a = Map::new();
@@ -1640,17 +1505,8 @@ fn type_change_at_an_index_from_scalar_to_list() {
 
 #[test]
 fn int_vs_float_single_element_list_matches_via_lcs_python_equality() {
-    // This used to assert `type_changes` here,
-    // matching this engine's own (and every *other*) numeric-comparison
-    // rule (see `int_vs_float_is_always_type_change_even_when_numerically_equal`
-    // and the sibling test below, both still `type_changes`). Real
-    // `DeepDiff` diverges specifically on the LCS list-matching path:
-    // `[1]` and `[1.0]` both qualify for basic-hashable list matching
-    // (see `crate::lcs::all_basic_scalars`), Python's `==` treats `1`
-    // and `1.0` as equal, and a `difflib` `'equal'` opcode is never
-    // diffed further — so real `DeepDiff` reports this pair as
-    // *completely empty*, confirmed against `deepdiff==9.1.0`. See
-    // `docs/design/list-diff.md` for the full write-up.
+    // `[1]` vs `[1.0]` is an LCS `'equal'` opcode under Python `==`, so nothing
+    // is reported (docs/design/list-diff.md).
     let report = diff(&json!([1]), &json!([1.0])).unwrap();
     assert!(report.is_empty());
 }
@@ -1660,9 +1516,7 @@ fn int_vs_float_at_an_index_is_still_a_type_change_outside_a_hashable_only_list(
     // The ordinary int/float type-change rule still holds whenever the
     // LCS path does not apply: a sibling dict element disqualifies the
     // whole list from hashable-list matching (`crate::lcs::all_basic_scalars`
-    // is false), falling back to `positional_array_diff` — confirmed
-    // against real `DeepDiff`, which applies the identical
-    // disqualification rule (a dict is never a "basic hashable" type).
+    // is false), falling back to `positional_array_diff`.
     let report = diff(&json!([1, {"k": 1}]), &json!([1.0, {"k": 1}])).unwrap();
     assert_eq!(
         report.to_json_value(),
@@ -1688,19 +1542,7 @@ fn i64_and_u64_same_value_at_an_index_are_equal() {
 
 #[test]
 fn deeply_nested_unequal_list_at_the_bottom_hits_the_depth_bound() {
-    // depth == DEFAULT_MAX_DEPTH + 1 is exactly one past the bound, same
-    // shape as unequal_structure_deeper_than_default_max_depth_errors_via_diff
-    // but for arrays instead of dicts.
-    //
-    // This runs on the test thread's own default (~2 MiB) stack, with no
-    // large-stack accommodation: `array_diff` keeps its scalar-only-list
-    // candidate computation (two extra `Report` locals) in a separate
-    // non-recursive helper (`lcs_or_positional_array_diff`, see
-    // `array_diff`'s "Stack-footprint note"), so those locals don't inflate
-    // every frame of this native list-of-list recursion in a debug build,
-    // and the bound is reached cleanly. The dedicated
-    // `array_diff_at_depth_512_on_a_default_stack_completes_without_crashing`
-    // test below pins the exact bound this test's shape only implies.
+    // One past the bound on a nested list, on the default test thread.
     let a = nested_array(DEFAULT_MAX_DEPTH + 1, json!(1));
     let b = nested_array(DEFAULT_MAX_DEPTH + 1, json!(2));
 
@@ -1718,15 +1560,7 @@ fn deeply_nested_unequal_list_at_the_bottom_hits_the_depth_bound() {
 
 #[test]
 fn array_diff_at_depth_512_on_a_default_stack_completes_without_crashing() {
-    // Runs the diff call directly on
-    // this test's own (default-size, ~2 MiB) thread — no
-    // `run_on_a_large_stack` for the diff call itself, which is
-    // exactly the point (a library consumer calling `diff`/
-    // `diff_with_max_depth` on an ordinary thread must not crash
-    // before `Error::MaxDepthExceeded` can fire). Pure nested-list
-    // traversal (every level dispatches through `array_diff`, the hot
-    // path the fix targeted) one level past `DEFAULT_MAX_DEPTH`
-    // completes with a clean `Err`, not a `SIGABRT`.
+    // Runs on the default test thread.
     let a = nested_array(DEFAULT_MAX_DEPTH + 1, json!("left"));
     let b = nested_array(DEFAULT_MAX_DEPTH + 1, json!("right"));
 
@@ -1743,10 +1577,7 @@ fn array_diff_at_depth_512_on_a_default_stack_completes_without_crashing() {
 
 #[test]
 fn added_tail_element_deeper_than_the_remaining_budget_errors_cleanly() {
-    // Mirrors added_value_deeper_than_max_depth_errors_cleanly_instead_of_cloning_it
-    // (object_diff's dictionary_item_added sink), but for array_diff's
-    // iterable_item_added sink: a surplus tail element one level deeper
-    // than the max_depth budget must be rejected before it is cloned.
+    // A surplus tail element past the budget is rejected before it is cloned.
     let deep = nested_array(11, json!(1)); // one past the root (depth 0) budget of 10
     let a = json!([]);
     let b = json!([deep]);
@@ -1764,8 +1595,6 @@ fn added_tail_element_deeper_than_the_remaining_budget_errors_cleanly() {
 
 #[test]
 fn removed_tail_element_deeper_than_the_remaining_budget_errors_cleanly() {
-    // Mirrors the added case above, but for array_diff's
-    // iterable_item_removed sink.
     let deep = nested_array(11, json!(1)); // one past the root (depth 0) budget of 10
     let a = json!([deep]);
     let b = json!([]);
@@ -1781,17 +1610,7 @@ fn removed_tail_element_deeper_than_the_remaining_budget_errors_cleanly() {
     );
 }
 
-// --- Review follow-up: the two surplus-tail check_value_depth
-// calls in array_diff use `depth + 1`, i.e. the *finding's own* path
-// depth, not the parent list's `depth`. Every test above only ever put
-// the surplus tail at the root (depth 0), so mutating `depth + 1` to
-// `depth` there is unobservable (root's `depth` is 0, so `depth + 1`
-// and a hypothetical off-by-one both still land on a value budget of
-// `max_depth`, or the mutation just shifts which of two equal-looking
-// numbers is used). These pin the +1 at a non-root path (a list nested
-// inside a dict, so the surplus finding sits at path depth 2), mirroring
-// value_depth_reduced_budget_at_a_deep_finding_is_accepted_at_the_reduced_bound
-// for object_diff's own leaf sinks. ---
+// --- Surplus-tail depth checks at a non-root path (path depth 2) ---
 
 #[test]
 fn added_tail_element_at_a_non_root_path_is_accepted_at_the_reduced_budget() {
@@ -1832,8 +1651,6 @@ fn added_tail_element_at_a_non_root_path_one_past_the_reduced_budget_errors() {
 
 #[test]
 fn removed_tail_element_at_a_non_root_path_is_accepted_at_the_reduced_budget() {
-    // Mirrors the added case above, but for array_diff's
-    // iterable_item_removed sink.
     let deep = nested_array(8, json!(1));
     let a = json!({"p": [1, deep.clone()]});
     let b = json!({"p": [1]});
@@ -1865,9 +1682,6 @@ fn removed_tail_element_at_a_non_root_path_one_past_the_reduced_budget_errors() 
 
 #[test]
 fn equal_deeply_nested_lists_at_a_tiny_max_depth_still_succeed() {
-    // Same equal-inputs-of-any-depth guarantee as
-    // equal_inputs_deeper_than_a_tiny_configured_max_depth_still_succeed,
-    // for arrays instead of dicts.
     let value = nested_array(50, json!("leaf"));
     let report = diff_with_max_depth(&value, &value.clone(), 1).unwrap();
     assert!(report.is_empty());
@@ -1883,7 +1697,7 @@ fn lcs_tie_break_positional_candidate_hits_the_depth_bound_at_the_root() {
     // add + a remove, via `1.0`/`1`'s cross-type match), which is
     // `> 1`, so `array_diff` also computes `positional_array_diff` to
     // compare counts. That candidate recurses into same-index pairs
-    // through `diff_at` at `depth + 1` exactly like any other list —
+    // through `diff_at` at `depth + 1` like any other list —
     // at `max_depth == 0` (this pair sits at the *root*, depth 0),
     // `depth + 1 == 1` trips the bound before the tie-break can even
     // finish computing, and the whole `diff` call must surface that
@@ -1905,17 +1719,7 @@ fn lcs_tie_break_positional_candidate_hits_the_depth_bound_at_the_root() {
 
 #[test]
 fn lcs_replace_pair_itself_hits_the_depth_bound_not_via_the_positional_fallback() {
-    // Distinct from `lcs_tie_break_positional_candidate_hits_the_depth_bound_at_the_root`
-    // above: that test's input (`[1.0, 2]` vs `[2, 1]`) opcodes are
-    // insert+equal+delete — no `Replace` opcode at all — so its error
-    // comes from `positional_array_diff`'s own `diff_at` recursion
-    // (the tie-break candidate), never from `insert_lcs_pair_finding`'s
-    // own `check_traversal_depth` call. `[1, 2, 3]` vs `[1, 5, 3]`
-    // opcodes are equal+replace+equal (a single, aligned `Replace`
-    // pair at index 1, real DeepDiff: `values_changed` at `root[1]`) —
-    // `lcs_report.finding_count()` here is exactly `1`, so
-    // `array_diff` never even reaches the tie-break/positional branch;
-    // the error can only come from `insert_lcs_pair_finding` itself.
+    // The error comes from the LCS replace pair, not the positional fallback.
     let a = json!([1, 2, 3]);
     let b = json!([1, 5, 3]);
 
@@ -1955,10 +1759,6 @@ fn lcs_tie_break_positional_candidate_succeeds_at_a_sufficient_max_depth() {
 }
 
 // --- tuples -------------------------------------------------------------
-//
-// Every expected value in this section was confirmed against a real
-// `deepdiff==9.1.0` probe (`DeepDiff(t1, t2, verbose_level=2).to_json()`),
-// not derived from this engine's own behavior.
 
 #[test]
 fn tuple_vs_tuple_diffs_positionally_like_a_list() {
@@ -2078,7 +1878,7 @@ fn tuple_of_scalars_uses_the_same_lcs_match_a_list_would() {
 fn a_tuple_element_disqualifies_a_list_from_lcs_matching() {
     // `[(1, 2), 3]` vs `[3]`: a tuple is not a basic-hashable scalar, so the
     // list falls back to index-aligned comparison (a type change at index 0
-    // plus a removed tail), exactly like a nested list or dict element.
+    // plus a removed tail), like a nested list or dict element.
     let report = super::diff(
         &carr(vec![ctup(&[json!(1), json!(2)]), cv(&json!(3))]),
         &cv(&json!([3])),
@@ -2115,7 +1915,7 @@ fn a_tuple_never_equals_a_list_with_the_same_items() {
 
 #[test]
 fn tuple_nesting_counts_toward_the_value_depth_guard() {
-    // Tuples nest exactly like arrays, so `deeper_than` must see through
+    // Tuples nest like arrays, so `deeper_than` must see through
     // them: `((1,),)` is depth 2.
     let nested = ctuple(vec![ctup(&[json!(1)])]);
     assert!(super::dispatch::deeper_than(&nested, 1));
@@ -2276,7 +2076,7 @@ fn a_naive_and_aware_pair_matched_by_difflib_replace_reports_nothing_at_a_drifte
     // Two lists that differ *only* in a naive/aware pair at one instant are
     // equal by this engine's own rules, so `diff_with_options`'s top-level
     // fast path would answer them before `array_diff` ran at all. The
-    // unmatched leading element here keeps the lists genuinely unequal, so
+    // unmatched leading element here keeps the lists unequal, so
     // the difflib 'replace' opcode really is what decides the datetime pair,
     // and the finding it must *not* record is the whole point.
     let report = super::diff(
@@ -2300,7 +2100,7 @@ fn a_naive_and_aware_pair_matched_by_difflib_replace_reports_nothing_at_a_drifte
 
 #[test]
 fn a_datetime_pair_matched_by_difflib_replace_is_normalized_and_keeps_new_path() {
-    // Same 'replace' path, with the instants genuinely different and an
+    // Same 'replace' path, with the instants different and an
     // earlier delete drifting the new-side index, which attaches `new_path`.
     let report = super::diff(
         &carr(vec![
@@ -2352,9 +2152,8 @@ fn comparing_two_datetimes_that_cannot_normalize_to_utc_is_an_error_naming_the_p
 fn an_unnormalizable_datetime_still_diffs_when_it_is_never_compared_to_another_one() {
     // On the ordered path real `DeepDiff` normalizes only inside
     // `_diff_datetime`, so the same value added, or type-changed against a
-    // non-datetime, reports its raw rendering rather than raising in both
-    // tools — verified live. The `ignore_order` path differs; see the test
-    // below.
+    // non-datetime, reports its raw rendering rather than raising in both tools.
+    // The `ignore_order` path differs; see the test below.
     let extreme = cdt_at(9999, 12, 31, 23, 0, 0, 0, Some(-3600));
 
     let added = super::diff(&cv(&json!({})), &wrapped(extreme.clone())).unwrap();
@@ -2380,14 +2179,7 @@ fn an_unnormalizable_datetime_under_ignore_order_is_reported_raw() {
     // `ignore_order` hashes every item, and this engine's hash key is the
     // instant, which every datetime has — so an extreme aware value that has
     // no UTC form is still hashed, paired, and reported raw.
-    //
-    // Real `DeepDiff` diverges here, and deliberately so: its
-    // `deephash.py::_prep_datetime` runs `datetime_normalize` on every
-    // datetime it hashes, so it raises `OverflowError: date value out of
-    // range` for both cases below — the added one and the pure shuffle that
-    // has no finding at all. Reproducing a crash is not a semantic worth
-    // matching (see `tests/golden/README.md`), so onix keeps the
-    // deterministic report.
+    // DeepDiff raises here; onix reports the deterministic result (tests/golden/README.md).
     let extreme = cdt_at(9999, 12, 31, 23, 0, 0, 0, Some(-3600));
     let opts = super::DiffOptions {
         ignore_order: true,
