@@ -193,7 +193,7 @@ fn insert_checked<V>(map: &mut BTreeMap<Vec<PathSegment>, V>, path: Vec<PathSegm
 }
 
 /// Merges `src` into `dst` through [`insert_checked`], so the duplicate-path
-/// assertion still fires.
+/// assertion fires on a collision.
 fn merge_map(dst: &mut BTreeMap<Vec<PathSegment>, Value>, src: BTreeMap<Vec<PathSegment>, Value>) {
     for (path, value) in src {
         insert_checked(dst, path, value);
@@ -302,22 +302,26 @@ impl Report {
         insert_checked(&mut self.values_changed, path, entry);
     }
 
-    /// Records a `dictionary_item_added` finding at the structural `path`; `value` is the added value itself.
+    /// Records a `dictionary_item_added` finding at the structural `path`;
+    /// `value` is the added value itself.
     pub(crate) fn insert_dictionary_item_added(&mut self, path: Vec<PathSegment>, value: Value) {
         insert_checked(&mut self.dictionary_item_added, path, value);
     }
 
-    /// Records a `dictionary_item_removed` finding at the structural `path`; `value` is the removed value itself.
+    /// Records a `dictionary_item_removed` finding at the structural `path`;
+    /// `value` is the removed value itself.
     pub(crate) fn insert_dictionary_item_removed(&mut self, path: Vec<PathSegment>, value: Value) {
         insert_checked(&mut self.dictionary_item_removed, path, value);
     }
 
-    /// Records a `iterable_item_added` finding at the structural `path`; `value` is the added value itself.
+    /// Records an `iterable_item_added` finding at the structural `path`;
+    /// `value` is the added value itself.
     pub(crate) fn insert_iterable_item_added(&mut self, path: Vec<PathSegment>, value: Value) {
         insert_checked(&mut self.iterable_item_added, path, value);
     }
 
-    /// Records a `iterable_item_removed` finding at the structural `path`; `value` is the removed value itself.
+    /// Records an `iterable_item_removed` finding at the structural `path`;
+    /// `value` is the removed value itself.
     pub(crate) fn insert_iterable_item_removed(&mut self, path: Vec<PathSegment>, value: Value) {
         insert_checked(&mut self.iterable_item_removed, path, value);
     }
