@@ -28,10 +28,10 @@ enumeration has not been classified, see #212. A standalone `cargo mutants -p
 onix-arrow` on a quiet machine, run on the earlier 274-mutant `onix-arrow`
 enumeration (208 in `row_diff.rs`, 38 in `schema.rs`, 17 in `table_diff.rs`, 4
 in `lib.rs`, 4 in `error.rs`, 3 in `options.rs`), classified **212 caught, 52
-unviable, 9 timeout, 1 missed**. The 52 unviable are `Default`-substitution mutants on types without a
-usable `Default`. The 9 timeouts are mutant-induced infinite loops the tests
-reach — the trailing-zero reduction loop in `hash_decimal` (`==`/`/=` mutants)
-and the two cursor-advance loops in `classify` (the `<`/`==`/`+=` mutants) —
+unviable, 9 timeout, 1 missed**. The 52 unviable are `Default`-substitution
+mutants on types without a usable `Default`. The 9 timeouts are
+mutant-induced infinite loops the tests reach — the trailing-zero reduction
+loop in `hash_decimal` (`==`/`/=` mutants) and the two cursor-advance loops in `classify` (the `<`/`==`/`+=` mutants) —
 detected as hangs, not silent survivors. The 1 missed is a genuine equivalent
 mutant: `row_diff.rs`'s `push_filtered` (the shared filter-and-push helper of
 both the added/removed and the per-cell materialize passes) guards
@@ -96,11 +96,11 @@ is what was verified independently of any single run's labels.
      `keyed`, `tuple_keyed`, `HashedList::build`, `HashedList::get`.
    - `memo.rs`: `tuple_digest`, `content_rep`, `member_rep`.
    - `ignore_order/pairing.rs`'s `compute_pairs` contributes **two** unviable
-     mutants by two independent mechanisms: the `HashMap::from_iter([(Default::
-     default(), …)])` one fails on the missing `Default` for `ItemKey`, and the
-     `HashMap::new()` one fails because the crate's fxhash-backed `HashMap`
-     type alias has no inherent `::new()` (that associated fn exists only for
-     the `RandomState`-backed `std` `HashMap`), not a `Default` issue.
+     mutants by two independent mechanisms: the `HashMap::from_iter` one
+     fails on the missing `Default` for `ItemKey`, and the `HashMap::new()`
+     one fails because the crate's fxhash-backed `HashMap` type alias has no
+     inherent `::new()` (that associated fn exists only for the
+     `RandomState`-backed `std` `HashMap`), not a `Default` issue.
 
 Every other viable mutant is caught. `onix-cli`'s only non-caught mutants are
 the two uncompilable `Default`-substitutions above; every viable `onix-cli`
