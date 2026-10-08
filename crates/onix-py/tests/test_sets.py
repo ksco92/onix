@@ -7,9 +7,8 @@ bindings: that a report crossing back into Python carries real ``set``/
 ``frozenset`` objects, that the two set categories come back as lists of path
 strings, the float rendering used inside a set item's path, and the places
 onix deliberately differs from real DeepDiff: the five consequences of
-DeepDiff's set results depending on the process's set iteration order (see
-``tests/golden/README.md``'s "Set iteration order" section), and being able to
-serialize a frozenset at all. Each of those is pinned here as onix's own
+DeepDiff's set results (see ``tests/golden/README.md``'s "Set iteration order"
+section), and being able to serialize a frozenset at all. Each of those is pinned here as onix's own
 output, with DeepDiff's shown alongside rather than asserted equal.
 """
 
