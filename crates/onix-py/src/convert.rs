@@ -1090,8 +1090,8 @@ fn object_failure(
 ///
 /// Never recurses natively, and every `onix_core` step run while building (set
 /// ordering, `Value`'s `Drop`) is iterative, so native stack and error-path
-/// teardown stay O(1) at any depth (`docs/design/value-model.md`'s "Stack
-/// safety"); only the diff engine needs `crate::guard`'s sized worker.
+/// teardown stay O(1) at any depth; only the diff engine needs
+/// `crate::guard`'s sized worker.
 ///
 /// The second return value is whether the walk built a lone-surrogate `str` or
 /// key (see [`pystring_to_cstr`]). `held` collects the objects the value's
