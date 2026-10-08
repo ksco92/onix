@@ -71,7 +71,7 @@ use crate::value::Value;
 /// `0 == 0.0 == False`) as equal regardless of type, so `difflib` can match
 /// an `int` in one list against a `float` (or `bool`) of the same numeric
 /// value in the other — and, critically, a `difflib` `'equal'` opcode is
-/// *never* diffed further (see `crate::diff::array_diff`'s doc), so two
+/// *never* diffed further (`docs/design/list-diff.md`, "Opcode-to-finding mapping"), so two
 /// cross-type-equal numbers matched this way produce **no** `type_changes`
 /// finding at all, unlike every other numeric comparison in this engine
 /// (which always treats int/float and bool/int as a type change — see
