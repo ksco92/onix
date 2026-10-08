@@ -1,35 +1,14 @@
-"""Type stub for the compiled ``deepdiff_rs`` extension module."""
-
 from typing import Any
 
 __version__: str
-"""The installed ``deepdiff-rs`` distribution version."""
 
 class MaxDepthError(ValueError):
-    """Raised when diffing (or importing an Arrow schema) would need to
-    recurse past the configured ``max_depth`` — a catchable Python
-    exception in place of a native stack overflow.
-    """
+    """Raised when diffing two values would need to recurse past the configured ``max_depth``."""
 
 MAX_DEPTH_CEILING: int
-"""The largest ``max_depth`` a caller may pass to :class:`DeepDiff` or
-:func:`diff_json`; a larger value raises ``ValueError`` up front.
-"""
 
 class DeepDiff:
-    """A drop-in subset of ``deepdiff.DeepDiff``, diffing ``t1``/``t2`` at
-    ``verbose_level=2``. ``max_depth`` defaults to 512; deeper input raises
-    ``MaxDepthError``. Supported types and errors:
-    https://github.com/ksco92/onix#known-limitations
-
-    Example::
-
-        from deepdiff_rs import DeepDiff
-
-        diff = DeepDiff({"a": 1}, {"a": 2})
-        if diff:
-            print(diff.to_json())
-    """
+    """A drop-in subset of ``deepdiff.DeepDiff``, diffing ``t1``/``t2`` at ``verbose_level=2``."""
 
     def __init__(
         self,
@@ -37,41 +16,12 @@ class DeepDiff:
         t2: Any,
         ignore_order: bool = ...,
         max_depth: int | None = ...,
-    ) -> None:
-        """
-        :param t1: The left value to compare. Any of ``None``, ``bool``,
-            ``int``, ``float`` (``NaN``/``Infinity``/``-Infinity`` included),
-            ``str``, ``dict`` (a key may be ``str``,
-            ``None``, ``bool``, ``int``, ``float``, ``datetime.datetime``,
-            ``datetime.date``, or a ``tuple`` of those, never nested),
-            ``list``, ``tuple``, ``set``, ``frozenset``,
-            ``datetime.datetime``, ``datetime.date``, ``datetime.time``, or
-            ``datetime.timedelta``, arbitrarily nested, or a subclass of
-            any of the container or calendar types above (a ``namedtuple``, a
-            ``set`` subclass, a pandas ``Timestamp``), which converts and
-            compares as its base type but reports its own class name in a
-            ``type_changes`` entry. Any other object is diffed by its
-            attributes as a custom object (``attribute_added``/
-            ``attribute_removed``, ``root.attr`` paths, ``type_changes``
-            between two different classes), except a type DeepDiff routes to
-            a handler onix lacks, which raises ``TypeError``.
-        :param t2: The right value to compare, of the same supported types.
-        :param ignore_order: Mirrors ``DeepDiff(..., ignore_order=True)``.
-        :param max_depth: Recursion-depth bound; defaults to 512. Raises
-            ``ValueError`` up front if it exceeds :data:`MAX_DEPTH_CEILING`,
-            and :class:`MaxDepthError` if diffing recurses past it.
-        """
-
+    ) -> None: ...
     def to_json(self) -> str:
-        """The report as a ``DeepDiff``-compatible JSON string
-        (``verbose_level=2`` shape)."""
+        """The report as a ``DeepDiff``-compatible JSON string at ``verbose_level=2``; a deep report renders on the sized worker thread rather than inline."""
 
     def to_dict(self) -> dict[str, Any]:
-        """The report as a native ``dict``, with Python types (tuples,
-        sets, datetimes) preserved rather than rendered to JSON. A custom
-        object, however, comes back as a plain ``dict`` of its attributes
-        (onix cannot reconstruct the instance), unlike DeepDiff's own
-        ``to_dict()`` which returns the original object."""
+        """The report as a native Python dict, Python types (tuples, sets, datetimes) intact."""
 
     def __bool__(self) -> bool: ...
     def __repr__(self) -> str: ...
@@ -82,138 +32,53 @@ def diff_json(
     ignore_order: bool = ...,
     max_depth: int | None = ...,
 ) -> str:
-    """Diffs two JSON documents and returns a ``DeepDiff``-compatible JSON
-    report string, entirely in Rust with no Python-object traversal.
-
-    Example::
-
-        from deepdiff_rs import diff_json
-
-        print(diff_json('{"a": 1}', '{"a": 2}'))
-
-    :param a: The left document, as a JSON string.
-    :param b: The right document, as a JSON string.
-    :param ignore_order: Mirrors ``DeepDiff(..., ignore_order=True)``.
-    :param max_depth: Recursion-depth bound; defaults to 512. Raises
-        ``ValueError`` up front if it exceeds :data:`MAX_DEPTH_CEILING`, and
-        :class:`MaxDepthError` if diffing recurses past it.
-    :raises ValueError: If ``a`` or ``b`` fails to parse as JSON.
-    """
+    """Diffs two JSON documents and returns a ``DeepDiff``-compatible JSON report string (``verbose_level=2`` shape)."""
 
 def diff_tables(left: Any, right: Any, *, key: list[str], threads: int | None = None) -> TableDiff:
-    """Diffs two Arrow tables — schema and keyed rows.
-
-    ``left`` and ``right`` are any object implementing the Arrow PyCapsule
-    interface: a pyarrow ``Table``/``RecordBatch``, a polars ``DataFrame``,
-    or a DuckDB relation.
-
-    Example::
-
-        import polars as pl
-        from deepdiff_rs import diff_tables
-
-        left = pl.DataFrame({"id": [1, 2], "v": [10, 20]})
-        right = pl.DataFrame({"id": [2, 3], "v": [20, 30]})
-        diff = diff_tables(left, right, key=["id"])
-        print(diff.summary())
-
-    :param left: The left table.
-    :param right: The right table.
-    :param key: The primary-key column names, required and non-empty; every
-        key column must exist, with the same type, on both sides.
-    :param threads: Number of worker threads the row diff hashes and
-        classifies rows with. ``None`` (the default) uses the machine's
-        available parallelism; ``1`` runs single-threaded. The result is
-        byte-identical at any value. Must be ``None`` or a positive integer
-        no greater than 1024 (the diff spawns one worker per thread). The diff
-        runs single-threaded (ignoring this) only when both sides stay under
-        50,000 rows and under 64 MB of decoded data; either bound reached first
-        uses the requested threads.
-    :raises TypeError: If an input implements neither Arrow PyCapsule method,
-        or ``key`` is a bare string rather than a list of column names.
-    :raises ValueError: If a key column is missing, duplicated, or
-        type-mismatched, or a column's type cannot be compared by value —
-        the message names the column — or if ``threads`` is less than 1 or
-        greater than 1024.
-    :raises MaxDepthError: If a column's Arrow type is nested past the
-        supported depth.
-    """
+    """Diffs two Arrow tables."""
 
 class TableDiff:
-    """The result of :func:`diff_tables`: the schema diff and the keyed row
-    diff. Not constructible directly; returned by :func:`diff_tables`.
-    """
+    """The result of ``diff_tables``: the schema diff and the row-level members (``rows_added``, ``rows_removed``, ``cells_changed``, ``duplicate_keys``)."""
 
     @property
     def schema(self) -> list[dict[str, Any]]:
-        """The schema changes: one dict per changed column, with ``column``,
-        ``change`` (``added``/``removed``/``type_changed``), ``left_type``,
-        ``right_type``, ``left_nullable``, ``right_nullable``."""
+        """The schema changes as a list of dicts, one per changed column, each with ``column``, ``change`` (``added``/``removed``/``type_changed``), ``left_type``, ``right_type``, ``left_nullable``, ``right_nullable``."""
 
     @property
     def schema_arrow(self) -> ArrowTable:
-        """The schema diff as an Arrow-exportable table."""
+        """The schema diff as an Arrow-exportable table: it implements ``__arrow_c_stream__`` and offers ``ArrowTable.to_pyarrow``."""
 
     def summary(self) -> dict[str, int]:
-        """Counts of each kind of change: ``columns_added``,
-        ``columns_removed``, ``columns_type_changed``, ``rows_added``,
-        ``rows_removed``, ``rows_changed``, ``duplicate_keys``,
-        ``null_keys``, ``cells_changed``."""
+        """Counts of each kind of change: the schema counts (``columns_added``, ``columns_removed``, ``columns_type_changed``), the row counts (``rows_added``, ``rows_removed``, ``rows_changed``, ``duplicate_keys``, ``null_keys``), and ``cells_changed`` (the total number of changed cells)."""
 
     def to_json(self) -> str:
-        """The full diff — schema, summary, and every row-level member — as
-        a JSON string.
-
-        :raises ValueError: If the row-level members would together embed
-            more than 10,000 rows; use the row-level accessors, or
-            :meth:`ArrowTable.to_pyarrow`/``__arrow_c_stream__``, instead.
-        """
+        """The full diff as a JSON string: the schema diff, the summary, and ``rows_added``, ``rows_removed``, ``cells_changed``, and ``duplicate_keys`` (each an array of one JSON object per row, keyed by column name, with a null cell as JSON ``null``)."""
 
     def rows_added(self) -> ArrowTable:
-        """Rows present only on the right, excluding duplicate keys."""
+        """Rows present only on the right (added), in the right table's schema and excluding duplicate keys."""
 
     def rows_removed(self) -> ArrowTable:
-        """Rows present only on the left, excluding duplicate keys."""
+        """Rows present only on the left (removed), in the left table's schema and excluding duplicate keys."""
 
     def cells_changed(self) -> ArrowTable:
-        """Per-cell changes for rows present on both sides with differing
-        non-key values: the key columns, then ``column``, ``old_value``,
-        ``new_value``, and ``change``."""
+        """Per-cell changes for rows present on both sides with differing non-key values: the key columns, then ``column``, ``old_value``, ``new_value`` (canonical string renderings, null for a null cell), and ``change`` (``value_changed``, ``type_changed``, ``became_null``, or ``became_non_null``)."""
 
     def duplicate_keys(self) -> ArrowTable:
-        """Keys appearing more than once on either side: the key columns,
-        then ``left_count`` and ``right_count``."""
+        """Keys appearing more than once on either side: the key columns, then ``left_count`` and ``right_count``."""
 
     def __repr__(self) -> str: ...
 
 class ArrowTable:
-    """An Arrow record batch exposed through the Arrow PyCapsule interface.
-    Every table-shaped result of :func:`diff_tables` is one of these. Not
-    constructible directly.
-    """
+    """An Arrow record batch exposed to Python through the Arrow ``PyCapsule`` interface."""
 
     def __arrow_c_stream__(self, requested_schema: object | None = ...) -> object:
-        """Exports this table as an Arrow C stream capsule — the protocol
-        pyarrow, polars, and pandas all use to import it. Polars needs no
-        pyarrow dependency of its own to do so.
-
-        :param requested_schema: An optional requested-schema capsule, as
-            the Arrow PyCapsule interface defines it.
-        """
+        """Exports this table as an Arrow C stream (one record batch) in a ``PyCapsule``, the standard zero-copy hand-off pyarrow, polars, and pandas all understand."""
 
     def __arrow_c_schema__(self) -> object:
-        """Exports this table's schema as an Arrow C schema capsule."""
+        """Exports the schema of this table as an Arrow C schema in a ``PyCapsule``."""
 
     def to_pyarrow(self) -> Any:
-        """This table as a ``pyarrow.Table``.
+        """This table as a ``pyarrow.Table``."""
 
-        :raises ImportError: If pyarrow is not installed; names the
-            ``deepdiff-rs[arrow]`` extra. Not needed to consume this table
-            with polars — use ``__arrow_c_stream__`` (which polars calls for
-            you) instead; pandas needs pyarrow either way.
-        """
-
-    def __len__(self) -> int:
-        """The number of rows in this table."""
-
+    def __len__(self) -> int: ...
     def __repr__(self) -> str: ...
