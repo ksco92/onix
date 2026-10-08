@@ -5,7 +5,7 @@
 //! (`super::hash`) at all — every function here operates directly on the
 //! crate's compact [`Value`].
 
-use crate::value::{Number, Object, ObjectKey, ObjectKind, Value};
+use crate::value::{Number, Object, ObjectKey, ObjectKind, Value, same_class};
 
 use crate::datetime::DateTime;
 use crate::diff::DiffOptions;
@@ -332,6 +332,9 @@ pub(crate) fn count_diff_leaves(
         return count_diff_leaves(a, b, depth, opts, memo);
     }
     let count = match (a, b) {
+        // `diff_at`'s class rule: two classes are one type change, whatever
+        // the variant, so no arm below compares across classes.
+        _ if !same_class(a, b) => type_change_leaf_length(a, b),
         (Value::Null, Value::Null) => 0,
         (Value::Bool(x), Value::Bool(y)) => usize::from(x != y),
         (Value::Str(x), Value::Str(y)) => usize::from(x != y),
@@ -358,13 +361,7 @@ pub(crate) fn count_diff_leaves(
         (Value::Set(x), Value::Set(y)) | (Value::FrozenSet(x), Value::FrozenSet(y)) => {
             count_set_diff_leaves(x, y, memo)
         }
-        // Two objects of the *same* class ([`Object::same_class`], class
-        // identity plus kind) diff by their entries; a `dict` and a custom
-        // object, or two different classes, are a `type_changes` here exactly
-        // as `diff_at` treats them — so a candidate pair's distance reflects
-        // the whole-value change `DeepDiff` would report, not a spurious
-        // near-zero attribute diff.
-        (Value::Object(x), Value::Object(y)) if x.same_class(y) => {
+        (Value::Object(x), Value::Object(y)) => {
             return count_object_diff_leaves(x, y, depth, opts, memo);
         }
         _ => type_change_leaf_length(a, b),
@@ -1020,6 +1017,12 @@ fn count_set_diff_leaves(a: &[Value], b: &[Value], memo: &IgnoreOrderMemo) -> us
 /// single-pair) [`crate::diff::array_diff`] trial diff rather than a count-only
 /// mirror. The trial runs at the array's own `depth` under the caller's
 /// `max_depth`, the budget its real diff would get.
+#[inline(always)]
+#[allow(
+    clippy::inline_always,
+    reason = "`stack_frame_cost`'s release `pairing` shape costs 2,730 bytes/level with this \
+              as its own frame (plain `#[inline]` the same) and 2,455 inlined"
+)]
 pub(crate) fn count_array_diff_leaves(
     a: &[Value],
     b: &[Value],

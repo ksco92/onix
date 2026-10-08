@@ -1440,6 +1440,157 @@ fn a_dict_candidate_holding_an_unnormalizable_datetime_fails_the_diff_at_its_pat
     );
 }
 
+fn sub() -> std::sync::Arc<str> {
+    std::sync::Arc::from("Sub")
+}
+
+fn csub_datetime(value: &CValue) -> CValue {
+    let CValue::DateTime(datetime) = value else {
+        panic!("csub_datetime wraps a datetime")
+    };
+    CValue::DateTime(crate::value::Typed::with_class_name(
+        datetime.value(),
+        Some(sub()),
+    ))
+}
+
+fn mirror_and_report(a: &CValue, b: &CValue) -> [Result<usize, Box<crate::error::Error>>; 2] {
+    let opts = ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH);
+    [
+        super::distance::count_diff_leaves(a, b, 0, &opts, &IgnoreOrderMemo::new()),
+        crate::diff::diff_with_options(a, b, &opts)
+            .map(|report| report.distance_leaf_length())
+            .map_err(Box::new),
+    ]
+}
+
+#[test]
+fn an_unnormalizable_datetime_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let (extreme, near) = unnormalizable_and_near();
+    assert_eq!(
+        mirror_and_report(&csub_datetime(&extreme), &near),
+        [Ok(2), Ok(2)]
+    );
+    let (a, b) = lists_with_a_failing_candidate(
+        crate::value::Builder::new().object(vec![("k", near.clone()), ("n", CValue::Null)]),
+        cdict_holding(csub_datetime(&extreme)),
+        cdict_holding(near),
+    );
+    assert!(
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH))
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_same_instant_datetime_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let (_, near) = unnormalizable_and_near();
+    assert_eq!(
+        mirror_and_report(&csub_datetime(&near), &near),
+        [Ok(2), Ok(2)]
+    );
+}
+
+#[test]
+fn a_date_time_or_timedelta_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let date = cdate(2024, 1, 1);
+    let time = ctime(10, 0, 0, 0, None);
+    let delta = ctimedelta(1, 0, 0);
+    let (CValue::Date(d), CValue::Time(t), CValue::TimeDelta(td)) = (&date, &time, &delta) else {
+        panic!("the builders return their own variants")
+    };
+    for (subclass, base) in [
+        (
+            CValue::Date(crate::value::Typed::with_class_name(d.value(), Some(sub()))),
+            &date,
+        ),
+        (
+            CValue::Time(crate::value::Typed::with_class_name(t.value(), Some(sub()))),
+            &time,
+        ),
+        (
+            CValue::TimeDelta(crate::value::Typed::with_class_name(
+                td.value(),
+                Some(sub()),
+            )),
+            &delta,
+        ),
+    ] {
+        assert_eq!(mirror_and_report(&subclass, base), [Ok(2), Ok(2)]);
+    }
+}
+
+/// `[datetime, "x"]` as a list or a tuple, of the subclass `Sub` or not.
+fn sequence_holding(datetime: &CValue, tuple: bool, class: Option<std::sync::Arc<str>>) -> CValue {
+    let items = crate::value::Typed::with_class_name(
+        vec![datetime.clone(), cv(&json!("x"))].into_boxed_slice(),
+        class,
+    );
+    if tuple {
+        CValue::Tuple(items)
+    } else {
+        CValue::Array(items)
+    }
+}
+
+/// Asserts the mirror and the report agree on a `Sub` sequence holding an
+/// unnormalizable datetime against a plain one, bare and as the losing
+/// candidate of a list, where the diff reports it removed.
+fn assert_sequence_of_another_class_is_a_type_change(tuple: bool) {
+    let (extreme, near) = unnormalizable_and_near();
+    let base = sequence_holding(&near, tuple, None);
+    assert_eq!(
+        mirror_and_report(&sequence_holding(&extreme, tuple, Some(sub())), &base),
+        [Ok(3), Ok(3)]
+    );
+    let (a, b) = lists_with_a_failing_candidate(
+        crate::value::Builder::new().object(vec![("k", base.clone()), ("n", CValue::Null)]),
+        cdict_holding(sequence_holding(&extreme, tuple, Some(sub()))),
+        cdict_holding(base),
+    );
+    let report =
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH))
+            .map(|report| report.to_json_value());
+    assert_eq!(
+        report.map(|json| json["iterable_item_removed"]
+            .as_object()
+            .map(|removed| { removed.keys().cloned().collect::<Vec<_>>() })),
+        Ok(Some(vec!["root[1]".to_string()]))
+    );
+}
+
+#[test]
+fn a_list_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    assert_sequence_of_another_class_is_a_type_change(false);
+}
+
+#[test]
+fn a_tuple_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    assert_sequence_of_another_class_is_a_type_change(true);
+}
+
+#[test]
+fn a_set_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let members = || crate::value::SetItems::new(vec![cv(&json!(1)), cv(&json!(2))]);
+    assert_eq!(
+        mirror_and_report(
+            &CValue::Set(members().with_type_name(Some(sub()))),
+            &CValue::Set(members())
+        ),
+        [Ok(1), Ok(1)]
+    );
+}
+
+#[test]
+fn a_dict_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let entries = || cobj(json!({"a": 1, "b": 2}).as_object().unwrap());
+    let subclass = entries().with_dict_class(Some((sub(), std::sync::Arc::from("1"))));
+    assert_eq!(
+        mirror_and_report(&CValue::Object(subclass), &CValue::Object(entries())),
+        [Ok(3), Ok(3)]
+    );
+}
+
 #[test]
 fn a_candidate_whose_trial_compares_an_unnormalizable_datetime_fails_the_diff_at_its_path() {
     let (extreme, near) = unnormalizable_and_near();
@@ -3365,7 +3516,10 @@ fn arb_cleaf() -> impl Strategy<Value = CValue> {
             Just(Some(-3600))
         ],
     )
-        .prop_map(|(y, mo, d, h, mi, s, off)| cdt_at(y, mo, d, h, mi, s, 0, off));
+        .prop_map(|(y, mo, d, h, mi, s, off)| cdt_at(y, mo, d, h, mi, s, 0, off))
+        .prop_flat_map(|datetime| {
+            prop_oneof![Just(datetime.clone()), Just(csub_datetime(&datetime))]
+        });
     let arb_date = (2000i32..2025, 1u8..=12, 1u8..=28).prop_map(|(y, m, d)| cdate(y, m, d));
     // `NaN` is excluded, not `any::<f64>()`'s non-finite values generally:
     // `Infinity`/`-Infinity` are ordinary equal-to-themselves floats and
@@ -3476,9 +3630,10 @@ fn structural_twin(value: &CValue, in_set: bool) -> CValue {
             entries.reverse();
             crate::value::Builder::new().object_with_keys(entries)
         }
-        CValue::DateTime(dt) if !in_set => {
+        CValue::DateTime(typed) if !in_set => {
+            let dt = typed.value();
             let date = dt.date();
-            match dt.utc_offset_seconds() {
+            let twin = match dt.utc_offset_seconds() {
                 None => cdt_at(
                     date.year(),
                     date.month(),
@@ -3506,7 +3661,14 @@ fn structural_twin(value: &CValue, in_set: bool) -> CValue {
                         Some(offset),
                     )
                 }
-            }
+            };
+            let CValue::DateTime(rewritten) = &twin else {
+                unreachable!("cdt_at builds a datetime")
+            };
+            CValue::DateTime(crate::value::Typed::with_class_name(
+                rewritten.value(),
+                typed.class_name().map(std::sync::Arc::from),
+            ))
         }
         CValue::Number(n) if n.is_f64() => {
             let f = n.as_f64().expect("is_f64 guarantees as_f64");

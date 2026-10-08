@@ -38,8 +38,8 @@ function, and under `ignore_order` the candidate-distance trial's
 chain), measured per shape by
 `crates/onix-core/examples/stack_frame_cost.rs`. The worst case is its
 `pairing` shape (an `ignore_order` list nested at every level beside
-two shared strings): about 6,900 bytes/level in a debug build and
-2,600 in release, against 4,000 and 1,330 for plain nested lists;
+two shared strings): about 6,700 bytes/level in a debug build and
+2,500 in release, against 4,000 and 1,330 for plain nested lists;
 `guard.rs` (in `onix-py`) sizes its worker stack from this example.
 Every site that clones a whole value into a `Report` calls
 `check_value_depth`/`check_map_depth` first, so no value over the
@@ -56,9 +56,9 @@ stack overflow.
 
 `DEFAULT_MAX_DEPTH` (512) means 513 levels (depth `0` through `512`).
 A release build fits every measured shape in an ordinary 2 MiB thread
-(about 1,345,000 bytes for `pairing`); a debug build fits plain lists
+(about 1,259,000 bytes for `pairing`); a debug build fits plain lists
 with roughly 2% headroom (about 2,052,000 bytes) but needs about
-3,539,000 bytes, a 4 MiB thread, for `pairing` at the default depth.
+3,448,000 bytes, a 4 MiB thread, for `pairing` at the default depth.
 Per-function frame size is part of this bound — see `array_diff`'s
 Stack-footprint note for why its scalar-branch locals are kept out of
 the hot recursion frame.
