@@ -22,6 +22,14 @@
 //!
 //! With `--max-bytes-per-level`, the run exits 1 when any shape exceeds `N`.
 //!
+//! `-- --handoff` instead measures the fixed cost above the first engine
+//! level: the smallest thread stack, to 1 KiB, on which an unequal `list` diff,
+//! its `Report::to_value` and the report's JSON rendering succeed, at depths
+//! 100 and 300. The line's `base` is the intercept of those two points, the
+//! frames every `onix-py` worker pays at any `max_depth` (the sizing floor in
+//! `crates/onix-py/src/guard.rs`); a value within a few KiB of zero means the
+//! fixed cost is below the 1 KiB search step and the fit's noise.
+//!
 //! The worst case (largest bytes/level) is `pairing`, an `ignore_order` list
 //! nested at every level beside two shared strings, in a debug build.
 
@@ -93,6 +101,61 @@ fn run_probe(shape: &str, depth: usize) -> ! {
     std::process::exit(i32::from(!survived));
 }
 
+/// One handoff probe: the minimal worker body (diff, `to_value`, JSON text)
+/// on a thread with `stack` bytes, over a `depth`-deep `list`.
+fn run_handoff_probe(stack: usize, depth: usize) -> ! {
+    let handle = std::thread::Builder::new()
+        .stack_size(stack)
+        .spawn(move || {
+            let a = onix_core::Value::from(build("list", depth, 1));
+            let b = onix_core::Value::from(build("list", depth, 2));
+            let opts = DiffOptions {
+                max_depth: depth + 1,
+                ignore_order: false,
+            };
+            let report = diff_with_options(&a, &b, &opts).expect("depth budget covers the input");
+            serde_json::to_string(&report.to_value().to_serde_json()).expect("report serializes");
+        })
+        .expect("probe thread spawns");
+    std::process::exit(i32::from(handle.join().is_err()));
+}
+
+/// Binary-searches the smallest stack, in 1 KiB steps, on which the handoff
+/// body survives at `depth`.
+fn min_handoff_stack(exe: &str, depth: usize) -> usize {
+    let survives = |stack: usize| {
+        Command::new(exe)
+            .args(["--probe-handoff", &stack.to_string(), &depth.to_string()])
+            .status()
+            .expect("child probe runs")
+            .success()
+    };
+    let (mut low, mut high) = (16 * 1024_usize, 16 * 1024 * 1024_usize);
+    while high - low > 1024 {
+        let mid = usize::midpoint(low, high);
+        if survives(mid) {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    high
+}
+
+/// The fixed handoff cost: the intercept of the minimum stack at two depths,
+/// which a thread's platform minimum stack would otherwise hide.
+fn measure_handoff(exe: &str) -> isize {
+    let (near, far) = (100_usize, 300_usize);
+    let (s_near, s_far) = (min_handoff_stack(exe, near), min_handoff_stack(exe, far));
+    let per_level = (s_far - s_near) / (far - near);
+    let base = isize::try_from(s_near).expect("stack fits isize")
+        - isize::try_from(near * per_level).expect("stack fits isize");
+    println!(
+        "handoff: min_ok_stack@{near}={s_near} @{far}={s_far} bytes_per_level={per_level} base={base}"
+    );
+    base
+}
+
 /// Returns whether a probe at `depth` for `shape` survived (exited cleanly).
 fn probe_survives(exe: &str, shape: &str, depth: usize) -> bool {
     Command::new(exe)
@@ -135,10 +198,20 @@ fn main() {
         run_probe(shape, depth);
     }
 
+    if args.get(1).map(String::as_str) == Some("--probe-handoff") {
+        let stack = args.get(2).and_then(|d| d.parse().ok()).unwrap_or(0);
+        let depth = args.get(3).and_then(|d| d.parse().ok()).unwrap_or(0);
+        run_handoff_probe(stack, depth);
+    }
+
     let exe = std::env::current_exe()
         .expect("current exe path")
         .to_string_lossy()
         .into_owned();
+    if args.iter().any(|a| a == "--handoff") {
+        measure_handoff(&exe);
+        return;
+    }
     println!("onix_core diff recursion stack cost");
     let max = args
         .iter()
