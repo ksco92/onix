@@ -1,8 +1,4 @@
-//! Unit tests for the `_diff_str` port. Every expected string here was
-//! captured from real `deepdiff==9.1.0` at `verbose_level=2` (its
-//! `_diff_str` -> `difflib.unified_diff` output); the golden corpus and the
-//! Python differential fuzz check the same behavior end-to-end and at scale
-//! (including `difflib`'s autojunk heuristic, which needs 200+ lines).
+//! Tests for the `_diff_str` port; expected strings come from `DeepDiff`'s own output.
 
 use super::{format_range_unified, splitlines, str_diff_field};
 use crate::value::Value;

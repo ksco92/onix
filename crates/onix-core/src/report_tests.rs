@@ -201,11 +201,7 @@ fn all_six_categories_present_omits_none() {
     assert!(value.get("iterable_item_removed").is_some());
 }
 
-/// Every category gets its own, mutually-distinct entry count (2..=7,
-/// never 0 or 1) so a `+` mutated to `-` or `*` anywhere in
-/// [`Report::finding_count`]'s summation is guaranteed to change the
-/// total (a shared count, or a `0`/`1` term, could let some `+`/`*`
-/// pairs coincide by accident).
+/// Distinct per-category counts so the sum is unambiguous.
 #[test]
 fn finding_count_sums_every_category_distinctly() {
     let mut report = Report::new();
@@ -278,9 +274,6 @@ fn merge_combines_iterable_findings_from_both_reports() {
     let mut left = Report::new();
     left.insert_iterable_item_removed(index_path(3), cv(&json!("y")));
 
-    // Both new categories on `other` (not `left`), so `merge` exercises
-    // both of its new per-category loop bodies (`other.iterable_item_added`
-    // and `other.iterable_item_removed`), not just the outer `for`.
     let mut right = Report::new();
     right.insert_iterable_item_added(index_path(2), cv(&json!("x")));
     right.insert_iterable_item_removed(index_path(4), cv(&json!("z")));
@@ -411,9 +404,7 @@ fn retag_new_path_composes_with_an_already_set_new_path() {
     );
 }
 
-/// The genuine bug [`insert_checked`]'s guard exists to catch: the exact
-/// same *structural* path inserted twice into one category is always a
-/// real engine double-visit, so it still panics in debug builds.
+/// One structural path inserted twice into a category panics in debug builds.
 #[test]
 #[should_panic(expected = "duplicate report path")]
 fn inserting_the_same_structural_path_twice_panics_in_debug() {
@@ -438,20 +429,10 @@ fn inserting_the_same_structural_path_twice_panics_in_debug() {
     );
 }
 
-/// The regression this module's rewrite fixes: two *different*
-/// structural paths that render to the identical `DeepDiff`-style
-/// string (see [`crate::path::quote_key`]'s doc for how a key's own
-/// text can produce this) must NOT panic the duplicate-path guard, and
-/// must collapse to a single JSON entry at serialization time rather
-/// than silently vanishing or corrupting the report.
+/// Two structural paths that render identically collapse to one entry without panicking.
 #[test]
 fn two_structural_paths_rendering_identically_collapse_without_panicking() {
-    // Same shape as the `tests/golden/path_rendering_collision` regression:
-    // a single key whose own text contains `][` next to quote
-    // characters renders identically to two nested single-quote-containing
-    // keys. Both `k1`/`k2` and `flat_key` must contain a single quote so
-    // `quote_key` wraps all three in double quotes (see its doc) -- that
-    // shared quote character is what makes the two renderings collide.
+    // A key containing `"]["` renders like two nested quoted keys.
     let mut k1_then_k2 = String::new();
     k1_then_k2.push('p');
     k1_then_k2.push('\'');
@@ -683,10 +664,7 @@ fn set_entries_are_sorted_by_rendered_path_string() {
 /// entry, the same way every path-keyed category does.
 #[test]
 fn set_entries_rendering_identically_collapse_to_one() {
-    // The same colliding pair as
-    // `two_structural_paths_rendering_identically_collapse_without_panicking`
-    // (see its comment for the mechanism), with a set-item segment appended
-    // to each side.
+    // The colliding pair above, each with a set-item segment appended.
     let mut flat_key = String::new();
     flat_key.push('p');
     flat_key.push('\'');
