@@ -27,8 +27,7 @@ pub(crate) const MAX_DEPTH_CEILING: usize = 20_000;
 /// two. The Makefile's `stack-check` target passes this value to the example.
 const PER_LEVEL_STACK_BYTES: usize = 8_192;
 
-/// Multiplier over the bare `ceiling * per-level` figure; the per-level
-/// product, 16,384, is 2.4 times the measured debug `pairing` cost.
+/// Multiplier over the bare `ceiling * per-level` figure.
 const STACK_SAFETY_MARGIN: usize = 2;
 
 /// The diff worker thread's stack size: reserved virtual address space,
