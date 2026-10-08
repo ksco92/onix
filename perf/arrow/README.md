@@ -75,10 +75,6 @@ float16/decimal32/decimal64/view/fixed-size-binary columns) is linear over
 the same range, so `WIDE_DEFAULT_ROWS` was solved the same way as
 `DEFAULT_ROWS` above.
 
-## Mutation mix
-
-The mutation mix is documented in `generate_fixtures.py`'s module docstring.
-
 ## Oracle semantics
 
 ```sh

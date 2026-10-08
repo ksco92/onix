@@ -32,7 +32,7 @@ machete:
 	cargo machete
 
 # Mutation testing: slow by design, run periodically, not on every check.
-# Scope and rationale: CONTRIBUTING.md, Coverage scope.
+# Scope and rationale: CONTRIBUTING.md, Coverage scope and Mutation testing.
 mutants:
 	@command -v cargo-mutants >/dev/null 2>&1 || { echo "cargo-mutants not installed: cargo install cargo-mutants --locked"; exit 1; }
 	cargo mutants --package onix-core --package onix-cli --package onix-arrow

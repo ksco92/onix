@@ -11,7 +11,7 @@ name: Publish to PyPI
 # on PyPI. The `version_check` job alone decides this, by looking the version
 # up on PyPI before any wheel build starts: a PR that forgets to bump the
 # version becomes a cheap no-op there (one HTTP call, no builders ever run).
-# Catching a missing bump is a review-time concern, not this workflow's.
+# Catching a missing bump is not this workflow's job.
 #
 # `deepdiff-rs` is a PyO3 extension module (crate `onix-py`) built with
 # maturin, published as a single abi3 wheel per platform (Python 3.9+, one

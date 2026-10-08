@@ -31,12 +31,14 @@ Homepage = "https://github.com/ksco92/onix"
 Repository = "https://github.com/ksco92/onix"
 
 [dependency-groups]
-# Test-only, never shipped: pytest, and `deepdiff` pinned to the exact version the golden corpus is generated against.
-# The `python_version >= '3.10'` marker is there because that pin requires >=3.10 while `requires-python` is >=3.9.
-# The test venv itself IS pinned, via this directory's `.python-version`:
-# Pinned to 3.14, Unicode 16.0.0; see tests/golden/README.md, Pinned versions.
-# polars and duckdb: the Arrow table-diff tests cross-check the same data; pandas: interchange and `pandas.Timestamp` tests.
-# pyarrow is also the `arrow` extra; mypy runs the stub check; pydantic supplies the model onix refuses.
+# Test-only, never shipped: pytest, and `deepdiff` pinned to the exact version
+# the golden corpus is generated against. The `python_version >= '3.10'` marker
+# is there because that pin requires >=3.10 while `requires-python` is >=3.9.
+# The test venv itself is pinned, via this directory's `.python-version`, to
+# 3.14, Unicode 16.0.0; see tests/golden/README.md, Pinned versions.
+# polars and duckdb: the Arrow table-diff tests cross-check the same data;
+# pandas: interchange and `pandas.Timestamp` tests. pyarrow is also the `arrow`
+# extra; mypy runs the stub check; pydantic supplies the model onix refuses.
 test = [
     "pytest>=8",
     "deepdiff==9.1.0 ; python_version >= '3.10'",
