@@ -1031,19 +1031,8 @@ pub(crate) fn count_array_diff_leaves(
     else {
         return 0;
     };
-    // `DeepDiff`'s own `_to_delta_dict` (what its real distance computation
-    // measures) also applies its whole-tree mutual-add-remove merge before
-    // measuring `diff_length`: `[3.8, 3, [true]]` vs `[0.0, 0.0, [], 3]`
-    // delta-dicts to `{"values_changed": {"root[0]": ..., "root[2]": ...}}`, not
-    // raw `iterable_item_added`/`removed` pairs — without this, a genuinely close
-    // nested-list pair can measure a spuriously large `diff_length` (unmerged
-    // add+remove instead of one merged value change), pushing an
-    // otherwise-acceptable candidate over the cutoff and silently rejecting a
-    // pairing real `DeepDiff` accepts. Skipped without effect when `array_diff`
-    // didn't go through the `ignore_order` path (no
-    // `iterable_item_added`/`removed` pair can share a path there — see
-    // `crate::diff::array_diff`'s own doc on the LCS/positional split), so this is
-    // always safe to call unconditionally.
+    // The mutual add/remove merge runs before `diff_length` is measured; it
+    // is a no-op when `array_diff` took the positional path.
     sub_report.merge_mutual_add_removes();
     sub_report.distance_leaf_length()
 }
