@@ -24,21 +24,37 @@ make mutants        # cargo mutants --package onix-core --package onix-cli --pac
 `hash.rs` has 42, `memo.rs` 25, `lcs.rs` 191) plus 634 in `onix-arrow`
 (`cargo mutants --list -p onix-arrow`: 509 in `row_diff.rs`, 38 in
 `schema.rs`, 36 in `profile.rs`, 26 in `table_diff.rs`, 9 in `options.rs`, 5 in
-`json_rows.rs`, 4 in `lib.rs`, 4 in `error.rs`, 3 in `spool.rs`). The current
-enumeration has not been classified, see #212. A standalone `cargo mutants -p
-onix-arrow` on a quiet machine, run on the earlier 274-mutant `onix-arrow`
-enumeration (208 in `row_diff.rs`, 38 in `schema.rs`, 17 in `table_diff.rs`, 4
-in `lib.rs`, 4 in `error.rs`, 3 in `options.rs`), classified **212 caught, 52
-unviable, 9 timeout, 1 missed**. The 52 unviable are `Default`-substitution
-mutants on types without a usable `Default`. The 9 timeouts are
-mutant-induced infinite loops the tests reach — the trailing-zero reduction
-loop in `hash_decimal` (`==`/`/=` mutants) and the two cursor-advance loops in
-`classify` (the `<`/`==`/`+=` mutants) — detected as hangs, not silent
-survivors. The 1 missed is a genuine equivalent mutant: `row_diff.rs`'s
-`push_filtered` (the shared filter-and-push helper of both the added/removed and
-the per-cell materialize passes) guards `if selected.num_rows() > 0` before
-pushing a batch to `concat_batches`, and `> 0 -> >= 0` only adds empty batches,
-which `concat_batches` ignores, so the output is identical.
+`json_rows.rs`, 4 in `lib.rs`, 4 in `error.rs`, 3 in `spool.rs`). The
+classification below is of that 2145-mutant enumeration, one serial `make
+mutants` run (14 h): **1790 caught, 246 unviable, 49 timeout, 60 missed**.
+
+| crate | mutants | caught | unviable | timeout | missed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `onix-core` | 1491 | 1313 | 130 | 37 | 11 |
+| `onix-cli` | 20 | 14 | 6 | 0 | 0 |
+| `onix-arrow` | 634 | 463 | 110 | 12 | 49 |
+
+`onix-arrow` by file:
+
+| file | mutants | caught | unviable | timeout | missed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `row_diff.rs` | 509 | 407 | 85 | 12 | 5 |
+| `schema.rs` | 38 | 26 | 12 | 0 | 0 |
+| `profile.rs` | 36 | 0 | 0 | 0 | 36 |
+| `table_diff.rs` | 26 | 10 | 8 | 0 | 8 |
+| `options.rs` | 9 | 8 | 1 | 0 | 0 |
+| `json_rows.rs` | 5 | 5 | 0 | 0 | 0 |
+| `lib.rs` | 4 | 3 | 1 | 0 | 0 |
+| `error.rs` | 4 | 4 | 0 | 0 | 0 |
+| `spool.rs` | 3 | 0 | 3 | 0 | 0 |
+
+The unviable mutants are `Default`-substitution mutants on types without a
+usable `Default`. The timeouts are mutant-induced infinite loops the tests
+reach, detected as hangs (the trailing-zero reduction loop in `hash_decimal`,
+the cursor-advance loops in `classify`, `find_longest_match`'s forward
+extension), plus mutants slowed past the 84 s limit on a loaded machine: a
+re-run of the 49 with `--timeout 300` left 32 timed out, 6 caught and 11 missed.
+Those 11 and the 60 missed are triaged below.
 
 cargo-mutants' classification of each mutant into caught / missed / timeout /
 unviable is **not** reproducible run to run: it depends on wall-clock time (a
@@ -54,7 +70,9 @@ is what was verified independently of any single run's labels.
    - `onix-core/src/lcs.rs`'s `find_longest_match` / `get_matching_blocks`:
      these either force a non-terminating loop (reported as a timeout) or
      touch only the backward extension step, whose size increment the
-     forward step re-covers, or a guard on an empty window or zero-size block.
+     forward step re-covers, or a bound that only skips an empty window.
+   - `onix-core/src/lcs.rs`'s `mix_float_bits`: `^` → `|` changes only how
+     float hashes spread over buckets, never a result.
    - `onix-core/src/diff/array.rs`'s `lcs_or_positional_array_diff` `> 1`
      threshold: replacing `> 1` with `>= 1` is output-neutral (at exactly one
      LCS finding the positional report holds the same finding or at least two,
@@ -79,11 +97,27 @@ is what was verified independently of any single run's labels.
      `/` versus `*` on `f64` is not bit-exact in general). The sibling `%`
      mutant on the same line *is* a genuine, non-equivalent rescale and is
      caught.
-   - `onix-core/src/ignore_order/memo.rs`'s `is_container`, mutated to always
-     return `true`: it only gates whether a candidate pair's distance is
-     *cached*, never what value is computed. Scalar pairs are then cached too,
-     which costs a clone and a hashmap round trip each and cannot change a
-     result.
+   - `onix-core/src/ignore_order/distance.rs`'s `python_eq` and
+     `is_below_threshold_to_diff_deeper`: `||` → `&&` on `has_non_str_keys`
+     only sends a pair with exactly one non-`str` side down the `str`-only
+     branch, which gives the same answer (no `str` key equals a non-`str`
+     one; non-`str` keys sort last).
+   - `onix-core/src/report.rs`'s `Report::merge`: `>` → `>=` on the size
+     comparison only swaps the destination on a tie, and the maps are sorted by
+     path.
+   - `onix-core/src/value.rs`: `Wtf8Chars::next`'s `|` → `^` combining three
+     disjoint bit fields, and `Number::integer_cmp`'s `i128` fast-path arm,
+     which the `BigInt` arm below it orders identically.
+   - `onix-arrow/src/row_diff.rs`: the reordering worker's `|| failed` break
+     (the consumer sets `stop` on the first error, so continuing only
+     drains), `RightFuse::visit`'s `row_at < first.at` → `<=` (`row_at` is
+     unique per row), and its `else if stale > 0` → `>= 0` (`compact_if_stale`
+     leaves `stale * 2 <= rows`, so a zero count is a no-op).
+   - `onix-arrow/src/profile.rs`: all 36 mutants are reported missed because
+     the module is compiled only under the `profile` feature, which `make
+     mutants` does not enable. `cargo mutants -p onix-arrow --features
+     profile -f crates/onix-arrow/src/profile.rs` classifies them: 23 caught,
+     12 unviable, 1 timeout, 0 missed.
 
 2. **`Default`-substitution mutants that cannot compile.** cargo-mutants tries
    replacing a function body with `Default::default()` (and similar). They
@@ -110,4 +144,4 @@ The `ItemKey::hash` no-op mutant is caught by
 `float_hash_buckets_stay_distinct_and_grow_linearly_with_member_count`.
 
 Future work that touches this logic should re-run `make mutants` and confirm
-that no *viable* mutant survives outside the five documented equivalent spots.
+that no *viable* mutant survives outside the documented equivalent spots.
