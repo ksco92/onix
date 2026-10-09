@@ -3,7 +3,8 @@ use crate::error::Error;
 use crate::path::PathSegment;
 use crate::report::Report;
 use crate::test_support::{
-    carr, ccustom, ccustom_id, cdate, cdt, cdt_at, cfrozen, cnum, cobj, cset, ctup, ctuple, cv,
+    carr, ccustom, ccustom_entries, ccustom_id, cdate, cdt, cdt_at, cfrozen, cnum, cobj, cset,
+    ctup, ctuple, cv,
 };
 use crate::value::{Object as CObject, ObjectKey, SetItems, Typed, Value as CValue};
 use serde_json::{Map, Number, Value, json};
@@ -1171,6 +1172,32 @@ fn structure_exactly_at_configured_max_depth_diffs_successfully() {
         json!({"values_changed": {
             "root['k']['k']['k']": {"new_value": "b", "old_value": "a"}
         }})
+    );
+}
+
+#[test]
+fn a_custom_object_pair_with_a_one_sided_non_str_key_takes_the_mixed_walk() {
+    let key = |name: &str| ObjectKey::Str(crate::value::Key::Utf8(name.into()));
+    let a = ccustom_entries(vec![
+        (key("x"), cv(&json!(1))),
+        (key("y"), cv(&json!(1))),
+        (key("z"), cv(&json!(1))),
+    ]);
+    let b = ccustom_entries(vec![
+        (key("x"), cv(&json!(2))),
+        (key("y"), cv(&json!(1))),
+        (key("z"), cv(&json!(1))),
+        (ObjectKey::Other(Box::new(cv(&json!(5)))), cv(&json!(4))),
+    ]);
+
+    let report = super::diff(&CValue::Object(a), &CValue::Object(b)).unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({
+            "dictionary_item_added": {"root[5]": 4},
+            "values_changed": {"root['x']": {"new_value": 2, "old_value": 1}},
+        })
     );
 }
 

@@ -335,6 +335,7 @@ fn python_eq(a: &Value, b: &Value) -> bool {
         }
         // Kept off this frame for the reason `object_diff`'s own dispatch documents.
         (Value::Object(x), Value::Object(y)) => {
+            // A `str`-only dict never equals one with a non-`str` key, by either branch.
             if x.has_non_str_keys() || y.has_non_str_keys() {
                 dict_python_eq_mixed(x, y)
             } else {
@@ -625,6 +626,8 @@ pub(crate) fn match_dict_keys<'a>(a: &'a Object, b: &'a Object) -> DictKeyMatch<
 /// `crate::diff::object_diff`. All-`str` keys are counted by merging the two ascending key
 /// sequences, with no hashing.
 pub(crate) fn is_below_threshold_to_diff_deeper(a: &Object, b: &Object) -> bool {
+    // Non-`str` keys sort last, so with one such side the merge below counts the same
+    // intersection as `match_dict_keys`.
     let (union_len, intersect_len) = if a.has_non_str_keys() || b.has_non_str_keys() {
         let matched = match_dict_keys(a, b);
         (

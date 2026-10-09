@@ -155,6 +155,20 @@ pub(crate) fn ccustom_id(
     ))
 }
 
+/// Custom object `C` over explicit entries (non-`str` keys).
+pub(crate) fn ccustom_entries(
+    entries: Vec<(crate::value::ObjectKey, Value)>,
+) -> crate::value::Object {
+    crate::value::Object::from_pairs(entries).into_class(
+        crate::value::ObjectKind::CustomObject,
+        std::sync::Arc::from("C"),
+        std::sync::Arc::from("C"),
+        crate::value::ObjectLengths::default(),
+        Vec::new(),
+        None,
+    )
+}
+
 /// Compact [`Number`] from a `serde_json` number.
 pub(crate) fn cnum(n: &serde_json::Number) -> Number {
     if let Some(u) = n.as_u64() {

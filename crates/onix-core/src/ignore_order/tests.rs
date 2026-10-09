@@ -1,8 +1,8 @@
 use super::IgnoreOrderMemo;
 use crate::diff::DiffOptions;
 use crate::test_support::{
-    carr, ccustom, cdate, cdt, cdt_at, cfrozen, cobj, cset, ctime, ctimedelta, ctup, ctuple, cv,
-    cvec,
+    carr, ccustom, ccustom_entries, cdate, cdt, cdt_at, cfrozen, cobj, cset, ctime, ctimedelta,
+    ctup, ctuple, cv, cvec,
 };
 use crate::value::{ObjectKey, SetItems, Value as CValue};
 use serde_json::json;
@@ -999,6 +999,24 @@ fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact()
             Err(Box::new(max_depth_exceeded("root[5][0]['a']['b']", 3))),
             Ok(1)
         )
+    );
+}
+
+#[test]
+fn count_object_diff_leaves_walks_a_one_sided_non_str_key_pair_with_the_mixed_path() {
+    let x = || ObjectKey::Str(crate::value::Key::Utf8("x".into()));
+    let a = ccustom_entries(vec![(x(), cv(&json!([{"a": {"b": 1}}])))]);
+    let b = ccustom_entries(vec![
+        (x(), cv(&json!([{"a": {"b": 9}}]))),
+        (ObjectKey::Other(Box::new(cv(&json!(5)))), cv(&json!([1]))),
+    ]);
+    let opts = DiffOptions {
+        max_depth: 3,
+        ignore_order: false,
+    };
+    assert_eq!(
+        super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &IgnoreOrderMemo::new()),
+        Err(Box::new(max_depth_exceeded("root['x'][0]['a']['b']", 3)))
     );
 }
 
