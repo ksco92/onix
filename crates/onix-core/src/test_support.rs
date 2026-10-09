@@ -155,8 +155,7 @@ pub(crate) fn ccustom_id(
     ))
 }
 
-/// A custom object of class `C` over explicit `entries`, for keys `ccustom` cannot express
-/// (a non-`str` key).
+/// Custom object `C` over explicit entries (non-`str` keys).
 pub(crate) fn ccustom_entries(
     entries: Vec<(crate::value::ObjectKey, Value)>,
 ) -> crate::value::Object {

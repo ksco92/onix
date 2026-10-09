@@ -59,11 +59,12 @@ is what was verified independently of any single run's labels.
 
 ### Survivors: test gaps, equivalent spots, and `profile.rs`
 
-The 60 missed: ten were test gaps, killed by tests added in the same change
-(`table_diff.rs`'s row-cap sum x8, `row_diff.rs:1081` x2) and likewise the
-`lcs.rs` non-empty-block guards and the two `has_non_str_keys` sites in
-`object_diff` and `count_object_diff_leaves`; the 36 in `profile.rs` are not
-mutants of compiled code (below); the rest are the equivalent spots.
+The 60 missed: 12 were test gaps, killed by tests added in the same change
+(`table_diff.rs` row-cap sum x8, `row_diff.rs:1081` x2, `lcs.rs`
+non-empty-block guards x2), 36 are in `profile.rs` (below), 12 are equivalent
+spots. Of the 11 timeouts missed at `--timeout 300`, the two
+`has_non_str_keys` sites (`object_diff`, `count_object_diff_leaves`) were test
+gaps killed the same way; nine are equivalent spots.
 
 `profile.rs` is compiled only under the `profile` feature, which `make mutants`
 does not enable. `cargo mutants -p onix-arrow --features profile -f
