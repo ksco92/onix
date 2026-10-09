@@ -1,7 +1,7 @@
 # Mutation testing results
 
 The `cargo-mutants` enumeration for `onix-core`, `onix-cli` and `onix-arrow`,
-the kinds of mutant that survive and why none is a test gap, and how to
+the survivors and why each is a test gap or an equivalent spot, and how to
 reproduce it. Line coverage proves every line ran; mutation testing proves a
 test would fail if that line's logic were wrong.
 
@@ -22,39 +22,33 @@ make mutants        # cargo mutants --package onix-core --package onix-cli --pac
 `make mutants` enumerates a deterministic 1511 mutants (`cargo mutants --list
 -p onix-core -p onix-cli`: 20 in `onix-cli`, 1491 in `onix-core`, of which
 `hash.rs` has 42, `memo.rs` 25, `lcs.rs` 191) plus 634 in `onix-arrow`
-(`cargo mutants --list -p onix-arrow`: 509 in `row_diff.rs`, 38 in
-`schema.rs`, 36 in `profile.rs`, 26 in `table_diff.rs`, 9 in `options.rs`, 5 in
-`json_rows.rs`, 4 in `lib.rs`, 4 in `error.rs`, 3 in `spool.rs`). The
-classification below is of that 2145-mutant enumeration, one serial `make
-mutants` run (14 h): **1790 caught, 246 unviable, 49 timeout, 60 missed**.
+(`cargo mutants --list -p onix-arrow`). The classification below is of that
+2145-mutant enumeration, one `make mutants` run with cargo-mutants 27.1.0 from
+2026-10-08 to 2026-10-09: 1790 caught, 246 unviable, 49 timeout, 60 missed.
 
-| crate | mutants | caught | unviable | timeout | missed |
+| crate / file | mutants | caught | unviable | timeout | missed |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `onix-core` | 1491 | 1313 | 130 | 37 | 11 |
 | `onix-cli` | 20 | 14 | 6 | 0 | 0 |
 | `onix-arrow` | 634 | 463 | 110 | 12 | 49 |
-
-`onix-arrow` by file:
-
-| file | mutants | caught | unviable | timeout | missed |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `row_diff.rs` | 509 | 407 | 85 | 12 | 5 |
-| `schema.rs` | 38 | 26 | 12 | 0 | 0 |
-| `profile.rs` | 36 | 0 | 0 | 0 | 36 |
-| `table_diff.rs` | 26 | 10 | 8 | 0 | 8 |
-| `options.rs` | 9 | 8 | 1 | 0 | 0 |
-| `json_rows.rs` | 5 | 5 | 0 | 0 | 0 |
-| `lib.rs` | 4 | 3 | 1 | 0 | 0 |
-| `error.rs` | 4 | 4 | 0 | 0 | 0 |
-| `spool.rs` | 3 | 0 | 3 | 0 | 0 |
+| &nbsp;&nbsp;`row_diff.rs` | 509 | 407 | 85 | 12 | 5 |
+| &nbsp;&nbsp;`schema.rs` | 38 | 26 | 12 | 0 | 0 |
+| &nbsp;&nbsp;`profile.rs` | 36 | 0 | 0 | 0 | 36 |
+| &nbsp;&nbsp;`table_diff.rs` | 26 | 10 | 8 | 0 | 8 |
+| &nbsp;&nbsp;`options.rs` | 9 | 8 | 1 | 0 | 0 |
+| &nbsp;&nbsp;`json_rows.rs` | 5 | 5 | 0 | 0 | 0 |
+| &nbsp;&nbsp;`lib.rs` | 4 | 3 | 1 | 0 | 0 |
+| &nbsp;&nbsp;`error.rs` | 4 | 4 | 0 | 0 | 0 |
+| &nbsp;&nbsp;`spool.rs` | 3 | 0 | 3 | 0 | 0 |
 
 The unviable mutants are `Default`-substitution mutants on types without a
-usable `Default`. The timeouts are mutant-induced infinite loops the tests
-reach, detected as hangs (the trailing-zero reduction loop in `hash_decimal`,
-the cursor-advance loops in `classify`, `find_longest_match`'s forward
-extension), plus mutants slowed past the 84 s limit on a loaded machine: a
-re-run of the 49 with `--timeout 300` left 32 timed out, 6 caught and 11 missed.
-Those 11 and the 60 missed are triaged below.
+usable `Default`. The 49 timeouts, classified again at `--timeout 300`: 32
+timeout, 6 caught, 11 missed (the missed are among the survivors below). The 32
+timeout at `row_diff.rs` (`hash_decimal`, `classify` x8, `consume_reordered`,
+`classify_partition`), `lcs.rs` (`find_longest_match` x5, `get_matching_blocks`
+x2), `report.rs` (`Report::merge`), `value.rs` (`Value::eq`, `structural_eq` x5),
+`hash.rs` (`DistKey::eq` x2), `memo.rs` (`caching_enabled`, `get`, `put`,
+`is_container`) and `pairing.rs` (`compute_pairs`).
 
 cargo-mutants' classification of each mutant into caught / missed / timeout /
 unviable is **not** reproducible run to run: it depends on wall-clock time (a
@@ -63,16 +57,24 @@ and, in this workspace, on build caching (a mutant that fails to compile can
 be reported as "unviable" or, spuriously, as "caught"). So the substance below
 is what was verified independently of any single run's labels.
 
-### Kinds of mutant that survive, and why none is a real test gap
+### Survivors: test gaps, equivalent spots, and `profile.rs`
+
+The 60 missed: ten were test gaps, killed by tests added in the same change
+(`table_diff.rs`'s row-cap sum x8, `row_diff.rs:1081` x2) and likewise the
+`lcs.rs` non-empty-block guards and the two `has_non_str_keys` sites in
+`object_diff` and `count_object_diff_leaves`; the 36 in `profile.rs` are not
+mutants of compiled code (below); the rest are the equivalent spots.
+
+`profile.rs` is compiled only under the `profile` feature, which `make mutants`
+does not enable. `cargo mutants -p onix-arrow --features profile -f
+crates/onix-arrow/src/profile.rs` classifies its 36: 23 caught, 12 unviable, 1
+timeout, 0 missed.
 
 1. **Equivalent viable mutants** — a mutation that compiles and runs but
    cannot change any output, so no test can kill it. Confined to these spots:
-   - `onix-core/src/lcs.rs`'s `find_longest_match` / `get_matching_blocks`:
-     these either force a non-terminating loop (reported as a timeout) or
-     touch only the backward extension step, whose size increment the
-     forward step re-covers, or a bound that only skips an empty window.
-   - `onix-core/src/lcs.rs`'s `mix_float_bits`: `^` → `|` changes only how
-     float hashes spread over buckets, never a result.
+   - `lcs.rs`: `find_longest_match` backward-extension `+=` → `*=` and
+     `get_matching_blocks` window bounds; argument at the site.
+   - `lcs.rs`: `mix_float_bits`, `^` → `|`; argument at the site.
    - `onix-core/src/diff/array.rs`'s `lcs_or_positional_array_diff` `> 1`
      threshold: replacing `> 1` with `>= 1` is output-neutral (at exactly one
      LCS finding the positional report holds the same finding or at least two,
@@ -97,27 +99,18 @@ is what was verified independently of any single run's labels.
      `/` versus `*` on `f64` is not bit-exact in general). The sibling `%`
      mutant on the same line *is* a genuine, non-equivalent rescale and is
      caught.
-   - `onix-core/src/ignore_order/distance.rs`'s `python_eq` and
-     `is_below_threshold_to_diff_deeper`: `||` → `&&` on `has_non_str_keys`
-     only sends a pair with exactly one non-`str` side down the `str`-only
-     branch, which gives the same answer (no `str` key equals a non-`str`
-     one; non-`str` keys sort last).
-   - `onix-core/src/report.rs`'s `Report::merge`: `>` → `>=` on the size
-     comparison only swaps the destination on a tie, and the maps are sorted by
-     path.
-   - `onix-core/src/value.rs`: `Wtf8Chars::next`'s `|` → `^` combining three
-     disjoint bit fields, and `Number::integer_cmp`'s `i128` fast-path arm,
-     which the `BigInt` arm below it orders identically.
-   - `onix-arrow/src/row_diff.rs`: the reordering worker's `|| failed` break
-     (the consumer sets `stop` on the first error, so continuing only
-     drains), `RightFuse::visit`'s `row_at < first.at` → `<=` (`row_at` is
-     unique per row), and its `else if stale > 0` → `>= 0` (`compact_if_stale`
-     leaves `stale * 2 <= rows`, so a zero count is a no-op).
-   - `onix-arrow/src/profile.rs`: all 36 mutants are reported missed because
-     the module is compiled only under the `profile` feature, which `make
-     mutants` does not enable. `cargo mutants -p onix-arrow --features
-     profile -f crates/onix-arrow/src/profile.rs` classifies them: 23 caught,
-     12 unviable, 1 timeout, 0 missed.
+   - `distance.rs`: `python_eq`, `||` → `&&`; argument at the site.
+   - `distance.rs`: `is_below_threshold_to_diff_deeper`, `||` → `&&`; argument
+     at the site.
+   - `report.rs`: `Report::merge`, `>` → `>=`; argument at the site.
+   - `value.rs`: `Wtf8Chars::next`, `|` → `^`; argument at the site.
+   - `value.rs`: `Number::integer_cmp`, deleted `i128` arm; argument at the site.
+   - `row_diff.rs`: the reordering worker's `|| failed` break, `||` → `&&`;
+     argument at the site.
+   - `row_diff.rs`: `RightFuse::visit`, `row_at < first.at` → `<=`; argument at
+     the site.
+   - `row_diff.rs`: `RightFuse::visit`, `else if stale > 0` → `>= 0`; argument
+     at the site.
 
 2. **`Default`-substitution mutants that cannot compile.** cargo-mutants tries
    replacing a function body with `Default::default()` (and similar). They

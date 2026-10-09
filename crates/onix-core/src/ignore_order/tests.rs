@@ -1,8 +1,8 @@
 use super::IgnoreOrderMemo;
 use crate::diff::DiffOptions;
 use crate::test_support::{
-    carr, ccustom, cdate, cdt, cdt_at, cfrozen, cobj, cset, ctime, ctimedelta, ctup, ctuple, cv,
-    cvec,
+    carr, ccustom, ccustom_entries, cdate, cdt, cdt_at, cfrozen, cobj, cset, ctime, ctimedelta,
+    ctup, ctuple, cv, cvec,
 };
 use crate::value::{ObjectKey, SetItems, Value as CValue};
 use serde_json::json;
@@ -1004,19 +1004,9 @@ fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact()
 
 #[test]
 fn count_object_diff_leaves_walks_a_one_sided_non_str_key_pair_with_the_mixed_path() {
-    let class = |pairs| {
-        crate::value::Object::from_pairs(pairs).into_class(
-            crate::value::ObjectKind::CustomObject,
-            "C".into(),
-            "1".into(),
-            crate::value::ObjectLengths::default(),
-            Vec::new(),
-            None,
-        )
-    };
     let x = || ObjectKey::Str(crate::value::Key::Utf8("x".into()));
-    let a = class(vec![(x(), cv(&json!([{"a": {"b": 1}}])))]);
-    let b = class(vec![
+    let a = ccustom_entries(vec![(x(), cv(&json!([{"a": {"b": 1}}])))]);
+    let b = ccustom_entries(vec![
         (x(), cv(&json!([{"a": {"b": 9}}]))),
         (ObjectKey::Other(Box::new(cv(&json!(5)))), cv(&json!([1]))),
     ]);

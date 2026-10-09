@@ -3,7 +3,8 @@ use crate::error::Error;
 use crate::path::PathSegment;
 use crate::report::Report;
 use crate::test_support::{
-    carr, ccustom, ccustom_id, cdate, cdt, cdt_at, cfrozen, cnum, cobj, cset, ctup, ctuple, cv,
+    carr, ccustom, ccustom_entries, ccustom_id, cdate, cdt, cdt_at, cfrozen, cnum, cobj, cset,
+    ctup, ctuple, cv,
 };
 use crate::value::{Object as CObject, ObjectKey, SetItems, Typed, Value as CValue};
 use serde_json::{Map, Number, Value, json};
@@ -1176,23 +1177,13 @@ fn structure_exactly_at_configured_max_depth_diffs_successfully() {
 
 #[test]
 fn a_custom_object_pair_with_a_one_sided_non_str_key_takes_the_mixed_walk() {
-    let class = |entries| {
-        CObject::from_pairs(entries).into_class(
-            crate::value::ObjectKind::CustomObject,
-            "C".into(),
-            "C".into(),
-            crate::value::ObjectLengths::default(),
-            Vec::new(),
-            None,
-        )
-    };
     let key = |name: &str| ObjectKey::Str(crate::value::Key::Utf8(name.into()));
-    let a = class(vec![
+    let a = ccustom_entries(vec![
         (key("x"), cv(&json!(1))),
         (key("y"), cv(&json!(1))),
         (key("z"), cv(&json!(1))),
     ]);
-    let b = class(vec![
+    let b = ccustom_entries(vec![
         (key("x"), cv(&json!(2))),
         (key("y"), cv(&json!(1))),
         (key("z"), cv(&json!(1))),

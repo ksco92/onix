@@ -3070,8 +3070,8 @@ impl RightFuse<'_> {
                 full: rows,
             };
             self.keep(candidate, stale)?;
-        // `compact_if_stale` leaves `stale * 2 <= rows`, so a zero count is a no-op.
         } else if stale > 0 {
+            // `compact_if_stale` leaves `stale * 2 <= rows`, so a zero count is a no-op.
             self.keep_stale(stale)?;
         }
         let mut routed = Routed::group(partitions, &changed, |row| pairs[row].0)?;
