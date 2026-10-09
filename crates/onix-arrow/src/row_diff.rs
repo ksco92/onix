@@ -1486,6 +1486,8 @@ where
                         },
                     );
                     let failed = result.is_err();
+                    // The consumer sets `stop` on the first error, so a worker that keeps going
+                    // after a failed batch only drains.
                     if back_tx.send(result).is_err() || failed {
                         break;
                     }
@@ -3038,6 +3040,7 @@ impl RightFuse<'_> {
                         let first = entry.get_mut();
                         first.count += 1;
                         stale += usize::from(first.count == 2);
+                        // `row_at` is unique per row, so it never equals `first.at`.
                         if row_at < first.at {
                             first.at = row_at;
                             kept.push(row);
@@ -3067,6 +3070,7 @@ impl RightFuse<'_> {
                 full: rows,
             };
             self.keep(candidate, stale)?;
+        // `compact_if_stale` leaves `stale * 2 <= rows`, so a zero count is a no-op.
         } else if stale > 0 {
             self.keep_stale(stale)?;
         }
@@ -7227,6 +7231,21 @@ mod tests {
             super::parallel_hash_passes() > before,
             "a wide side over the byte bound must run the parallel pass"
         );
+    }
+
+    #[test]
+    fn peek_byte_bound_leaves_a_few_megabytes_small() {
+        use_real_size_gate();
+        let sch = schema(vec![id_field(), Field::new("v", DataType::Utf8, false)]);
+        let wide = "x".repeat(4096);
+        let n = 1_000;
+        let ids: Int64Array = (0..n).map(Some).collect();
+        let vals: StringArray = (0..n).map(|_| Some(wide.as_str())).collect();
+        let batch = RecordBatch::try_new(sch.clone(), vec![Arc::new(ids), Arc::new(vals)]).unwrap();
+        let input = multi_reader(&sch, vec![batch]);
+        let before = super::parallel_hash_passes();
+        diff_rows_with(&input, &input, &sch, &sch, &key(), 4).unwrap();
+        assert_eq!(super::parallel_hash_passes(), before);
     }
 
     #[test]

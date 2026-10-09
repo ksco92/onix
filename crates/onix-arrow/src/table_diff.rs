@@ -403,6 +403,47 @@ mod tests {
         );
     }
 
+    fn spread_over_members(last: usize) -> TableDiff {
+        let batch = |rows: usize| {
+            let ids: Vec<i64> = (0..rows).map(|i| i64::try_from(i).unwrap()).collect();
+            RecordBatch::try_new(
+                empty_batch().schema(),
+                vec![Arc::new(Int64Array::from(ids))],
+            )
+            .unwrap()
+        };
+        TableDiff::new(
+            Vec::new(),
+            RowDiff {
+                rows_added: batch(1),
+                rows_removed: batch(2),
+                duplicate_keys: batch(3),
+                cells_changed: batch(last),
+                counts: no_rows(),
+            },
+        )
+    }
+
+    #[test]
+    fn to_json_refuses_a_total_over_the_cap_spread_over_members() {
+        assert_eq!(
+            spread_over_members(crate::MAX_JSON_ROWS - 5).to_json(),
+            Err(crate::error::TableDiffError::TooManyJsonRows {
+                rows: crate::MAX_JSON_ROWS + 1,
+                max: crate::MAX_JSON_ROWS,
+            })
+        );
+    }
+
+    #[test]
+    fn to_json_accepts_a_total_at_the_cap_spread_over_members() {
+        assert!(
+            spread_over_members(crate::MAX_JSON_ROWS - 6)
+                .to_json()
+                .is_ok()
+        );
+    }
+
     #[test]
     fn schema_record_batch_matches_the_changes() {
         let batch = sample().schema_record_batch().unwrap();
