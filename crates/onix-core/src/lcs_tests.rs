@@ -340,6 +340,26 @@ fn get_matching_blocks_right_recursion_finds_a_second_insert() {
     );
 }
 
+fn blocks(a: &[serde_json::Value], b: &[serde_json::Value]) -> Vec<(usize, usize, usize)> {
+    super::get_matching_blocks(&cvec(a), &cvec(b), false)
+        .iter()
+        .map(|m| (m.a, m.b, m.size))
+        .collect()
+}
+
+#[test]
+fn get_matching_blocks_without_a_match_is_only_the_terminator() {
+    assert_eq!(blocks(&vals(&[1]), &vals(&[2, 3])), vec![(1, 2, 0)]);
+}
+
+#[test]
+fn get_matching_blocks_starting_past_the_origin_has_no_empty_leading_block() {
+    assert_eq!(
+        blocks(&vals(&[9, 1, 2]), &vals(&[1, 2])),
+        vec![(1, 0, 2), (3, 2, 0)]
+    );
+}
+
 /// The right-recursion bound finds a trailing insert.
 #[test]
 fn get_matching_blocks_right_recursion_finds_a_trailing_insert() {

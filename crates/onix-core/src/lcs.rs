@@ -48,6 +48,7 @@ pub(crate) enum ScalarKey {
 /// Avalanches a float's bit pattern before hashing: integral and half-integer floats share about
 /// 50 trailing zero bits, so under `FxHash` they would pile into one bucket (`O(n^2)` lookups).
 pub(crate) fn mix_float_bits(bits: u64) -> u64 {
+    // Only bucket spread depends on the mixing; equal bit patterns map to equal outputs.
     let mut x = bits ^ (bits >> 32);
     x = x.wrapping_mul(0xd6e8_feb8_6659_fd93);
     x ^= x >> 32;
@@ -246,6 +247,7 @@ fn find_longest_match(
     }
 
     if extend {
+        // The forward loop re-covers any size the backward loop does not add.
         while best_a > alo && best_b > blo && a_keys[best_a - 1] == b_keys[best_b - 1] {
             best_a -= 1;
             best_b -= 1;
@@ -313,6 +315,7 @@ fn get_matching_blocks(a: &[Value], b: &[Value], autojunk: bool) -> Vec<Match> {
                 b: match_b,
                 size: match_size,
             });
+            // A window with an empty side holds no match, so these bounds only prune.
             if alo < match_a && blo < match_b {
                 stack.push(Window {
                     alo,

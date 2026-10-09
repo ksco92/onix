@@ -373,6 +373,7 @@ impl Report {
         // The smaller report goes into the larger, so a finding at every level
         // of a deep chain is moved a logarithmic number of times, not once per
         // level.
+        // A tie merges identically either way: the maps are sorted by path.
         if other.finding_count() > self.finding_count() {
             std::mem::swap(self, &mut other);
         }

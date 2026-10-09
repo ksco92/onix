@@ -1002,6 +1002,34 @@ fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact()
     );
 }
 
+#[test]
+fn count_object_diff_leaves_walks_a_one_sided_non_str_key_pair_with_the_mixed_path() {
+    let class = |pairs| {
+        crate::value::Object::from_pairs(pairs).into_class(
+            crate::value::ObjectKind::CustomObject,
+            "C".into(),
+            "1".into(),
+            crate::value::ObjectLengths::default(),
+            Vec::new(),
+            None,
+        )
+    };
+    let x = || ObjectKey::Str(crate::value::Key::Utf8("x".into()));
+    let a = class(vec![(x(), cv(&json!([{"a": {"b": 1}}])))]);
+    let b = class(vec![
+        (x(), cv(&json!([{"a": {"b": 9}}]))),
+        (ObjectKey::Other(Box::new(cv(&json!(5)))), cv(&json!([1]))),
+    ]);
+    let opts = DiffOptions {
+        max_depth: 3,
+        ignore_order: false,
+    };
+    assert_eq!(
+        super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &IgnoreOrderMemo::new()),
+        Err(Box::new(max_depth_exceeded("root['x'][0]['a']['b']", 3)))
+    );
+}
+
 /// `dict_python_eq_mixed` rejects a pair when either side has an extra key
 /// or a shared key's value differs, never just papering over one with another.
 #[test]

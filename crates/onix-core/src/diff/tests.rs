@@ -1174,6 +1174,42 @@ fn structure_exactly_at_configured_max_depth_diffs_successfully() {
     );
 }
 
+#[test]
+fn a_custom_object_pair_with_a_one_sided_non_str_key_takes_the_mixed_walk() {
+    let class = |entries| {
+        CObject::from_pairs(entries).into_class(
+            crate::value::ObjectKind::CustomObject,
+            "C".into(),
+            "C".into(),
+            crate::value::ObjectLengths::default(),
+            Vec::new(),
+            None,
+        )
+    };
+    let key = |name: &str| ObjectKey::Str(crate::value::Key::Utf8(name.into()));
+    let a = class(vec![
+        (key("x"), cv(&json!(1))),
+        (key("y"), cv(&json!(1))),
+        (key("z"), cv(&json!(1))),
+    ]);
+    let b = class(vec![
+        (key("x"), cv(&json!(2))),
+        (key("y"), cv(&json!(1))),
+        (key("z"), cv(&json!(1))),
+        (ObjectKey::Other(Box::new(cv(&json!(5)))), cv(&json!(4))),
+    ]);
+
+    let report = super::diff(&CValue::Object(a), &CValue::Object(b)).unwrap();
+
+    assert_eq!(
+        report.to_json_value(),
+        json!({
+            "dictionary_item_added": {"root[5]": 4},
+            "values_changed": {"root['x']": {"new_value": 2, "old_value": 1}},
+        })
+    );
+}
+
 /// `object_diff_mixed`'s shared-key recursion steps `depth` by exactly one.
 #[test]
 fn mixed_dict_shared_key_recursion_steps_depth_by_one_not_by_multiplication() {

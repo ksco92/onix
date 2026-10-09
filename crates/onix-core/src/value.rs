@@ -145,6 +145,7 @@ impl Iterator for Wtf8Chars<'_> {
             (Wtf8Char::Scalar(c), &self.remaining[c.len_utf8()..])
         } else {
             // Only the three-byte surrogate encoding (lead byte `0xED`) fails validation here.
+            // The three fields occupy disjoint bits, so `|` and `^` agree.
             let code_point = (u32::from(candidate[0] & 0x0F) << 12)
                 | (u32::from(candidate[1] & 0x3F) << 6)
                 | u32::from(candidate[2] & 0x3F);
@@ -853,6 +854,7 @@ impl Number {
     #[must_use]
     pub(crate) fn integer_cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self.as_i128(), other.as_i128()) {
+            // Fast path; the `BigInt` arm orders identically.
             (Some(a), Some(b)) => a.cmp(&b),
             _ => self.to_bigint().cmp(&other.to_bigint()),
         }
